@@ -1,0 +1,58 @@
+# ============================================
+# dotClaw 配置文件
+# ============================================
+
+llm:
+  default_model: qwen-plus
+  clients:
+    qwen-plus:
+      provider: qwen
+      api_key: ${DOTCLAW_API_KEY}
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen-plus
+    qwen-turbo:
+      provider: qwen
+      api_key: ${DOTCLAW_API_KEY}
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen-turbo
+  fallbacks:
+    - qwen-turbo
+  retry:
+    max_retries: 3
+    base_delay: 1.0
+  stream: true
+
+agent:
+  system_prompt: |
+    你是一个有用、诚实且友好的 AI 助手。
+    你可以调用工具来帮助用户完成任务。
+    当需要执行危险操作时会请求确认。
+  max_context_tokens: 8000
+  keep_recent_messages: 10
+
+tools:
+  exec:
+    enabled: true
+    needs_approval: true
+  python:
+    enabled: true
+    needs_approval: true
+    timeout: 30
+  web_search:
+    enabled: false
+
+skills:
+  directory: ./skills
+
+memory:
+  long_term_file: ./data/memory/MEMORY.md
+
+session:
+  directory: ./data/sessions
+
+scheduler:
+  enabled: true
+
+debug:
+  level: INFO
+  log_file: ./data/dotclaw.log
