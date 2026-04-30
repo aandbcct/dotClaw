@@ -11,17 +11,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotclaw.config import get_config, load_config
 from dotclaw.channel.cli import CLIChannel
-from dotclaw.session.store import SessionManager
+from dotclaw.memory.store import SessionManager
 from dotclaw.agent.loop import AgentLoop
 from dotclaw.llm.proxy import LLMProxy
 
 
 def _print_banner():
     banner = """
-╔══════════════════════════════════════╗
-║          dotClaw v0.1.0               ║
-║   轻量级 AI Agent 框架 · 学习版        ║
-╚══════════════════════════════════════╝
++============================================+
+|         dotClaw v0.1.0                    |
+|   Lightweight AI Agent Framework          |
++============================================+
 """
     print(banner)
 

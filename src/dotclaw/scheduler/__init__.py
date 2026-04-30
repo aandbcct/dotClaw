@@ -1,5 +1,5 @@
-"""Skill 模块"""
+"""Scheduler 模块"""
 
-from .loader import Skill, SkillLoader
+from .reminder import ReminderManager
 
-__all__ = ["Skill", "SkillLoader"]
+__all__ = ["ReminderManager"]

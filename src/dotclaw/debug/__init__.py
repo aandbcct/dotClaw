@@ -1,5 +1,5 @@
-"""Skill 模块"""
+"""Debug 模块"""
 
-from .loader import Skill, SkillLoader
+from .logger import DebugManager, TraceRecord
 
-__all__ = ["Skill", "SkillLoader"]
+__all__ = ["DebugManager", "TraceRecord"]

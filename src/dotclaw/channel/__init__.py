@@ -1,5 +1,6 @@
-"""Skill 模块"""
+"""Channel 模块"""
 
-from .loader import Skill, SkillLoader
+from .base import Channel
+from .cli import CLIChannel
 
-__all__ = ["Skill", "SkillLoader"]
+__all__ = ["Channel", "CLIChannel"]

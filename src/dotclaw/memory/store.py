@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import aiofiles
+
+
+def _resolve_data_dir(relative_path: str | Path) -> Path:
+    """将相对路径解析为相对于项目根目录（config.yaml 所在目录）。"""
+    # 向上找 config.yaml 来定位项目根目录
+    import dotclaw
+    module_path = Path(dotclaw.__file__).parent  # src/dotclaw/
+    project_root = module_path.parent.parent  # 项目根目录
+    resolved = project_root / relative_path
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 @dataclass
@@ -43,7 +54,7 @@ class SessionManager:
     """
 
     def __init__(self, data_dir: str | Path):
-        self._data_dir = Path(data_dir)
+        self._data_dir = _resolve_data_dir(data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
     def _session_path(self, session_id: str) -> Path:

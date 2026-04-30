@@ -1,5 +1,31 @@
-"""Skill 模块"""
+"""配置模块"""
 
-from .loader import Skill, SkillLoader
+from .settings import (
+    Config,
+    LLMConfig,
+    LLMClientConfig,
+    AgentConfig,
+    ToolsConfig,
+    SkillsConfig,
+    MemoryConfig,
+    SessionConfig,
+    SchedulerConfig,
+    DebugConfig,
+    load_config,
+    get_config,
+)
 
-__all__ = ["Skill", "SkillLoader"]
+__all__ = [
+    "Config",
+    "LLMConfig",
+    "LLMClientConfig",
+    "AgentConfig",
+    "ToolsConfig",
+    "SkillsConfig",
+    "MemoryConfig",
+    "SessionConfig",
+    "SchedulerConfig",
+    "DebugConfig",
+    "load_config",
+    "get_config",
+]

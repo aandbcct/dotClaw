@@ -14,9 +14,9 @@ env/
 .idea/
 
 # dotClaw runtime data
-data/sessions/
-data/memory/*.md
-data/*.log
+# dotClaw runtime data
+data/
+src/dotclaw/data/
 
 # OS
 .DS_Store

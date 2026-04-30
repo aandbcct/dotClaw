@@ -11,6 +11,13 @@ from typing import Any
 import yaml
 
 
+def _find_project_root() -> Path:
+    """从 dotClaw 模块位置向上找到项目根目录（包含 config.yaml）"""
+    import dotclaw
+    module_path = Path(dotclaw.__file__).parent  # src/dotclaw/
+    return module_path.parent.parent  # 项目根目录
+
+
 def _expand_env(value: Any) -> Any:
     """递归替换 ${ENV_VAR} 为环境变量值"""
     if isinstance(value, str):
@@ -169,14 +176,17 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     加载 YAML 配置文件。
 
     支持 ${ENV_VAR} 环境变量展开。
-    默认路径为当前目录下的 config.yaml。
+    默认从项目根目录（config.yaml 所在目录）加载。
     """
-    path = Path(path)
-    if not path.exists():
+    if Path(path).is_absolute():
+        config_path = Path(path)
+    else:
+        config_path = _find_project_root() / path
+    if not config_path.exists():
         # 返回默认配置
         return Config()
 
-    with open(path, encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     # 展开环境变量

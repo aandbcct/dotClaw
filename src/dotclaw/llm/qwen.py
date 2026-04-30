@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterator
 
 from openai import AsyncOpenAI
 
@@ -62,7 +62,8 @@ class QwenClient(LLMClient):
 
         if stream:
             async for chunk in response:
-                yield from self._parse_stream_chunk(chunk)
+                for sub in self._parse_stream_chunk(chunk):
+                    yield sub
         else:
             choice = response.choices[0]
             content = choice.message.content or ""
@@ -80,8 +81,8 @@ class QwenClient(LLMClient):
             result.append(m)
         return result
 
-    def _parse_stream_chunk(self, chunk) -> AsyncIterator[ChatChunk]:
-        """解析 OpenAI SSE chunk"""
+    def _parse_stream_chunk(self, chunk) -> Iterator[ChatChunk]:
+        """解析 OpenAI SSE chunk（同步生成器）"""
         delta = chunk.choices[0].delta
         content = delta.content or ""
 

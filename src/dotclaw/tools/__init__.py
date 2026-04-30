@@ -1,4 +1,4 @@
-"""工具模块"""
+"""Tools 模块"""
 
 from .base import ToolRegistry, ToolDefinition, ToolResult, register_tool
 

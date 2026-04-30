@@ -1,5 +1,6 @@
-"""
-dotClaw 包入口
-"""
+"""dotClaw 包入口"""
 
-__path__ = __import__('pkgutil').extend_path(__path__, __name__)
+from .main import main
+
+if __name__ == "__main__":
+    main()
