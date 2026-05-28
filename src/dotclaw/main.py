@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
 # 确保 src 在路径中
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# 屏蔽第三方库的 INFO 日志（避免在交互界面输出 HTTP 请求日志）
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 from dotclaw.config import get_config, load_config
 from dotclaw.channel.cli import CLIChannel
 from dotclaw.memory.store import SessionManager
 from dotclaw.agent.loop import AgentLoop
 from dotclaw.llm.proxy import LLMProxy
+from dotclaw.tools.base import ToolRegistry
+from dotclaw.tools.approval import ApprovalManager
 
 
 def _print_banner():
@@ -37,6 +45,10 @@ async def _run_cli():
     session_mgr = SessionManager(config.session.directory)
     llm_proxy = LLMProxy(config.llm)
 
+    # 初始化工具注册表和审批管理器
+    approval_mgr = ApprovalManager()
+    tool_registry = ToolRegistry(approval_mgr, config)
+
     # 确保至少有默认会话
     sessions = await session_mgr.list_all()
     current_session = sessions[0] if sessions else await session_mgr.create("主对话")
@@ -51,6 +63,7 @@ async def _run_cli():
         session_mgr=session_mgr,
         channel=channel,
         config=config,
+        tool_registry=tool_registry,
     )
 
     while True:
@@ -89,6 +102,8 @@ async def _run_cli():
                         channel.print_error("用法: /delete <会话ID>")
                 elif cmd == "/debug":
                     agent.debug_trace(channel)
+                elif cmd == "/tools":
+                    _cmd_tools(channel, tool_registry)
                 elif cmd == "/model":
                     if args:
                         agent.model = args
@@ -116,6 +131,7 @@ dotClaw 命令:
   /switch <id>     切换到指定对话
   /delete <id>      删除对话
   /debug           查看最近推理过程
+  /tools           列出可用工具
   /model <名称>    切换模型
   /help            显示帮助
   /quit            退出
@@ -128,6 +144,23 @@ async def _cmd_list(channel, session_mgr, current):
     for s in sessions:
         mark = " ← 当前" if s.id == current.id else ""
         channel.print_info(f"  [{s.id}] {s.title} ({s.updated_at[:10]}){mark}")
+
+
+def _cmd_tools(channel, tool_registry):
+    """列出所有可用工具"""
+    definitions = tool_registry.get_definitions()
+    if not definitions:
+        channel.print_info("(没有注册任何工具)")
+        return
+    channel.print_info(f"可用工具 ({len(definitions)} 个):")
+    for d in definitions:
+        mark = ""
+        if tool_registry._config:
+            if d.name == "exec" and tool_registry._config.tools.exec_needs_approval:
+                mark = " [需审批]"
+            elif d.name == "python" and tool_registry._config.tools.python_needs_approval:
+                mark = " [需审批]"
+        channel.print_info(f"  {d.name}: {d.description}{mark}")
 
 
 async def _cmd_switch(channel, session_mgr, agent, session_id: str):

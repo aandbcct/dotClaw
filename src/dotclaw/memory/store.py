@@ -57,6 +57,18 @@ class SessionManager:
         self._data_dir = _resolve_data_dir(data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _dict_to_session(raw: dict) -> Session:
+        """将 JSON 反序列化的 dict 转为 Session，确保 messages 是 SessionMessage 对象"""
+        messages = []
+        for m in raw.pop("messages", []):
+            if isinstance(m, SessionMessage):
+                messages.append(m)
+            elif isinstance(m, dict):
+                messages.append(SessionMessage(**m))
+        raw["messages"] = messages
+        return Session(**raw)
+
     def _session_path(self, session_id: str) -> Path:
         return self._data_dir / f"{session_id}.json"
 
@@ -81,7 +93,7 @@ class SessionManager:
         try:
             async with aiofiles.open(path, encoding="utf-8") as f:
                 data = await f.read()
-            return Session(**json.loads(data))
+            return self._dict_to_session(json.loads(data))
         except Exception:
             return None
 
@@ -99,7 +111,7 @@ class SessionManager:
             try:
                 async with aiofiles.open(path, encoding="utf-8") as f:
                     data = await f.read()
-                sessions.append(Session(**json.loads(data)))
+                sessions.append(self._dict_to_session(json.loads(data)))
             except Exception:
                 pass
         sessions.sort(key=lambda s: s.updated_at, reverse=True)

@@ -28,3 +28,16 @@ class Channel(ABC):
     async def ask_user(self, prompt: str) -> str:
         """向用户提问（用于审批等）"""
         ...
+
+    def print_error(self, message: str) -> None:
+        """打印错误信息（默认实现：打印到 stderr）"""
+        import sys
+        print(f"错误：{message}", file=sys.stderr)
+
+    def print_info(self, message: str) -> None:
+        """打印普通信息（默认实现：打印到 stdout）"""
+        print(message)
+
+    async def print_markdown(self, md: str) -> None:
+        """渲染 Markdown（默认实现：直接打印）"""
+        print(md)

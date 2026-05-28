@@ -71,9 +71,10 @@ def register_tool(
 class ToolRegistry:
     """工具注册表（生命周期管理）"""
 
-    def __init__(self, approval_manager: ApprovalManager | None = None):
+    def __init__(self, approval_manager: ApprovalManager | None = None, config=None):
         self._tools: dict[str, tuple[ToolDefinition, Callable]] = dict(_registry)
         self._approval = approval_manager or ApprovalManager()
+        self._config = config  # 保存 config 引用
 
     def register(self, name: str, definition: ToolDefinition, handler: Callable):
         self._tools[name] = (definition, handler)
@@ -99,8 +100,13 @@ class ToolRegistry:
 
         definition, handler = entry
 
-        # 审批检查
-        needs_approval = getattr(definition, "needs_approval", False)
+        # 审批检查：从 config 读取哪些工具需要审批
+        needs_approval = False
+        if self._config:
+            if name == "exec":
+                needs_approval = self._config.tools.exec_needs_approval
+            elif name == "python":
+                needs_approval = self._config.tools.python_needs_approval
         if needs_approval:
             approved = await self._approval.check(name, arguments, channel)
             if not approved:

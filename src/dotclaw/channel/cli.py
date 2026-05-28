@@ -44,7 +44,7 @@ class CLIChannel(Channel):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
-            lambda: console.print(chunk, end="", flush=True)
+            lambda: console.print(chunk, end="")
         )
 
     async def ask_user(self, prompt: str) -> str:

@@ -14,6 +14,7 @@ class Message:
     content: str
     name: str | None = None
     tool_call_id: str | None = None
+    tool_calls: list[ToolCall] | None = None  # assistant 消息中携带的工具调用列表
 
 
 @dataclass

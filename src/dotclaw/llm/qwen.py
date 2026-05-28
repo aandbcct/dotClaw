@@ -25,6 +25,11 @@ class QwenClient(LLMClient):
     ):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._model = model
+        self._reset_stream_state()
+
+    def _reset_stream_state(self):
+        """重置流式解析的临时状态"""
+        self._pending_tool_calls: dict[int, dict] = {}  # index → {id, name, arguments}
 
     async def chat(
         self,
@@ -32,6 +37,9 @@ class QwenClient(LLMClient):
         tools: list[ToolDefinition] | None = None,
         stream: bool = True,
     ) -> AsyncIterator[ChatChunk]:
+        # 重置流式解析状态（每次新对话都清空）
+        self._reset_stream_state()
+
         # 转换 messages 格式
         openai_messages = self._convert_messages(messages)
 
@@ -78,25 +86,68 @@ class QwenClient(LLMClient):
                 m["name"] = msg.name
             if msg.tool_call_id:
                 m["tool_call_id"] = msg.tool_call_id
+            if msg.tool_calls:
+                m["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ]
             result.append(m)
         return result
 
     def _parse_stream_chunk(self, chunk) -> Iterator[ChatChunk]:
-        """解析 OpenAI SSE chunk（同步生成器）"""
+        """解析 OpenAI SSE chunk，正确处理跨 chunk 的 arguments 增量拼接"""
         delta = chunk.choices[0].delta
+
+        # 处理文本内容
         content = delta.content or ""
 
-        tool_call = None
+        # 处理 tool_calls（可能多个，可能跨 chunk）
         if delta.tool_calls:
-            tc = delta.tool_calls[0]
-            tool_call = ToolCall(
-                id=tc.id or "",
-                name=tc.function.name,
-                arguments=tc.function.arguments or "",
-            )
+            for tc in delta.tool_calls:
+                idx = tc.index if tc.index is not None else 0
+                if idx not in self._pending_tool_calls:
+                    self._pending_tool_calls[idx] = {
+                        "id": "",
+                        "name": "",
+                        "arguments": "",
+                    }
 
-        if content or tool_call:
-            yield ChatChunk(content=content, tool_call=tool_call)
+                pending = self._pending_tool_calls[idx]
 
-        if chunk.choices[0].finish_reason:
-            yield ChatChunk(is_final=True)
+                if tc.id:
+                    pending["id"] = tc.id
+                if tc.function and tc.function.name:
+                    # name 也是增量传输，需要拼接
+                    pending["name"] += tc.function.name
+                if tc.function and tc.function.arguments:
+                    pending["arguments"] += tc.function.arguments
+
+        # 检查是否是最后一个 chunk
+        is_final = chunk.choices[0].finish_reason is not None
+
+        if is_final:
+            # 产出所有累积的 tool_calls
+            for idx, pending in self._pending_tool_calls.items():
+                if pending["name"]:  # 忽略只有 content 的情况
+                    yield ChatChunk(
+                        content="",
+                        tool_call=ToolCall(
+                            id=pending["id"],
+                            name=pending["name"],
+                            arguments=pending["arguments"],
+                        ),
+                    )
+
+            yield ChatChunk(content="", is_final=True)
+            self._reset_stream_state()
+        else:
+            # 非最终 chunk，只产出文本内容
+            if content:
+                yield ChatChunk(content=content, tool_call=None)
