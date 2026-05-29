@@ -1,7 +1,7 @@
 # Phase 2 详细开发文档：多模型支持 + 基础设施
 
 > 创建时间：2026-05-29
-> 状态：规划完成，待实施
+> 状态：已完成 ✅（实施日期：2026-05-29）
 
 ---
 
@@ -136,15 +136,11 @@ purposes:
     description: "日常对话"
     priority:
       - model: qwen3.5-flash
-        weight: 60
+        priority: 1
       - model: deepseek-v3
-        weight: 30
+        priority: 2
       - model: gpt-4o-mini
-        weight: 10
-    fallback_chain:
-      - qwen3.5-flash
-      - qwen-turbo
-      - deepseek-v3
+        priority: 3
 ```
 
 > 注：Level 5（overrides）留到后续阶段实现。
@@ -192,15 +188,15 @@ LLMClient (ABC)                    ← llm/base.py
 
 | 文件 | 状态 | 描述 |
 |------|------|------|
-| `llm/model_router.py` | **新增** | 模型路由器：purpose → 模型优先级选择 + 加权随机 + 降级链 |
+| `llm/model_router.py` | **新增** | 模型路由器：purpose → priority 确定性选择 + 降级链（从 priority 列表自动生成） |
 | `llm/proxy.py` | **重构** | LLMProxy 重构为使用 ModelRouter |
 
 **ModelRouter 职责**：
 - `resolve(purpose: str, forced_model: str | None) -> tuple[LLMClient, str]`
   - forced_model 有值时按三层匹配规则找对应的 client 实例
-  - forced_model 为 None 时查 `purposes[purpose].priority` → 加权随机选择 model → 找到对应 client 实例
+  - forced_model 为 None 时查 `purposes[purpose].priority` → 按 priority 升序排列（数值越小越优先），取第一个 active model → 找到对应 client 实例
 - `get_fallback_chain(purpose: str) -> list[str]`
-  - 返回该 purpose 配置的降级模型列表
+  - 返回该 purpose 的降级模型列表（按 priority 升序排列，从 priority 列表自动生成，无需单独配置 fallback_chain 字段）
 - `get_available_models() -> list[str]`
   - 返回所有 status=active 的模型名称（供 `/model` 命令）
 - 客户端实例缓存：以 `model_name` 为 key，懒加载创建 client 实例。每个模型一个实例，同一供应商的不同模型共享同一个类但不同实例
@@ -228,6 +224,8 @@ LLMClient (ABC)                    ← llm/base.py
 降级规则：
 - 只有 `CallSetupError` 触发降级（在 `async for chunk in client.chat()` 开始之前发生的异常）
 - 一旦 `async for` 循环开始产出至少一个 chunk，后续的所有异常都是 `NonRetryableStreamError`，不再降级（因为已输出的 chunk 无法撤回给用户）
+- 降级时**直接查 models 字典** + `_get_or_create_client()`，不经过 `router.resolve()`（避免 resolve 的 default-fallback 行为造成回环：fallback 到 defaults.model 可能恰好是已失败的模型）
+- 降级链中的模型不在 models 字典中时 → 跳过（不回落 default），继续尝试下一个
 - 降级链耗尽全部模型 → raise RuntimeError
 
 ### 2.5 Layer 5 — AgentLoop
@@ -285,7 +283,7 @@ LLMClient (ABC)                    ← llm/base.py
 **要点**：
 - 新增 `ProviderConfig` dataclass：api_key, base_url, rate_limit, retry, extra_headers 等
 - 新增 `ModelConfig` dataclass：provider, model_id, context_window, capabilities, status
-- 新增 `PurposeConfig` dataclass：priority（model + weight 列表）, fallback_chain
+- 新增 `PurposeConfig` dataclass：description + priority（`PurposePriority` 列表，`priority` 字段为 int 类型，数值越小越优先）。降级链由 priority 列表自动生成，不再单独配置 `fallback_chain`
 - 新增 `RouterConfig` dataclass：聚合 defaults + providers + models + purposes
 - 新增 `load_router_config(path: str) -> RouterConfig` 函数：读取并解析 `model_router_config.yaml`
 - 新增 `_build_router_config_from_legacy(llm_config: LLMConfig) -> RouterConfig` 函数：将旧 `config.yaml` 的 `llm.clients` 格式自动转换为 `RouterConfig`，保证后向兼容
@@ -300,8 +298,8 @@ LLMClient (ABC)                    ← llm/base.py
 - defaults.model = llm_config.default_model
 - providers: 从 clients 中提取 provider 名称，每个 provider 的 api_key/base_url 从第一个 model 取值
 - models: 每个 client 映射为一个 model entry（model_id, provider, context_window 用默认值或从已有配置推断）
-- purposes.chat.priority: 按 clients 的原有顺序列出，权重平均分配
-- purposes.chat.fallback_chain = llm_config.fallbacks（P1 的降级列表）
+- purposes.chat.priority: 按 clients 的原有顺序列出，priority 依次为 1, 2, 3...
+- purposes.chat 的降级链从 priority 列表自动生成（按 priority 升序排列所有 active model）
 ```
 
 ### 3.5 `llm/openai_compat.py` — 通用基类
@@ -327,11 +325,10 @@ LLMClient (ABC)                    ← llm/base.py
 **要点**：
 - `resolve(purpose, forced_model)` 逻辑：
   1. forced_model 非空 → 按三层匹配优先级找到 model_name → 获取或创建 client 实例
-  2. forced_model 为空 → 查 `purposes[purpose].priority` → 按权重随机选择 model
-  3. model → `models[model].provider` → 找到 provider → 获取或创建 client 实例
-- 加权随机选择：使用 `random.choices(models, weights=weights)`
+  2. forced_model 为空 → 查 `purposes[purpose].priority` → 按 `priority` 升序排列（数值越小越优先），取第一个 active model → 找到对应 client 实例
+- **确定性选择**（非随机）：`sorted(p.priority)` → 返回 priority 最小的 active model，同一 priority 时按配置顺序
+- 降级链：`get_fallback_chain(purpose)` 从 priority 列表自动生成（按 priority 升序排列所有 active model），无需在配置文件中单独维护 `fallback_chain` 字段
 - 客户端实例缓存：`_client_cache: dict[str, LLMClient]`，key 为 model_name。每个模型一个实例，同一供应商的不同模型使用相同类、不同实例
-- `get_fallback_chain(purpose)` → 返回降级模型列表
 
 **forced_model 三层匹配优先级**（精确到行为）：
 ```
@@ -353,7 +350,7 @@ LLMClient (ABC)                    ← llm/base.py
 **开发注意事项**：
 - 前缀匹配规则：按 provider 名称在 `providers` dict 中查找，然后在该 provider 的 models 中匹配
 - 客户端实例缓存：`_client_cache` 以 model 名称为 key，首次访问时懒加载。实例创建调用 `_instantiate_client(provider_config, model_config)` 工厂函数
-- 加权随机需要在测试中可控制（通过 `random.seed` 注入固定种子）
+- `_instantiate_client` 通过字典查表选择具体 Client 类，未知 provider 名称回退到 QwenClient（通用 OpenAI 兼容客户端）
 
 ### 3.8 `llm/proxy.py` — 重构代理
 
@@ -508,12 +505,12 @@ llm_proxy = LLMProxy(
 | # | 测试场景 | 验证内容 |
 |---|---------|---------|
 | 1 | OpenAICompatibleClient 等价性 | Mock API 响应，验证 chat() 产出与 P1 QwenClient 完全一致（消息格式、tool_calls 序列化、流式 chunk 顺序） |
-| 2 | ModelRouter 加权随机 | 固定 seed，模拟 1000 次 resolve，验证分布偏差 ≤ 5%（与配置的 weight 比例相比） |
-| 3 | ModelRouter 降级链 | 验证 get_fallback_chain("chat") 返回配置的正确顺序 |
-| 4 | ModelRouter forced_model 匹配 | 验证精确匹配、前缀匹配、不存在降级三层行为 |
-| 5 | RateLimiter 基本行为 | 验证 acquire 在配额内立即返回、超配额时等待（mock asyncio.sleep） |
-| 6 | Proxy 流式中途不降级 | 模拟 client.chat() 产出 2 个 chunk 后抛出异常，验证不触发 fallback（异常直接向上传播） |
-| 7 | Proxy 调用前失败降级 | 模拟 client.chat() 在开始前抛出 CallSetupError，验证降级到 fallback_chain 的下一个模型 |
+| 2 | ModelRouter 优先级制选择 | 验证 100 次 resolve 确定性返回 priority 最小的 model；验证降级链按 priority 升序排列 |
+| 3 | ModelRouter forced_model 匹配 | 验证精确匹配、前缀匹配、不存在降级三层行为 |
+| 4 | Proxy 降级链（实际 API） | 构造无效 base_url → 第一个 model 失败 → 按 priority 降级到下一个 model → 成功返回 |
+| 5 | RateLimiter 基本行为 | 验证 acquire 在配额内立即返回；超配额时触发 asyncio.sleep（mock） |
+| 6 | Proxy 流式中途不降级 | 模拟 client.chat() 产出 chunk 后抛出异常，验证不触发 fallback（NonRetryableStreamError 向上传播） |
+| 7 | Proxy 调用前失败降级 | 模拟 client.chat() 在开始前抛出 CallSetupError，验证降级到 priority 列表的下一个 model |
 
 ### 5.4 手动测试
 
@@ -529,7 +526,7 @@ llm_proxy = LLMProxy(
 2. **配置后向兼容**：`model_router_config.yaml` 不存在时，LLMProxy 应自动使用 `config.yaml` 的 `llm.clients` 旧格式，通过 `_build_router_config_from_legacy()` 构建等效 `RouterConfig`
 3. **限流器默认关闭**：`rate_limit.requests_per_minute = 0` 表示不限流，开发环境不需要配置
 4. **消息格式不变**：`Message` 和 `ChatChunk` 不做任何修改，所有适配在 Client 层完成
-5. **前缀匹配容错**：model 名称未匹配到任何 provider 时，按三层匹配规则最终降级到 `defaults.provider` 和 `defaults.model`，并写入 warning 日志
+5. **前缀匹配容错**：model 名称未匹配到任何 provider 时，按三层匹配规则最终降级到 `defaults.provider` 和 `defaults.model`，并写入 warning 日志。注意此行为仅在 `resolve()` 中，降级链不走此路径（直接查 models 字典）
 6. **日志记录**：每次 provider 切换和降级尝试都写入 debug log（`logging.getLogger("dotclaw.llm")`），方便调试
 7. **流式降级边界**：`async for` 循环一旦开始迭代，异常不再触发降级（已输出 chunk 无法撤回）。开发和测试时特别注意这个边界
 8. **RateLimiter 并发安全**：token bucket 的 `refill + consume` 是复合操作，使用 `asyncio.Lock` 保护。并发调用的限流允差为 ±1 请求
