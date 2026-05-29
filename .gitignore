@@ -8,6 +8,8 @@ __pycache__/
 .venv
 venv/
 env/
+.workbuddy
+.env
 
 # IDE
 .vscode/

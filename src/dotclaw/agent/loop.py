@@ -81,6 +81,7 @@ class AgentLoop:
                     messages=messages,
                     tools=self._tool_registry.get_definitions() if self._tool_registry else None,
                     model=self.model,
+                    purpose="chat",
                     stream=self.config.llm.stream,
                 ):
                     if chunk.content:

@@ -43,7 +43,38 @@ async def _run_cli():
 
     # 初始化各组件
     session_mgr = SessionManager(config.session.directory)
-    llm_proxy = LLMProxy(config.llm)
+
+    # ---- P2 新增：多供应商路由初始化 ----
+    from dotclaw.config import (
+        _find_project_root,
+        load_router_config,
+        _build_router_config_from_legacy,
+    )
+    from dotclaw.llm.model_router import ModelRouter
+    from dotclaw.common.rate_limiter import RateLimiter, RateLimitConfig
+
+    project_root = _find_project_root()
+    router_config_path = project_root / "model_router_config.yaml"
+
+    if router_config_path.exists():
+        router_config = load_router_config(str(router_config_path))
+    else:
+        # 后向兼容：从旧 config.llm 构建 RouterConfig
+        router_config = _build_router_config_from_legacy(config.llm)
+
+    model_router = ModelRouter(router_config)
+
+    # 从各 provider 配置提取 rate_limit
+    rate_limit_configs = {}
+    for prov_name, prov_cfg in router_config.providers.items():
+        rl_raw = prov_cfg.rate_limit
+        rate_limit_configs[prov_name] = RateLimitConfig(
+            requests_per_minute=rl_raw.get("requests_per_minute", 0),
+        )
+
+    rate_limiter = RateLimiter(rate_limit_configs)
+    llm_proxy = LLMProxy(model_router=model_router, rate_limiter=rate_limiter)
+    # ---- P2 路由初始化结束 ----
 
     # 初始化工具注册表和审批管理器
     approval_mgr = ApprovalManager()

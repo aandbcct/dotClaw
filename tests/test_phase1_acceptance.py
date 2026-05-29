@@ -43,7 +43,7 @@ class MockLLM:
         self._idx = 0
         self.calls: list[dict] = []
 
-    async def chat(self, messages, tools=None, model=None, stream=True):
+    async def chat(self, messages, tools=None, model=None, purpose="chat", stream=True):
         call_info = {
             "seq_idx": self._idx,
             "msg_count": len(messages),

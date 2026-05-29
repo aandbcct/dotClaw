@@ -1,0 +1,88 @@
+# ============================================
+# dotClaw 模型路由配置（Phase 2 新增）
+# ============================================
+# 此文件存在时，LLMProxy 使用多供应商路由模式。
+# 若文件不存在，自动从 config.yaml 的 llm.clients 降级为 P1 行为。
+
+# Level 1: 全局默认
+defaults:
+  provider: qwen
+  model: qwen3.7-max
+  parameters:
+    temperature: 0.7
+    max_tokens: 4096
+  fallback_enabled: true
+
+# Level 2: 供应商配置
+providers:
+  qwen:
+    api_key: ${QWEN_API_KEY}
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+#    base_url: https://invalid-host-99999.example.com/v1
+    rate_limit:
+      requests_per_minute: 0
+    retry:
+      max_attempts: 3
+      backoff_factor: 2.0
+  deepseek:
+    api_key: ${DEEPSEEK_API_KEY}
+    base_url: https://api.deepseek.com
+    rate_limit:
+      requests_per_minute: 0
+    retry:
+      max_attempts: 2
+  gemini:
+    api_key: ${GEMINI_API_KEY}
+    base_url:
+  openai:
+    api_key: ${OPENAI_API_KEY}
+    base_url: https://api.openai.com/v1
+    rate_limit:
+      requests_per_minute: 0
+
+# Level 3: 模型配置
+models:
+  qwen3.7-max:
+    provider: qwen
+    model_id: qwen3.7-max
+    context_window: 131072
+    capabilities: [chat, function_calling]
+    status: active
+#  qwen-turbo:
+#    provider: qwen
+#    model_id: qwen-turbo
+#    context_window: 1000000
+#    capabilities: [chat, function_calling]
+#    status: active
+  deepseek-v4-flash:
+    provider: deepseek
+    model_id: deepseek-v4-flash
+    context_window: 64000
+    capabilities: [chat, function_calling]
+    status: active
+  gpt-4o-mini:
+    provider: openai
+    model_id: gpt-4o-mini
+    context_window: 128000
+    capabilities: [chat, function_calling]
+    status: active
+  gemini-3.5-flash:
+    provider: gemini
+    model_id: gemini-3.5-flash
+    context_window: 128000
+    capabilities: [ chat, function_calling ]
+    status: disable
+
+# Level 4: 用途路由
+purposes:
+  chat:
+    description: "日常对话"
+    priority:
+      - model: qwen3.7-max
+        priority: 1
+      - model: deepseek-v4-flash
+        priority: 2
+      - model: gemini-3.5-flash
+        priority: 3
+      - model: gpt-4o-mini
+        priority: 4

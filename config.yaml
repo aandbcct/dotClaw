@@ -7,12 +7,12 @@ llm:
   clients:
     qwen3.7-max:
       provider: qwen
-      api_key: ${DOTCLAW_API_KEY}
+      api_key: ${QWEN_API_KEY}
       base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
       model: qwen3.7-max
     qwen-turbo:
       provider: qwen
-      api_key: ${DOTCLAW_API_KEY}
+      api_key: ${QWEN_API_KEY}
       base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
       model: qwen-turbo
   fallbacks:
