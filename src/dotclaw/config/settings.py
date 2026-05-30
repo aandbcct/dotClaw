@@ -51,6 +51,7 @@ class AgentConfig:
     system_prompt: str = "你是一个有用、诚实且友好的 AI 助手。"
     max_context_tokens: int = 8000
     keep_recent_messages: int = 10
+    rules: str = ""   # P3 新增：额外行为规则，追加到 system prompt
 
 
 @dataclass
@@ -339,6 +340,7 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         system_prompt=agent_raw.get("system_prompt", ""),
         max_context_tokens=agent_raw.get("max_context_tokens", 8000),
         keep_recent_messages=agent_raw.get("keep_recent_messages", 10),
+        rules=agent_raw.get("rules", ""),
     )
 
     tools_raw = raw.get("tools", {})

@@ -88,6 +88,23 @@ async def _run_cli():
     channel.print_info(f"可用模型: {', '.join(llm_proxy.available_models)}")
     channel.print_info("输入 /help 查看命令\n")
 
+    # ---- P3 新增：PromptBuilder + AgentLogger ----
+    from dotclaw.agent.logger import AgentLogger
+    from dotclaw.agent.prompt.builder import PromptBuilder
+    from dotclaw.agent.prompt.providers import (
+        RoleProvider, RulesProvider, ToolsProvider,
+        MemoryProvider, SkillsProvider,
+    )
+
+    agent_logger = AgentLogger()
+    prompt_builder = PromptBuilder([
+        RoleProvider(),
+        RulesProvider(),
+        ToolsProvider(),
+        # MemoryProvider(),    ← P4 激活
+        # SkillsProvider(),    ← P7 激活
+    ])
+
     agent = AgentLoop(
         llm=llm_proxy,
         session=current_session,
@@ -95,6 +112,8 @@ async def _run_cli():
         channel=channel,
         config=config,
         tool_registry=tool_registry,
+        prompt_builder=prompt_builder,   # P3 新增
+        logger=agent_logger,             # P3 新增
     )
 
     while True:
