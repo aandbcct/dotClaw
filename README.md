@@ -22,7 +22,7 @@ dotclaw
 ```
 dotClaw/
 ├── src/dotclaw/             # 源代码
-│   ├── agent/               # Agent 核心循环（ReAct）
+│   ├── agent/               # Agent 核心循环（ReAct + AgentContext + PromptBuilder）
 │   ├── llm/                 # LLM 客户端（Qwen / DeepSeek / OpenAI）
 │   ├── tools/               # 工具系统（8 个内置工具 + 审批机制）
 │   ├── common/              # 通用工具库（限流器 / 单例 / 工具函数）
@@ -32,7 +32,7 @@ dotClaw/
 │   ├── scheduler/           # 定时提醒
 │   ├── config/              # 配置加载（YAML → dataclass）
 │   └── debug/               # 调试系统（TraceRecord）
-├── tests/                   # 测试（P1 + P2 验收测试全部通过）
+├── tests/                   # 测试（P1 + P2 + P3 验收测试全部通过）
 ├── skills/                  # 技能目录
 ├── data/                    # 运行时数据（sessions / logs）
 ├── config.yaml              # 配置文件
@@ -72,8 +72,8 @@ pip install -e ".[dev]"
 # 运行 Phase 1 测试
 python tests/test_phase1_acceptance.py
 
-# 运行 Phase 2 测试
-python tests/test_phase2_acceptance.py
+# 运行 Phase 3 测试
+python tests/test_phase3_acceptance.py
 ```
 
 ## 开发进度
@@ -82,7 +82,7 @@ python tests/test_phase2_acceptance.py
 |-------|------|------|
 | Phase 1 | ✅ 完成 | ReAct 循环、工具系统、流式输出、审批、调试追踪 |
 | Phase 2 | ✅ 完成 | 多供应商路由、OpenAICompatibleClient 基类、priority 降级、限流器 |
-| Phase 3 | 🔜 待开始 | AgentContext、PromptBuilder、AgentResult、消息工具 |
+| Phase 3 | ✅ 完成 | AgentContext、PromptBuilder、AgentResult、message_utils、AgentLogger |
 | Phase 4 | 🔜 待开始 | 三级记忆 + Deep Dream 蒸馏、上下文压缩 |
 | Phase 5 | 🔜 待开始 | python / web_search / web_fetch 工具、失败恢复 |
 | Phase 6 | 🔜 待开始 | MCP 协议集成 |
