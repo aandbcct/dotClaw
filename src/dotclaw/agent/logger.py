@@ -36,10 +36,6 @@ class AgentLogger:
     def new_request(self) -> str:
         """为新的 run() 调用生成唯一 request_id"""
         self._current_request_id = uuid4().hex[:8]
-        logger.info(
-            f"[{self._current_request_id}] new request started",
-            extra={"request_id": self._current_request_id},
-        )
         return self._current_request_id
 
     @property
@@ -50,8 +46,8 @@ class AgentLogger:
         """记录 TraceRecord 到日志和 DebugManager"""
         self._last_trace = trace
 
-        # 写入结构化日志
-        logger.info(
+        # 写入结构化日志（DEBUG 级别，避免污染 CLI 界面）
+        logger.debug(
             f"[{self._current_request_id}] request completed: "
             f"duration={trace.duration_ms}ms, "
             f"iterations={len(trace.llm_responses)}, "

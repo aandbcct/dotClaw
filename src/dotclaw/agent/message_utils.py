@@ -3,7 +3,7 @@
 纯函数集合，无内部状态。函数签名均为 (list[Message], ...) -> list[Message] | list[str]。
 链式调用友好：validate(messages) → trim(messages) → clean(messages)
 
-P3 用中英文差异化公式估算 token 数，P4 升级为 tiktoken。
+P3 用中英文差异化公式估算 token 数。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("dotclaw.agent.message_utils")
 
 
-# ---- Token 估算（P3 近似，P4 替换 tiktoken） ----
+# ---- Token 估算（中英文差异化公式） ----
 
 def _estimate_tokens(text: str) -> int:
     """粗略估算 token 数。中文 ~1 char/token，其他 ~4 chars/token。"""

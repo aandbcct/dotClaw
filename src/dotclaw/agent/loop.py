@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .context import AgentContext
     from .prompt.builder import PromptBuilder
     from .logger import AgentLogger
+    from ..memory.manager import MemoryManager
 
 
 def _find_project_root() -> Path:
@@ -48,6 +49,7 @@ class AgentLoop:
         tool_registry: "ToolRegistry | None" = None,
         prompt_builder: "PromptBuilder | None" = None,
         logger: "AgentLogger | None" = None,
+        memory_mgr: "MemoryManager | None" = None,
     ):
         self.llm = llm
         self.session = session
@@ -59,6 +61,7 @@ class AgentLoop:
         self._tool_registry = tool_registry
         self._prompt_builder = prompt_builder
         self._logger = logger
+        self._memory_mgr = memory_mgr
         self._debug_manager = DebugManager(
             level=config.debug.level,
             log_file=config.debug.log_file,
@@ -77,8 +80,8 @@ class AgentLoop:
         self._running = True
         start_time = time.time()
 
-        # 构建上下文
-        context = self._build_context(user_message)
+        # 构建上下文（P4：异步语义检索）
+        context = await self._build_context(user_message)
 
         trace = TraceRecord(
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -186,6 +189,16 @@ class AgentLoop:
             ))
             await self.session_mgr.save(self.session)
 
+            # P4：flush 触发（仅在正常完成时）
+            if self._memory_mgr and len(self.session.messages) > self.config.memory.flush_threshold:
+                import asyncio
+                asyncio.create_task(
+                    self._memory_mgr.flush_memory(
+                        messages=self.session.messages[-self.config.memory.flush_max_messages:],
+                        reason="threshold",
+                    )
+                )
+
             trace.final_response = final_response
             trace.duration_ms = int((time.time() - start_time) * 1000)
             self._debug_manager.record_trace(trace)
@@ -221,17 +234,28 @@ class AgentLoop:
         finally:
             self._running = False
 
-    def _build_context(self, user_message: str) -> "AgentContext":
-        """构建 AgentContext 不可变快照（在 run() 开头调用）"""
+    async def _build_context(self, user_message: str) -> "AgentContext":
+        """构建 AgentContext 不可变快照（P4：异步语义检索）"""
         from .context import AgentContext as Ctx
 
-        # 生成 request_id
         request_id = ""
         if self._logger:
             request_id = self._logger.new_request()
 
-        # 获取项目根目录
         project_root = _find_project_root()
+
+        # P4：语义检索
+        memory_summary = ""
+        if self._memory_mgr:
+            try:
+                results = await self._memory_mgr.search(user_message, max_results=3)
+                if results:
+                    memory_summary = "\n".join(
+                        f"- ({r.source}:{r.path}) {r.snippet}" for r in results
+                    )
+            except Exception as e:
+                logger = __import__('logging').getLogger("dotclaw.agent")
+                logger.debug(f"记忆检索失败（不影响对话）: {e}")
 
         return Ctx(
             session_id=self.session.id,
@@ -251,6 +275,7 @@ class AgentLoop:
             purpose="chat",
             max_context_tokens=self.config.agent.max_context_tokens,
             rules=getattr(self.config.agent, "rules", ""),
+            memory_summary=memory_summary,
             channel=self.channel,
         )
 

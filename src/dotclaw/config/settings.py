@@ -18,6 +18,14 @@ def _find_project_root() -> Path:
     return module_path.parent.parent  # 项目根目录
 
 
+def _resolve_memory_path(path_str: str, project_root: Path) -> Path:
+    """将相对路径基于 project_root 解析为绝对路径"""
+    p = Path(path_str)
+    if p.is_absolute():
+        return p
+    return project_root / p
+
+
 def _expand_env(value: Any) -> Any:
     """递归替换 ${ENV_VAR} 为环境变量值（委托 common.utils）"""
     from dotclaw.common.utils import expand_env_vars
@@ -71,7 +79,38 @@ class SkillsConfig:
 
 @dataclass
 class MemoryConfig:
+    # P1 已有
     long_term_file: str = "./data/memory/MEMORY.md"
+
+    # P4 新增
+    workspace: str = "./data"
+    db_path: str = "./data/memory/memory.db"
+    chunk_max_tokens: int = 500
+    chunk_overlap_tokens: int = 50
+    embedding_provider: str | None = None
+    embedding_model: str = "text-embedding-v3"
+    embedding_dimensions: int = 1024
+    embedding_api_base: str = ""
+    embedding_api_key: str = ""
+    max_results: int = 5
+    min_score: float = 0.1
+    vector_weight: float = 0.7
+    keyword_weight: float = 0.3
+    sync_on_search: bool = True
+    flush_threshold: int = 5
+    flush_max_messages: int = 10
+    dream_enabled: bool = True
+    dream_schedule: str = "55 23 * * *"
+    temporal_decay_half_life_days: float = 30.0
+
+    def get_db_path(self, project_root: Path) -> Path:
+        return _resolve_memory_path(self.db_path, project_root)
+
+    def get_memory_dir(self, project_root: Path) -> Path:
+        return _resolve_memory_path(self.workspace, project_root) / "memory"
+
+    def get_workspace(self, project_root: Path) -> Path:
+        return _resolve_memory_path(self.workspace, project_root)
 
 
 @dataclass
@@ -356,8 +395,21 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
     skills = SkillsConfig(
         directory=raw.get("skills", {}).get("directory", "./skills"),
     )
+    memory_raw = raw.get("memory", {})
     memory = MemoryConfig(
-        long_term_file=raw.get("memory", {}).get("long_term_file", "./data/memory/MEMORY.md"),
+        long_term_file=memory_raw.get("long_term_file", "./data/memory/MEMORY.md"),
+        workspace=memory_raw.get("workspace", "./data"),
+        db_path=memory_raw.get("db_path", "./data/memory/memory.db"),
+        embedding_provider=memory_raw.get("embedding_provider"),
+        embedding_model=memory_raw.get("embedding_model", "text-embedding-v3"),
+        embedding_dimensions=memory_raw.get("embedding_dimensions", 1024),
+        embedding_api_base=memory_raw.get("embedding_api_base", ""),
+        embedding_api_key=memory_raw.get("embedding_api_key", ""),
+        max_results=memory_raw.get("max_results", 5),
+        min_score=memory_raw.get("min_score", 0.1),
+        flush_threshold=memory_raw.get("flush_threshold", 20),
+        flush_max_messages=memory_raw.get("flush_max_messages", 10),
+        dream_enabled=memory_raw.get("dream_enabled", True),
     )
     session = SessionConfig(
         directory=raw.get("session", {}).get("directory", "./data/sessions"),

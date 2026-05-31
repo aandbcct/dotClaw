@@ -61,6 +61,9 @@ class AgentContext:
     channel: "Channel | None" = None
     """通信通道（可为 None，如 Scheduler 触发）"""
 
+    memory_summary: str = ""
+    """P4 新增：语义检索结果文本，由 _build_context() 异步填充，MemoryProvider 读取"""
+
     def __post_init__(self):
         """设置 workspace 默认值（绕过 frozen 限制）"""
         if str(self.workspace) == ".":

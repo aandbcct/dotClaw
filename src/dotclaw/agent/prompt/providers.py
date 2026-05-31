@@ -83,14 +83,16 @@ class ToolsProvider(DataProvider):
 # ---- P4/P7 预留 Provider 骨架 ----
 
 class MemoryProvider(DataProvider):
-    """记忆上下文（P4 实现）"""
+    """记忆上下文（P4 激活）。从 context.memory_summary 读取，纯同步。"""
 
     @property
     def section_name(self) -> str:
         return "memory"
 
     def provide(self, context: "AgentContext") -> str | None:
-        return None  # P4 实现
+        if not context.memory_summary:
+            return None
+        return f"## 相关记忆\n\n{context.memory_summary}"
 
 
 class SkillsProvider(DataProvider):

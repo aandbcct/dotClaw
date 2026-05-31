@@ -80,6 +80,61 @@ async def _run_cli():
     approval_mgr = ApprovalManager()
     tool_registry = ToolRegistry(approval_mgr, config)
 
+    # ---- P4 新增：记忆系统初始化 ----
+    from dotclaw.config import _find_project_root
+    project_root = _find_project_root()
+    memory_mgr = None
+
+    if hasattr(config, 'memory') and config.memory:
+        try:
+            from dotclaw.memory.storage import MemoryStorage
+            from dotclaw.memory.chunker import TextChunker
+            from dotclaw.memory.manager import MemoryManager
+            from dotclaw.memory.flush import MemoryFlushManager
+            from dotclaw.memory.dream import DeepDream
+
+            storage = MemoryStorage(config.memory.get_db_path(project_root))
+            chunker = TextChunker(
+                max_tokens=config.memory.chunk_max_tokens,
+                overlap_tokens=config.memory.chunk_overlap_tokens,
+            )
+
+            # EmbeddingProvider 可选
+            embedding = None
+            if config.memory.embedding_provider and config.memory.embedding_api_key:
+                from dotclaw.memory.embedding import OpenAIEmbeddingProvider
+                embedding = OpenAIEmbeddingProvider(
+                    api_base=config.memory.embedding_api_base,
+                    api_key=config.memory.embedding_api_key,
+                    model=config.memory.embedding_model,
+                    dimensions=config.memory.embedding_dimensions,
+                )
+
+            flush_mgr = MemoryFlushManager(
+                workspace_dir=config.memory.get_workspace(project_root),
+                llm=llm_proxy,
+            )
+
+            memory_mgr = MemoryManager(
+                storage=storage,
+                chunker=chunker,
+                embedding_provider=embedding,
+                flush_manager=flush_mgr,
+                sync_on_search=config.memory.sync_on_search,
+                vector_weight=config.memory.vector_weight,
+                keyword_weight=config.memory.keyword_weight,
+                max_results=config.memory.max_results,
+                min_score=config.memory.min_score,
+            )
+
+            # 初始化 DeepDream（稍后通过 /dream 命令触发）
+            dream = DeepDream(config.memory.get_workspace(project_root), llm=llm_proxy)
+        except Exception as e:
+            channel.print_info(f"  记忆系统初始化失败（已降级为无记忆模式）: {e}")
+            memory_mgr = None
+
+    # ---- P4 记忆系统初始化结束 ----
+
     # 确保至少有默认会话
     sessions = await session_mgr.list_all()
     current_session = sessions[0] if sessions else await session_mgr.create("主对话")
@@ -114,6 +169,7 @@ async def _run_cli():
         tool_registry=tool_registry,
         prompt_builder=prompt_builder,   # P3 新增
         logger=agent_logger,             # P3 新增
+        memory_mgr=memory_mgr,           # P4 新增
     )
 
     while True:
@@ -152,6 +208,8 @@ async def _run_cli():
                         channel.print_error("用法: /delete <会话ID>")
                 elif cmd == "/debug":
                     agent.debug_trace(channel)
+                elif cmd == "/dream":
+                    await _cmd_dream_async(channel, project_root, config, llm_proxy)
                 elif cmd == "/tools":
                     _cmd_tools(channel, tool_registry)
                 elif cmd == "/model":
@@ -182,6 +240,7 @@ dotClaw 命令:
   /delete <id>      删除对话
   /debug           查看最近推理过程
   /tools           列出可用工具
+  /dream           触发记忆蒸馏
   /model <名称>    切换模型
   /help            显示帮助
   /quit            退出
@@ -211,6 +270,30 @@ def _cmd_tools(channel, tool_registry):
             elif d.name == "python" and tool_registry._config.tools.python_needs_approval:
                 mark = " [需审批]"
         channel.print_info(f"  {d.name}: {d.description}{mark}")
+
+
+def _cmd_dream(channel, project_root, config, llm_proxy):
+    """手动触发 Deep Dream 蒸馏"""
+    from dotclaw.memory.dream import DeepDream
+    dream = DeepDream(config.memory.get_workspace(project_root), llm=llm_proxy)
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(dream.run())
+        channel.print_info(f"Dream: {result}")
+    except Exception as e:
+        channel.print_error(f"Dream 失败: {e}")
+
+
+async def _cmd_dream_async(channel, project_root, config, llm_proxy):
+    """手动触发 Deep Dream 蒸馏（异步版本）"""
+    from dotclaw.memory.dream import DeepDream
+    dream = DeepDream(config.memory.get_workspace(project_root), llm=llm_proxy)
+    try:
+        result = await dream.run()
+        channel.print_info(f"Dream: {result}")
+    except Exception as e:
+        channel.print_error(f"Dream 失败: {e}")
 
 
 async def _cmd_switch(channel, session_mgr, agent, session_id: str):
