@@ -340,6 +340,8 @@ P3:  run() → _build_context() → AgentContext(frozen)
 
 ### Phase 4：记忆系统
 
+> 详细开发文档：[docs/phase4-roadmap.md](./phase4-roadmap.md)
+
 **总体内容描述**
 
 实现三级记忆架构：短期（Session messages，已完成）→ 中期（每日对话摘要）→ 长期（MEMORY.md + Deep Dream 蒸馏）。同时实现上下文分层压缩策略，使 Agent 在长对话中保持性能。
