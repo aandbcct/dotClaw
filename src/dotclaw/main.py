@@ -102,7 +102,7 @@ async def _run_cli():
             # EmbeddingProvider 可选
             embedding = None
             if config.memory.embedding_provider and config.memory.embedding_api_key:
-                from dotclaw.memory.embedding import OpenAIEmbeddingProvider
+                from dotclaw.memory.embedding import OpenAIEmbeddingProvider, EmbeddingCache
                 embedding = OpenAIEmbeddingProvider(
                     api_base=config.memory.embedding_api_base,
                     api_key=config.memory.embedding_api_key,
@@ -118,8 +118,10 @@ async def _run_cli():
             memory_mgr = MemoryManager(
                 storage=storage,
                 chunker=chunker,
+                workspace=config.memory.get_workspace(project_root),
                 embedding_provider=embedding,
                 flush_manager=flush_mgr,
+                embedding_cache=EmbeddingCache(),
                 sync_on_search=config.memory.sync_on_search,
                 vector_weight=config.memory.vector_weight,
                 keyword_weight=config.memory.keyword_weight,
@@ -156,7 +158,7 @@ async def _run_cli():
         RoleProvider(),
         RulesProvider(),
         ToolsProvider(),
-        # MemoryProvider(),    ← P4 激活
+        MemoryProvider(),
         # SkillsProvider(),    ← P7 激活
     ])
 

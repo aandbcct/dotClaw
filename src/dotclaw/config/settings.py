@@ -97,7 +97,7 @@ class MemoryConfig:
     vector_weight: float = 0.7
     keyword_weight: float = 0.3
     sync_on_search: bool = True
-    flush_threshold: int = 5
+    flush_threshold: int = 20
     flush_max_messages: int = 10
     dream_enabled: bool = True
     dream_schedule: str = "55 23 * * *"

@@ -1,13 +1,28 @@
-"""DeepDream — L3 蒸馏：日记忆 → MEMORY.md 长期记忆"""
+"""DeepDream — L3 蒸馏：日记忆 → MEMORY.md 长期记忆（LLM 语义合并 + 去重）"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from ..llm.base import Message as LLMMessage
+
+if TYPE_CHECKING:
+    from ..llm.proxy import LLMProxy
 
 logger = logging.getLogger("dotclaw.memory.dream")
+
+DREAM_SYSTEM_PROMPT = """你是记忆提炼助手。阅读以下对话摘要和已有长期记忆，合并提炼为简洁的 Markdown 列表。
+
+要求：
+1. 提取用户偏好、重要决策、待办事项、学到的知识
+2. 与已有记忆语义相近的条目合并而非新增
+3. 忽略闲聊和重复信息
+4. 每行格式：'- [日期] 内容'"""
 
 
 class DeepDream:
@@ -27,52 +42,87 @@ class DeepDream:
         """
         1. 读取所有日记忆文件
         2. 读取当前 MEMORY.md
-        3. 蒸馏合并
+        3. 调用 LLM：合并 + 语义去重 + 提炼关键信息
         4. 写入 MEMORY.md
         5. 更新 .dream_state.json
-        6. 返回摘要
+        6. 返回蒸馏摘要
         """
         state = self._load_state()
         daily_files = sorted(self._memory_dir.glob("????-??-??.md"))
 
-        newly_distilled = 0
-        new_entries: list[str] = []
+        # 收集未蒸馏的日记
+        new_dates: list[str] = []
+        new_content: list[str] = []
 
         for f in daily_files:
             date_key = f.stem
-
-            # 检查是否已蒸馏
             entry = state.get(date_key, {})
             if entry.get("distilled_at") and not force:
                 continue
+            new_dates.append(date_key)
+            new_content.append(f.read_text(encoding="utf-8"))
 
-            content = f.read_text(encoding="utf-8")
-            new_entries.append(f"## {date_key}\n{content}")
-            newly_distilled += 1
-            state[date_key] = {
-                "distilled_at": datetime.now().isoformat(),
-                "entries": len(content.splitlines()),
-                "hash": self._hash_content(content),
-            }
-
-        if newly_distilled == 0:
+        if not new_dates:
             return "已蒸馏 0 日，无新记忆"
 
-        # 读取现有 MEMORY.md
-        existing = ""
+        # 读取现有长期记忆
+        existing_memory = ""
         if self._memo_path.exists():
-            existing = self._memo_path.read_text(encoding="utf-8")
+            existing_memory = self._memo_path.read_text(encoding="utf-8")
 
-        # 合并写入
-        merged = existing
-        for entry_text in new_entries:
-            if entry_text not in merged:
-                merged += f"\n{entry_text}\n"
+        # 调用 LLM 蒸馏
+        try:
+            distilled = await self._distill_with_llm(existing_memory, new_content, new_dates)
+        except Exception as e:
+            logger.error(f"LLM 蒸馏失败: {e}")
+            return f"蒸馏失败: {e}"
 
-        self._memo_path.write_text(merged, encoding="utf-8")
+        # 写入 MEMORY.md
+        self._memo_path.write_text(distilled, encoding="utf-8")
+
+        # 更新状态
+        for d in new_dates:
+            state[d] = {
+                "distilled_at": datetime.now().isoformat(),
+                "entries": len(distilled.splitlines()),
+                "hash": self._hash_content(distilled[:200]),
+            }
         self._save_state(state)
 
-        return f"已蒸馏 {newly_distilled} 日记忆"
+        return f"已蒸馏 {len(new_dates)} 日记忆"
+
+    async def _distill_with_llm(
+        self,
+        existing: str,
+        daily_contents: list[str],
+        dates: list[str],
+    ) -> str:
+        """调用 LLM 做语义合并蒸馏"""
+        if not self._llm:
+            return existing + "\n\n" + "\n\n".join(daily_contents)
+
+        date_labels = ", ".join(dates)
+        daily_text = "\n\n---\n\n".join(daily_contents)
+
+        user_content = f"""日期: {date_labels}
+
+已有长期记忆:
+{existing if existing else "(暂无)"}
+
+新对话摘要:
+{daily_text}
+
+请将以上新对话摘要与已有长期记忆合并，提炼为简洁的 Markdown 列表。"""
+
+        messages = [
+            LLMMessage(role="system", content=DREAM_SYSTEM_PROMPT),
+            LLMMessage(role="user", content=user_content),
+        ]
+
+        result = ""
+        async for chunk in self._llm.chat(messages=messages, stream=False):
+            result += chunk.content
+        return result.strip()
 
     def _load_state(self) -> dict:
         if self._state_path.exists():
@@ -87,5 +137,4 @@ class DeepDream:
 
     @staticmethod
     def _hash_content(content: str) -> str:
-        import hashlib
         return hashlib.sha256(content.encode()).hexdigest()[:16]

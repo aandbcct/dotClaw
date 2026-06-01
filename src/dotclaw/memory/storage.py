@@ -162,8 +162,8 @@ class MemoryStorage:
         # 检测 CJK
         cjk = any('\u4e00' <= c <= '\u9fff' for c in query)
 
-        if cjk:
-            # 中文：trigram
+        if cjk and len(query.replace(" ", "")) >= 3:
+            # 中文 trigram（≥3 字符，避免 FTS5 trigram 短查询异常）
             try:
                 rows = self._conn.execute(
                     """SELECT c.path, c.start_line, c.end_line, c.text, c.source,

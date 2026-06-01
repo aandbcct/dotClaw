@@ -1,4 +1,4 @@
-"""MemoryFlushManager — L2 日记忆写入（含同日去重）"""
+"""MemoryFlushManager — L2 日记忆写入（LLM 摘要 + 同日去重）"""
 
 from __future__ import annotations
 
@@ -8,10 +8,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..llm.base import Message as LLMMessage
+
 if TYPE_CHECKING:
     from ..memory.store import SessionMessage
+    from ..llm.proxy import LLMProxy
 
 logger = logging.getLogger("dotclaw.memory.flush")
+
+FLUSH_SYSTEM_PROMPT = """你是对话摘要助手。根据以下对话记录，生成 2-3 句中文摘要。
+
+要求：
+1. 提取用户的主要话题、提出的问题、做出的决策
+2. 提取 AI 提供的关键信息、建议、结论
+3. 忽略闲聊、问候等无信息量的内容
+4. 纯文本输出，不要标题、编号、Markdown 格式"""
 
 
 class MemoryFlushManager:
@@ -30,22 +41,22 @@ class MemoryFlushManager:
         max_messages: int = 10,
     ) -> bool:
         """
-        1. 取最近 N 条消息
-        2. 生成简单摘要
-        3. 同日去重
-        4. 追加到 memory/YYYY-MM-DD.md
+        1. 取最近 N 条消息（含 user + assistant 完整往返）
+        2. 调用 LLM 生成 2-3 句中文摘要
+        3. 检查同日已有摘要的 content hash — 相同则跳过
+        4. 追加到 data/memory/YYYY-MM-DD.md
+        5. 异常静默（后台 asyncio.create_task，不抛给调用方）
         """
         if not messages:
             return False
 
-        # 取最近的消息
         recent = messages[-max_messages:]
-        content = "\n".join(
-            f"[{m.role}] {m.content[:200]}" for m in recent
-        )
 
-        # 生成简单摘要
-        summary = self._generate_summary(recent)
+        try:
+            summary = await self._summarize_with_llm(recent)
+        except Exception as e:
+            logger.warning(f"LLM 摘要生成失败，降级为模板摘要: {e}")
+            summary = self._generate_fallback_summary(recent)
 
         # 同日去重
         today = datetime.now().strftime("%Y-%m-%d")
@@ -67,19 +78,44 @@ class MemoryFlushManager:
         logger.info(f"日记忆已写入: {path} ({reason})")
         return True
 
-    def _generate_summary(self, messages: list) -> str:
-        """从消息列表生成简单摘要"""
+    async def _summarize_with_llm(self, messages: list) -> str:
+        """调用 LLM 生成对话摘要"""
+        if not self._llm:
+            raise RuntimeError("LLM 未配置")
+
+        # 构建对话记录文本
+        dialog_lines = []
+        for m in messages:
+            role = getattr(m, "role", "unknown")
+            content = getattr(m, "content", "")[:500]
+            label = {"user": "用户", "assistant": "AI"}.get(role, role)
+            dialog_lines.append(f"{label}: {content}")
+
+        dialog_text = "\n".join(dialog_lines)
+
+        llm_messages = [
+            LLMMessage(role="system", content=FLUSH_SYSTEM_PROMPT),
+            LLMMessage(role="user", content=f"对话记录：\n\n{dialog_text}"),
+        ]
+
+        result = ""
+        async for chunk in self._llm.chat(messages=llm_messages, stream=False):
+            result += chunk.content
+        return result.strip()
+
+    def _generate_fallback_summary(self, messages: list) -> str:
+        """LLM 不可用时的降级摘要"""
         if not messages:
             return "（空对话）"
 
         user_parts = []
         assistant_parts = []
         for m in messages:
-            content = m.content[:100] if hasattr(m, 'content') else str(m)[:100]
-            role = getattr(m, 'role', 'unknown')
-            if role == 'user':
+            content = getattr(m, "content", "")[:100]
+            role = getattr(m, "role", "unknown")
+            if role == "user":
                 user_parts.append(content)
-            elif role == 'assistant':
+            elif role == "assistant":
                 assistant_parts.append(content)
 
         user_text = " ".join(user_parts)
