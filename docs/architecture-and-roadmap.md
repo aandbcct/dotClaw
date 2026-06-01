@@ -1,6 +1,6 @@
 # dotClaw 项目架构分析与开发路线图
 
-更新时间：2026-05-30（含 CowAgent 对比分析）
+更新时间：2026-06-01（含 CowAgent 对比分析）
 
 ## 项目定位
 
@@ -42,9 +42,14 @@ dotClaw/
 │   ├── singleton.py     ← SingletonMeta 元类
 │   └── utils.py         ← expand_env_vars（未解析 WARNING）/ safe_load_yaml
 │
-├── memory/              ⚠️ 仅 store.py 完成
-│   ├── store.py         ✅ 会话持久化（JSON，load 返回 SessionMessage 对象）
-│   └── flush.py         ← 📋 规划：MemoryFlushManager（Phase 4）
+├── memory/              ✅ 已完成（Phase 4）
+│   ├── store.py         ✅ 会话持久化（JSON，load 返回 SessionMessage）
+│   ├── storage.py       ← SQLite + FTS5 双索引 + 向量检索（Phase 4 ✅）
+│   ├── chunker.py       ← Markdown 结构感知文本分块（Phase 4 ✅）
+│   ├── embedding.py     ← EmbeddingProvider + LRU Cache（Phase 4 ✅）
+│   ├── manager.py       ← MemoryManager 核心调度：混合检索 + sync（Phase 4 ✅）
+│   ├── flush.py         ← MemoryFlushManager：L2 日记忆写入 + LLM 摘要（Phase 4 ✅）
+│   └── dream.py         ← DeepDream：L3 蒸馏 + MEMORY.md 备份（Phase 4 ✅）
 │
 ├── tools/               ✅ 已完成
 │   ├── __init__.py      ← 自动注册所有工具模块
@@ -71,10 +76,11 @@ dotClaw/
 │
 ├── model_router_config.yaml  ← 路由配置（providers/models/purposes 三层）
 │
-└── tests/               ✅ Phase 1 + 2 + 3 测试
+└── tests/               ✅ Phase 1 + 2 + 3 + 4 测试
     ├── test_phase1_acceptance.py
     ├── test_phase2_acceptance.py
-    └── test_phase3_acceptance.py
+    ├── test_phase3_acceptance.py
+    └── test_phase4_acceptance.py
 ```
 
 > 图例：✅ 已完成 ⚠️ 部分完成 📋 规划中
@@ -100,12 +106,18 @@ dotClaw/
 | CLI Channel | ✅ 完整 | rich 渲染，流式输出，print_* 方法 |
 | common/ 工具库 | ✅ 完成 | rate_limiter（Token Bucket + Lock）、singleton（SingletonMeta）、utils |
 | 会话管理 | ✅ 完整 | JSON 存储，多会话 CRUD；load() 返回 SessionMessage 对象 |
+| MemoryStorage | ✅ 完成 | SQLite WAL + FTS5 双索引（unicode61/trigram）+ embedding BLOB + 文件变更检测 |
+| TextChunker | ✅ 完成 | Markdown 结构感知分块（不切断 ## 标题，块间重叠） |
+| EmbeddingProvider | ✅ 完成 | OpenAIEmbeddingProvider + LRU EmbeddingCache；numpy 缺失纯 Python 降级 |
+| MemoryManager | ✅ 完成 | 混合检索（向量 0.7 + 关键词 0.3）+ sync 文件同步 + flush 触发 + 时间衰减 |
+| MemoryFlushManager | ✅ 完成 | L2 日记忆 LLM 摘要 + 同日 content hash 去重 + 降级模板 |
+| DeepDream | ✅ 完成 | L3 蒸馏 LLM 语义合并 + MEMORY.md.bak 备份 + .dream_state.json |
+| MemoryProvider | ✅ 激活 | P3 骨架 → 从 context.memory_summary 读取语义检索结果注入 Prompt |
 | 工具系统 | ✅ 完整 | 8 个工具自动注册；审批从 config 读取 |
 | DebugManager | ✅ 完成 | TraceRecord + /debug 命令（P3 由 AgentLogger 回写） |
-| 测试 | ✅ 完成 | P1: 7/7 + P2: 7/7 + P3: 8/8 全部通过 |
+| 测试 | ✅ 完成 | P1: 7/7 + P2: 7/7 + P3: 8/8 + P4: 6/6 全部通过 |
 | Skill 加载 | ⚠️ 半成品 | 能加载 SKILL.md，未注入 system prompt |
 | 定时提醒 | ⚠️ 最简版 | 仅一次性延迟提醒 |
-| 长期记忆 | ⚠️ 半成品 | 工具有，Agent 循环未调用 |
 | MCP 集成 | ❌ 未实现 | 不支持 MCP 协议 |
 | python 工具 | ❌ 未注册 | 审批引用了但未注册 |
 
@@ -118,7 +130,7 @@ dotClaw/
 | `agent/result.py` | 🟡 中 | Phase 3 ✅ | run() 返回 AgentResult（含 tool_calls_count/iterations/duration_ms/error），__str__ 兼容 |
 | `agent/prompt/builder.py` | 🔴 高 | Phase 3 ✅ | DataProvider 模式模块化 system prompt；P4/P7 只需新增 Provider 不修改 Builder |
 | `agent/message_utils.py` | 🟡 中 | Phase 3 ✅ | validate/trim/clean 纯函数；trim 含 assistant(tool_calls)-tool 配对保护 |
-| `memory/flush.py` | 🔴 高 | Phase 4 | 管理日记忆自动刷新 + Deep Dream 蒸馏触发 |
+| `memory/flush.py` | 🔴 高 | Phase 4 ✅ | L2 日记忆 LLM 摘要写入 + 同日去重；AgentLoop.run() 末尾异步触发 |
 
 ---
 
@@ -338,41 +350,79 @@ P3:  run() → _build_context() → AgentContext(frozen)
 
 ---
 
-### Phase 4：记忆系统
+### Phase 4：记忆系统（已完成 ✅）
 
-> 详细开发文档：[docs/phase4-roadmap.md](./phase4-roadmap.md)
+> 详细开发文档：[docs/phase4-roadmap.md](./phase4-roadmap.md) | 变更日志：[docs/phase4-record.md](./phase4-record.md)
 
 **总体内容描述**
 
-实现三级记忆架构：短期（Session messages，已完成）→ 中期（每日对话摘要）→ 长期（MEMORY.md + Deep Dream 蒸馏）。同时实现上下文分层压缩策略，使 Agent 在长对话中保持性能。
+实现三级记忆架构：L1 Session JSON（P1 已有）→ L2 日记忆文件（LLM 摘要 + SQLite 索引）→ L3 MEMORY.md（Deep Dream LLM 语义蒸馏）。使用 SQLite FTS5 双索引（unicode61 + trigram）+ numpy 向量余弦相似度混合检索。P3 预留的 MemoryProvider 骨架激活，token 估算保留中英文差异化公式。
 
-**分模块内容描述**
+**完成日期**：2026-05-31 ~ 2026-06-01
 
-| 模块 | 文件 | 描述 |
-|------|------|------|
-| MemoryFlushManager | `memory/flush.py` | 日记忆刷新管理：对话结束时自动生成 `memory/YYYY-MM-DD.md`；每日 23:55 触发 Deep Dream 蒸馏，将日记忆提炼为 MEMORY.md |
-| 上下文压缩 | `agent/loop.py`（修改） | `_build_messages()` 中实现分层截断逻辑，调用 `message_utils` 的裁剪函数 |
-| 记忆注入 | `agent/loop.py`（修改） | 通过 PromptBuilder 将 MEMORY.md 和当日记忆注入 system prompt |
-| MemoryProvider 激活 | `agent/prompt/providers.py`（修改） | P3 预留的 `MemoryProvider.provide()` 从返回 None → 调用 MemoryFlushManager 获取记忆摘要 |
-| token 估算升级 | `agent/message_utils.py`（修改） | 将 `_estimate_tokens()` 从中英文差异化公式替换为 tiktoken 精确计算 |
+**分模块修改清单**
+
+| 模块 | 文件 | 状态 | 描述 |
+|------|------|------|------|
+| MemoryStorage | `memory/storage.py` | 新增 | SQLite WAL + FTS5 双索引 + embedding BLOB + 文件变更检测 + numpy 降级 |
+| TextChunker | `memory/chunker.py` | 新增 | Markdown 结构感知分块（不切断 ## 标题，块间重叠） |
+| EmbeddingProvider | `memory/embedding.py` | 新增 | OpenAIEmbeddingProvider + LRU EmbeddingCache（OrderedDict, max 256） |
+| MemoryManager | `memory/manager.py` | 新增 | 混合检索 + sync 文件同步 + flush 触发 + 时间衰减 + 递归防护 |
+| MemoryFlushManager | `memory/flush.py` | 新增 | L2 日记忆 LLM 摘要 + 同日 content hash 去重 + 降级模板 |
+| DeepDream | `memory/dream.py` | 新增 | L3 蒸馏 LLM 语义合并 + MEMORY.md.bak 备份 + .dream_state.json |
+| AgentContext | `agent/context.py` | 修改 | 新增 `memory_summary` 字段 |
+| MemoryProvider | `agent/prompt/providers.py` | 修改 | P3 骨架 → 读 context.memory_summary → "## 相关记忆" section |
+| AgentLoop | `agent/loop.py` | 修改 | memory_mgr 参数；`_build_context` async 语义检索；flush 异步触发 |
+| MemoryConfig | `config/settings.py` | 修改 | 扩展 20 字段 + `_resolve_memory_path` + P4 字段 YAML 解析 |
+| main.py | `main.py` | 修改 | 记忆初始化链 + `/dream` 命令 |
+| pyproject.toml | `pyproject.toml` | 修改 | 新增 `numpy>=1.26.0` |
+| 测试 | `tests/test_phase4_acceptance.py` | 新增 | 6 个场景：CRUD/向量/分块/降级/缓存/注入 |
+
+**架构变化**
+
+```
+P3:  run() → _build_context()[同步] → AgentContext → PromptBuilder
+
+P4:  run() → _build_context()[async]
+         │           │
+         │     MemoryManager.search(user_message)
+         │           │
+         │     混合检索 + 时间衰减
+         │           │
+         ▼           ▼
+    AgentContext(memory_summary="...")
+         │
+    PromptBuilder → MemoryProvider → "## 相关记忆"
+         │
+    run() 末尾: asyncio.create_task(flush_memory())
+         │
+    L2: LLM 摘要 → YYYY-MM-DD.md
+    L3: /dream → LLM 蒸馏 → MEMORY.md
+```
 
 **分模块内容要点**
 
-- **三级记忆**：短期（`Session.messages`，P1 完成）→ 中期（`memory/YYYY-MM-DD.md`，对话结束自动追加摘要）→ 长期（`data/memory/MEMORY.md`，Deep Dream 蒸馏写入）
-- **Deep Dream 触发**：定时（23:55，通过 Scheduler）或手动（`/dream` 命令）；流程为：扫描当日 memory 文件 → 调用 LLM 提取关键信息 → 追加到 MEMORY.md → 记录蒸馏日志
-- **去重保护**：基于内容哈希（`hashlib.sha256`）检查 MEMORY.md 中是否已存在相同内容，避免重复写入
-- **上下文压缩**：当前轮完整保留，历史轮通过 LLM 生成摘要注入。工具结果分级截断（当前轮 50K chars → 历史轮 20K chars）。确保 tool_use/tool_result 消息对不被破坏
-- `_build_messages()` 改为：`PromptBuilder.build()` → 注入记忆上下文 → `message_utils.trim_messages()` 截断 → 返回
-- **MemoryProvider 激活**：P3 在 `providers.py` 中预留了返回 None 的骨架，P4 实现 `MemoryProvider.provide()` 调用 `MemoryFlushManager.get_context()` 获取记忆摘要
-- **token 估算升级**：P3 的 `_estimate_tokens()` 使用中英文差异化近似公式（代码中已标记 `P4 替换 tiktoken`），P4 替换为 tiktoken 精确计算
+- **三级记忆**：L1 `Session.messages`（JSON，P1）→ L2 `data/memory/YYYY-MM-DD.md`（LLM 2-3 句中文摘要）→ L3 `data/memory/MEMORY.md`（Deep Dream 语义蒸馏，写入前备份 `.bak`）
+- **混合检索**：向量余弦相似度（权重 0.7）+ FTS5 trigram 关键词（权重 0.3）加权合并。日记忆按半衰期 30 天指数衰减，MEMORY.md 不衰减
+- **flush**：消息数 > `flush_threshold`（20）→ `asyncio.create_task` 异步 LLM 摘要 → 同日 content hash 去重。仅正常路径触发
+- **Deep Dream**：`/dream` 手动触发 → `.dream_state.json` 记录状态，同日期不重复蒸馏
+- **numpy 降级**：未安装时 `search_vector()` 降级为纯 Python 余弦相似度
+
+**验收标准**（全部通过 ✅）
+
+1. CRUD + 中英文关键词搜索 + UPSERT rowid 稳定性
+2. 向量检索排序 + embedding BLOB round-trip
+3. TextChunker 不切断 ## 标题边界
+4. embedding=None → 纯关键词降级
+5. EmbeddingCache LRU 淘汰
+6. MemoryProvider 空/非空 memory_summary 注入
 
 **开发注意事项**
 
-- MemoryFlushManager 的 Deep Dream 依赖 LLM 调用（用当前默认模型），注意错误处理和重试
-- 上下文压缩的截断阈值可配置（`config.agent.max_context_tokens` 和 `keep_recent_messages`，P1 已有字段，P4 开始使用）
-- 日记忆文件按 UTC+8 日期命名，Deep Dream 在 23:55 处理当日文件
-- 截断后消息合法性由 `message_utils.validate_messages()` 保证
-- **AgentServices 收拢**：P3 后 AgentLoop 构造参数已达 8 个，P4 引入 MemoryFlushManager 后增至 9 个。建议将 `prompt_builder` / `logger` / `memory_flush_manager` 等基础设施组件收拢为 `AgentServices` 对象，避免参数继续膨胀（P3 roadmap 前瞻建议）
+- FTS5 UPSERT 后需 `rebuild` content table（小数据集可接受，设计权衡）
+- FTS5 trigram 短中文（<3 字符）走 LIKE 降级
+- token 估算保留 P3 中英文差异化公式（已移除 tiktoken）
+- AgentLogger + DebugManager 双日志系统 P5 合并
 
 ---
 

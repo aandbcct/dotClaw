@@ -27,7 +27,7 @@ dotClaw/
 │   ├── tools/               # 工具系统（8 个内置工具 + 审批机制）
 │   ├── common/              # 通用工具库（限流器 / 单例 / 工具函数）
 │   ├── skills/              # Skill 加载器
-│   ├── memory/              # 记忆 / 会话持久化
+│   ├── memory/              # 三级记忆系统（L1 Session / L2 日记忆 / L3 蒸馏）
 │   ├── channel/             # 通道（CLI）
 │   ├── scheduler/           # 定时提醒
 │   ├── config/              # 配置加载（YAML → dataclass）
@@ -72,8 +72,14 @@ pip install -e ".[dev]"
 # 运行 Phase 1 测试
 python tests/test_phase1_acceptance.py
 
+# 运行 Phase 2 测试
+python tests/test_phase2_acceptance.py
+
 # 运行 Phase 3 测试
 python tests/test_phase3_acceptance.py
+
+# 运行 Phase 4 测试
+python tests/test_phase4_acceptance.py
 ```
 
 ## 开发进度
@@ -83,7 +89,7 @@ python tests/test_phase3_acceptance.py
 | Phase 1 | ✅ 完成 | ReAct 循环、工具系统、流式输出、审批、调试追踪 |
 | Phase 2 | ✅ 完成 | 多供应商路由、OpenAICompatibleClient 基类、priority 降级、限流器 |
 | Phase 3 | ✅ 完成 | AgentContext、PromptBuilder、AgentResult、message_utils、AgentLogger |
-| Phase 4 | 🔜 待开始 | 三级记忆 + Deep Dream 蒸馏、上下文压缩 |
+| Phase 4 | ✅ 完成 | SQLite FTS5 混合检索、LLM 日记忆摘要、Deep Dream 蒸馏、MemoryProvider |
 | Phase 5 | 🔜 待开始 | python / web_search / web_fetch 工具、失败恢复 |
 | Phase 6 | 🔜 待开始 | MCP 协议集成 |
 | Phase 7 | 🔜 待开始 | Skill 系统完善（注入 / 热加载 / 创建向导） |
