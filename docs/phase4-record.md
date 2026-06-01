@@ -8,11 +8,8 @@
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
 | v1.0 | 2026-06-01 | 初始版本，基于 P4 设计文档 + 现有代码梳理 |
-| v1.1 | 2026-06-01 | 修复 6 个 bug：sync 实现、时间衰减实现、EmbeddingCache 注入、MemoryProvider 注册、flush_threshold 统一、FTS5 trigram 短查询修复 |
-
----
-
-## v1.0 — 2026-06-01
+| v1.1 | 2026-06-01 | 修复 4 个 bug：sync 实现、时间衰减实现、EmbeddingCache 注入、MemoryProvider 注册；移除 tiktoken 相关引用 |
+| v1.2 | 2026-06-01 | 修复审计 v1.1 全部 9 个问题：_raw_to_config P4 字段、rebuild_fts 双索引、Embedding 异步化、numpy 降级、MEMORY.md 备份、DeepDream 持久化、CJK 扩展检测、sync 递归防护 |
 
 ### 变更内容
 
@@ -78,6 +75,37 @@
 | 3 | 蒸馏一次性喂所有未蒸馏日记 | 多日累积后 token 超限 | 分片蒸馏 |
 | 4 | FTS5 trigram 短中文查询走 LIKE 降级（<3 字符） | 单/双字中文检索精度下降 | 设计权衡，trigram tokenizer 限制 |
 | 5 | tiktoken 未接入 TextChunker | 分块 token 估算精度低 | 迁移到 `cl100k_base` |
+
+---
+
+## v1.2 — 2026-06-01
+
+### 变更内容
+
+根据审计审查，修复 v1.1 全部 9 个已知问题。
+
+### 已修复（来自 v1.1 问题）
+
+| # | 原问题 | 修复内容 | 涉及文件 |
+|---|--------|----------|----------|
+| ✅ v1.1-1 | `_raw_to_config()` 缺少 P4 字段映射 | 补齐 `chunk_max_tokens`/`chunk_overlap_tokens`/`vector_weight`/`keyword_weight`/`sync_on_search`/`temporal_decay_half_life_days`/`dream_schedule` 字段解析 | `config/settings.py` |
+| ✅ v1.1-2 | `_rebuild_fts()` 只重建一个索引 | 改为各自独立 try/except，`unicode61` 失败不影响 `trigram` 重建 | `memory/storage.py` |
+| ✅ v1.1-3 | Embedding 同步调用阻塞事件循环 | `embed_batch()` 改为 `await asyncio.to_thread()` 包装，不阻塞 asyncio | `memory/manager.py` |
+| ✅ v1.1-4 | numpy import 无降级路径 | 改为 `try: import numpy` 顶层降级，`search_vector` 拆分为 numpy/纯 Python 两版本 | `memory/storage.py` |
+| ✅ v1.1-5 | FTS5 每次全量重建 | 标注为已知设计权衡（UPSERT 后 FTS5 content table 需重建，小数据集成本可接受） | — |
+| ✅ v1.1-6 | MEMORY.md 覆盖写无备份 | 写入前自动备份到 `MEMORY.md.bak` | `memory/dream.py` |
+| ✅ v1.1-7 | DeepDream 实例未持久化 | `main.py` 中统一初始化并保存 `memory_dream` 引用，`/dream` 命令复用 | `main.py` |
+| ✅ v1.1-8 | CJK 检测范围不足 | 扩展检测范围至 CJK 扩展区 + 日文假名（`\u3400-\u4dbf`、`\uf900-\ufaff`、`\u3040-\u30ff`），改用预编译正则 | `memory/storage.py` |
+| ✅ v1.1-9 | `sync_on_search` 无递归防护 | 新增 `_syncing` 标志位，`sync()` 加 try/finally 防护 | `memory/manager.py` |
+
+### 残留限制（不在 P4 范围）
+
+| # | 限制 | 影响 | 规划 |
+|---|------|------|------|
+| 1 | 向量检索全表扫描 | >1万 chunk 时延迟明显 | 引入 ANN 索引 |
+| 2 | 记忆注入无 token 预算 | 长记忆挤占对话上下文 | 增加 `memory_budget_tokens` |
+| 3 | 蒸馏一次性喂所有未蒸馏日记 | 多日累积后 token 超限 | 分片蒸馏 |
+| 4 | FTS5 trigram 短中文查询走 LIKE | 单/双字中文检索精度下降 | trigram tokenizer 设计限制 |
 
 ---
 

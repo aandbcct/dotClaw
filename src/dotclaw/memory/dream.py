@@ -77,6 +77,14 @@ class DeepDream:
             logger.error(f"LLM 蒸馏失败: {e}")
             return f"蒸馏失败: {e}"
 
+        # 写入前备份旧版本
+        if self._memo_path.exists() and self._memo_path.stat().st_size > 0:
+            backup_path = self._memo_path.with_suffix(".md.bak")
+            backup_path.write_text(
+                self._memo_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            logger.debug(f"MEMORY.md 已备份: {backup_path}")
+
         # 写入 MEMORY.md
         self._memo_path.write_text(distilled, encoding="utf-8")
 

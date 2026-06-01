@@ -50,6 +50,7 @@ class MemoryManager:
         self._min_score = min_score
         self._half_life = temporal_decay_half_life_days
         self._memory_dir = (workspace or Path(".")) / "memory"
+        self._syncing = False  # sync 递归防护
 
     async def search(
         self, query: str, max_results: int = 5, min_score: float = 0.1,
@@ -93,66 +94,76 @@ class MemoryManager:
 
     async def sync(self, force: bool = False):
         """文件变更检测 → 分块 → 批量 embedding → 写入索引"""
+        import asyncio
         import hashlib
 
-        # 监控的文件列表
-        monitored = [
-            self._memory_dir / "MEMORY.md",
-        ]
-        # 也扫描 skills 目录下的知识文件
-        skills_knowledge = self._memory_dir.parent.parent / "skills" / "knowledge"
-        if skills_knowledge.exists():
-            for f in skills_knowledge.glob("*.md"):
-                monitored.append(f)
+        # 递归防护
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            # 监控的文件列表
+            monitored = [
+                self._memory_dir / "MEMORY.md",
+            ]
+            # 也扫描 skills 目录下的知识文件
+            skills_knowledge = self._memory_dir.parent.parent / "skills" / "knowledge"
+            if skills_knowledge.exists():
+                for f in skills_knowledge.glob("*.md"):
+                    monitored.append(f)
 
-        for file_path in monitored:
-            if not file_path.exists():
-                continue
+            for file_path in monitored:
+                if not file_path.exists():
+                    continue
 
-            # 计算文件 hash
-            content = file_path.read_text(encoding="utf-8")
-            file_hash = hashlib.sha256(content.encode()).hexdigest()
-            mtime = int(file_path.stat().st_mtime)
-            size = file_path.stat().st_size
+                # 计算文件 hash
+                content = file_path.read_text(encoding="utf-8")
+                file_hash = hashlib.sha256(content.encode()).hexdigest()
+                mtime = int(file_path.stat().st_mtime)
+                size = file_path.stat().st_size
 
-            # 检查是否需要更新
-            existing = self._storage.get_file_state(str(file_path))
-            if not force and existing and existing[0] == file_hash:
-                continue
+                # 检查是否需要更新
+                existing = self._storage.get_file_state(str(file_path))
+                if not force and existing and existing[0] == file_hash:
+                    continue
 
-            # 分块
-            chunks = self._chunker.chunk_text(content)
-            rel_path = str(file_path.relative_to(self._memory_dir.parent.parent))
+                # 分块
+                chunks = self._chunker.chunk_text(content)
+                rel_path = str(file_path.relative_to(self._memory_dir.parent.parent))
 
-            # 生成 ID
-            memory_chunks = []
-            for i, c in enumerate(chunks):
-                chunk_id = hashlib.sha256(f"{rel_path}:{c.start_line}:{c.end_line}".encode()).hexdigest()[:16]
-                memory_chunks.append(MemoryChunk(
-                    id=chunk_id,
-                    path=rel_path,
-                    start_line=c.start_line,
-                    end_line=c.end_line,
-                    text=c.text,
-                    embedding=None,
-                    hash=hashlib.sha256(c.text.encode()).hexdigest()[:16],
-                    source="memory" if "MEMORY.md" in str(file_path) else "knowledge",
-                ))
+                # 生成 ID
+                memory_chunks = []
+                for i, c in enumerate(chunks):
+                    chunk_id = hashlib.sha256(f"{rel_path}:{c.start_line}:{c.end_line}".encode()).hexdigest()[:16]
+                    memory_chunks.append(MemoryChunk(
+                        id=chunk_id,
+                        path=rel_path,
+                        start_line=c.start_line,
+                        end_line=c.end_line,
+                        text=c.text,
+                        embedding=None,
+                        hash=hashlib.sha256(c.text.encode()).hexdigest()[:16],
+                        source="memory" if "MEMORY.md" in str(file_path) else "knowledge",
+                    ))
 
-            # batch embedding
-            if self._embedding and memory_chunks:
-                try:
-                    embeddings = self._embedding.embed_batch([c.text for c in memory_chunks])
-                    for c, emb in zip(memory_chunks, embeddings):
-                        c.embedding = emb
-                except Exception as e:
-                    logger.warning(f"Embedding 生成失败，跳过向量索引: {e}")
+                # batch embedding
+                if self._embedding and memory_chunks:
+                    try:
+                        embeddings = await asyncio.to_thread(
+                            self._embedding.embed_batch, [c.text for c in memory_chunks]
+                        )
+                        for c, emb in zip(memory_chunks, embeddings):
+                            c.embedding = emb
+                    except Exception as e:
+                        logger.warning(f"Embedding 生成失败，跳过向量索引: {e}")
 
-            # 写入存储
-            self._storage.delete_by_path(rel_path)
-            self._storage.save_chunks_batch(memory_chunks)
-            self._storage.upsert_file_state(rel_path, file_hash, mtime, size)
-            logger.info(f"已同步: {rel_path} ({len(memory_chunks)} chunks)")
+                # 写入存储
+                self._storage.delete_by_path(rel_path)
+                self._storage.save_chunks_batch(memory_chunks)
+                self._storage.upsert_file_state(rel_path, file_hash, mtime, size)
+                logger.info(f"已同步: {rel_path} ({len(memory_chunks)} chunks)")
+        finally:
+            self._syncing = False
 
     async def flush_memory(
         self, messages: list, reason: str = "threshold",

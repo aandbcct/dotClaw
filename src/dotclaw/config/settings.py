@@ -400,6 +400,8 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         long_term_file=memory_raw.get("long_term_file", "./data/memory/MEMORY.md"),
         workspace=memory_raw.get("workspace", "./data"),
         db_path=memory_raw.get("db_path", "./data/memory/memory.db"),
+        chunk_max_tokens=memory_raw.get("chunk_max_tokens", 500),
+        chunk_overlap_tokens=memory_raw.get("chunk_overlap_tokens", 50),
         embedding_provider=memory_raw.get("embedding_provider"),
         embedding_model=memory_raw.get("embedding_model", "text-embedding-v3"),
         embedding_dimensions=memory_raw.get("embedding_dimensions", 1024),
@@ -407,9 +409,14 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         embedding_api_key=memory_raw.get("embedding_api_key", ""),
         max_results=memory_raw.get("max_results", 5),
         min_score=memory_raw.get("min_score", 0.1),
+        vector_weight=memory_raw.get("vector_weight", 0.7),
+        keyword_weight=memory_raw.get("keyword_weight", 0.3),
+        sync_on_search=memory_raw.get("sync_on_search", True),
         flush_threshold=memory_raw.get("flush_threshold", 20),
         flush_max_messages=memory_raw.get("flush_max_messages", 10),
         dream_enabled=memory_raw.get("dream_enabled", True),
+        dream_schedule=memory_raw.get("dream_schedule", "55 23 * * *"),
+        temporal_decay_half_life_days=memory_raw.get("temporal_decay_half_life_days", 30.0),
     )
     session = SessionConfig(
         directory=raw.get("session", {}).get("directory", "./data/sessions"),

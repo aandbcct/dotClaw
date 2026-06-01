@@ -9,7 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-import numpy as np
+try:
+    import numpy as np
+    _NUMPY_AVAILABLE = True
+except ImportError:
+    np = None  # type: ignore
+    _NUMPY_AVAILABLE = False
 
 logger = logging.getLogger("dotclaw.memory.storage")
 
@@ -91,12 +96,16 @@ class MemoryStorage:
         self._conn.commit()
 
     def _rebuild_fts(self):
-        """FTS5 自愈机制：从 chunks 表重建 FTS5 索引"""
+        """重建双 FTS5 索引（各自 try/except 独立，避免一个失败影响另一个）"""
         assert self._conn is not None
         try:
             self._conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
-        except Exception:
+        except Exception as e:
+            logger.warning(f"FTS5 unicode61 重建失败: {e}")
+        try:
             self._conn.execute("INSERT INTO chunks_fts_trigram(chunks_fts_trigram) VALUES('rebuild')")
+        except Exception as e:
+            logger.warning(f"FTS5 trigram 重建失败: {e}")
 
     # ---- 写入 ----
 
@@ -105,7 +114,11 @@ class MemoryStorage:
         for c in chunks:
             emb_blob = None
             if c.embedding:
-                emb_blob = np.array(c.embedding, dtype=np.float32).tobytes()
+                if _NUMPY_AVAILABLE:
+                    emb_blob = np.array(c.embedding, dtype=np.float32).tobytes()
+                else:
+                    import json
+                    emb_blob = json.dumps(c.embedding).encode()
 
             self._conn.execute(
                 """INSERT INTO chunks (id, path, start_line, end_line, text, embedding, hash, source, metadata)
@@ -159,8 +172,11 @@ class MemoryStorage:
         assert self._conn is not None
         results = []
 
-        # 检测 CJK
-        cjk = any('\u4e00' <= c <= '\u9fff' for c in query)
+        # 检测 CJK（含扩展区、日文假名）
+        _CJK_RE = __import__('re').compile(
+            r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3040-\u309f\u30a0-\u30ff]'
+        )
+        cjk = bool(_CJK_RE.search(query))
 
         if cjk and len(query.replace(" ", "")) >= 3:
             # 中文 trigram（≥3 字符，避免 FTS5 trigram 短查询异常）
@@ -220,7 +236,7 @@ class MemoryStorage:
     def search_vector(
         self, query_embedding: list[float], limit: int = 10
     ) -> list[SearchResult]:
-        """numpy 向量化余弦相似度"""
+        """向量余弦相似度检索（numpy 向量化，无 numpy 时纯 Python 降级）"""
         assert self._conn is not None
         rows = self._conn.execute(
             "SELECT path, start_line, end_line, text, source, embedding "
@@ -230,25 +246,45 @@ class MemoryStorage:
         if not rows:
             return []
 
-        query_vec = np.array(query_embedding, dtype=np.float32)
-        results = []
+        if _NUMPY_AVAILABLE:
+            return self._search_vector_numpy(query_embedding, rows, limit)
+        else:
+            logger.warning("numpy 未安装，降级为纯 Python 向量检索（性能差 ~100x）")
+            return self._search_vector_python(query_embedding, rows, limit)
 
+    def _search_vector_numpy(self, query_emb, rows, limit) -> list[SearchResult]:
+        query_vec = np.array(query_emb, dtype=np.float32)
+        results = []
         for path, sl, el, text, source, emb_blob in rows:
             chunk_vec = np.frombuffer(emb_blob, dtype=np.float32)
-            # 余弦相似度
-            dot = np.dot(query_vec, chunk_vec)
-            norm_q = np.linalg.norm(query_vec)
-            norm_c = np.linalg.norm(chunk_vec)
-            if norm_q > 0 and norm_c > 0:
-                score = float(dot / (norm_q * norm_c))
-            else:
-                score = 0.0
-
+            dot = float(np.dot(query_vec, chunk_vec))
+            norm_q = float(np.linalg.norm(query_vec))
+            norm_c = float(np.linalg.norm(chunk_vec))
+            score = dot / (norm_q * norm_c) if norm_q > 0 and norm_c > 0 else 0.0
             results.append(SearchResult(
                 path=path, start_line=sl, end_line=el,
                 score=score, snippet=text[:200], source=source,
             ))
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:limit]
 
+    def _search_vector_python(self, query_emb, rows, limit) -> list[SearchResult]:
+        import json
+        import math
+        results = []
+        for path, sl, el, text, source, emb_blob in rows:
+            try:
+                chunk_vec = json.loads(emb_blob.decode()) if isinstance(emb_blob, bytes) else emb_blob
+            except Exception:
+                continue
+            dot = sum(a * b for a, b in zip(query_emb, chunk_vec))
+            norm_q = math.sqrt(sum(a * a for a in query_emb))
+            norm_c = math.sqrt(sum(b * b for b in chunk_vec))
+            score = dot / (norm_q * norm_c) if norm_q > 0 and norm_c > 0 else 0.0
+            results.append(SearchResult(
+                path=path, start_line=sl, end_line=el,
+                score=score, snippet=text[:200], source=source,
+            ))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 

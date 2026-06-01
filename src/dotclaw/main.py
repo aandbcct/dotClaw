@@ -84,6 +84,7 @@ async def _run_cli():
     from dotclaw.config import _find_project_root
     project_root = _find_project_root()
     memory_mgr = None
+    memory_dream = None
 
     if hasattr(config, 'memory') and config.memory:
         try:
@@ -131,6 +132,7 @@ async def _run_cli():
 
             # 初始化 DeepDream（稍后通过 /dream 命令触发）
             dream = DeepDream(config.memory.get_workspace(project_root), llm=llm_proxy)
+            memory_dream = dream
         except Exception as e:
             channel.print_info(f"  记忆系统初始化失败（已降级为无记忆模式）: {e}")
             memory_mgr = None
@@ -211,7 +213,7 @@ async def _run_cli():
                 elif cmd == "/debug":
                     agent.debug_trace(channel)
                 elif cmd == "/dream":
-                    await _cmd_dream_async(channel, project_root, config, llm_proxy)
+                    await _cmd_dream_async(channel, memory_dream)
                 elif cmd == "/tools":
                     _cmd_tools(channel, tool_registry)
                 elif cmd == "/model":
@@ -274,23 +276,11 @@ def _cmd_tools(channel, tool_registry):
         channel.print_info(f"  {d.name}: {d.description}{mark}")
 
 
-def _cmd_dream(channel, project_root, config, llm_proxy):
+async def _cmd_dream_async(channel, dream):
     """手动触发 Deep Dream 蒸馏"""
-    from dotclaw.memory.dream import DeepDream
-    dream = DeepDream(config.memory.get_workspace(project_root), llm=llm_proxy)
-    try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        result = loop.run_until_complete(dream.run())
-        channel.print_info(f"Dream: {result}")
-    except Exception as e:
-        channel.print_error(f"Dream 失败: {e}")
-
-
-async def _cmd_dream_async(channel, project_root, config, llm_proxy):
-    """手动触发 Deep Dream 蒸馏（异步版本）"""
-    from dotclaw.memory.dream import DeepDream
-    dream = DeepDream(config.memory.get_workspace(project_root), llm=llm_proxy)
+    if not dream:
+        channel.print_error("Dream: 记忆系统未初始化")
+        return
     try:
         result = await dream.run()
         channel.print_info(f"Dream: {result}")
