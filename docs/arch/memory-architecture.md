@@ -582,33 +582,5 @@ main.py / _run_cli()
 
 ---
 
-## 7. 已知限制与后续规划
-
-| # | 限制 | 影响 | 规划 |
-|---|------|------|------|
-| 1 | 向量检索全表扫描 | >1万 chunk 时延迟明显 | 后续引入 HNSW/ANN |
-| 2 | 记忆注入无 token 预算 | 长记忆挤占对话上下文 | 后续增加 `memory_budget_tokens` 配置 |
-| 3 | 蒸馏一次性喂所有未蒸馏日记 | 多日累积后 token 超限 | 后续做分片蒸馏 |
-| 4 | FTS5 trigram 短中文查询走 LIKE 降级（<3 字符） | 单/双字中文检索精度下降 | 有限设计权衡，trigram tokenizer 限制 |
-
-### 已修复（v1.1）
-
-| # | 问题 | 修复内容 |
-|---|------|----------|
-| ✅ | `sync()` 未实现 | 实现 hash 变更检测 → 分块 → batch embedding → UPSERT 写入完整链路 |
-| ✅ | 时间衰减空壳 | 实现指数衰减公式：`score *= exp(-age_days * ln(2) / half_life)` |
-| ✅ | EmbeddingCache 未传入 | `main.py` 中创建 `EmbeddingCache()` 并传入 `MemoryManager` |
-| ✅ | MemoryProvider 未注册 | `main.py` 中 `MemoryProvider()` 加入 PromptBuilder 列表 |
-
----
-
-## 变更日志
-
-| 版本 | 日期 | 变更内容 |
-|------|------|----------|
-| v1.1 | 2026-06-01 | 修复 4 个 bug：sync 实现、时间衰减实现、EmbeddingCache 注入、MemoryProvider 注册；移除 tiktoken 相关引用 |
-| v1.0 | 2026-06-01 | 初始版本，基于 P4 设计文档 + 现有代码梳理 |
-
----
-
 *本文档由 dotClaw 开发工程师维护。架构变更后请同步更新此文档。*
+开发日志见 `docs/phase4-record.md`。
