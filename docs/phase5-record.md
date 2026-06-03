@@ -8,6 +8,7 @@
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
 | v1.0 | 2026-06-03 | Phase 5 工具层架构重构首次实施，14步全部完成，63/63 测试通过 |
+| v1.1 | 2026-06-03 | 修复代码审查 W1（exec_command 孤儿子进程）+ W2（read_file 文件大小限制），67/67 测试通过 |
 
 ### 变更内容
 
@@ -35,8 +36,30 @@
 | Phase 2 验收 | 7 | 7 | ✅ |
 | Phase 3 验收 | 8 | 8 | ✅ |
 | Phase 4 验收 | 6 | 6 | ✅ |
-| Phase 5 验收 | 35 | 35 | ✅ |
-| **合计** | **63** | **63** | **✅** |
+| Phase 5 验收 | 39 | 39 | ✅ |
+| **合计** | **67** | **67** | **✅** |
+
+---
+
+## v1.1 — 2026-06-03
+
+### 变更内容
+
+根据代码审查报告 `docs/phase5-codeReview.md` 修复 Warning 级别问题 W1 和 W2。
+
+### 已修复（来自审查 Warning）
+
+| # | 原问题 | 修复内容 | 涉及文件 |
+|---|--------|----------|----------|
+| ✅ W1 | exec_command 双层超时导致孤儿子进程 | 添加 `CancelledError` 处理分支：ToolExecutor `asyncio.wait_for` 超时 cancel task 时，`CancelledError`（继承 `BaseException`）不被 `except Exception` 捕获 → 新增独立 `except CancelledError` 块确保 `proc.kill()` + `await proc.wait()` 执行后再 `raise` | `tools/builtin/exec_tool.py` |
+| ✅ W2 | `read_file` 无文件大小限制 | 新增 `MAX_FILE_SIZE = 10 * 1024 * 1024` 常量 + `file_path.stat().st_size > MAX_FILE_SIZE` 检查，超大文件返回错误提示 | `tools/builtin/file_tool.py` |
+
+### 新增测试
+
+| # | 测试场景 | 验证内容 |
+|---|---------|---------|
+| 场景 14 | W1 修复验证 | `exec_command` 源码包含 `CancelledError` 处理 + `proc.kill()` 调用；正常执行 `echo hello` 不受影响 |
+| 场景 15 | W2 修复验证 | 小文件正常读取；超过 10MB 文件返回"文件过大"错误 |
 
 ---
 

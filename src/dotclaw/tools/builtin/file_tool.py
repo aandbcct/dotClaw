@@ -8,6 +8,8 @@ import aiofiles
 
 from dotclaw.tools.handler import BuiltinToolHandler
 
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
 
 async def read_file(path: str) -> str:
     """读取文件全部内容"""
@@ -17,6 +19,8 @@ async def read_file(path: str) -> str:
             return f"错误：文件不存在 '{path}'"
         if not file_path.is_file():
             return f"错误：'{path}' 不是文件"
+        if file_path.stat().st_size > MAX_FILE_SIZE:
+            return f"错误：文件过大（{file_path.stat().st_size} bytes），超过限制 {MAX_FILE_SIZE} bytes"
         async with aiofiles.open(file_path, encoding="utf-8", errors="replace") as f:
             return await f.read()
     except Exception as e:
