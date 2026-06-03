@@ -3,7 +3,7 @@
 > 创建时间：2026-06-02
 > 状态：已完成 ✅（2026-06-03）
 > 依赖：Phase 1-4 已完成
-> 变更日志：[docs/phase5-record.md](./phase5-record.md)
+> 变更日志：[docs/phase5-record.md](phase5-record.md)
 
 ---
 
