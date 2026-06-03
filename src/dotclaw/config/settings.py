@@ -81,6 +81,52 @@ class ToolsConfig:
     # web_search 配置
     web_search_enabled: bool = False
 
+    # Phase 6 新增：MCP 配置
+    mcp_global: McpGlobalConfig = field(default_factory=lambda: McpGlobalConfig())
+    mcp_servers: list[McpServerConfig] = field(default_factory=list)
+
+
+@dataclass
+class McpGlobalConfig:
+    """MCP 全局配置（默认值）"""
+    startup_timeout: float = 4.0        # 握手超时（秒）
+    tool_timeout: float = 60.0          # 工具调用超时（秒）
+    restart_on_crash: bool = True       # 崩溃后是否自动重连
+    max_restart_attempts: int = 3       # 最大重连次数
+
+
+@dataclass
+class McpServerConfig:
+    """单个 MCP server 配置"""
+    name: str = ""                      # server 名称（唯一标识）
+    transport: str = "stdio"            # "stdio" | "streamable_http"
+
+    # stdio 传输字段
+    command: str = ""                   # 可执行命令
+    args: list[str] = field(default_factory=list)
+
+    # streamable_http 传输字段
+    url: str = ""                       # HTTP endpoint
+    headers: dict = field(default_factory=dict)  # 认证 headers
+
+    # 覆盖全局配置（None 时使用全局默认）
+    startup_timeout: float | None = None
+    tool_timeout: float | None = None
+    restart_on_crash: bool | None = None
+    max_restart_attempts: int | None = None
+
+    def get_startup_timeout(self, global_cfg: McpGlobalConfig) -> float:
+        return self.startup_timeout if self.startup_timeout is not None else global_cfg.startup_timeout
+
+    def get_tool_timeout(self, global_cfg: McpGlobalConfig) -> float:
+        return self.tool_timeout if self.tool_timeout is not None else global_cfg.tool_timeout
+
+    def get_restart_on_crash(self, global_cfg: McpGlobalConfig) -> bool:
+        return self.restart_on_crash if self.restart_on_crash is not None else global_cfg.restart_on_crash
+
+    def get_max_restart_attempts(self, global_cfg: McpGlobalConfig) -> int:
+        return self.max_restart_attempts if self.max_restart_attempts is not None else global_cfg.max_restart_attempts
+
 
 @dataclass
 class SkillsConfig:
@@ -418,6 +464,9 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         exec_timeout=tools_raw.get("exec_timeout") or
                       tools_raw.get("python", {}).get("timeout", 60.0),
         web_search_enabled=tools_raw.get("web_search", {}).get("enabled", False),
+        # Phase 6: MCP 配置解析
+        mcp_global=_parse_mcp_global(tools_raw.get("mcp_global", {})),
+        mcp_servers=_parse_mcp_servers(tools_raw.get("mcp_servers", [])),
     )
 
     skills = SkillsConfig(
@@ -468,6 +517,53 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         scheduler=scheduler,
         debug=debug,
     )
+
+
+def _parse_mcp_global(raw: dict) -> McpGlobalConfig:
+    """解析 MCP 全局配置"""
+    return McpGlobalConfig(
+        startup_timeout=raw.get("startup_timeout", 4.0),
+        tool_timeout=raw.get("tool_timeout", 60.0),
+        restart_on_crash=raw.get("restart_on_crash", True),
+        max_restart_attempts=raw.get("max_restart_attempts", 3),
+    )
+
+
+def _parse_mcp_servers(raw_servers: list[dict]) -> list[McpServerConfig]:
+    """解析 MCP servers 列表，校验 transport/name/command/url"""
+    servers = []
+    seen_names: set[str] = set()
+    for srv in raw_servers:
+        name = srv.get("name", "")
+        transport = srv.get("transport", "stdio")
+
+        if not name:
+            raise ValueError("MCP server 配置缺少 name 字段")
+        if name in seen_names:
+            raise ValueError(f"MCP server name 重复: {name}")
+        seen_names.add(name)
+
+        if transport not in ("stdio", "streamable_http"):
+            raise ValueError(f"MCP server {name}: 不支持的 transport={transport}")
+
+        if transport == "stdio" and not srv.get("command"):
+            raise ValueError(f"MCP server {name}: stdio transport 缺少 command")
+        if transport == "streamable_http" and not srv.get("url"):
+            raise ValueError(f"MCP server {name}: streamable_http transport 缺少 url")
+
+        servers.append(McpServerConfig(
+            name=name,
+            transport=transport,
+            command=srv.get("command", ""),
+            args=srv.get("args", []),
+            url=srv.get("url", ""),
+            headers=srv.get("headers", {}),
+            startup_timeout=srv.get("startup_timeout"),
+            tool_timeout=srv.get("tool_timeout"),
+            restart_on_crash=srv.get("restart_on_crash"),
+            max_restart_attempts=srv.get("max_restart_attempts"),
+        ))
+    return servers
 
 
 def load_config(path: str | Path = "config.yaml") -> Config:

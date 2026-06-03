@@ -1,5 +1,5 @@
 # ============================================
-# dotClaw 配置文件（Phase 5 升级）
+# dotClaw 配置文件（Phase 6 升级）
 # ============================================
 
 llm:
@@ -33,8 +33,8 @@ agent:
 tools:
   # source 级启停（Phase 5 新增）
   builtin_enabled: true
-  mcp_enabled: true      # Phase 5 预留
-  skill_enabled: true     # Phase 5 预留
+  mcp_enabled: true
+  skill_enabled: true
 
   # 危险工具审批命令列表（Phase 5 新增）
   approval_commands:
@@ -42,12 +42,33 @@ tools:
     - python
 
   # 单工具禁用列表（向后兼容旧 config.exec.enabled: false）
-  disabled_tools: []       # 如 ["exec"] 禁用 exec 工具
+  disabled_tools: []
 
   exec_timeout: 60
 
   web_search:
     enabled: false
+
+  # Phase 6 新增：MCP 全局配置
+  mcp_global:
+    startup_timeout: 4.0
+    tool_timeout: 60.0
+    restart_on_crash: true
+    max_restart_attempts: 3
+
+  # Phase 6 新增：MCP servers 列表
+  mcp_servers: []
+  # 示例:
+  #   - name: filesystem
+  #     transport: stdio
+  #     command: npx
+  #     args: ["-y", "@anthropic/mcp-server-filesystem", "/tmp"]
+  #   - name: remote-api
+  #     transport: streamable_http
+  #     url: http://localhost:8080/mcp
+  #     headers:
+  #       Authorization: "Bearer ${MCP_API_KEY}"
+  #     tool_timeout: 120.0
 
 skills:
   directory: ./skills

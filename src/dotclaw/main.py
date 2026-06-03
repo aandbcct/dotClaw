@@ -96,6 +96,30 @@ async def _run_cli():
         approval_commands=config.tools.approval_commands,
     )
 
+    # ---- Phase 6 新增：MCP 初始化 ----
+    mcp_provider = None
+    if config.tools.mcp_enabled and config.tools.mcp_servers:
+        from dotclaw.mcp import MCPToolProvider
+
+        mcp_provider = MCPToolProvider(
+            global_config=config.tools.mcp_global,
+            server_configs=config.tools.mcp_servers,
+            registry=tool_registry,
+            approval_commands=config.tools.approval_commands,
+        )
+
+        channel.print_info("MCP 工具加载中...")
+
+        async def _load_mcp():
+            try:
+                tool_names = await mcp_provider.start()
+                channel.print_info(f"  已加载 {len(tool_names)} 个 MCP 工具")
+            except Exception as e:
+                channel.print_error(f"  MCP 加载失败: {e}")
+
+        asyncio.create_task(_load_mcp())
+    # ---- Phase 6 MCP 初始化结束 ----
+
     # 4. 创建执行器
     tool_executor = ToolExecutor(
         registry=tool_registry,
@@ -242,6 +266,8 @@ async def _run_cli():
                     await _cmd_dream_async(channel, memory_dream)
                 elif cmd == "/tools":
                     _cmd_tools(channel, tool_executor)
+                elif cmd == "/mcp":
+                    _cmd_mcp(channel, mcp_provider)
                 elif cmd == "/model":
                     if args:
                         agent.model = args
@@ -270,6 +296,7 @@ dotClaw 命令:
   /delete <id>      删除对话
   /debug           查看最近推理过程
   /tools           列出可用工具
+  /mcp             查看 MCP servers 状态
   /dream           触发记忆蒸馏
   /model <名称>    切换模型
   /help            显示帮助
@@ -286,18 +313,75 @@ async def _cmd_list(channel, session_mgr, current):
 
 
 def _cmd_tools(channel, tool_executor):
-    """列出所有可用工具（Phase 5 升级 — 从 ToolExecutor 读取审批状态）"""
+    """列出所有可用工具（Phase 6 增强 — 按来源分组显示）"""
+    from dotclaw.tools.base import ToolSource
+
     definitions = tool_executor.get_definitions()
     if not definitions:
         channel.print_info("(没有注册任何工具)")
         return
-    channel.print_info(f"可用工具 ({len(definitions)} 个):")
-    for d in definitions:
-        handler = tool_executor.get_handler(d.name)
-        mark = ""
-        if handler and handler.definition().needs_approval:
-            mark = " [需审批]"
-        channel.print_info(f"  {d.name}{mark}: {d.description}")
+
+    total = len(definitions)  # 用局部变量避免与内置冲突
+    channel.print_info(f"可用工具 ({total} 个):")
+
+    # 按来源分组
+    builtin = [d for d in definitions if d.source == ToolSource.BUILTIN]
+    mcp_tools = [d for d in definitions if d.source == ToolSource.MCP]
+    other = [d for d in definitions if d.source not in (ToolSource.BUILTIN, ToolSource.MCP)]
+
+    if builtin:
+        channel.print_info(f"  内置工具 ({len(builtin)} 个):")
+        for d in builtin:
+            handler = tool_executor.get_handler(d.name)
+            mark = " [需审批]" if handler and handler.definition().needs_approval else ""
+            channel.print_info(f"    {d.name}{mark}: {d.description}")
+
+    if mcp_tools:
+        # 按 server 分组
+        by_server: dict[str, list] = {}
+        for d in mcp_tools:
+            server = d.metadata.get("server", "unknown")
+            by_server.setdefault(server, []).append(d)
+
+        channel.print_info(f"  MCP 工具 ({len(mcp_tools)} 个):")
+        for server, tools in by_server.items():
+            channel.print_info(f"    [{server}]")
+            for d in tools:
+                handler = tool_executor.get_handler(d.name)
+                mark = " [需审批]" if handler and handler.definition().needs_approval else ""
+                channel.print_info(f"      {d.name}{mark}: {d.description}")
+
+    if other:
+        channel.print_info(f"  其他工具 ({len(other)} 个):")
+        for d in other:
+            channel.print_info(f"    {d.name}: {d.description}")
+
+
+def _cmd_mcp(channel, mcp_provider):
+    """查看 MCP servers 状态"""
+    if not mcp_provider:
+        channel.print_info("MCP 未启用")
+        return
+
+    from dotclaw.mcp import McpClientState
+
+    states = mcp_provider.get_server_states()
+    if not states:
+        channel.print_info("(未配置 MCP server)")
+        return
+
+    channel.print_info("MCP servers:")
+    state_labels = {
+        McpClientState.STARTING: "⏳",
+        McpClientState.CONNECTED: "✅",
+        McpClientState.CRASHED: "💥",
+        McpClientState.FAILED: "❌",
+        McpClientState.SHUTDOWN: "🛑",
+    }
+    for name, (state, message) in states.items():
+        icon = state_labels.get(state, "❓")
+        msg = f" — {message}" if message else ""
+        channel.print_info(f"  {icon} [{name}] {state.value}{msg}")
 
 
 async def _cmd_dream_async(channel, dream):

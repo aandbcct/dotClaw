@@ -15,6 +15,7 @@ dependencies = [
     "aiofiles>=23.0",
     "rich>=13.0",
     "numpy>=1.26.0",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]

@@ -11,7 +11,7 @@
 开发计划人员已经完成了审计文档的查阅与修正回执，回执在 '审阅文档.md' 中，并且同步修正了 'phase3开发计划.md' ，请你查阅修正回执以及修正后的phase3开发计划，再次审计开发计划v2的可行性、长期发展性及有无漏洞，有漏洞或改进意见就提出意见，写入'审计文档2.md'中，如果没有问题，我就让开发人员进行phase3阶段的开发
 
 ## 生产计划完成，开发人员进行开发
-@skill:Self-Improving Agent @skill:Ralph Loops @skill:Code Simplifier @skill:test-driven-development phase2阶段的开发规划已经完成，根据 开发文档.md 进行phase2阶段的开发，中间有任何问题可以和我确认
+@skill:Self-Improving Agent @skill:Ralph Loops @skill:Code Simplifier @skill:test-driven-development phase2阶段的开发规划已经完成，根据 开发文档.md 进行phase2阶段的开发，并将开发变更内容记录到phase5-record.md中，开头写变更日志表格，发现的问题不需要你写，参考 phase5-record.md
 
 ## 开发完成测试人员根据实际开发情况审计项目
 @skill:Code Reviewcode-review-prompt.mdphase5-record.md  目前phase5阶段开发已完成，根据要求，完成phase5阶段的code review，review结果写到phase5-codeReview.md中
