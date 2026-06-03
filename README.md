@@ -24,15 +24,14 @@ dotClaw/
 ├── src/dotclaw/             # 源代码
 │   ├── agent/               # Agent 核心循环（ReAct + AgentContext + PromptBuilder）
 │   ├── llm/                 # LLM 客户端（Qwen / DeepSeek / OpenAI）
-│   ├── tools/               # 工具系统（8 个内置工具 + 审批机制）
+│   ├── tools/               # 工具系统（ToolHandler/Registry/Executor 三层 + 8 个内置工具 + 审批机制）
 │   ├── common/              # 通用工具库（限流器 / 单例 / 工具函数）
 │   ├── skills/              # Skill 加载器
 │   ├── memory/              # 三级记忆系统（L1 Session / L2 日记忆 / L3 蒸馏）
 │   ├── channel/             # 通道（CLI）
 │   ├── scheduler/           # 定时提醒
 │   ├── config/              # 配置加载（YAML → dataclass）
-│   └── debug/               # 调试系统（TraceRecord）
-├── tests/                   # 测试（P1 + P2 + P3 验收测试全部通过）
+├── tests/                   # 测试（P1-P5 验收测试全部通过，67/67）
 ├── skills/                  # 技能目录
 ├── data/                    # 运行时数据（sessions / logs）
 ├── config.yaml              # 配置文件
@@ -78,8 +77,8 @@ python tests/test_phase2_acceptance.py
 # 运行 Phase 3 测试
 python tests/test_phase3_acceptance.py
 
-# 运行 Phase 4 测试
-python tests/test_phase4_acceptance.py
+# 运行 Phase 5 测试
+python tests/test_phase5_acceptance.py
 ```
 
 ## 开发进度
@@ -90,8 +89,8 @@ python tests/test_phase4_acceptance.py
 | Phase 2 | ✅ 完成 | 多供应商路由、OpenAICompatibleClient 基类、priority 降级、限流器 |
 | Phase 3 | ✅ 完成 | AgentContext、PromptBuilder、AgentResult、message_utils、AgentLogger |
 | Phase 4 | ✅ 完成 | SQLite FTS5 混合检索、LLM 日记忆摘要、Deep Dream 蒸馏、MemoryProvider |
-| Phase 5 | 🔜 待开始 | python / web_search / web_fetch 工具、失败恢复 |
-| Phase 6 | 🔜 待开始 | MCP 协议集成 |
+| Phase 5 | ✅ 完成 | 工具层架构重构：ToolHandler/Registry/Executor 三层分离、builtin/ 子包、去硬编码审批、ToolProvider ABC、日志合并（删除 debug/ 子包） |
+| Phase 6 | 🔜 待开始 | MCP 协议集成（基于 ToolProvider ABC + ToolHandler ABC） |
 | Phase 7 | 🔜 待开始 | Skill 系统完善（注入 / 热加载 / 创建向导） |
 | Phase 8 | 🔜 待开始 | Scheduler cron 增强 |
 | Phase 9 | 🔜 待开始 | 取消机制（CancelTokenRegistry） |
