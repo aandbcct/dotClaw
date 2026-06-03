@@ -1,26 +1,12 @@
-"""Shell 执行工具"""
+"""Shell 执行工具（builtin 子包 — Phase 5 迁移）"""
 
 from __future__ import annotations
 
 import asyncio
 
-from .base import ToolResult, register_tool
+from dotclaw.tools.handler import BuiltinToolHandler
 
 
-@register_tool(
-    name="exec",
-    description="执行一条 Shell 命令。危险操作，执行前需用户确认。",
-    parameters={
-        "type": "object",
-        "properties": {
-            "command": {
-                "type": "string",
-                "description": "要执行的命令",
-            }
-        },
-        "required": ["command"],
-    },
-)
 async def exec_command(command: str) -> str:
     """
     执行 Shell 命令，返回标准输出。
@@ -42,3 +28,23 @@ async def exec_command(command: str) -> str:
             return "错误：命令执行超时（60秒）"
     except Exception as e:
         return f"错误：{e}"
+
+
+def get_exec_handler() -> BuiltinToolHandler:
+    return BuiltinToolHandler(
+        name="exec",
+        description="执行一条 Shell 命令。危险操作，执行前需用户确认。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "要执行的命令",
+                }
+            },
+            "required": ["command"],
+        },
+        handler_fn=exec_command,
+        needs_approval=True,
+        timeout=60.0,
+    )

@@ -1,4 +1,4 @@
-"""配置模块：YAML 配置加载 + Phase 2 路由配置"""
+"""配置模块：YAML 配置加载 + Phase 2 路由配置（Phase 5 升级）"""
 
 from __future__ import annotations
 
@@ -64,11 +64,21 @@ class AgentConfig:
 
 @dataclass
 class ToolsConfig:
-    exec_enabled: bool = True
-    exec_needs_approval: bool = True
-    python_enabled: bool = True
-    python_needs_approval: bool = True
-    python_timeout: int = 30
+    # Phase 5 新增：source 级启停
+    builtin_enabled: bool = True
+    mcp_enabled: bool = True       # Phase 5 预留，暂不消费
+    skill_enabled: bool = True      # Phase 5 预留，暂不消费
+
+    # 危险命令审批列表
+    approval_commands: list[str] = field(default_factory=lambda: ["exec", "python"])
+
+    # 单工具禁用列表（向后兼容旧 config.exec.enabled=false）
+    disabled_tools: list[str] = field(default_factory=list)
+
+    # exec 工具配置
+    exec_timeout: float = 60.0
+
+    # web_search 配置
     web_search_enabled: bool = False
 
 
@@ -355,11 +365,11 @@ def _build_router_config_from_legacy(llm_config: LLMConfig) -> RouterConfig:
 
 
 # ============================================================
-# P1 遗留 — load_config()
+# P1 遗留 — load_config()（Phase 5 升级）
 # ============================================================
 
 def _raw_to_config(raw: dict[str, Any]) -> Config:
-    """将字典转换为 Config dataclass"""
+    """将字典转换为 Config dataclass（Phase 5 升级）"""
     llm_raw = raw.get("llm", {})
     clients = {}
     for name, cfg in llm_raw.get("clients", {}).items():
@@ -382,13 +392,31 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         rules=agent_raw.get("rules", ""),
     )
 
+    # Phase 5 升级：ToolsConfig 新格式 + 向后兼容
     tools_raw = raw.get("tools", {})
+
+    # 向后兼容：合并新格式 + 旧格式（始终合并，防止混合格式丢数据）
+    approval_commands = list(tools_raw.get("approval_commands", []))
+    for tool_name in ("exec", "python"):
+        if tools_raw.get(tool_name, {}).get("needs_approval", False):
+            if tool_name not in approval_commands:
+                approval_commands.append(tool_name)
+
+    # 向后兼容：合并新格式 + 旧格式
+    disabled_tools = list(tools_raw.get("disabled_tools", []))
+    for tool_name in ("exec", "python"):
+        if not tools_raw.get(tool_name, {}).get("enabled", True):
+            if tool_name not in disabled_tools:
+                disabled_tools.append(tool_name)
+
     tools = ToolsConfig(
-        exec_enabled=tools_raw.get("exec", {}).get("enabled", True),
-        exec_needs_approval=tools_raw.get("exec", {}).get("needs_approval", True),
-        python_enabled=tools_raw.get("python", {}).get("enabled", True),
-        python_needs_approval=tools_raw.get("python", {}).get("needs_approval", True),
-        python_timeout=tools_raw.get("python", {}).get("timeout", 30),
+        builtin_enabled=tools_raw.get("builtin_enabled", True),
+        mcp_enabled=tools_raw.get("mcp_enabled", True),
+        skill_enabled=tools_raw.get("skill_enabled", True),
+        approval_commands=approval_commands,
+        disabled_tools=disabled_tools,
+        exec_timeout=tools_raw.get("exec_timeout") or
+                      tools_raw.get("python", {}).get("timeout", 60.0),
         web_search_enabled=tools_raw.get("web_search", {}).get("enabled", False),
     )
 

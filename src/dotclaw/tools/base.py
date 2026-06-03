@@ -1,120 +1,46 @@
-"""工具注册表"""
+"""工具基础类型定义（Phase 5 重构）"""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable
-
-from .approval import ApprovalManager
-
+from enum import Enum
+from typing import Any
 
 logger = logging.getLogger("dotclaw.tools")
 
 
+class ToolSource(str, Enum):
+    """工具来源"""
+    BUILTIN = "builtin"
+    MCP = "mcp"
+    SKILL = "skill"
+    CUSTOM = "custom"
+
+
 @dataclass
 class ToolDefinition:
-    """工具定义（描述 + 参数 schema）"""
+    """工具定义（增强版 — Phase 5）"""
     name: str
     description: str
-    parameters: dict = field(default_factory=dict)  # JSON Schema
+    parameters: dict = field(default_factory=dict)   # JSON Schema
+    source: ToolSource = ToolSource.BUILTIN
+    needs_approval: bool = False                    # 声明式审批需求
+    timeout: float = 60.0                          # 执行超时（秒）
+    metadata: dict = field(default_factory=dict)     # 扩展字段
 
 
 @dataclass
 class ToolResult:
-    """工具执行结果"""
-    output: str
+    """工具执行结果（结构化扩展 — Phase 5）"""
+    output: str = ""
     is_error: bool = False
+    error_code: str | None = None      # 如 TIMEOUT / PROCESS_ERROR / HTTP_ERROR
+    error_type: str | None = None      # 如 timeout / execution / parsing
+    metadata: dict = field(default_factory=dict)  # 扩展字段
 
 
-# 全局注册表
-_registry: dict[str, tuple[ToolDefinition, Callable[..., Awaitable[Any]]]] = {}
-
-
-def register_tool(
-    name: str,
-    description: str,
-    parameters: dict | None = None,
-) -> Callable:
-    """
-    装饰器：注册一个异步工具函数。
-
-    示例
-    ----
-    @register_tool(
-        name="get_weather",
-        description="查询城市天气",
-        parameters={
-            "type": "object",
-            "properties": {
-                "city": {"type": "string", "description": "城市名"}
-            },
-            "required": ["city"]
-        }
-    )
-    async def get_weather(city: str) -> str:
-        return f"{city} 今天晴天，25°C"
-    """
-    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
-        _registry[name] = (
-            ToolDefinition(
-                name=name,
-                description=description,
-                parameters=parameters or {},
-            ),
-            func,
-        )
-        return func
-    return decorator
-
-
-class ToolRegistry:
-    """工具注册表（生命周期管理）"""
-
-    def __init__(self, approval_manager: ApprovalManager | None = None, config=None):
-        self._tools: dict[str, tuple[ToolDefinition, Callable]] = dict(_registry)
-        self._approval = approval_manager or ApprovalManager()
-        self._config = config  # 保存 config 引用
-
-    def register(self, name: str, definition: ToolDefinition, handler: Callable):
-        self._tools[name] = (definition, handler)
-
-    def get_definitions(self) -> list[ToolDefinition]:
-        """返回所有工具定义，用于传给 LLM"""
-        return [def_ for def_, _ in self._tools.values()]
-
-    def get_handler(self, name: str) -> Callable | None:
-        handler = self._tools.get(name)
-        return handler[1] if handler else None
-
-    async def execute(
-        self,
-        name: str,
-        arguments: dict,
-        channel=None,
-    ) -> ToolResult:
-        """执行工具（含审批检查）"""
-        entry = self._tools.get(name)
-        if not entry:
-            return ToolResult(output=f"错误：未找到工具 '{name}'", is_error=True)
-
-        definition, handler = entry
-
-        # 审批检查：从 config 读取哪些工具需要审批
-        needs_approval = False
-        if self._config:
-            if name == "exec":
-                needs_approval = self._config.tools.exec_needs_approval
-            elif name == "python":
-                needs_approval = self._config.tools.python_needs_approval
-        if needs_approval:
-            approved = await self._approval.check(name, arguments, channel)
-            if not approved:
-                return ToolResult(output=f"用户拒绝了 {name} 的执行", is_error=True)
-
-        try:
-            result = await handler(**arguments)
-            return ToolResult(output=str(result))
-        except Exception as e:
-            logger.exception(f"工具 {name} 执行出错")
-            return ToolResult(output=f"工具执行出错: {e}", is_error=True)
+@dataclass
+class ToolExecutionContext:
+    """工具执行时的运行时上下文（最小集 — Phase 5）"""
+    timeout: float = 60.0              # 执行超时，来自 ToolDefinition.timeout

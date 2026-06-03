@@ -1,4 +1,4 @@
-"""记忆工具"""
+"""记忆工具（builtin 子包 — Phase 5 迁移）"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import aiofiles
 
-from .base import register_tool
+from dotclaw.tools.handler import BuiltinToolHandler
 
 
 def _get_memory_path(long_term_file: str) -> Path:
@@ -16,15 +16,6 @@ def _get_memory_path(long_term_file: str) -> Path:
     return path
 
 
-@register_tool(
-    name="memory_read",
-    description="读取长期记忆（MEMORY.md）",
-    parameters={
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-)
 async def memory_read(long_term_file: str = "./data/memory/MEMORY.md") -> str:
     """读取 MEMORY.md 内容"""
     try:
@@ -38,20 +29,6 @@ async def memory_read(long_term_file: str = "./data/memory/MEMORY.md") -> str:
         return f"错误：{e}"
 
 
-@register_tool(
-    name="memory_write",
-    description="追加写入长期记忆（MEMORY.md）",
-    parameters={
-        "type": "object",
-        "properties": {
-            "content": {
-                "type": "string",
-                "description": "要追加的内容",
-            }
-        },
-        "required": ["content"],
-    },
-)
 async def memory_write(
     content: str,
     long_term_file: str = "./data/memory/MEMORY.md",
@@ -72,3 +49,38 @@ async def memory_write(
         return "已追加到 MEMORY.md"
     except Exception as e:
         return f"错误：{e}"
+
+
+def get_memory_read_handler() -> BuiltinToolHandler:
+    return BuiltinToolHandler(
+        name="memory_read",
+        description="读取长期记忆（MEMORY.md）",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        handler_fn=memory_read,
+        needs_approval=False,
+        timeout=10.0,
+    )
+
+
+def get_memory_write_handler() -> BuiltinToolHandler:
+    return BuiltinToolHandler(
+        name="memory_write",
+        description="追加写入长期记忆（MEMORY.md）",
+        parameters={
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "要追加的内容",
+                }
+            },
+            "required": ["content"],
+        },
+        handler_fn=memory_write,
+        needs_approval=True,
+        timeout=10.0,
+    )

@@ -1,5 +1,5 @@
 # ============================================
-# dotClaw 配置文件
+# dotClaw 配置文件（Phase 5 升级）
 # ============================================
 
 llm:
@@ -31,13 +31,21 @@ agent:
   keep_recent_messages: 10
 
 tools:
-  exec:
-    enabled: true
-    needs_approval: true
-  python:
-    enabled: true
-    needs_approval: true
-    timeout: 30
+  # source 级启停（Phase 5 新增）
+  builtin_enabled: true
+  mcp_enabled: true      # Phase 5 预留
+  skill_enabled: true     # Phase 5 预留
+
+  # 危险工具审批命令列表（Phase 5 新增）
+  approval_commands:
+    - exec
+    - python
+
+  # 单工具禁用列表（向后兼容旧 config.exec.enabled: false）
+  disabled_tools: []       # 如 ["exec"] 禁用 exec 工具
+
+  exec_timeout: 60
+
   web_search:
     enabled: false
 

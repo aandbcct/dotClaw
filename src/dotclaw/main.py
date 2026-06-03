@@ -1,4 +1,4 @@
-"""dotClaw 主入口"""
+"""dotClaw 主入口（Phase 5 升级）"""
 
 from __future__ import annotations
 
@@ -20,8 +20,6 @@ from dotclaw.channel.cli import CLIChannel
 from dotclaw.memory.store import SessionManager
 from dotclaw.agent.loop import AgentLoop
 from dotclaw.llm.proxy import LLMProxy
-from dotclaw.tools.base import ToolRegistry
-from dotclaw.tools.approval import ApprovalManager
 
 
 def _print_banner():
@@ -76,13 +74,38 @@ async def _run_cli():
     llm_proxy = LLMProxy(model_router=model_router, rate_limiter=rate_limiter)
     # ---- P2 路由初始化结束 ----
 
-    # 初始化工具注册表和审批管理器
-    approval_mgr = ApprovalManager()
-    tool_registry = ToolRegistry(approval_mgr, config)
+    # ---- Phase 5 新增：工具层新架构初始化 ----
+    from dotclaw.tools.registry import ToolRegistry
+    from dotclaw.tools.executor import ToolExecutor
+    from dotclaw.tools.approval import ApprovalManager
+    from dotclaw.tools.builtin import register_all
+
+    # 1. 创建注册表
+    tool_registry = ToolRegistry()
+
+    # 2. 注册内置工具（仅在 builtin_enabled 为 true 时）
+    if config.tools.builtin_enabled:
+        register_all(tool_registry)
+
+    # 2b. 根据配置禁用指定工具（向后兼容旧 config.exec.enabled: false）
+    for tool_name in config.tools.disabled_tools:
+        tool_registry.unregister(tool_name)
+
+    # 3. 创建审批管理器（从 config 加载）
+    approval_mgr = ApprovalManager(
+        approval_commands=config.tools.approval_commands,
+    )
+
+    # 4. 创建执行器
+    tool_executor = ToolExecutor(
+        registry=tool_registry,
+        approval_manager=approval_mgr,
+    )
+    # ---- Phase 5 工具层初始化结束 ----
 
     # ---- P4 新增：记忆系统初始化 ----
-    from dotclaw.config import _find_project_root
-    project_root = _find_project_root()
+    from dotclaw.config import _find_project_root as _root
+    project_root = _root()
     memory_mgr = None
     memory_dream = None
 
@@ -147,7 +170,7 @@ async def _run_cli():
     channel.print_info(f"可用模型: {', '.join(llm_proxy.available_models)}")
     channel.print_info("输入 /help 查看命令\n")
 
-    # ---- P3 新增：PromptBuilder + AgentLogger ----
+    # ---- P3 新增：PromptBuilder + AgentLogger（Phase 5 升级） ----
     from dotclaw.agent.logger import AgentLogger
     from dotclaw.agent.prompt.builder import PromptBuilder
     from dotclaw.agent.prompt.providers import (
@@ -155,7 +178,10 @@ async def _run_cli():
         MemoryProvider, SkillsProvider,
     )
 
-    agent_logger = AgentLogger()
+    agent_logger = AgentLogger(
+        level=config.debug.level,
+        log_file=config.debug.log_file,
+    )
     prompt_builder = PromptBuilder([
         RoleProvider(),
         RulesProvider(),
@@ -170,9 +196,9 @@ async def _run_cli():
         session_mgr=session_mgr,
         channel=channel,
         config=config,
-        tool_registry=tool_registry,
+        tool_executor=tool_executor,
         prompt_builder=prompt_builder,   # P3 新增
-        logger=agent_logger,             # P3 新增
+        logger=agent_logger,             # P3 新增（Phase 5 合并 DebugManager）
         memory_mgr=memory_mgr,           # P4 新增
     )
 
@@ -215,7 +241,7 @@ async def _run_cli():
                 elif cmd == "/dream":
                     await _cmd_dream_async(channel, memory_dream)
                 elif cmd == "/tools":
-                    _cmd_tools(channel, tool_registry)
+                    _cmd_tools(channel, tool_executor)
                 elif cmd == "/model":
                     if args:
                         agent.model = args
@@ -259,21 +285,19 @@ async def _cmd_list(channel, session_mgr, current):
         channel.print_info(f"  [{s.id}] {s.title} ({s.updated_at[:10]}){mark}")
 
 
-def _cmd_tools(channel, tool_registry):
-    """列出所有可用工具"""
-    definitions = tool_registry.get_definitions()
+def _cmd_tools(channel, tool_executor):
+    """列出所有可用工具（Phase 5 升级 — 从 ToolExecutor 读取审批状态）"""
+    definitions = tool_executor.get_definitions()
     if not definitions:
         channel.print_info("(没有注册任何工具)")
         return
     channel.print_info(f"可用工具 ({len(definitions)} 个):")
     for d in definitions:
+        handler = tool_executor.get_handler(d.name)
         mark = ""
-        if tool_registry._config:
-            if d.name == "exec" and tool_registry._config.tools.exec_needs_approval:
-                mark = " [需审批]"
-            elif d.name == "python" and tool_registry._config.tools.python_needs_approval:
-                mark = " [需审批]"
-        channel.print_info(f"  {d.name}: {d.description}{mark}")
+        if handler and handler.definition().needs_approval:
+            mark = " [需审批]"
+        channel.print_info(f"  {d.name}{mark}: {d.description}")
 
 
 async def _cmd_dream_async(channel, dream):

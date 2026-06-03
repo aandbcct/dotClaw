@@ -1,5 +1,5 @@
 """
-Phase 1 验收测试 — 五个场景的端到端测试 + 回归验证
+Phase 1 验收测试 — 五个场景的端到端测试 + 回归验证（Phase 5 更新）
 
 通过 Mock LLM 和 Fake Channel 模拟完整交互流程，
 无需真实 API Key 即可运行。
@@ -22,13 +22,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from dotclaw.agent.loop import AgentLoop
 from dotclaw.llm.base import ChatChunk, Message, ToolCall, ToolDefinition
-from dotclaw.tools.base import ToolRegistry, register_tool
+from dotclaw.tools.base import ToolResult
+from dotclaw.tools.registry import ToolRegistry
+from dotclaw.tools.executor import ToolExecutor
+from dotclaw.tools.handler import BuiltinToolHandler
 from dotclaw.tools.approval import ApprovalManager
 from dotclaw.memory.store import Session, SessionManager, SessionMessage
 from dotclaw.config.settings import Config, AgentConfig, ToolsConfig, DebugConfig, LLMConfig
-
-# __init__.py 已处理工具自动注册，但仍需显式 import 触发装饰器
-import dotclaw.tools  # noqa: F401
 
 
 # ============================================================
@@ -97,7 +97,7 @@ def make_config(tmpdir: str) -> Config:
     return Config(
         llm=LLMConfig(default_model="qwen-plus", stream=True),
         agent=AgentConfig(system_prompt="你是一个测试助手。"),
-        tools=ToolsConfig(exec_needs_approval=True, python_needs_approval=True),
+        tools=ToolsConfig(approval_commands=["exec", "python"]),
         debug=DebugConfig(level="INFO", log_file=""),
     )
 
@@ -117,6 +117,12 @@ def tool_call(name: str, args: dict, call_id: str = "call_001") -> list[ChatChun
         ChatChunk(tool_call=ToolCall(id=call_id, name=name, arguments=json.dumps(args))),
         ChatChunk(is_final=True),
     ]
+
+
+def _make_executor() -> ToolExecutor:
+    """创建测试用 ToolExecutor（注册基础工具）"""
+    registry = ToolRegistry()
+    return ToolExecutor(registry)
 
 
 # ============================================================
@@ -158,13 +164,20 @@ async def test_1_text():
 async def test_2_tool():
     print("\n=== 场景 2：带工具调用的对话 ===")
 
-    @register_tool(
+    # Phase 5: 使用 ToolExecutor + ToolRegistry 代替旧的 register_tool 装饰器
+    registry = ToolRegistry()
+
+    async def get_time() -> str:
+        return "2026-05-28 17:30:00"
+
+    registry.register(BuiltinToolHandler(
         name="get_time",
         description="获取当前时间",
         parameters={"type": "object", "properties": {}},
-    )
-    async def get_time() -> str:
-        return "2026-05-28 17:30:00"
+        handler_fn=get_time,
+    ))
+
+    executor = ToolExecutor(registry)
 
     mock = MockLLM([
         tool_call("get_time", {}, call_id="t1"),
@@ -174,12 +187,11 @@ async def test_2_tool():
 
     with tempfile.TemporaryDirectory() as td:
         cfg = make_config(td)
-        tr = ToolRegistry(ApprovalManager(), cfg)
         sm = SessionManager(f"{td}/sessions")
         s = await sm.create("工具测试")
         agent = AgentLoop(
             llm=mock, session=s, session_mgr=sm, channel=ch, config=cfg,
-            tool_registry=tr,
+            tool_executor=executor,
         )
 
         resp = await agent.run("现在几点了？")
@@ -194,12 +206,6 @@ async def test_2_tool():
         )
         assert "tool" in call2_roles, f"第2次调用应包含 tool 结果消息，角色序列: {call2_roles}"
 
-        # 验证 assistant 消息确实携带了 tool_calls
-        for m in mock.calls[1]["messages"]:
-            if m[0] == "assistant":
-                # 找到对应的 Message 对象
-                pass  # 已在 MockLLM 中捕获了 roles
-
         print(f"  ✅ assistant tool_calls 消息正确注入, roles: {call2_roles}")
 
 
@@ -212,6 +218,28 @@ async def test_3_approval():
 
     # 3.1 用户同意
     print("  --- 3.1 用户同意 ---")
+
+    # Phase 5: 注册 exec 工具（needs_approval=True）
+    registry = ToolRegistry()
+
+    async def exec_cmd(command: str) -> str:
+        return f"输出: hello"
+
+    registry.register(BuiltinToolHandler(
+        name="exec",
+        description="执行 Shell 命令",
+        parameters={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+        handler_fn=exec_cmd,
+        needs_approval=True,
+    ))
+
+    approval = ApprovalManager(approval_commands=["exec", "python"])
+    executor = ToolExecutor(registry, approval)
+
     mock = MockLLM([
         tool_call("exec", {"command": "echo hello"}, call_id="e1"),
         text("命令执行成功: hello"),
@@ -220,12 +248,11 @@ async def test_3_approval():
 
     with tempfile.TemporaryDirectory() as td:
         cfg = make_config(td)
-        tr = ToolRegistry(ApprovalManager(), cfg)
         sm = SessionManager(f"{td}/sessions")
         s = await sm.create("审批测试")
         agent = AgentLoop(
             llm=mock, session=s, session_mgr=sm, channel=ch, config=cfg,
-            tool_registry=tr,
+            tool_executor=executor,
         )
 
         resp = await agent.run("请执行 echo hello")
@@ -235,6 +262,27 @@ async def test_3_approval():
 
     # 3.2 用户拒绝
     print("  --- 3.2 用户拒绝 ---")
+
+    registry2 = ToolRegistry()
+
+    async def exec_dangerous(command: str) -> str:
+        return "不应该执行"
+
+    registry2.register(BuiltinToolHandler(
+        name="exec",
+        description="执行 Shell 命令",
+        parameters={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+        handler_fn=exec_dangerous,
+        needs_approval=True,
+    ))
+
+    approval2 = ApprovalManager(approval_commands=["exec", "python"])
+    executor2 = ToolExecutor(registry2, approval2)
+
     mock2 = MockLLM([
         tool_call("exec", {"command": "rm -rf /"}, call_id="e2"),
         text("操作已取消"),
@@ -243,12 +291,12 @@ async def test_3_approval():
 
     with tempfile.TemporaryDirectory() as td:
         cfg = make_config(td)
-        tr = ToolRegistry(ApprovalManager(), cfg)
+        tr = ToolRegistry()
         sm = SessionManager(f"{td}/sessions")
         s = await sm.create("拒绝测试")
         agent = AgentLoop(
             llm=mock2, session=s, session_mgr=sm, channel=ch2, config=cfg,
-            tool_registry=tr,
+            tool_executor=executor2,
         )
 
         resp = await agent.run("请执行 rm -rf /")
@@ -351,16 +399,17 @@ async def test_regression_load_sessionmessage():
 
 
 # ============================================================
-# 回归验证：修复 3 — 工具自动注册
+# 回归验证：工具注册（Phase 5 更新）
 # ============================================================
 
-def test_regression_tools_auto_registered():
-    """验证 tools 包导入后，exec/file/memory/system 工具已自动注册"""
-    print("\n=== 回归验证：工具自动注册 ===")
+def test_regression_tools_registered():
+    """验证 builtin 工具通过 register_all() 正确注册"""
+    print("\n=== 回归验证：工具注册（Phase 5）===")
 
-    tr = ToolRegistry(ApprovalManager(), Config(
-        tools=ToolsConfig(exec_needs_approval=True),
-    ))
+    from dotclaw.tools.builtin import register_all
+
+    tr = ToolRegistry()
+    register_all(tr)
     definitions = tr.get_definitions()
     tool_names = {d.name for d in definitions}
 
@@ -368,14 +417,9 @@ def test_regression_tools_auto_registered():
                 "memory_read", "memory_write", "system_info", "get_time"}
     missing = required - tool_names
 
-    # get_time 是场景 2 中注册的，exec 等来自工具模块
-    base_tools = {"exec", "read_file", "write_file", "list_dir",
-                  "memory_read", "memory_write", "system_info", "get_time"}
-    found_base = tool_names & base_tools
-
-    assert len(found_base) >= 7, (
-        f"工具注册不完整。预期至少 7 个基础工具，实际: {sorted(found_base)}\n"
-        f"缺失: {sorted(base_tools - tool_names)}"
+    assert len(missing) == 0, (
+        f"工具注册不完整。缺失: {sorted(missing)}\n"
+        f"已注册: {sorted(tool_names)}"
     )
 
     print(f"  ✅ 已注册 {len(definitions)} 个工具: {sorted(tool_names)}")
@@ -416,7 +460,7 @@ async def main_async():
     print(f"\n{'='*60}")
     regressions = [
         ("回归-SessionMessage 类型", test_regression_load_sessionmessage),
-        ("回归-工具自动注册", test_regression_tools_auto_registered),
+        ("回归-工具注册", test_regression_tools_registered),
     ]
 
     for name, func in regressions:

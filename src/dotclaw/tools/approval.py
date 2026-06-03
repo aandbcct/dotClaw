@@ -1,25 +1,37 @@
-"""工具审批管理器"""
+"""工具审批管理器（Phase 5 重构）"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..channel.base import Channel
 
 
-# 需要审批的工具
-NEEDS_APPROVAL = {"exec", "python"}
-
-
 class ApprovalManager:
-    """危险工具执行前需要用户确认"""
+    """
+    危险工具执行前需要用户确认。
 
-    def __init__(self):
+    审批策略（双重）：
+    1. ToolDefinition.needs_approval 声明式（工具自己声明）
+    2. config.tools.approval_commands 列表（用户配置覆盖）
+
+    Phase 5 关键变化：
+    - 删除硬编码 NEEDS_APPROVAL = {"exec", "python"}
+    - 新增 _approval_commands 集合，从 config.yaml 加载
+    """
+
+    def __init__(self, approval_commands: list[str] | None = None):
         self._enabled = True
+        self._approval_commands = set(approval_commands or [])
 
     def set_enabled(self, enabled: bool):
         self._enabled = enabled
+
+    def set_approval_commands(self, commands: list[str]):
+        """从 config.yaml 加载需要审批的命令列表"""
+        self._approval_commands = set(commands)
 
     async def check(
         self,
@@ -30,21 +42,22 @@ class ApprovalManager:
         """
         检查工具是否需要审批。
 
-        如果是危险工具且有 channel，则向用户请求确认。
-        如果没有 channel，默认放行（子 Agent 场景）。
+        逻辑：
+        1. _enabled=False -> 全部放行
+        2. tool_name 在 _approval_commands 中 -> 需要审批
+        3. 否则放行
         """
-        if tool_name not in NEEDS_APPROVAL:
-            return True
-
         if not self._enabled:
             return True
 
+        if tool_name not in self._approval_commands:
+            return True
+
         if channel is None:
-            # 无 channel 时默认放行（子 Agent 不需要审批）
+            # 无 channel 时默认放行（子 Agent 场景）
             return True
 
         # 通过 channel 向用户请求确认
-        import json
         args_str = json.dumps(arguments, ensure_ascii=False, indent=2)
         confirm = await channel.ask_user(
             f"⚠️ 即将执行危险工具 `{tool_name}`\n"

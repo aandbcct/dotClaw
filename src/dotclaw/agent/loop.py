@@ -7,10 +7,10 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from dotclaw.debug.logger import DebugManager, TraceRecord
 from ..llm.base import Message
 from .result import AgentResult
 from .message_utils import validate as msg_validate, trim as msg_trim, clean as msg_clean
+from .logger import AgentLogger
 
 if TYPE_CHECKING:
     from ..llm.proxy import LLMProxy
@@ -18,10 +18,10 @@ if TYPE_CHECKING:
     from ..channel.base import Channel
     from ..config import Config
     from ..memory.store import SessionManager
-    from ..tools.base import ToolRegistry
+    from ..tools.executor import ToolExecutor
+    from ..tools.base import ToolResult
     from .context import AgentContext
     from .prompt.builder import PromptBuilder
-    from .logger import AgentLogger
     from ..memory.manager import MemoryManager
 
 
@@ -46,7 +46,7 @@ class AgentLoop:
         session_mgr: "SessionManager",
         channel: "Channel",
         config: "Config",
-        tool_registry: "ToolRegistry | None" = None,
+        tool_executor: "ToolExecutor | None" = None,
         prompt_builder: "PromptBuilder | None" = None,
         logger: "AgentLogger | None" = None,
         memory_mgr: "MemoryManager | None" = None,
@@ -58,11 +58,12 @@ class AgentLoop:
         self.config = config
         self.model = config.llm.default_model
         self._running = False
-        self._tool_registry = tool_registry
+        self._tool_executor = tool_executor
         self._prompt_builder = prompt_builder
-        self._logger = logger
         self._memory_mgr = memory_mgr
-        self._debug_manager = DebugManager(
+
+        # Phase 5: _logger 直接管理 trace（合并 DebugManager 能力）
+        self._logger = logger or AgentLogger(
             level=config.debug.level,
             log_file=config.debug.log_file,
         )
@@ -83,6 +84,7 @@ class AgentLoop:
         # 构建上下文（P4：异步语义检索）
         context = await self._build_context(user_message)
 
+        from .logger import TraceRecord
         trace = TraceRecord(
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
             session_id=self.session.id,
@@ -147,9 +149,9 @@ class AgentLoop:
                     except (json.JSONDecodeError, TypeError):
                         args = {}
 
-                    if self._tool_registry:
+                    if self._tool_executor:
                         self.channel.print_info(f"\n🔧 调用工具: {tc.name}({json.dumps(args, ensure_ascii=False)})")
-                        result = await self._tool_registry.execute(
+                        result = await self._tool_executor.execute(
                             name=tc.name,
                             arguments=args,
                             channel=self.channel,
@@ -172,7 +174,7 @@ class AgentLoop:
                     else:
                         messages.append(Message(
                             role="tool",
-                            content="错误：工具注册表未初始化",
+                            content="错误：工具执行器未初始化",
                             tool_call_id=tc.id,
                         ))
 
@@ -201,7 +203,6 @@ class AgentLoop:
 
             trace.final_response = final_response
             trace.duration_ms = int((time.time() - start_time) * 1000)
-            self._debug_manager.record_trace(trace)
 
             if self._logger:
                 self._logger.record(trace)
@@ -221,7 +222,6 @@ class AgentLoop:
 
             trace.final_response = f"ERROR: {error_msg}"
             trace.duration_ms = int((time.time() - start_time) * 1000)
-            self._debug_manager.record_trace(trace)
 
             return AgentResult(
                 final_text="",
@@ -264,12 +264,12 @@ class AgentLoop:
             model=self.model,
             system_prompt=self.config.agent.system_prompt,
             available_tools=(
-                [d.name for d in self._tool_registry.get_definitions()]
-                if self._tool_registry else []
+                [d.name for d in self._tool_executor.get_definitions()]
+                if self._tool_executor else []
             ),
             tool_definitions=(
-                self._tool_registry.get_definitions()
-                if self._tool_registry else []
+                self._tool_executor.get_definitions()
+                if self._tool_executor else []
             ),
             request_id=request_id,
             purpose="chat",
@@ -320,7 +320,7 @@ class AgentLoop:
 
     def debug_trace(self, channel: "Channel"):
         """输出最近一次推理过程（供 /debug 命令调用）"""
-        trace = self._debug_manager.get_last_trace()
+        trace = self._logger.get_last_trace() if self._logger else None
         if trace:
             channel.print_info(trace.format_summary())
         else:
