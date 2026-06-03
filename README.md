@@ -1,6 +1,7 @@
 # dotClaw
 
-A lightweight AI Agent framework for learning AI application development.
+一个轻量级开源AI个人助手框架，用于学习与实践个人agent助手架构设计，基于ReAct架构，由中间路由层连接客户端与底层组件，实现了多模型适配、多平台适配和会话管理。
+每阶段的开发路线、开发日志、代码审查记录都在文档中，方便学习与了解整个框架从0开始的搭建过程。
 
 ## 快速开始
 
@@ -25,13 +26,14 @@ dotClaw/
 │   ├── agent/               # Agent 核心循环（ReAct + AgentContext + PromptBuilder）
 │   ├── llm/                 # LLM 客户端（Qwen / DeepSeek / OpenAI）
 │   ├── tools/               # 工具系统（ToolHandler/Registry/Executor 三层 + 8 个内置工具 + 审批机制）
+│   ├── mcp/                  # MCP 协议客户端（stdio + Streamable HTTP 双传输）
 │   ├── common/              # 通用工具库（限流器 / 单例 / 工具函数）
 │   ├── skills/              # Skill 加载器
 │   ├── memory/              # 三级记忆系统（L1 Session / L2 日记忆 / L3 蒸馏）
 │   ├── channel/             # 通道（CLI）
 │   ├── scheduler/           # 定时提醒
 │   ├── config/              # 配置加载（YAML → dataclass）
-├── tests/                   # 测试（P1-P5 验收测试全部通过，67/67）
+├── tests/                   # 测试（P1-P6 验收测试全部通过，95/95）
 ├── skills/                  # 技能目录
 ├── data/                    # 运行时数据（sessions / logs）
 ├── config.yaml              # 配置文件
@@ -47,7 +49,8 @@ dotClaw/
 | `/switch <id>` | 切换到指定对话 |
 | `/delete <id>` | 删除对话 |
 | `/debug` | 查看最近一次推理过程 |
-| `/tools` | 列出所有可用工具 |
+| `/tools` | 列出所有可用工具（按来源分组：BUILTIN / MCP） |
+| `/mcp` | 查看 MCP servers 连接状态 |
 | `/model <名称>` | 切换模型（支持跨供应商） |
 | `/help` | 显示帮助 |
 | `/quit` | 退出 |
@@ -77,8 +80,14 @@ python tests/test_phase2_acceptance.py
 # 运行 Phase 3 测试
 python tests/test_phase3_acceptance.py
 
+# 运行 Phase 4 测试
+python tests/test_phase4_acceptance.py
+
 # 运行 Phase 5 测试
 python tests/test_phase5_acceptance.py
+
+# 运行 Phase 6 测试
+python tests/test_phase6_acceptance.py
 ```
 
 ## 开发进度
@@ -90,7 +99,7 @@ python tests/test_phase5_acceptance.py
 | Phase 3 | ✅ 完成 | AgentContext、PromptBuilder、AgentResult、message_utils、AgentLogger |
 | Phase 4 | ✅ 完成 | SQLite FTS5 混合检索、LLM 日记忆摘要、Deep Dream 蒸馏、MemoryProvider |
 | Phase 5 | ✅ 完成 | 工具层架构重构：ToolHandler/Registry/Executor 三层分离、builtin/ 子包、去硬编码审批、ToolProvider ABC、日志合并（删除 debug/ 子包） |
-| Phase 6 | 🔜 待开始 | MCP 协议集成（基于 ToolProvider ABC + ToolHandler ABC） |
+| Phase 6 | ✅ 完成 | MCP 协议集成：双传输（stdio+HTTP）+ McpClient 状态机 + 三个 Handler + MCPToolProvider + /mcp 命令 |
 | Phase 7 | 🔜 待开始 | Skill 系统完善（注入 / 热加载 / 创建向导） |
 | Phase 8 | 🔜 待开始 | Scheduler cron 增强 |
 | Phase 9 | 🔜 待开始 | 取消机制（CancelTokenRegistry） |

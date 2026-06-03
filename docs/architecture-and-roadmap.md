@@ -1,6 +1,6 @@
 # dotClaw 项目架构分析与开发路线图
 
-更新时间：2026-06-03（Phase 5 完成，含 CowAgent 对比分析）
+更新时间：2026-06-03（Phase 6 完成，含 CowAgent 对比分析）
 
 ## 项目定位
 
@@ -69,8 +69,11 @@ dotClaw/
 ├── skills/              ⚠️ 仅 loader.py 完成
 │   └── loader.py        ✅ SKILL.md 解析加载
 │
-├── mcp/                 ← 📋 规划：MCP 协议客户端（Phase 6）
-│
+├── mcp/                 ✅ 已完成（Phase 6）
+│   ├── __init__.py       ✅ 包入口，导出所有 public API
+│   ├── client.py         ✅ McpClient + 双传输 + 状态机 + Info/Result 数据类
+│   ├── tool_adapter.py   ✅ McpToolCallHandler / ResourceHandler / PromptHandler
+│   └── provider.py       ✅ MCPToolProvider（ToolProvider ABC 实现）
 ├── scheduler/           ⚠️ 最简版本
 │   └── reminder.py      ✅ 一次性提醒
 │
@@ -78,12 +81,13 @@ dotClaw/
 │
 ├── model_router_config.yaml  ← 路由配置（providers/models/purposes 三层）
 │
-└── tests/               ✅ Phase 1-5 测试
+└── tests/               ✅ Phase 1-6 测试
     ├── test_phase1_acceptance.py
     ├── test_phase2_acceptance.py
     ├── test_phase3_acceptance.py
     ├── test_phase4_acceptance.py
-    └── test_phase5_acceptance.py
+    ├── test_phase5_acceptance.py
+    └── test_phase6_acceptance.py
 ```
 
 > 图例：✅ 已完成 ⚠️ 部分完成 📋 规划中
@@ -117,8 +121,9 @@ dotClaw/
 | DeepDream | ✅ 完成 | L3 蒸馏 LLM 语义合并 + MEMORY.md.bak 备份 + .dream_state.json |
 | MemoryProvider | ✅ 激活 | P3 骨架 → 从 context.memory_summary 读取语义检索结果注入 Prompt |
 | 工具系统 | ✅ 完整 | Phase 5 架构重构：ToolHandler ABC / ToolRegistry 纯注册 / ToolExecutor 调度层三层分离；builtin/ 子包 8 个工厂函数；ApprovalManager 从 config 加载；ToolProvider ABC 骨架预留 MCP/Skill |
+| MCP 集成 | ✅ 完成 | Phase 6：双传输（stdio+Streamable HTTP）+ McpClient 状态机 + 三个独立 Handler（Tool/Resource/Prompt）+ MCPToolProvider（ToolProvider ABC）+ /mcp 命令 + /tools 按来源分组 |
 | DebugManager | ❌ Phase 5 已删除 | TraceRecord 合并到 AgentLogger，/debug 命令从 AgentLogger.get_last_trace() 读取 |
-| 测试 | ✅ 完成 | P1: 7/7 + P2: 7/7 + P3: 8/8 + P4: 6/6 + P5: 39/39 = 67/67 全部通过 |
+| 测试 | ✅ 完成 | P1: 7/7 + P2: 7/7 + P3: 8/8 + P4: 6/6 + P5: 39/39 + P6: 28/28 = 95/95 全部通过 |
 | Skill 加载 | ⚠️ 半成品 | 能加载 SKILL.md，未注入 system prompt |
 | 定时提醒 | ⚠️ 最简版 | 仅一次性延迟提醒 |
 | MCP 集成 | ❌ 未实现 | 不支持 MCP 协议 |
@@ -564,40 +569,118 @@ P5:  tools/base.py                    — ToolDefinition（+source/needs_approva
 
 ---
 
-### Phase 6：MCP 协议集成
+### Phase 6：MCP 协议集成（已完成 ✅）
+
+> 详细开发文档：[docs/phase6/phase6-roadmap.md](./phase6/phase6-roadmap.md) | 变更日志：[docs/phase6/phase6-record.md](./phase6/phase6-record.md)
 
 **总体内容描述**
 
-实现 MCP（Model Context Protocol）客户端，支持通过 MCP 协议动态注册外部工具，并提供增量热重载能力。
+实现 MCP（Model Context Protocol）客户端，支持 dotClaw 通过 MCP 协议动态调用外部工具。复用 Phase 5 预留的 ToolProvider ABC 和 ToolHandler ABC 接口——MCPToolProvider 实现 `discover_and_register()`，三个独立 Handler 类（McpToolCallHandler / McpResourceHandler / McpPromptHandler）分别实现 `ToolHandler` ABC。配置层继承 Phase 4/5 风格（dataclass + 解析函数 + 校验），支持 stdio（子进程）和 Streamable HTTP（远程服务）双传输。高可用设计：启动失败跳过、运行时崩溃自动重连（失败计数器 + 上限）、优雅关闭（session shutdown + transport terminate）。可观测性：`/tools` 按 ToolSource.BUILTIN/MCP 分组展示（MCP 按 server 二次分组），`/mcp` 命令显示连接状态（含 emoji 图标 + pending 状态）。
 
-**分模块内容描述**
+**完成日期**：2026-06-03
 
-| 模块 | 文件 | 描述 |
-|------|------|------|
-| MCP 客户端 | `mcp/client.py` | 支持 stdio 和 SSE 两种传输方式的 MCP 客户端实现 |
-| 工具适配器 | `mcp/tool_adapter.py` | 将 MCP 工具定义转换为 dotClaw `ToolDefinition` 格式 |
-| 配置管理 | `mcp/config.py` | 解析 `config.yaml` 中 `mcp_servers` 配置，启动/停止服务器进程 |
-| 热重载 | `mcp/watcher.py` | 监测 `config.yaml` 变化，差异式增量更新工具列表 |
+**分模块修改清单**
 
-**分模块内容要点**
+| 模块 | 文件 | 状态 | 描述 |
+|------|------|------|------|
+| 依赖 | `pyproject.toml` | 修改 | 新增 `mcp>=1.0.0` |
+| 配置 dataclass | `config/settings.py` | 修改 | 新增 McpGlobalConfig（startup_timeout/tool_timeout/restart_on_crash/max_restart_attempts）+ McpServerConfig（name/transport/command/args/url/headers + 覆盖字段 + getter 方法 + __post_init__ 校验） |
+| 配置解析 | `config/settings.py` | 修改 | 新增 _parse_mcp_global() + _parse_mcp_servers()（6 项校验：name 必填/重名检测/transport 合法/stdio 缺 command/streamable_http 缺 url）；ToolsConfig 扩展 mcp_global + mcp_servers 字段 |
+| 配置文件 | `config.yaml` | 修改 | 新增 mcp_global 全局配置段 + mcp_servers 列表（含 stdio/streamable_http 示例注释） |
+| MCP 包入口 | `mcp/__init__.py` | 新增 | 导出 McpClient / McpClientState / Handler 三件套 / Info 数据类 / MCPToolProvider |
+| 客户端 | `mcp/client.py` | 新增 | McpClient 封装 mcp SDK（stdio + Streamable HTTP 双传输）+ 连接管理（connect/_cleanup_old_connection）+ 工具发现（_discover）+ 执行（call_tool/read_resource/get_prompt 均含 timeout 参数）+ 重连逻辑（_handle_execution_error）+ cancel 通知（_send_cancel）+ 优雅关闭（shutdown） |
+| 状态机 | `mcp/client.py` | 新增 | McpClientState：STARTING/CONNECTED/CRASHED/FAILED/SHUTDOWN |
+| 数据类 | `mcp/client.py` | 新增 | McpToolInfo/McpResourceInfo/McpPromptInfo（from_mcp 含 TYPE_CHECKING 类型标注）+ McpToolResult（from_mcp/from_resource_result/from_prompt_result，非文本 content 降级处理） |
+| 异常 | `mcp/client.py` | 新增 | McpError → McpClientError / McpUnavailableError |
+| 适配层 | `mcp/tool_adapter.py` | 新增 | McpToolCallHandler（tools/call）+ McpResourceHandler（resources/read，命名 read_{server}_{name}）+ McpPromptHandler（prompts/get，命名 prompt_{server}_{name}），三个类均实现 ToolHandler ABC + context.timeout fallback |
+| Provider | `mcp/provider.py` | 新增 | MCPToolProvider（ToolProvider ABC 实现）— 编排：asyncio.gather 并行 connect → discover_and_register → register_handler；三层状态管理（_clients/_pending_servers/_failed_servers）；get_server_states()；shutdown() |
+| 集成 | `main.py` | 修改 | MCP 初始化链：if mcp_enabled + mcp_servers → MCPToolProvider → asyncio.create_task 后台加载（保存 mcp_task 引用）；/quit 退出时 cancel task + provider.shutdown()；/tools 命令增强（按 ToolSource 分组 + MCP 按 server 二次分组）；/mcp 命令（状态展示含 ⏳✅💥❌🛑 图标）；帮助文本新增 /mcp |
+| 验收测试 | `tests/test_phase6_acceptance.py` | 新增 | 28 tests / 7 场景：配置解析（8）/ 状态机（3）/ Info-Result（5）/ Handler 定义（3）/ Provider（5）/ 错误类型（2）/ 回归（2） |
 
-- MCP 客户端遵循 MCP 协议规范：`initialize` → `tools/list` → 注册工具 → `tools/call`
-- stdio 传输：通过 `asyncio.create_subprocess_exec` 启动 MCP 服务器子进程，JSON-RPC 通过 stdin/stdout 通信
-- SSE 传输：通过 HTTP SSE 连接远程 MCP 服务器，支持重连
-- 工具适配器将 MCP 的 `inputSchema` 映射为 dotClaw 的 `ToolDefinition.parameters`（JSON Schema 格式）
-- 热重载：每 30s 检查 `config.yaml` 的修改时间 + SHA256 签名，差异式处理（新增/删除/重启变化的服务器）。不变的服务器不重启
+**架构变化**
+
+```
+P5:  tools/                         — ToolRegistry / ToolExecutor / ToolHandler（builtin 工具注册）
+     tools/provider.py              — ToolProvider ABC（骨架，无实现）
+     tools/builtin/                 — 8 个内置工具工厂函数
+     config/settings.py             — ToolsConfig（builtin_enabled/mcp_enabled/skill_enabled）
+
+P6:  mcp/client.py                  — McpClient（双传输封装 + 状态机 + 重连 + cancel）
+     mcp/tool_adapter.py            — 三个 Handler 类（Tool/Resource/Prompt 各自实现 ToolHandler ABC）
+     mcp/provider.py                — MCPToolProvider（首个 ToolProvider ABC 实现）
+     mcp/__init__.py                — 包入口
+     config/settings.py             — ToolsConfig + mcp_global + mcp_servers + McpGlobalConfig/McpServerConfig
+     config.yaml                    — mcp_global + mcp_servers 段
+     main.py                        — MCP 后台加载 + /mcp 命令 + /tools 分组增强
+```
+
+**数据通路（启动 + 运行时）**
+
+```
+启动阶段（main.py）：
+  if config.tools.mcp_enabled and config.tools.mcp_servers:
+      mcp_provider = MCPToolProvider(global_config, server_configs, registry, approval_commands)
+      mcp_task = asyncio.create_task(mcp_provider.start())
+          → asyncio.gather(
+              McpClient.connect() → initialize 握手 → _discover(tools/resources/prompts)
+              → McpToolCallHandler / McpResourceHandler / McpPromptHandler
+              → ToolRegistry.register(handler)
+            )
+
+运行时：
+  AgentLoop.run()
+    → LLM 返回 tool_calls（含 MCP 工具定义）
+    → ToolExecutor.execute(name, args, channel)
+      → registry.get(name) → McpToolCallHandler / McpResourceHandler / McpPromptHandler
+      → handler.execute(args, ctx)
+        → McpClient.call_tool(name, args, timeout) / read_resource(uri, timeout) / get_prompt(name, args, timeout)
+        → McpToolResult → ToolResult
+
+退出时：
+  /quit → mcp_task.cancel() → await mcp_task
+        → mcp_provider.shutdown()
+          → 各 McpClient.shutdown() → session.shutdown() + transport.terminate()
+```
+
+**验收标准**（全部通过 ✅）
+
+1. 配置解析：MCP 全局默认值正确（startup_timeout=4.0 / tool_timeout=60.0 / restart_on_crash=True / max_restart_attempts=3）
+2. ServerConfig getter 正确：server 级超时覆盖全局默认值
+3. 配置校验：重名/缺 command/缺 url/错 transport 等 6 种错误场景正确抛 ValueError
+4. McpClientState 枚举值正确（starting/connected/crashed/failed/shutdown）
+5. Info/Result 数据类：McpToolInfo/ResourceInfo/PromptInfo from_mcp() 正确解析 mcp SDK 对象；McpToolResult 文本/资源/prompt 三种结果正确
+6. Handler 定义：source="mcp"，metadata 含 server/mcp_type；ResourceHandler 自动命名 read_{server}_{name}；PromptHandler 参数 schema 正确生成（required 字段 + properties）
+7. Provider 生命周期：init/空启动/重复启动/shutdown 正确
+8. Provider 实现 ToolProvider ABC：issubclass(MCPToolProvider, ToolProvider) 为 True
+9. 异常层次：McpClientError / McpUnavailableError 正确继承 McpError
+10. 回归：Phase 1-5 全部 67 测试通过
 
 **开发注意事项**
 
-- MCP 服务器加载使用后台 asyncio task，不阻塞 Agent 首次消息响应
-- 单个 MCP 服务器崩溃不影响其他服务器和主流程（try/except 隔离 + 日志记录）
-- `mcp_servers` 配置格式：`[{name, transport: "stdio"|"sse", command?, args?, url?}]`
-- MCP 工具通过 `ToolRegistry.register()` 动态注册，与内置工具（exec、read_file 等）放在同一命名空间，名称冲突时内置优先
-- **Phase 5 交付依赖**：`tools/provider.py` 已定义 `ToolProvider` ABC 接口（`discover_and_register(registry)`），MCPToolProvider 实现此接口即可完成工具注册；`ToolHandler` ABC 提供统一执行接口，McpToolHandler 继承实现；`config.tools.mcp_enabled` 已预留启停开关
+- mcp SDK 依赖：`mcp>=1.0.0`，导入在 `connect()` 内部延迟执行（不影响模块顶层导入）
+- stdio transport：子进程终止使用 `hasattr(self._transport, 'terminate')` 判断（defensive）
+- streamable_http transport：导入路径 `mcp.client.http`（SDK 版本依赖，已知 SDK 版本差异风险）
+- 重连保护：`_handle_execution_error()` 在 `MaxConnError` 时不重连（stdin 被占用）；计数器达到上限后标记 CRASHED
+- 连接资源清理：`connect()` 开头 `_cleanup_old_connection()`（session.shutdown → transport.terminate → 置 None）
+- Provider state leakage 修复：client 注册移到 handler 注册成功后
+- /tools 分组：按 ToolSource.BUILTIN 和 ToolSource.MCP 分组，MCP 按 server 二次分组
+- /mcp 命令：显示启动中/已连接/崩溃/失败/关闭五种状态，含 pending_servers
+- MCP 工具与内置工具同一命名空间：后注册覆盖前注册，名称冲突时内置工具优先（先注册）
 
----
+**跨阶段依赖声明**
 
-### Phase 7：Skill 系统完善
+以下内容在 Phase 6 开发中产生，交付给后续 Phase：
+
+| 依赖方向 | 内容 | 说明 |
+|----------|------|------|
+| → Phase 7 | MCPToolProvider 参考 | SkillToolProvider 可参考 MCPToolProvider 的编排模式（asyncio.gather 并行 + 状态管理 + shutdown） |
+| → Phase 7 | SkillsProvider 激活 | P3 预留的 SkillsProvider 可使用与 MCP 类似的注册模式——发现 SKILL.md → 生成 SkillToolHandler → registry.register() |
+| → Phase 7 | 工具命名防冲突 | Resource/Prompt 的 `read_{server}_{name}` / `prompt_{server}_{name}` 命名模式可为 Skill 工具命名提供参考 |
+| → Phase 8 | Cron + MCP | Scheduler cron 可触发 MCP 工具调用（如定时抓取外部数据） |
+| → Phase 9 | MCP cancel 链路 | `_send_cancel()` 机制可与 CancelTokenRegistry 集成 |
+| → 后续更新 | HttpClientTransport 路径 | stdio 传输的 `from mcp.client.stdio import StdioClientTransport` 和 streamable_http 的 `from mcp.client.http import HttpClientTransport` 导入路径与 mcp SDK 版本绑定，SDK 升级时需检查 |
+
+---### Phase 7：Skill 系统完善
 
 **总体内容描述**
 
@@ -628,6 +711,7 @@ P5:  tools/base.py                    — ToolDefinition（+source/needs_approva
 - 创建向导生成的 SKILL.md 使用标准 frontmatter 格式，与 P3 的 SkillLoader 兼容
 - 条件过滤结果在 `/skills` 命令中展示（可用 + 不可用分开展示）
 - **Phase 5 交付依赖**：`SkillToolProvider` 需实现 `tools/provider.py` 中定义的 `ToolProvider` ABC 接口；P3 预留的 `SkillsProvider` 骨架可通过 `SkillLoader.build_skill_prompt()` 激活注入；`ToolDefinition.source = ToolSource.SKILL` 枚举值已定义
+- **Phase 6 交付参考**：`MCPToolProvider` 的编排模式（asyncio.gather 并行连接 + _clients/_pending/_failed 三层状态管理 + shutdown）可作为 `SkillToolProvider` 参考实现；Resource/Prompt 的 `read_{server}_{name}` / `prompt_{server}_{name}` 命名防冲突模式可借鉴
 
 ---
 

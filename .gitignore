@@ -28,3 +28,7 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+/.learnings/ERRORS.md
+/.learnings/FEATURE_REQUESTS.md
+/.learnings/LEARNINGS.md
+/.codebuddy/settings.local.json
