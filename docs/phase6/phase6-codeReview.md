@@ -18,6 +18,20 @@ Phase 6 MCP 协议集成实现了完整的双传输支持（stdio + Streamable H
 | Critical | 0 | — |
 | Warning | 2 | 建议修复 |
 | Minor | 5 | 可后续改进 |
+
+### 修复记录（2026-06-03）
+
+全部 Warning + Minor 已修复，95/95 回归通过。
+
+| 编号 | 严重级别 | 修复状态 | 涉及文件 |
+|------|----------|----------|----------|
+| W1 | Warning | ✅ 已修复 | mcp/client.py — connect() 开头 _cleanup_old_connection() + shutdown() 扩展 |
+| W2 | Warning | ✅ 已修复 | mcp/provider.py — _connect_and_register() 把 client 注册移到方法末尾 |
+| M1 | Minor | ✅ 已修复 | mcp/client.py — read_resource() / get_prompt() 添加 timeout 参数 |
+| M2 | Minor | ✅ 已修复 | main.py — 保存 mcp_task 引用 + /quit 退出时优雅取消 |
+| M3 | Minor | ✅ 已修复 | config/settings.py — McpServerConfig.__post_init__ 校验 name/transport |
+| M4 | Minor | ✅ 已修复 | mcp/tool_adapter.py — 三个 Handler 使用 context.timeout fallback |
+| M5 | Minor | ✅ 已修复 | mcp/client.py — 6 个 from_mcp() 添加 TYPE_CHECKING 类型标注 |
 | Info | 3 | 可选优化 |
 
 ---

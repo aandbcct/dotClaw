@@ -13,10 +13,14 @@
 ## 生产计划完成，开发人员进行开发
 @skill:Self-Improving Agent @skill:Ralph Loops @skill:Code Simplifier @skill:test-driven-development phase2阶段的开发规划已经完成，根据 开发文档.md 进行phase2阶段的开发，并将开发变更内容记录到phase5-record.md中，开头写变更日志表格，发现的问题不需要你写，参考 phase5-record.md
 
-## 开发完成测试人员根据实际开发情况审计项目
+## 开发完成，测试人员根据实际开发情况审计项目
 @skill:Code Reviewcode-review-prompt.mdphase5-record.md  目前phase5阶段开发已完成，根据要求，完成phase5阶段的code review，review结果写到phase5-codeReview.md中
 
+## 代码审计文档给出，开发人员根据审计文档fix
+@skill:Code Simplifier@skill:Ralph Loops 代码审查员完成了代码审查，根据审查报告 phase6-codeReview.md  ，修复warming和minor。并更新变更日志 phase6-record.md ，并将修复情况记入phase6-codeReview.md 审查总览下面
+
 ## 开发完成更新开发文档与开发路线完成情况
-@skill:Ralph Loops 根据项目中phase4实际开发实现情况，结合phase4-record.md 更新phase4-roadmap.md，更新 architecture-and-roadmap.md 中目标架构、当前实现状态、开发路线phase4部分内容，并在phase4部分后面附上架构变化，开发路线图部分不要修改其他阶段的内容，如果有本阶段设定的需要在后续阶段进行声明的内容，可以补充道后续phase的开发路线中。不要修改与 CowAgent 的对比分析、dotClaw 可借鉴的设计、不需要借鉴的部分。并同步更新README.md
+根据项目中phase5实际开发实现情况，结合phase5-record.md，更新phase5-roadmap.md，更新 architecture-and-roadmap.md 中目标架构、当前实现状态、开发路线phase5部分内容，并在phase5部分后面附上架构变化，开发路线图部分不要修改其他阶段的内容，如果有本阶段设定的需要在后续阶段进行声明的内容，可以补充道后续phase的开发路线中。不要修改与 CowAgent 的对比分析、dotClaw 可借鉴的设计、不需要借鉴的部分。并同步更新README.md
 
-
+## 更新层级架构图
+参考 @file:docs\arch\memory-architecture.md，编写工具层架构图，放入arch文件夹

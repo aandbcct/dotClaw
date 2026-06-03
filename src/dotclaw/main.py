@@ -117,7 +117,10 @@ async def _run_cli():
             except Exception as e:
                 channel.print_error(f"  MCP 加载失败: {e}")
 
-        asyncio.create_task(_load_mcp())
+        # M2 修复：保存 task 引用，用于退出时优雅取消
+        mcp_task = asyncio.create_task(_load_mcp())
+    else:
+        mcp_task = None
     # ---- Phase 6 MCP 初始化结束 ----
 
     # 4. 创建执行器
@@ -239,6 +242,15 @@ async def _run_cli():
                 args = user_input[len(cmd):].strip()
 
                 if cmd == "/quit":
+                    # M2 修复：退出前取消 MCP 后台 task + 关闭 providers
+                    if mcp_task and not mcp_task.done():
+                        mcp_task.cancel()
+                        try:
+                            await mcp_task
+                        except asyncio.CancelledError:
+                            pass
+                    if mcp_provider:
+                        await mcp_provider.shutdown()
                     channel.print_info("再见！👋")
                     break
                 elif cmd == "/help":

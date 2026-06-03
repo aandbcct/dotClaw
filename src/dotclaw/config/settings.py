@@ -127,6 +127,13 @@ class McpServerConfig:
     def get_max_restart_attempts(self, global_cfg: McpGlobalConfig) -> int:
         return self.max_restart_attempts if self.max_restart_attempts is not None else global_cfg.max_restart_attempts
 
+    def __post_init__(self):
+        """M3 修复：dataclass 层面的基础校验"""
+        if not self.name:
+            raise ValueError("McpServerConfig.name 不能为空")
+        if self.transport not in ("stdio", "streamable_http"):
+            raise ValueError(f"不支持的 transport={self.transport}")
+
 
 @dataclass
 class SkillsConfig:
