@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..llm.base import ToolDefinition
     from ..channel.base import Channel
+    from ..skills.registry import SkillRegistry  # P7 新增
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,9 @@ class AgentContext:
 
     memory_summary: str = ""
     """P4 新增：语义检索结果文本，由 _build_context() 异步填充，MemoryProvider 读取"""
+
+    skill_registry: "SkillRegistry | None" = None
+    """P7 新增：Skill 注册表（skill_enabled=False 时为 None）"""
 
     def __post_init__(self):
         """设置 workspace 默认值（绕过 frozen 限制）"""

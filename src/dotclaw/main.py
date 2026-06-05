@@ -197,6 +197,33 @@ async def _run_cli():
     channel.print_info(f"可用模型: {', '.join(llm_proxy.available_models)}")
     channel.print_info("输入 /help 查看命令\n")
 
+    # ---- Phase 7 新增：Skill 系统初始化 ----
+    skill_registry = None
+    if config.skills.enabled:
+        from dotclaw.skills.scanner import SkillScanner
+        from dotclaw.skills.registry import SkillRegistry
+
+        skill_dirs = config.skills.directory
+        if isinstance(skill_dirs, str):
+            skill_dirs = [skill_dirs]
+
+        skill_paths = []
+        from pathlib import Path
+        for d in skill_dirs:
+            p = Path(d)
+            skill_paths.append(str(p) if p.is_absolute() else str(project_root / d))
+
+        scanner = SkillScanner(skill_paths, skip_prefix=config.skills.skip_prefix)
+        metas = scanner.scan()
+
+        skill_registry = SkillRegistry()
+        for meta in metas:
+            skill_registry.register(meta)
+
+        if metas:
+            channel.print_info(f"  已加载 {len(metas)} 个 Skill")
+    # ---- Phase 7 Skill 初始化结束 ----
+
     # ---- P3 新增：PromptBuilder + AgentLogger（Phase 5 升级） ----
     from dotclaw.agent.logger import AgentLogger
     from dotclaw.agent.prompt.builder import PromptBuilder
@@ -214,7 +241,7 @@ async def _run_cli():
         RulesProvider(),
         ToolsProvider(),
         MemoryProvider(),
-        # SkillsProvider(),    ← P7 激活
+        SkillsProvider(),     # ← P7 激活
     ])
 
     agent = AgentLoop(
@@ -227,6 +254,7 @@ async def _run_cli():
         prompt_builder=prompt_builder,   # P3 新增
         logger=agent_logger,             # P3 新增（Phase 5 合并 DebugManager）
         memory_mgr=memory_mgr,           # P4 新增
+        skill_registry=skill_registry,   # P7 新增
     )
 
     while True:
@@ -280,6 +308,8 @@ async def _run_cli():
                     _cmd_tools(channel, tool_executor)
                 elif cmd == "/mcp":
                     _cmd_mcp(channel, mcp_provider)
+                elif cmd == "/skills":
+                    _cmd_skills(channel, skill_registry)
                 elif cmd == "/model":
                     if args:
                         agent.model = args
@@ -309,6 +339,7 @@ dotClaw 命令:
   /debug           查看最近推理过程
   /tools           列出可用工具
   /mcp             查看 MCP servers 状态
+  /skills          列出已加载技能
   /dream           触发记忆蒸馏
   /model <名称>    切换模型
   /help            显示帮助
@@ -394,6 +425,25 @@ def _cmd_mcp(channel, mcp_provider):
         icon = state_labels.get(state, "❓")
         msg = f" — {message}" if message else ""
         channel.print_info(f"  {icon} [{name}] {state.value}{msg}")
+
+
+def _cmd_skills(channel, skill_registry):
+    """列出所有已加载的 Skill"""
+    if not skill_registry:
+        channel.print_info("Skill 系统未启用")
+        return
+
+    metas = skill_registry.list_all()
+    if not metas:
+        channel.print_info("(没有加载任何 Skill)")
+        return
+
+    channel.print_info(f"已加载 Skill ({len(metas)} 个):")
+    for meta in sorted(metas, key=lambda m: m.name):
+        desc_line = meta.description.split("\n")[0].strip()
+        if len(desc_line) > 20:
+            desc_line = desc_line[:20] + "..."
+        channel.print_info(f"  {meta.name}: {desc_line}")
 
 
 async def _cmd_dream_async(channel, dream):

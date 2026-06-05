@@ -1,1 +1,12 @@
-"""Skill 模块"""from .loader import Skill, SkillLoader__all__ = ["Skill", "SkillLoader"]
+"""Skill 模块（Phase 7）"""
+
+from .models import SkillMeta, SkillLifecycle
+from .scanner import SkillScanner
+from .registry import SkillRegistry
+
+__all__ = [
+    "SkillMeta",
+    "SkillLifecycle",
+    "SkillScanner",
+    "SkillRegistry",
+]

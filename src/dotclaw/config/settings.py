@@ -137,7 +137,10 @@ class McpServerConfig:
 
 @dataclass
 class SkillsConfig:
-    directory: str = "./skills"
+    """Phase 7 扩展：directory 支持列表 + enabled + skip_prefix"""
+    directory: str | list[str] = "./skills"
+    enabled: bool = True
+    skip_prefix: str = "_"
 
 
 @dataclass
@@ -476,8 +479,18 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         mcp_servers=_parse_mcp_servers(tools_raw.get("mcp_servers", [])),
     )
 
+    skills_raw = raw.get("skills", {})
+    # Phase 7: directory 支持字符串或列表
+    dir_raw = skills_raw.get("directory", "./skills")
+    if isinstance(dir_raw, list):
+        directory = dir_raw
+    else:
+        directory = str(dir_raw)
+
     skills = SkillsConfig(
-        directory=raw.get("skills", {}).get("directory", "./skills"),
+        directory=directory,
+        enabled=skills_raw.get("enabled", True),
+        skip_prefix=skills_raw.get("skip_prefix", "_"),
     )
     memory_raw = raw.get("memory", {})
     memory = MemoryConfig(

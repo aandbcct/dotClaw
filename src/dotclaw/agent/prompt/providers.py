@@ -96,11 +96,27 @@ class MemoryProvider(DataProvider):
 
 
 class SkillsProvider(DataProvider):
-    """技能描述（P7 实现）"""
+    """技能描述（Phase 7 实现）— 从 context.skill_registry 读取"""
 
     @property
     def section_name(self) -> str:
         return "skills"
 
     def provide(self, context: "AgentContext") -> str | None:
-        return None  # P7 实现
+        registry = context.skill_registry
+        if not registry:
+            return None
+
+        descriptions = registry.get_descriptions_block(max_desc_len=20)
+        if not descriptions:
+            return None
+
+        return (
+            "## 技能系统（mandatory）\n\n"
+            "如果有技能的描述与用户需求匹配：使用 `read_file` 工具读取其路径的 SKILL.md 文件，\n"
+            "然后严格遵循文件中的指令。\n\n"
+            "**重要**: 技能不是工具，不能直接调用。使用技能的唯一方式是用 `read_file` 读取 SKILL.md 文件，\n"
+            "然后按文件内容操作。\n\n"
+            "### 可用技能\n\n"
+            f"{descriptions}"
+        )

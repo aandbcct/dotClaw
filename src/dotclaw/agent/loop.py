@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .context import AgentContext
     from .prompt.builder import PromptBuilder
     from ..memory.manager import MemoryManager
+    from ..skills.registry import SkillRegistry  # P7 新增
 
 
 def _find_project_root() -> Path:
@@ -50,6 +51,7 @@ class AgentLoop:
         prompt_builder: "PromptBuilder | None" = None,
         logger: "AgentLogger | None" = None,
         memory_mgr: "MemoryManager | None" = None,
+        skill_registry: "SkillRegistry | None" = None,  # P7 新增
     ):
         self.llm = llm
         self.session = session
@@ -61,6 +63,7 @@ class AgentLoop:
         self._tool_executor = tool_executor
         self._prompt_builder = prompt_builder
         self._memory_mgr = memory_mgr
+        self._skill_registry = skill_registry  # P7 新增
 
         # Phase 5: _logger 直接管理 trace（合并 DebugManager 能力）
         self._logger = logger or AgentLogger(
@@ -277,6 +280,7 @@ class AgentLoop:
             rules=getattr(self.config.agent, "rules", ""),
             memory_summary=memory_summary,
             channel=self.channel,
+            skill_registry=self._skill_registry,  # P7 新增
         )
 
     def _build_messages(
