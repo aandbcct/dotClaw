@@ -1,6 +1,6 @@
 # dotClaw 项目架构分析与开发路线图
 
-更新时间：2026-06-03（Phase 6 完成，含 CowAgent 对比分析）
+更新时间：2026-06-05（Phase 7 完成，含 CowAgent 对比分析）
 
 ## 项目定位
 
@@ -66,8 +66,11 @@ dotClaw/
 │       ├── memory_tool.py
 │       └── system_tool.py
 │
-├── skills/              ⚠️ 仅 loader.py 完成
-│   └── loader.py        ✅ SKILL.md 解析加载
+├── skills/              ✅ 已完成（Phase 7）
+│   ├── __init__.py       ✅ 导出 SkillMeta/SkillLifecycle/SkillScanner/SkillRegistry
+│   ├── models.py         ✅ SkillMeta frozen dataclass + SkillLifecycle 枚举
+│   ├── scanner.py        ✅ SkillScanner 递归扫描 + yaml.safe_load + symlink 防护
+│   └── registry.py       ✅ SkillRegistry 索引容器 + get_descriptions_block
 │
 ├── mcp/                 ✅ 已完成（Phase 6）
 │   ├── __init__.py       ✅ 包入口，导出所有 public API
@@ -87,7 +90,7 @@ dotClaw/
     ├── test_phase3_acceptance.py
     ├── test_phase4_acceptance.py
     ├── test_phase5_acceptance.py
-    └── test_phase6_acceptance.py
+    └── test_phase7_acceptance.py
 ```
 
 > 图例：✅ 已完成 ⚠️ 部分完成 📋 规划中
@@ -122,9 +125,10 @@ dotClaw/
 | MemoryProvider | ✅ 激活 | P3 骨架 → 从 context.memory_summary 读取语义检索结果注入 Prompt |
 | 工具系统 | ✅ 完整 | Phase 5 架构重构：ToolHandler ABC / ToolRegistry 纯注册 / ToolExecutor 调度层三层分离；builtin/ 子包 8 个工厂函数；ApprovalManager 从 config 加载；ToolProvider ABC 骨架预留 MCP/Skill |
 | MCP 集成 | ✅ 完成 | Phase 6：双传输（stdio+Streamable HTTP）+ McpClient 状态机 + 三个独立 Handler（Tool/Resource/Prompt）+ MCPToolProvider（ToolProvider ABC）+ /mcp 命令 + /tools 按来源分组 |
+| Skill 系统 | ✅ 完成 | Phase 7：SkillScanner 递归扫描 + yaml.safe_load 解析 + SkillMeta frozen dataclass + SkillRegistry 索引 + SkillsProvider prompt 注入 + /skills 命令 |
 | DebugManager | ❌ Phase 5 已删除 | TraceRecord 合并到 AgentLogger，/debug 命令从 AgentLogger.get_last_trace() 读取 |
-| 测试 | ✅ 完成 | P1: 7/7 + P2: 7/7 + P3: 8/8 + P4: 6/6 + P5: 39/39 + P6: 28/28 = 95/95 全部通过 |
-| Skill 加载 | ⚠️ 半成品 | 能加载 SKILL.md，未注入 system prompt |
+| 测试 | ✅ 完成 | P1: 7 + P2: 7 + P3: 8 + P4: 6 + P5: 39 + P6: 28 + P7: 32 = 127/127 全部通过 |
+| Skill 加载 | ❌ Phase 7 已删除 | 旧 SkillLoader 由 SkillScanner + SkillRegistry 替代 |
 | 定时提醒 | ⚠️ 最简版 | 仅一次性延迟提醒 |
 | MCP 集成 | ❌ 未实现 | 不支持 MCP 协议 |
 | python 工具 | ❌ 未注册 | 列入后续更新建议，依赖条件加载机制 |
@@ -680,38 +684,118 @@ P6:  mcp/client.py                  — McpClient（双传输封装 + 状态机 
 | → Phase 9 | MCP cancel 链路 | `_send_cancel()` 机制可与 CancelTokenRegistry 集成 |
 | → 后续更新 | HttpClientTransport 路径 | stdio 传输的 `from mcp.client.stdio import StdioClientTransport` 和 streamable_http 的 `from mcp.client.http import HttpClientTransport` 导入路径与 mcp SDK 版本绑定，SDK 升级时需检查 |
 
-### Phase 7：Skill 系统完善
+### Phase 7：Skill 系统完善（已完成 ✅）
+
+> 详细开发文档：[docs/phase7/phase7-roadmap.md](./phase7/phase7-roadmap.md) | 变更日志：[docs/phase7/phase7-record.md](./phase7/phase7-record.md)
 
 **总体内容描述**
 
-将 Skill 系统从"仅加载不注入"升级为完整的能力扩展机制：注入 system prompt、支持脚本执行、支持热加载、提供对话式创建向导、条件过滤。
+将 Skill 系统从"骨架占位"升级为完整链路：启动时自动扫描 skills 目录 → 解析 SKILL.md frontmatter → 构建 SkillMeta → 注册到 SkillRegistry → 注入 AgentContext → SkillsProvider 生成 system prompt 描述块 → LLM 自主选择并读取执行。复用 Phase 3 预留的 DataProvider 接口和 SkillsProvider 类。采用渐进式披露：L1 描述常驻 system prompt → L2 SKILL.md body 由 LLM 自主 read_file → L3 scripts/references 由 LLM 判断 exec/read_file，不加任何新工具。旧 skills/loader.py（SkillLoader + Skill 类）由 scanner.py + registry.py 完全替代。
 
-**分模块内容描述**
+**完成日期**：2026-06-05
 
-| 模块 | 文件 | 描述 |
-|------|------|------|
-| Prompt 注入 | `agent/prompt/builder.py`（修改） | PromptBuilder 新增 `skills` section；`agent/prompt/providers.py` 激活 P3 预留的 `SkillsProvider.provide()`（从返回 None → 调用 SkillLoader） |
-| 脚本执行 | `skills/loader.py`（修改） | SkillLoader 解析 SKILL.md 中的 `scripts/` 声明，注册为可执行工具 |
-| 热加载 | `skills/loader.py`（修改） | 监测 `skills/` 目录变化，自动刷新技能列表 |
-| 创建向导 | `skills/creator.py` | 对话式引导流程：收集元信息 → 生成 SKILL.md frontmatter → 写入 `skills/` 目录 |
-| 条件过滤 | `skills/loader.py`（修改） | 解析 SKILL.md frontmatter 中的 `requires` 字段，过滤不可用技能 |
+**分模块修改清单**
 
-**分模块内容要点**
+| 模块 | 文件 | 状态 | 描述 |
+|------|------|------|------|
+| 数据模型 | `skills/models.py` | 新增 | SkillMeta frozen dataclass（17 字段：frontmatter 全量 + 文件系统）+ SkillLifecycle 枚举（PERSISTENT/ONE_SHOT/EPHEMERAL）+ truncated_description() 共享方法 |
+| 配置扩展 | `config/settings.py` | 修改 | SkillsConfig 新增 enabled/skip_prefix 字段 + directory 支持 str\|list；_raw_to_config 适配 |
+| 扫描器 | `skills/scanner.py` | 新增 | SkillScanner — 递归扫描 SKILL.md + skip_prefix 过滤 + yaml.safe_load 解析 + 从 parser 提取 name/description/keywords/lifecycle/metadata + openclaw.always/emoji + scripts/references 子目录扫描 + symlink 防护（follow_symlinks=False） |
+| 注册表 | `skills/registry.py` | 新增 | SkillRegistry — register/get/list_all CRUD + get_descriptions_block() 生成 prompt 描述块（默认 max_desc_len=40 兼容 CJK） + debug 覆盖日志 |
+| 包导出 | `skills/__init__.py` | 修改 | 导出 SkillMeta/SkillLifecycle/SkillScanner/SkillRegistry |
+| 旧代码删除 | `skills/loader.py` | 删除 | SkillLoader + Skill 类由 scanner + registry 替代 |
+| AgentContext | `agent/context.py` | 修改 | 新增 skill_registry 字段（TYPE_CHECKING 导入） |
+| SkillsProvider | `agent/prompt/providers.py` | 修改 | provide() 实现——从 context.skill_registry 读取 + 生成技能系统提示词（mandatory 说明 + 可用技能列表） |
+| PromptBuilder | `main.py` | 修改 | SkillsProvider() 注册到 PromptBuilder |
+| AgentLoop | `agent/loop.py` | 修改 | 新增 skill_registry 参数 + _build_context() 传入 |
+| 启动编排 | `main.py` | 修改 | SkillsConfig.enabled → SkillScanner → SkillRegistry → AgentLoop；/skills CLI 命令（truncated_description 显示）；帮助文本 |
+| 验收测试 | `tests/test_phase7_acceptance.py` | 新增 | 32 tests / 7 场景：Meta/Lifecycle/Config/Scanner（12）/Registry（5）/Provider（3）/AgentContext（2）/Regression（2） |
 
-- Prompt 注入：`SkillLoader.build_skill_prompt()` 生成 `<available_skills>` XML 块，PromptBuilder 将其注入 system prompt 的 skills section
-- 脚本执行：SKILL.md 中 `scripts/hello.py` 被解析为 `Skill.scripts: list[Path]`；Agent 可通过 `exec` 或 `python` 工具执行（不注册为独立工具，避免工具爆炸）
-- 热加载：`SkillLoader` 新增 `watch()` 方法，使用 `watchfiles` 库（或轮询）监测目录变化，变化后自动 `reload()`
-- 创建向导：`skill create` CLI 命令启动对话式流程。步骤：询问技能名称 → 描述 → 依赖（可选）→ 生成 SKILL.md 模板 → 写入 `skills/<name>/SKILL.md`
-- 条件过滤：frontmatter 中的 `requires.binaries: ["ffmpeg"]` → `SkillLoader._check_requirements()` 检查 PATH → 不满足则放入 `unavailable_skills` 列表，注入 prompt 时显示为"不可用技能"
+**架构变化**
+
+```
+P6:  skills/loader.py              — SkillLoader + Skill 类（手动逐行解析，仅 2 字段）
+     skills/__init__.py            — 导出 Skill, SkillLoader
+     agent/context.py              — 无 skill_registry
+     agent/prompt/providers.py     — SkillsProvider.provide() 返回 None（骨架）
+
+P7:  skills/models.py              — SkillMeta frozen dataclass（17 字段，yaml.safe_load 解析）
+     skills/scanner.py             — SkillScanner（递归扫描 + _parse_frontmatter + _parse_lifecycle + symlink 防护）
+     skills/registry.py            — SkillRegistry（CRUD + get_descriptions_block + truncated_description）
+     skills/__init__.py            — 导出 SkillMeta/SkillLifecycle/SkillScanner/SkillRegistry
+     agent/context.py              — skill_registry: SkillRegistry | None
+     agent/prompt/providers.py     — SkillsProvider.provide() 返回技能系统提示词
+     agent/loop.py                 — skill_registry 参数 → AgentContext
+     main.py                       — 启动扫描 + SkillsProvider 注册 + /skills CLI
+     ❌ skills/loader.py（旧）      — 删除
+```
+
+**数据通路（启动 + 运行时）**
+
+```
+启动阶段（main.py）：
+  if config.skills.enabled:
+      scanner = SkillScanner(skill_paths, skip_prefix)
+      metas = scanner.scan()
+        → _find_skill_files → 递归找 SKILL.md（跳过 _ 前缀，follow_symlinks=False）
+        → _parse_skill → yaml.safe_load(frontmatter) → SkillMeta
+      registry = SkillRegistry()
+      for meta in metas: registry.register(meta)
+      AgentLoop(skill_registry=registry)
+
+每次请求：
+  AgentLoop._build_context() → AgentContext(skill_registry=registry)
+  PromptBuilder.build(context)
+    → SkillsProvider.provide(context)
+      → registry.get_descriptions_block(max_desc_len=40)
+      → 返回 "## 技能系统（mandatory）..." + 列表
+  → system prompt 含 Skill 描述
+
+LLM 交互：
+  LLM 看到 Skill 列表 → 判断需求匹配 → read_file(path={"SKILL.md"}) → 获取 body 指令
+  → 按 body 指令：exec scripts/run.py / read_file references/guide.md
+```
+
+**验收标准**（全部通过 ✅）
+
+1. SkillMeta 创建正确：name/description/keywords/lifecycle/deactivate_on/always_load/emoji/homepage/author/metadata/extra 各字段正确
+2. SkillMeta frozen：修改字段抛 AttributeError
+3. SkillLifecycle 枚举：PERSISTENT/ONE_SHOT/EPHEMERAL 三值正确
+4. SkillScanner 基础扫描：正常 SKILL.md 解析为 SkillMeta
+5. _ 前缀跳过：_example 等目录被正确跳过
+6. 递归扫描生效：嵌套目录 SKILL.md 被发现
+7. 缺失字段：无 name 跳过，无效 lifecycle 降级 PERSISTENT
+8. 多目录扫描：多路径下所有 Skill 都被发现
+9. scripts/references 子目录扫描：文件清单正确
+10. SkillRegistry CRUD：register/get/list_all 正常，同名覆盖
+11. get_descriptions_block：格式正确（name + 截断描述 + 路径）
+12. SkillsProvider 注入：skill_registry 存在时返回技能系统提示词，None 时返回 None
+13. AgentContext.skill_registry：字段存在，默认 None
+14. 回归：Phase 1-6 全部 95 测试通过
 
 **开发注意事项**
 
-- Skill 不直接注册为工具（避免工具列表膨胀），而是通过 instructions 文本引导 LLM 使用现有工具组合完成任务
-- 热加载使用防抖（debounce 500ms），避免频繁保存触发多次重载
-- 创建向导生成的 SKILL.md 使用标准 frontmatter 格式，与 P3 的 SkillLoader 兼容
-- 条件过滤结果在 `/skills` 命令中展示（可用 + 不可用分开展示）
-- **Phase 5 交付依赖**：`SkillToolProvider` 需实现 `tools/provider.py` 中定义的 `ToolProvider` ABC 接口；P3 预留的 `SkillsProvider` 骨架可通过 `SkillLoader.build_skill_prompt()` 激活注入；`ToolDefinition.source = ToolSource.SKILL` 枚举值已定义
-- **Phase 6 交付参考**：`MCPToolProvider` 的编排模式（asyncio.gather 并行连接 + _clients/_pending/_failed 三层状态管理 + shutdown）可作为 `SkillToolProvider` 参考实现；Resource/Prompt 的 `read_{server}_{name}` / `prompt_{server}_{name}` 命名防冲突模式可借鉴
+- Skill 不注册为工具：通过 SkillsProvider 将描述注入 system prompt，LLM 自主通过 read_file 激活
+- 渐进式披露三层：L1 描述常驻（启动时注册） → L2 body 按需读（LLM read_file） → L3 scripts/references 按判断 exec/read_file
+- Description 为空保护：`_parse_skill()` 中 debug 日志提示，不阻止注册
+- CJK 截断：`max_desc_len` 默认 40（从 20 提升），中文 Skill 获得合理的视觉宽度
+- skills/loader.py 删除：所有功能由 scanner + registry 替代
+- SkillsProvider 不改 PromptBuilder：保持 DataProvider 接口契约
+- SkillLifecycle ONE_SHOT/EPHEMERAL 仅定义不消费：生命周期管理留待后续 Phase
+- ToolsConfig.skill_enabled 不消费：P5 预留字段，P7 起由 SkillsConfig.enabled 替代
+- 扫描在启动时同步执行：小规模目录（< 20 个 Skill）延迟可忽略
+
+**跨阶段依赖声明**
+
+以下内容在 Phase 7 开发中产生，交付给后续 Phase：
+
+| 依赖方向 | 内容 | 说明 |
+|----------|------|------|
+| → Phase 9 | SkillLifecycle.ONE_SHOT/EPHEMERAL | 枚举值已定义，生命周期管理（自动卸载/按请求判定）可在 P9 实现 |
+| → 后续更新 | Skill 创建向导 | `/skill create` CLI 命令可基于 SkillMeta 字段生成 SKILL.md 模板（P7 未实现） |
+| → 后续更新 | 热加载 | watcher 监测 skills 目录变化 → 自动 re-scan → 热更新 registry（P7 未实现） |
+| → 后续更新 | 条件加载 | frontmatter `requires` 字段已预留，P7 未消费 |
+| → 后续更新 | 大量 Skill 关键词预过滤 | SkillsProvider 中基于 query 关键词预过滤 Skill 列表，减少 prompt token（>20 Skills 时考虑） |
 
 ---
 
@@ -743,6 +827,7 @@ P6:  mcp/client.py                  — McpClient（双传输封装 + 状态机 
 - 持久化文件格式与 P1 的 session JSON 格式一致（`json.dumps(ensure_ascii=False, indent=2)`）
 - Agent 触发模式下 `channel` 为 None，`ApprovalManager.check()` 默认放行（P1 已有逻辑）
 - Scheduler 与 Agent 主循环运行在同一个 asyncio event loop 中，注意 cron 触发不影响活跃对话
+- **Phase 7 交付参考**：Scheduler cron 触发的 Agent 可通过 context 中的 skill_registry 访问 Skill 列表，定时任务可使用 Skill 指令（如定时执行代码审查 Skill）
 
 ---
 

@@ -28,12 +28,12 @@ dotClaw/
 │   ├── tools/               # 工具系统（ToolHandler/Registry/Executor 三层 + 8 个内置工具 + 审批机制）
 │   ├── mcp/                  # MCP 协议客户端（stdio + Streamable HTTP 双传输）
 │   ├── common/              # 通用工具库（限流器 / 单例 / 工具函数）
-│   ├── skills/              # Skill 加载器
+│   ├── skills/              # Skill 系统（扫描+注册+prompt注入）
 │   ├── memory/              # 三级记忆系统（L1 Session / L2 日记忆 / L3 蒸馏）
 │   ├── channel/             # 通道（CLI）
 │   ├── scheduler/           # 定时提醒
 │   ├── config/              # 配置加载（YAML → dataclass）
-├── tests/                   # 测试（P1-P6 验收测试全部通过，95/95）
+├── tests/                   # 测试（P1-P7 验收测试全部通过，127/127）
 ├── skills/                  # 技能目录
 ├── data/                    # 运行时数据（sessions / logs）
 ├── config.yaml              # 配置文件
@@ -51,6 +51,7 @@ dotClaw/
 | `/debug` | 查看最近一次推理过程 |
 | `/tools` | 列出所有可用工具（按来源分组：BUILTIN / MCP） |
 | `/mcp` | 查看 MCP servers 连接状态 |
+| `/skills` | 列出已加载技能 |
 | `/model <名称>` | 切换模型（支持跨供应商） |
 | `/help` | 显示帮助 |
 | `/quit` | 退出 |
@@ -86,8 +87,8 @@ python tests/test_phase4_acceptance.py
 # 运行 Phase 5 测试
 python tests/test_phase5_acceptance.py
 
-# 运行 Phase 6 测试
-python tests/test_phase6_acceptance.py
+# 运行 Phase 7 测试
+python tests/test_phase7_acceptance.py
 ```
 
 ## 开发进度
@@ -100,7 +101,7 @@ python tests/test_phase6_acceptance.py
 | Phase 4 | ✅ 完成 | SQLite FTS5 混合检索、LLM 日记忆摘要、Deep Dream 蒸馏、MemoryProvider |
 | Phase 5 | ✅ 完成 | 工具层架构重构：ToolHandler/Registry/Executor 三层分离、builtin/ 子包、去硬编码审批、ToolProvider ABC、日志合并（删除 debug/ 子包） |
 | Phase 6 | ✅ 完成 | MCP 协议集成：双传输（stdio+HTTP）+ McpClient 状态机 + 三个 Handler + MCPToolProvider + /mcp 命令 |
-| Phase 7 | 🔜 待开始 | Skill 系统完善（注入 / 热加载 / 创建向导） |
+| Phase 7 | ✅ 完成 | Skill 系统完善：扫描注册 + prompt 注入 + SkillsProvider + /skills 命令 |
 | Phase 8 | 🔜 待开始 | Scheduler cron 增强 |
 | Phase 9 | 🔜 待开始 | 取消机制（CancelTokenRegistry） |
 | Phase 10 | 🔜 待开始 | 测试覆盖率 + Web Channel |
