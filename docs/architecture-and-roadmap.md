@@ -680,7 +680,7 @@ P6:  mcp/client.py                  — McpClient（双传输封装 + 状态机 
 | → Phase 9 | MCP cancel 链路 | `_send_cancel()` 机制可与 CancelTokenRegistry 集成 |
 | → 后续更新 | HttpClientTransport 路径 | stdio 传输的 `from mcp.client.stdio import StdioClientTransport` 和 streamable_http 的 `from mcp.client.http import HttpClientTransport` 导入路径与 mcp SDK 版本绑定，SDK 升级时需检查 |
 
----### Phase 7：Skill 系统完善
+### Phase 7：Skill 系统完善
 
 **总体内容描述**
 
