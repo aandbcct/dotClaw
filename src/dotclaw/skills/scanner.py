@@ -53,7 +53,8 @@ class SkillScanner:
         def _walk(path: Path):
             try:
                 for entry in path.iterdir():
-                    if not entry.is_dir():
+                    # W1 修复：follow_symlinks=False 防止符号链接循环导致 RecursionError
+                    if not entry.is_dir(follow_symlinks=False):
                         continue
                     if entry.name.startswith(self._skip_prefix):
                         continue
@@ -85,6 +86,10 @@ class SkillScanner:
         if not fm.get("name"):
             logger.warning(f"SKILL.md 缺少 name 字段: {skill_md}")
             return None
+
+        # M5 修复：description 为空时的 hint 日志
+        if not fm.get("description", "").strip():
+            logger.debug(f"Skill {fm.get('name')} 的 description 为空，LLM 匹配可能受到影响")
 
         script_paths = self._scan_subdir(skill_dir, "scripts")
         reference_paths = self._scan_subdir(skill_dir, "references")
@@ -128,7 +133,8 @@ class SkillScanner:
 
     def _parse_frontmatter(self, content: str) -> dict[str, Any] | None:
         """用 yaml.safe_load() 解析 YAML frontmatter"""
-        content = content.replace('\r\n', '\n')
+        # M1 修复：规范化所有换行符格式（\r\n Windows + \r 旧 Mac + \n Unix）
+        content = content.replace('\r\n', '\n').replace('\r', '\n')
         match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
         if not match:
             return None
@@ -151,10 +157,11 @@ class SkillScanner:
     def _scan_subdir(self, skill_dir: Path, subdir_name: str) -> list[str]:
         """扫描 scripts/ 或 references/ 子目录，返回相对路径列表"""
         subdir = skill_dir / subdir_name
-        if not subdir.is_dir():
+        # W1 修复：follow_symlinks=False + is_symlink 检查
+        if not subdir.is_dir(follow_symlinks=False):
             return []
         paths: list[str] = []
         for f in subdir.rglob("*"):
-            if f.is_file():
+            if f.is_file() and not f.is_symlink():
                 paths.append(str(f.relative_to(skill_dir)))
         return sorted(paths)

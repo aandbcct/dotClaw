@@ -440,9 +440,8 @@ def _cmd_skills(channel, skill_registry):
 
     channel.print_info(f"已加载 Skill ({len(metas)} 个):")
     for meta in sorted(metas, key=lambda m: m.name):
-        desc_line = meta.description.split("\n")[0].strip()
-        if len(desc_line) > 20:
-            desc_line = desc_line[:20] + "..."
+        # M2 修复：使用 SkillMeta.truncated_description 共享方法
+        desc_line = meta.truncated_description(max_len=40)
         channel.print_info(f"  {meta.name}: {desc_line}")
 
 

@@ -8,6 +8,7 @@
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
 | v1.0 | 2026-06-05 | Phase 7 Skill 系统完善首次实施，4步全部完成，127/127 测试通过 |
+| v1.1 | 2026-06-05 | 修复代码审查 W1（symlink 循环）+ M1-M5（CR 规范/截断重复/日志/ CJK/空描述），127/127 测试通过 |
 
 ### 变更内容
 
@@ -38,4 +39,23 @@
 
 ---
 
-*本文件由 dotClaw 开发工程师维护。Phase 7 首次实施完成。*
+## v1.1 — 2026-06-05
+
+### 变更内容
+
+根据代码审查报告 `docs/phase7/phase7-codeReview.md` 修复 Warning 级别问题 W1 + Minor 级别问题 M1-M5。
+
+### 已修复（来自审查 Warning + Minor）
+
+| # | 原问题 | 修复内容 | 涉及文件 |
+|---|--------|----------|----------|
+| ✅ W1 | 目录遍历存在符号链接循环风险 | `_walk()` 使用 `entry.is_dir(follow_symlinks=False)` 禁用 symlink 跟随；`_scan_subdir()` 使用 `subdir.is_dir(follow_symlinks=False)` + `f.is_symlink()` 检查 | `skills/scanner.py` |
+| ✅ M1 | CR/LF 规范化不完整（缺孤 \r） | `_parse_frontmatter()` 增加 `content.replace('\r', '\n')` 处理旧 Mac 格式 | `skills/scanner.py` |
+| ✅ M2 | 描述截断逻辑重复（registry + main） | `SkillMeta` 新增 `truncated_description(max_len)` 共享方法；`SkillRegistry.get_descriptions_block()` 和 `_cmd_skills()` 均改用此方法 | `skills/models.py`, `skills/registry.py`, `main.py` |
+| ✅ M3 | registry logger 定义但未使用 | `SkillRegistry.register()` 添加 debug 级别覆盖日志 | `skills/registry.py` |
+| ✅ M4 | max_desc_len 过短（20字符不适合 CJK） | 默认值从 20 提升到 40（兼容中英文） | `skills/registry.py`, `main.py` |
+| ✅ M5 | SkillMeta 无空 description 保护 | `_parse_skill()` 中 `description` 为空时添加 debug 级别 hint 日志 | `skills/scanner.py` |
+
+---
+
+*本文件由 dotClaw 开发工程师维护。Phase 7 审查修复完成。*

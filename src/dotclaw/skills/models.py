@@ -45,3 +45,10 @@ class SkillMeta:
     has_references: bool = False
     script_paths: tuple[str, ...] = ()
     reference_paths: tuple[str, ...] = ()
+
+    def truncated_description(self, max_len: int = 40) -> str:
+        """M2 修复：共享的截断描述方法。取第一行，超过 max_len 截断加 ..."""
+        first_line = self.description.split("\n")[0].strip()
+        if len(first_line) > max_len:
+            first_line = first_line[:max_len] + "..."
+        return first_line
