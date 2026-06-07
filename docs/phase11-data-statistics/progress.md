@@ -1,0 +1,59 @@
+# 数据统计模块 — 开发进度
+
+> 会话开始：2026-06-07T16:13
+> 关联：task_plan.md
+
+---
+
+## 2026-06-07 会话日志
+
+### 16:13 — 会话启动
+- 完成项目结构探索（Agent 探索）
+- 识别关键模块：agent/loop.py、llm/proxy.py、agent/tools/executor.py、agent/context.py
+
+### 16:19 — 设计评审
+- 对 data-statistics-design.md v1.0 做逐字段冗余评估
+- 识别三类冗余：可推导（4 字段）、标注依赖（8 字段）、价值存疑（12 字段）
+- 精简方案从 ~78 字段压缩到 ~52 字段
+
+### 16:30 — 设计文档更新
+- 重写 data-statistics-design.md → v1.1
+- 每个 Metrics 类增加"与 v1.0 相比删除的字段"对照表
+- 删除 ToolSelectionError、FalseTriggerRecord、MissedTriggerRecord 三个辅助 dataclass
+- 更新诊断指南、优先级表、示例 JSON
+
+### 16:35 — 需求文档编写
+- 新建 data-statistics-requirements.md
+- 涵盖：背景动机、使用场景（3 个）、功能需求（4 组 16 条）、非功能需求（6 条）、验收标准（5 组）
+
+### 16:44 — 开发计划编写
+- 创建 task_plan.md、findings.md、progress.md（规划文件体系）
+- 8 个 Phase（0-7）：从模块骨架到全面验收
+- 每个 Phase 含 Step 分点、验收标准、预估文件
+- 附录含错误处理矩阵、长期可维护措施、风险缓解
+
+### 17:37 — 计划修订
+- 确认 TTFT/TPS 由客户端侧计算（`perf_counter()`），更新 Phase 2 Step 2.3 和 Phase 3 Step 3.1
+- 确认 cost_usd 暂不计算（无价格配置），返回 0.0 占位
+- 更新 findings.md F3、F6，标记已确认项
+- 更新附录 C 风险：TTFT/TPS 风险从"可能为空"改为"客户端统一计时"
+
+### 17:49 — 待确认点全部关闭
+- `hit` 判定：返回非空结果即算命中
+- `index_size` / `index_size_mb`：记忆系统重构前暂不采集，返回 0 / 0.0 占位
+- findings.md F6 全部标记为已确认
+
+---
+
+## 当前状态
+
+| Phase | 状态 | 说明 |
+|-------|------|------|
+| Phase 0 | pending | 模块骨架与核心数据类型 |
+| Phase 1 | pending | 事件采集器 |
+| Phase 2 | pending | 快照构建器 |
+| Phase 3 | pending | 业务代码接入 |
+| Phase 4 | pending | 对比引擎 |
+| Phase 5 | pending | 序列化与存储 |
+| Phase 6 | pending | CLI 集成 |
+| Phase 7 | pending | 全面测试与验收 |
