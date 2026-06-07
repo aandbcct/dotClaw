@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from ..llm.base import Message
 from .result import AgentResult
@@ -52,6 +52,7 @@ class AgentLoop:
         logger: "AgentLogger | None" = None,
         memory_mgr: "MemoryManager | None" = None,
         skill_registry: "SkillRegistry | None" = None,  # P7 新增
+        metrics_collector: "Any | None" = None,  # P11 新增
     ):
         self.llm = llm
         self.session = session
@@ -64,6 +65,7 @@ class AgentLoop:
         self._prompt_builder = prompt_builder
         self._memory_mgr = memory_mgr
         self._skill_registry = skill_registry  # P7 新增
+        self._metrics_collector = metrics_collector  # P11 新增
 
         # Phase 5: _logger 直接管理 trace（合并 DebugManager 能力）
         self._logger = logger or AgentLogger(
@@ -83,9 +85,24 @@ class AgentLoop:
         """
         self._running = True
         start_time = time.time()
+        collector = None
 
         # 构建上下文（P4：异步语义检索）
         context = await self._build_context(user_message)
+        collector = context.metrics_collector
+
+        # ── P11 指标埋点：会话开始 ──
+        if collector:
+            from ..metrics.events import AgentEvent, EventType
+            collector.on_event(AgentEvent(
+                timestamp=start_time * 1000,
+                event_type=EventType.SESSION_START,
+                data={
+                    "session_id": self.session.id,
+                    "request_id": context.request_id,
+                    "task_index": getattr(self, "_task_index", 0),
+                },
+            ))
 
         from .logger import TraceRecord
         trace = TraceRecord(
@@ -109,12 +126,24 @@ class AgentLoop:
                 tool_calls_pending = []
                 current_content = ""
 
+                loop_start_ts = time.time()
+
+                # ── P11 指标埋点：ReAct 循环开始 ──
+                if collector:
+                    from ..metrics.events import AgentEvent, EventType
+                    collector.on_event(AgentEvent(
+                        timestamp=loop_start_ts * 1000,
+                        event_type=EventType.REACT_LOOP_START,
+                        data={"loop_index": i},
+                    ))
+
                 async for chunk in self.llm.chat(
                     messages=messages,
                     tools=context.tool_definitions if context.tool_definitions else None,
                     model=context.model,
                     purpose=context.purpose,
                     stream=self.config.llm.stream,
+                    metrics_collector=collector,
                 ):
                     if chunk.content:
                         current_content += chunk.content
@@ -129,6 +158,29 @@ class AgentLoop:
                 if not tool_calls_pending:
                     final_response = current_content
                     await self.channel.send("\n")
+
+                    # ── P11 指标埋点：空转 ──
+                    if iterations == 1:
+                        # If the agent responds without any tool calls, it's an empty action
+                        if collector:
+                            collector.on_event(AgentEvent(
+                                timestamp=time.time() * 1000,
+                                event_type=EventType.REACT_EMPTY_ACTION,
+                                data={"loop_index": i},
+                            ))
+
+                    # ── P11 指标埋点：循环结束 ──
+                    if collector:
+                        loop_duration = (time.time() - loop_start_ts) * 1000
+                        collector.on_event(AgentEvent(
+                            timestamp=time.time() * 1000,
+                            event_type=EventType.REACT_LOOP_END,
+                            data={
+                                "loop_index": i,
+                                "action": "respond",
+                                "duration_ms": round(loop_duration, 1),
+                            },
+                        ))
                     break
 
                 trace.tool_calls.append([tc.__dict__ for tc in tool_calls_pending])
@@ -154,10 +206,20 @@ class AgentLoop:
 
                     if self._tool_executor:
                         self.channel.print_info(f"\n🔧 调用工具: {tc.name}({json.dumps(args, ensure_ascii=False)})")
+
+                        # ── P11 指标埋点：工具调用开始 ──
+                        if collector:
+                            collector.on_event(AgentEvent(
+                                timestamp=time.time() * 1000,
+                                event_type=EventType.TOOL_CALL_START,
+                                data={"tool_name": tc.name, "tool_input": args},
+                            ))
+
                         result = await self._tool_executor.execute(
                             name=tc.name,
                             arguments=args,
                             channel=self.channel,
+                            metrics_collector=collector,
                         )
                         trace.tool_results.append({
                             "tool": tc.name,
@@ -181,6 +243,21 @@ class AgentLoop:
                             tool_call_id=tc.id,
                         ))
 
+                # ── P11 指标埋点：ReAct 循环结束（含工具调用）──
+                if collector and tool_calls_pending:
+                    loop_duration = (time.time() - loop_start_ts) * 1000
+                    first_tc = tool_calls_pending[0]
+                    collector.on_event(AgentEvent(
+                        timestamp=time.time() * 1000,
+                        event_type=EventType.REACT_LOOP_END,
+                        data={
+                            "loop_index": i,
+                            "action": first_tc.name,
+                            "duration_ms": round(loop_duration, 1),
+                            "tool_calls_count": len(tool_calls_pending),
+                        },
+                    ))
+
             # 保存会话历史
             from ..memory.store import SessionMessage
 
@@ -201,11 +278,25 @@ class AgentLoop:
                     self._memory_mgr.flush_memory(
                         messages=self.session.messages[-self.config.memory.flush_max_messages:],
                         reason="threshold",
+                        metrics_collector=self._metrics_collector,
                     )
                 )
 
             trace.final_response = final_response
             trace.duration_ms = int((time.time() - start_time) * 1000)
+
+            # ── P11 指标埋点：会话结束（成功）──
+            if collector:
+                collector.on_event(AgentEvent(
+                    timestamp=time.time() * 1000,
+                    event_type=EventType.SESSION_END,
+                    data={
+                        "session_id": self.session.id,
+                        "success": True,
+                        "total_loops": iterations,
+                        "total_duration_ms": trace.duration_ms,
+                    },
+                ))
 
             if self._logger:
                 self._logger.record(trace)
@@ -225,6 +316,20 @@ class AgentLoop:
 
             trace.final_response = f"ERROR: {error_msg}"
             trace.duration_ms = int((time.time() - start_time) * 1000)
+
+            # ── P11 指标埋点：会话结束（失败）──
+            if collector:
+                collector.on_event(AgentEvent(
+                    timestamp=time.time() * 1000,
+                    event_type=EventType.SESSION_END,
+                    data={
+                        "session_id": self.session.id,
+                        "success": False,
+                        "total_loops": iterations,
+                        "total_duration_ms": trace.duration_ms,
+                        "error": error_msg,
+                    },
+                ))
 
             return AgentResult(
                 final_text="",
@@ -251,7 +356,23 @@ class AgentLoop:
         memory_summary = ""
         if self._memory_mgr:
             try:
+                retrieval_start = time.time()
                 results = await self._memory_mgr.search(user_message, max_results=3)
+
+                # ── P11 指标埋点：记忆检索 ──
+                retrieval_duration = (time.time() - retrieval_start) * 1000
+                if self._metrics_collector:
+                    from ..metrics.events import AgentEvent, EventType
+                    self._metrics_collector.on_event(AgentEvent(
+                        timestamp=time.time() * 1000,
+                        event_type=EventType.MEMORY_RETRIEVAL,
+                        data={
+                            "query": user_message[:100],
+                            "hit": bool(results),
+                            "top_k": 3,
+                            "duration_ms": round(retrieval_duration, 1),
+                        },
+                    ))
                 if results:
                     memory_summary = "\n".join(
                         f"- ({r.source}:{r.path}) {r.snippet}" for r in results
@@ -281,6 +402,7 @@ class AgentLoop:
             memory_summary=memory_summary,
             channel=self.channel,
             skill_registry=self._skill_registry,  # P7 新增
+            metrics_collector=self._metrics_collector,  # P11 新增
         )
 
     def _build_messages(

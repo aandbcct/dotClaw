@@ -15,7 +15,10 @@ env/
 .vscode/
 .idea/
 
-# dotClaw runtime data
+# Coverage
+.coverage
+.coverage.*
+
 # dotClaw runtime data
 data/
 src/dotclaw/data/

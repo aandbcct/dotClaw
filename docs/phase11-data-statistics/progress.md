@@ -57,9 +57,23 @@
 
 | Phase | 状态 | 说明 |
 |-------|------|------|
-| Phase 0 | pending | 模块骨架与核心数据类型 |
-| Phase 1 | pending | 事件采集器 |
-| Phase 2 | pending | 快照构建器 |
-| Phase 3 | pending | 业务代码接入（14 种事件埋点） |
-| Phase 4 | pending | 存储与对比（JSON 序列化 + 简单 diff） |
-| Phase 5 | pending | 测试与验收 |
+| Phase 0 | completed | 模块骨架与核心数据类型 |
+| Phase 1 | completed | 事件采集器 |
+| Phase 2 | completed | 快照构建器 |
+| Phase 3 | completed | 业务代码接入（14 种事件埋点） |
+| Phase 4 | completed | 存储与对比（JSON 序列化 + 简单 diff） |
+| Phase 5 | completed | 测试与验收（83 tests, 99% coverage） |
+
+## 最终实现总结
+
+- **总测试数**: 83 (all passing)
+- **覆盖率**: 99% on `src/dotclaw/metrics/`
+- **模块文件**: 6 files (events.py, snapshot.py, collector.py, builder.py, storage.py, __init__.py)
+- **测试文件**: 4 files (test_snapshot.py, test_collector.py, test_builder.py, test_storage.py)
+- **修改的业务文件**:
+  - `src/dotclaw/agent/context.py` — 新增 `metrics_collector` 字段
+  - `src/dotclaw/agent/loop.py` — 会话/ReAct/工具/记忆埋点
+  - `src/dotclaw/agent/prompt/providers.py` — Skill 埋点
+  - `src/dotclaw/llm/proxy.py` — LLM 埋点 + TTFT/TPS 计时
+  - `src/dotclaw/tools/executor.py` — 工具调用埋点
+  - `src/dotclaw/memory/manager.py` — 记忆写入埋点

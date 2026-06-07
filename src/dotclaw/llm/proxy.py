@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import AsyncIterator, TYPE_CHECKING
+import time
+from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .base import ChatChunk, LLMClient, Message, ToolDefinition
 
@@ -74,6 +75,7 @@ class LLMProxy:
         model: str | None = None,
         purpose: str = "chat",
         stream: bool = True,
+        metrics_collector: "Any | None" = None,
     ) -> AsyncIterator[ChatChunk]:
         """
         统一聊天接口：限流 → 路由 → 调用 → 降级。
@@ -85,16 +87,60 @@ class LLMProxy:
         provider = self._router._config.models.get(resolved_model)
         provider_name = provider.provider if provider else "unknown"
 
-        async for chunk in self._call_with_fallback(
-            client=client,
-            resolved_model=resolved_model,
-            provider_name=provider_name,
-            purpose=purpose,
-            messages=messages,
-            tools=tools,
-            stream=stream,
-        ):
-            yield chunk
+        # ── P11 指标埋点：LLM 请求开始 ──
+        request_start_ts = time.perf_counter() * 1000
+        first_chunk_ts: float | None = None
+        output_token_count = 0
+
+        if metrics_collector:
+            from ..metrics.events import AgentEvent, EventType
+            metrics_collector.on_event(AgentEvent(
+                timestamp=request_start_ts,
+                event_type=EventType.LLM_REQUEST_START,
+                data={
+                    "model": resolved_model,
+                    "input_tokens": sum(len(m.content) for m in messages if m.content),  # char count as rough tokens
+                    "client_start_ts": request_start_ts,
+                },
+            ))
+
+        try:
+            async for chunk in self._call_with_fallback(
+                client=client,
+                resolved_model=resolved_model,
+                provider_name=provider_name,
+                purpose=purpose,
+                messages=messages,
+                tools=tools,
+                stream=stream,
+            ):
+                if first_chunk_ts is None:
+                    first_chunk_ts = time.perf_counter() * 1000
+                if chunk.content:
+                    output_token_count += len(chunk.content)
+                yield chunk
+
+        finally:
+            # ── P11 指标埋点：LLM 请求结束 ──
+            if metrics_collector:
+                end_ts = time.perf_counter() * 1000
+                from ..metrics.events import AgentEvent, EventType
+
+                ttft_ms = (first_chunk_ts - request_start_ts) if first_chunk_ts else 0.0
+                total_duration = end_ts - request_start_ts
+                tps = (output_token_count / (end_ts - first_chunk_ts)) if first_chunk_ts and first_chunk_ts < end_ts else 0.0
+
+                metrics_collector.on_event(AgentEvent(
+                    timestamp=end_ts,
+                    event_type=EventType.LLM_REQUEST_END,
+                    data={
+                        "model": resolved_model,
+                        "output_tokens": output_token_count,
+                        "duration_ms": round(total_duration, 1),
+                        "ttft_ms": round(ttft_ms, 1),
+                        "tps": round(tps, 1),
+                    },
+                ))
 
     async def _call_with_fallback(
         self,

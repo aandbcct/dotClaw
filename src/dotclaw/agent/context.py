@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..llm.base import ToolDefinition
@@ -67,6 +67,9 @@ class AgentContext:
 
     skill_registry: "SkillRegistry | None" = None
     """P7 新增：Skill 注册表（skill_enabled=False 时为 None）"""
+
+    metrics_collector: "Any | None" = None
+    """P11 新增：指标采集器（None 时跳过埋点，有实例时自动生效）"""
 
     def __post_init__(self):
         """设置 workspace 默认值（绕过 frozen 限制）"""

@@ -7,7 +7,7 @@ import logging
 import math
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from .storage import MemoryStorage, MemoryChunk, SearchResult
 
@@ -167,13 +167,29 @@ class MemoryManager:
 
     async def flush_memory(
         self, messages: list, reason: str = "threshold",
+        metrics_collector: Any | None = None,
     ) -> bool:
         """触发 L2 日记忆写入"""
+        success = False
         if self._flush_mgr:
-            return await self._flush_mgr.flush_from_messages(
+            import time as _time
+            success = await self._flush_mgr.flush_from_messages(
                 messages=messages, reason=reason
             )
-        return False
+            # ── P11 指标埋点：记忆写入 ──
+            if metrics_collector:
+                from ..metrics.events import AgentEvent, EventType
+                metrics_collector.on_event(AgentEvent(
+                    timestamp=_time.time() * 1000,
+                    event_type=EventType.MEMORY_WRITE,
+                    data={
+                        "memory_type": "daily_note",
+                        "success": success,
+                        "reason": reason,
+                        "message_count": len(messages),
+                    },
+                ))
+        return success
 
     def _get_embedding(self, text: str) -> list[float] | None:
         if not self._embedding:

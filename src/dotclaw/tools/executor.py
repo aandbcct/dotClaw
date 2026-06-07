@@ -38,6 +38,7 @@ class ToolExecutor:
         name: str,
         arguments: dict[str, Any],
         channel: Any | None = None,
+        metrics_collector: Any | None = None,
     ) -> ToolResult:
         """执行工具：查找 Handler → 审批检查 → 超时控制 → 返回 ToolResult"""
         handler = self._registry.get(name)
@@ -70,14 +71,45 @@ class ToolExecutor:
         timeout = definition.timeout
         ctx = ToolExecutionContext(timeout=timeout)
 
+        exec_start = asyncio.get_event_loop().time()
         try:
             result = await asyncio.wait_for(
                 handler.execute(arguments, ctx),
                 timeout=timeout,
             )
+            # ── P11 指标埋点：工具调用结束（成功）──
+            if metrics_collector:
+                from ..metrics.events import AgentEvent, EventType
+                exec_duration = (asyncio.get_event_loop().time() - exec_start) * 1000
+                metrics_collector.on_event(AgentEvent(
+                    timestamp=asyncio.get_event_loop().time() * 1000,
+                    event_type=EventType.TOOL_CALL_END,
+                    data={
+                        "tool_name": name,
+                        "success": not result.is_error,
+                        "duration_ms": round(exec_duration, 1),
+                        "error": result.error_code if result.is_error else "",
+                        "error_type": result.error_type if result.is_error else "",
+                    },
+                ))
             return result
         except asyncio.TimeoutError:
             logger.warning(f"工具 {name} 执行超时（{timeout}s）")
+            # ── P11 指标埋点：工具调用结束（超时）──
+            if metrics_collector:
+                from ..metrics.events import AgentEvent, EventType
+                exec_duration = timeout * 1000
+                metrics_collector.on_event(AgentEvent(
+                    timestamp=asyncio.get_event_loop().time() * 1000,
+                    event_type=EventType.TOOL_CALL_END,
+                    data={
+                        "tool_name": name,
+                        "success": False,
+                        "duration_ms": exec_duration,
+                        "error": "TIMEOUT",
+                        "error_type": "timeout",
+                    },
+                ))
             return ToolResult(
                 output=f"错误：工具执行超时（{int(timeout)}秒）",
                 is_error=True,
@@ -86,6 +118,21 @@ class ToolExecutor:
             )
         except Exception as e:
             logger.exception(f"工具 {name} 调度出错")
+            # ── P11 指标埋点：工具调用结束（异常）──
+            if metrics_collector:
+                from ..metrics.events import AgentEvent, EventType
+                exec_duration = (asyncio.get_event_loop().time() - exec_start) * 1000
+                metrics_collector.on_event(AgentEvent(
+                    timestamp=asyncio.get_event_loop().time() * 1000,
+                    event_type=EventType.TOOL_CALL_END,
+                    data={
+                        "tool_name": name,
+                        "success": False,
+                        "duration_ms": round(exec_duration, 1),
+                        "error": str(e),
+                        "error_type": "execution",
+                    },
+                ))
             return ToolResult(
                 output=f"工具调度出错: {e}",
                 is_error=True,

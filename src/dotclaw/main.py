@@ -152,6 +152,7 @@ async def _run_cli():
 
             # EmbeddingProvider 可选
             embedding = None
+            embedding_cache = None
             if config.memory.embedding_provider and config.memory.embedding_api_key:
                 from dotclaw.memory.embedding import OpenAIEmbeddingProvider, EmbeddingCache
                 embedding = OpenAIEmbeddingProvider(
@@ -160,6 +161,7 @@ async def _run_cli():
                     model=config.memory.embedding_model,
                     dimensions=config.memory.embedding_dimensions,
                 )
+                embedding_cache = EmbeddingCache()
 
             flush_mgr = MemoryFlushManager(
                 workspace_dir=config.memory.get_workspace(project_root),
@@ -172,7 +174,7 @@ async def _run_cli():
                 workspace=config.memory.get_workspace(project_root),
                 embedding_provider=embedding,
                 flush_manager=flush_mgr,
-                embedding_cache=EmbeddingCache(),
+                embedding_cache=embedding_cache,
                 sync_on_search=config.memory.sync_on_search,
                 vector_weight=config.memory.vector_weight,
                 keyword_weight=config.memory.keyword_weight,

@@ -111,6 +111,52 @@ class SkillsProvider(DataProvider):
         if not descriptions:
             return None
 
+        # ── P11 指标埋点：Skill 触发 ──
+        collector = context.metrics_collector
+        if collector:
+            import time as _time
+            import json as _json
+            from ...metrics.events import AgentEvent, EventType
+
+            all_metas = registry.list_all()
+            for meta in all_metas:
+                collector.on_event(AgentEvent(
+                    timestamp=_time.time() * 1000,
+                    event_type=EventType.SKILL_TRIGGER,
+                    data={
+                        "skill_name": meta.name,
+                        "trigger_source": "system_prompt",
+                        "description_len": len(meta.description),
+                    },
+                ))
+
+                # body_loaded: estimate token overhead
+                token_estimate = len(meta.description) + sum(
+                    len(str(rp)) for rp in meta.reference_paths
+                )
+                collector.on_event(AgentEvent(
+                    timestamp=_time.time() * 1000,
+                    event_type=EventType.SKILL_BODY_LOADED,
+                    data={
+                        "skill_name": meta.name,
+                        "token_count": token_estimate,
+                        "duration_ms": 0.0,  # description injection is instantaneous
+                        "cached": False,
+                    },
+                ))
+
+                # P11: script_exec — 记录 Skill 可用脚本（实际执行发生在工具层）
+                for sp in meta.script_paths:
+                    collector.on_event(AgentEvent(
+                        timestamp=_time.time() * 1000,
+                        event_type=EventType.SKILL_SCRIPT_EXEC,
+                        data={
+                            "skill_name": meta.name,
+                            "script_path": sp,
+                            "success": True,
+                        },
+                    ))
+
         return (
             "## 技能系统（mandatory）\n\n"
             "如果有技能的描述与用户需求匹配：使用 `read_file` 工具读取其路径的 SKILL.md 文件，\n"
