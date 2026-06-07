@@ -93,18 +93,26 @@ python tests/test_phase7_acceptance.py
 
 ## 开发进度
 
-| Phase | 状态 | 说明 |
-|-------|------|------|
-| Phase 1 | ✅ 完成 | ReAct 循环、工具系统、流式输出、审批、调试追踪 |
-| Phase 2 | ✅ 完成 | 多供应商路由、OpenAICompatibleClient 基类、priority 降级、限流器 |
-| Phase 3 | ✅ 完成 | AgentContext、PromptBuilder、AgentResult、message_utils、AgentLogger |
-| Phase 4 | ✅ 完成 | SQLite FTS5 混合检索、LLM 日记忆摘要、Deep Dream 蒸馏、MemoryProvider |
-| Phase 5 | ✅ 完成 | 工具层架构重构：ToolHandler/Registry/Executor 三层分离、builtin/ 子包、去硬编码审批、ToolProvider ABC、日志合并（删除 debug/ 子包） |
-| Phase 6 | ✅ 完成 | MCP 协议集成：双传输（stdio+HTTP）+ McpClient 状态机 + 三个 Handler + MCPToolProvider + /mcp 命令 |
-| Phase 7 | ✅ 完成 | Skill 系统完善：扫描注册 + prompt 注入 + SkillsProvider + /skills 命令 |
-| Phase 8 | 🔜 待开始 | Scheduler cron 增强 |
-| Phase 9 | 🔜 待开始 | 取消机制（CancelTokenRegistry） |
-| Phase 10 | 🔜 待开始 | 测试覆盖率 + Web Channel |
+| Phase | 状态    | 说明 |
+|-------|-------|------|
+| Phase 1 | ✅ 完成  | ReAct 循环、工具系统、流式输出、审批、调试追踪 |
+| Phase 2 | ✅ 完成  | 多供应商路由、OpenAICompatibleClient 基类、priority 降级、限流器 |
+| Phase 3 | ✅ 完成  | AgentContext、PromptBuilder、AgentResult、message_utils、AgentLogger |
+| Phase 4 | ✅ 完成  | SQLite FTS5 混合检索、LLM 日记忆摘要、Deep Dream 蒸馏、MemoryProvider |
+| Phase 5 | ✅ 完成  | 工具层架构重构：ToolHandler/Registry/Executor 三层分离、builtin/ 子包、去硬编码审批、ToolProvider ABC、日志合并（删除 debug/ 子包） |
+| Phase 6 | ✅ 完成  | MCP 协议集成：双传输（stdio+HTTP）+ McpClient 状态机 + 三个 Handler + MCPToolProvider + /mcp 命令 |
+| Phase 7 | ✅ 完成  | Skill 系统完善：扫描注册 + prompt 注入 + SkillsProvider + /skills 命令 |
+| Phase 8 | 🔜 搁置 | Scheduler cron 增强 |
+| Phase 9 | 🔜 搁置 | 取消机制（CancelTokenRegistry） |
+| Phase 10 | 🔜 搁置 | 测试覆盖率 + Web Channel |
+
+## 后续开发计划（不分先后）
+| 模块       | 状态     | 说明                                               |
+|----------|--------|--------------------------------------------------|
+| 数据统计模块   | 🔜 进行中 | 记录框架的性能指标，量化后续优化策略的效果                            |
+| 多agent协作 | 🔜 待开发 | 记录框架的性能指标，量化后续优化策略的效果                            |
+
+## 碎碎念
 
 ## License
 
