@@ -20,6 +20,7 @@ from dotclaw.channel.cli import CLIChannel
 from dotclaw.memory.store import SessionManager
 from dotclaw.agent.loop import AgentLoop
 from dotclaw.llm.proxy import LLMProxy
+from dotclaw.metrics.collector import MetricsCollector  # P11
 
 
 def _print_banner():
@@ -246,6 +247,9 @@ async def _run_cli():
         SkillsProvider(),     # ← P7 激活
     ])
 
+    # ── P11：数据统计采集器 ──
+    metrics_collector = MetricsCollector()
+
     agent = AgentLoop(
         llm=llm_proxy,
         session=current_session,
@@ -257,6 +261,7 @@ async def _run_cli():
         logger=agent_logger,             # P3 新增（Phase 5 合并 DebugManager）
         memory_mgr=memory_mgr,           # P4 新增
         skill_registry=skill_registry,   # P7 新增
+        metrics_collector=metrics_collector,  # P11 新增
     )
 
     while True:

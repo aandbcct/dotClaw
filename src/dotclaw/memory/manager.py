@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from .storage import MemoryStorage, MemoryChunk, SearchResult
+from ..metrics.events import AgentEvent, EventType
 
 if TYPE_CHECKING:
     from .chunker import TextChunker
@@ -178,7 +179,6 @@ class MemoryManager:
             )
             # ── P11 指标埋点：记忆写入 ──
             if metrics_collector:
-                from ..metrics.events import AgentEvent, EventType
                 metrics_collector.on_event(AgentEvent(
                     timestamp=_time.time() * 1000,
                     event_type=EventType.MEMORY_WRITE,

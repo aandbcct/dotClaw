@@ -10,6 +10,7 @@ from .base import ToolExecutionContext, ToolResult
 from .handler import ToolHandler
 from .registry import ToolRegistry
 from .approval import ApprovalManager
+from ..metrics.events import AgentEvent, EventType
 
 logger = logging.getLogger("dotclaw.tools.executor")
 
@@ -79,7 +80,6 @@ class ToolExecutor:
             )
             # ── P11 指标埋点：工具调用结束（成功）──
             if metrics_collector:
-                from ..metrics.events import AgentEvent, EventType
                 exec_duration = (asyncio.get_event_loop().time() - exec_start) * 1000
                 metrics_collector.on_event(AgentEvent(
                     timestamp=asyncio.get_event_loop().time() * 1000,
@@ -97,7 +97,6 @@ class ToolExecutor:
             logger.warning(f"工具 {name} 执行超时（{timeout}s）")
             # ── P11 指标埋点：工具调用结束（超时）──
             if metrics_collector:
-                from ..metrics.events import AgentEvent, EventType
                 exec_duration = timeout * 1000
                 metrics_collector.on_event(AgentEvent(
                     timestamp=asyncio.get_event_loop().time() * 1000,
@@ -120,7 +119,6 @@ class ToolExecutor:
             logger.exception(f"工具 {name} 调度出错")
             # ── P11 指标埋点：工具调用结束（异常）──
             if metrics_collector:
-                from ..metrics.events import AgentEvent, EventType
                 exec_duration = (asyncio.get_event_loop().time() - exec_start) * 1000
                 metrics_collector.on_event(AgentEvent(
                     timestamp=asyncio.get_event_loop().time() * 1000,

@@ -8,9 +8,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
+from ...metrics.events import AgentEvent, EventType
 
 if TYPE_CHECKING:
     from ..context import AgentContext
@@ -111,44 +114,42 @@ class SkillsProvider(DataProvider):
         if not descriptions:
             return None
 
-        # ── P11 指标埋点：Skill 触发 ──
+        # ── P11 指标埋点：Skill 注入 prompt ──
         collector = context.metrics_collector
         if collector:
-            import time as _time
-            import json as _json
-            from ...metrics.events import AgentEvent, EventType
-
             all_metas = registry.list_all()
             for meta in all_metas:
+                # NOTE: SKILL_TRIGGER 在此处表示 Skill 被注入到 system prompt 中（非实际触发执行）
                 collector.on_event(AgentEvent(
-                    timestamp=_time.time() * 1000,
+                    timestamp=time.time() * 1000,
                     event_type=EventType.SKILL_TRIGGER,
                     data={
                         "skill_name": meta.name,
                         "trigger_source": "system_prompt",
                         "description_len": len(meta.description),
+                        "scope": "injected_to_prompt",
                     },
                 ))
 
-                # body_loaded: estimate token overhead
+                # body_loaded: 估算 token 开销
                 token_estimate = len(meta.description) + sum(
                     len(str(rp)) for rp in meta.reference_paths
                 )
                 collector.on_event(AgentEvent(
-                    timestamp=_time.time() * 1000,
+                    timestamp=time.time() * 1000,
                     event_type=EventType.SKILL_BODY_LOADED,
                     data={
                         "skill_name": meta.name,
                         "token_count": token_estimate,
-                        "duration_ms": 0.0,  # description injection is instantaneous
-                        "cached": False,
+                        "duration_ms": 0.0,       # description injection is instantaneous
+                        "cached": False,            # NOTE: always False during prompt injection, no real cache in this path
                     },
                 ))
 
-                # P11: script_exec — 记录 Skill 可用脚本（实际执行发生在工具层）
+                # script_exec: 记录 Skill 可用脚本（实际执行发生在工具层）
                 for sp in meta.script_paths:
                     collector.on_event(AgentEvent(
-                        timestamp=_time.time() * 1000,
+                        timestamp=time.time() * 1000,
                         event_type=EventType.SKILL_SCRIPT_EXEC,
                         data={
                             "skill_name": meta.name,

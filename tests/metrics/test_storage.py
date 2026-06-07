@@ -360,13 +360,15 @@ class TestDiffSnapshots:
         lines = diff_snapshots(baseline, candidate)
 
         for line in lines:
-            # Should contain field_name: old -> new (pct%) marker
-            assert " -> " in line, f"Missing arrow: {line}"
-            assert "%" in line, f"Missing percentage: {line}"
-            assert "✅" in line or "❌" in line, f"Missing marker: {line}"
+            # " -> " for percentage changes, "N/A →" for new-from-zero
+            has_change = " -> " in line and "%" in line
+            has_new = "N/A →" in line
+            assert has_change or has_new, f"Unexpected format: {line}"
+            if has_change:
+                assert "✅" in line or "❌" in line, f"Missing marker: {line}"
 
-    def test_baseline_zero_ignored(self):
-        """Fields where baseline is 0 should not appear in diff."""
+    def test_baseline_zero_shows_new(self):
+        """Fields where baseline is 0 should output 'N/A → val (new)' instead of being skipped."""
         baseline = AgentRunSnapshot(
             run_id="zero",
             react=ReactLoopMetrics(total_loops=0),
@@ -384,8 +386,9 @@ class TestDiffSnapshots:
             general=AgentGeneralMetrics(),
         )
         lines = diff_snapshots(baseline, candidate)
-        # Baseline is 0 for total_loops and overall_success_rate, so they should be skipped
-        assert len(lines) == 0
+        # Both fields went from 0 to non-zero, so they should appear as "new"
+        assert any("N/A →" in l for l in lines)
+        assert len(lines) >= 1
 
 
 class TestIsImprovement:
@@ -413,6 +416,19 @@ class TestIsImprovement:
     def test_small_change_not_improvement(self):
         assert _is_improvement("overall_success_rate", 1.5) is False
         assert _is_improvement("avg_loop_duration_ms", -1.5) is False
+
+    def test_empty_action_rate_up_is_regression(self):
+        """empty_action_rate higher = worse, should be regression despite 'rate' keyword."""
+        assert _is_improvement("react.empty_action_rate", 100.0) is False
+
+    def test_empty_action_rate_down_is_improvement(self):
+        assert _is_improvement("react.empty_action_rate", -50.0) is True
+
+    def test_redundant_action_rate_up_is_regression(self):
+        assert _is_improvement("react.redundant_action_rate", 200.0) is False
+
+    def test_retry_rate_up_is_regression(self):
+        assert _is_improvement("tools.retry_rate", 150.0) is False
 
 
 class TestRunMetaBuilder:

@@ -77,3 +77,21 @@
   - `src/dotclaw/llm/proxy.py` — LLM 埋点 + TTFT/TPS 计时
   - `src/dotclaw/tools/executor.py` — 工具调用埋点
   - `src/dotclaw/memory/manager.py` — 记忆写入埋点
+
+### 20:04 — 内联 import 清理
+- 将所有业务文件中的 inline `from ...metrics import` 提升到文件顶部
+- 涉及 5 个文件：loop.py、providers.py、proxy.py、executor.py、manager.py
+
+### 20:29 — Code Review 修复（CRITICAL + 5 WARNING + 5 INFO）
+- [CRITICAL] loop.py 补全 RunMeta/_get_git_commit/_build_config_hash imports
+- [W1] proxy.py token 估算注释升级
+- [W2] providers.py Skill 埋点注释和 scope 字段标注
+- [W3] collector.py finalize() 暴露 task_count 参数
+- [W4] storage.py baseline=0 输出 "N/A → val (new)"
+- [W5] storage.py _flatten_snapshot docstring 修复
+- [I1] storage.py _is_improvement() 新增显式字段列表修复误判
+- [I2] builder.py avg_skill_duration_ms 注释明确
+- [I3] builder.py 变量重命名 (_tool_success_count → _total, _tool_success_counts → _by_name)
+- [I4] builder.py 预留字段添加 # reserved 注释
+- [I7] providers.py 内联 import 提升到顶部
+- 新增 4 个测试（I1 显式字段验证），全量 87 tests passed

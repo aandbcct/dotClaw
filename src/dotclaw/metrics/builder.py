@@ -65,11 +65,11 @@ class SnapshotBuilder:
         # ── 工具中间状态 ──
         self._total_tool_calls = 0
         self._tool_call_counts: dict[str, int] = {}
-        self._tool_success_counts: dict[str, int] = {}
+        self._tool_success_by_name: dict[str, int] = {}
         self._tool_error_counts: dict[str, int] = {}
         self._tool_error_types: dict[str, int] = {}
         self._tool_durations_by_tool: dict[str, list[float]] = {}
-        self._tool_success_count = 0  # total successful tool calls
+        self._tool_success_total = 0  # total successful tool calls
         self._retry_count = 0
         self._current_loop_tools: set[str] = set()
 
@@ -157,8 +157,8 @@ class SnapshotBuilder:
 
             # success/failure
             if data.get("success", False):
-                self._tool_success_count += 1
-                self._tool_success_counts[tool_name] = self._tool_success_counts.get(tool_name, 0) + 1
+                self._tool_success_total += 1
+                self._tool_success_by_name[tool_name] = self._tool_success_by_name.get(tool_name, 0) + 1
             else:
                 self._tool_error_counts[tool_name] = self._tool_error_counts.get(tool_name, 0) + 1
                 error_type = data.get("error_type", "unknown")
@@ -296,12 +296,12 @@ class SnapshotBuilder:
         )
 
     def _build_tools(self) -> ToolCallMetrics:
-        success_rate = _safe_div(self._tool_success_count, self._total_tool_calls)
+        success_rate = _safe_div(self._tool_success_total, self._total_tool_calls)
         retry_rate = _safe_div(self._retry_count, self._total_tool_calls)
 
         success_by_tool: dict[str, float] = {}
         for name, count in self._tool_call_counts.items():
-            s = self._tool_success_counts.get(name, 0)
+            s = self._tool_success_by_name.get(name, 0)
             success_by_tool[name] = round(_safe_div(s, count), 4)
 
         avg_by_tool: dict[str, float] = {}
@@ -331,7 +331,7 @@ class SnapshotBuilder:
         script_rate = _safe_div(self._skill_script_success, self._skill_script_count)
         avg_token_overhead = _safe_div(sum(self._skill_token_overhead), self._skill_triggers)
 
-        # avg_skill_duration_ms: average of body load durations (scripts are usually separate)
+        # avg_skill_duration_ms: body load duration only (scripts measured separately via skill.script_exec)
         skill_dur = _safe_div(sum(self._skill_body_load_ms), len(self._skill_body_load_ms))
 
         return SkillMetrics(
@@ -357,13 +357,13 @@ class SnapshotBuilder:
             hit_rate=round(hit_rate, 4),
             avg_retrieval_ms=round(_safe_div(sum(self._retrieval_durations), total_retrievals), 1),
             p95_retrieval_ms=round(_p95(self._retrieval_durations), 1),
-            index_size=0,
-            index_size_mb=0.0,
+            index_size=0,                        # reserved: will be populated after memory refactor
+            index_size_mb=0.0,                   # reserved
             total_writes=self._total_writes,
             writes_by_type=dict(self._writes_by_type),
             write_failures=self._write_failures,
-            avg_memory_tokens_per_request=0.0,
-            memory_token_ratio=0.0,
+            avg_memory_tokens_per_request=0.0,   # reserved
+            memory_token_ratio=0.0,              # reserved
         )
 
     def _build_general(self, task_count: int) -> AgentGeneralMetrics:
@@ -385,12 +385,12 @@ class SnapshotBuilder:
             total_input_tokens=total_in,
             total_output_tokens=total_out,
             avg_tokens_per_task=round(avg_tokens, 1),
-            cost_usd=0.0,
+            cost_usd=0.0,                        # reserved: no pricing config yet
             cost_by_model=cost_by_model,
             avg_ttft_ms=round(avg_ttft, 1),
             avg_tps=round(avg_tps, 1),
             avg_e2e_latency_ms=round(avg_e2e, 1),
             p95_e2e_latency_ms=round(_p95(self._e2e_durations), 1),
             avg_context_length=avg_ctx,
-            context_overflow_count=0,
+            context_overflow_count=0,            # reserved
         )

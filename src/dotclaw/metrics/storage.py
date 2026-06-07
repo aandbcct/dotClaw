@@ -180,13 +180,23 @@ def build_run_meta(
 def _is_improvement(field_name: str, pct: float) -> bool:
     """判断指标变化是改善还是退化。
 
-    成功率类指标上升是改善，耗时/成本类指标下降是改善。
+    优先匹配显式字段名（避免 rate 子串误判 empty_action_rate 等），
+    其次通过关键词启发式判断。
     """
+    # 显式字段：含 rate 但实际越低越好
+    _LOWER_IS_BETTER_EXPLICIT = {
+        "empty_action_rate", "redundant_action_rate", "retry_rate",
+        "write_failures", "context_overflow_count",
+    }
+    fname = field_name.lower()
+    for suffix in _LOWER_IS_BETTER_EXPLICIT:
+        if suffix in fname:
+            return pct < -2.0
+
     higher_is_better = {"rate", "accuracy", "precision", "recall", "hit_rate", "success"}
     lower_is_better = {"duration", "latency", "ms", "tokens", "cost", "loops", "errors",
                        "usd", "overhead", "overflow", "failures", "tps", "ttft"}
 
-    fname = field_name.lower()
     if any(k in fname for k in higher_is_better):
         return pct > 2.0
     if any(k in fname for k in lower_is_better):
@@ -197,7 +207,8 @@ def _is_improvement(field_name: str, pct: float) -> bool:
 def _flatten_snapshot(snapshot: AgentRunSnapshot) -> dict[str, float | int]:
     """将快照展平为扁平标量字典（仅数值类型）。
 
-    递归展开 subsections，用 "." 连接路径。
+    展开 react/tools/skills/memory/general 五个 section 下的直接标量字段，
+    用 "." 连接路径。dict 嵌套值（如 calls_by_tool）不展开。
     """
     result: dict[str, float | int] = {}
     d = dataclasses.asdict(snapshot)
@@ -242,7 +253,9 @@ def diff_snapshots(
         cand_val = candidate_flat.get(key, 0)
 
         if base_val == 0:
-            # baseline is 0, can't compute percentage
+            # baseline is 0 — report new appearances
+            if cand_val != 0:
+                lines.append(f"{key}: N/A → {cand_val} (new)")
             continue
 
         pct = (cand_val - base_val) / base_val * 100

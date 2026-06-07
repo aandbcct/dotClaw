@@ -11,6 +11,9 @@ from ..llm.base import Message
 from .result import AgentResult
 from .message_utils import validate as msg_validate, trim as msg_trim, clean as msg_clean
 from .logger import AgentLogger
+from ..metrics.events import AgentEvent, EventType
+from ..metrics.snapshot import RunMeta  # P11
+from ..metrics.storage import _get_git_commit, _build_config_hash  # P11
 
 if TYPE_CHECKING:
     from ..llm.proxy import LLMProxy
@@ -93,7 +96,6 @@ class AgentLoop:
 
         # ── P11 指标埋点：会话开始 ──
         if collector:
-            from ..metrics.events import AgentEvent, EventType
             collector.on_event(AgentEvent(
                 timestamp=start_time * 1000,
                 event_type=EventType.SESSION_START,
@@ -130,7 +132,6 @@ class AgentLoop:
 
                 # ── P11 指标埋点：ReAct 循环开始 ──
                 if collector:
-                    from ..metrics.events import AgentEvent, EventType
                     collector.on_event(AgentEvent(
                         timestamp=loop_start_ts * 1000,
                         event_type=EventType.REACT_LOOP_START,
@@ -297,6 +298,8 @@ class AgentLoop:
                         "total_duration_ms": trace.duration_ms,
                     },
                 ))
+                # ── P11 自动保存快照 ──
+                _emit_snapshot(collector, channel=self.channel)
 
             if self._logger:
                 self._logger.record(trace)
@@ -330,6 +333,8 @@ class AgentLoop:
                         "error": error_msg,
                     },
                 ))
+                # ── P11 自动保存快照 ──
+                _emit_snapshot(collector, channel=self.channel)
 
             return AgentResult(
                 final_text="",
@@ -362,7 +367,6 @@ class AgentLoop:
                 # ── P11 指标埋点：记忆检索 ──
                 retrieval_duration = (time.time() - retrieval_start) * 1000
                 if self._metrics_collector:
-                    from ..metrics.events import AgentEvent, EventType
                     self._metrics_collector.on_event(AgentEvent(
                         timestamp=time.time() * 1000,
                         event_type=EventType.MEMORY_RETRIEVAL,
@@ -451,3 +455,31 @@ class AgentLoop:
             channel.print_info(trace.format_summary())
         else:
             channel.print_info("(no trace yet)")
+
+
+def _emit_snapshot(collector: "Any", channel: "Any | None" = None) -> None:
+    """会话结束时自动计算快照并保存到 data/snapshots/。
+
+    保存成功后通过 channel 输出提示信息。
+    """
+    try:
+        from datetime import datetime, timezone
+
+        ts = datetime.now(timezone.utc)
+        run_id = f"run_{ts.strftime('%Y%m%d_%H%M%S')}"
+
+        meta = RunMeta(
+            run_id=run_id,
+            timestamp=ts.isoformat(),
+            git_commit=_get_git_commit(),
+            config_hash=_build_config_hash(
+                config_path="config.yaml", router_config_path="model_router_config.yaml",
+            ),
+            test_dataset="interactive",
+            test_dataset_size=1,
+        )
+        filepath = collector.finalize(meta)
+        if filepath and channel:
+            channel.print_info(f"[metrics] 快照已保存: {filepath}")
+    except Exception:
+        pass  # 快照保存失败不影响主流程

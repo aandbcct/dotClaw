@@ -8,6 +8,7 @@ import time
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .base import ChatChunk, LLMClient, Message, ToolDefinition
+from ..metrics.events import AgentEvent, EventType
 
 if TYPE_CHECKING:
     from .model_router import ModelRouter
@@ -93,13 +94,12 @@ class LLMProxy:
         output_token_count = 0
 
         if metrics_collector:
-            from ..metrics.events import AgentEvent, EventType
             metrics_collector.on_event(AgentEvent(
                 timestamp=request_start_ts,
                 event_type=EventType.LLM_REQUEST_START,
                 data={
                     "model": resolved_model,
-                    "input_tokens": sum(len(m.content) for m in messages if m.content),  # char count as rough tokens
+                    "input_tokens": sum(len(m.content) for m in messages if m.content),  # NOTE: char count, NOT real tokens (Chinese ~2-4 tokens/char)
                     "client_start_ts": request_start_ts,
                 },
             ))
@@ -124,7 +124,6 @@ class LLMProxy:
             # ── P11 指标埋点：LLM 请求结束 ──
             if metrics_collector:
                 end_ts = time.perf_counter() * 1000
-                from ..metrics.events import AgentEvent, EventType
 
                 ttft_ms = (first_chunk_ts - request_start_ts) if first_chunk_ts else 0.0
                 total_duration = end_ts - request_start_ts
