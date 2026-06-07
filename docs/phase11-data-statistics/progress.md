@@ -43,6 +43,14 @@
 - `index_size` / `index_size_mb`：记忆系统重构前暂不采集，返回 0 / 0.0 占位
 - findings.md F6 全部标记为已确认
 
+### 18:06 — 计划大幅精简
+- 从 8 个 Phase 砍到 6 个
+- 砍掉 Phase 6（CLI bench 命令 + 测试数据集管理）——当前无测试数据，不需要 batch benchmark
+- 旧 Phase 4（对比引擎） + 旧 Phase 5（序列化）→ 新 Phase 4（存储与对比）
+- 对比逻辑从 ComparisonReport dataclass + flat_mapping → 简化为 `diff_snapshots()` 工具函数
+- 旧 Phase 7 测试 → 新 Phase 5
+- 模块文件减少：comparator.py 不再独立（对比逻辑放 storage.py），test_comparator.py 合并到 test_storage.py
+
 ---
 
 ## 当前状态
@@ -52,8 +60,6 @@
 | Phase 0 | pending | 模块骨架与核心数据类型 |
 | Phase 1 | pending | 事件采集器 |
 | Phase 2 | pending | 快照构建器 |
-| Phase 3 | pending | 业务代码接入 |
-| Phase 4 | pending | 对比引擎 |
-| Phase 5 | pending | 序列化与存储 |
-| Phase 6 | pending | CLI 集成 |
-| Phase 7 | pending | 全面测试与验收 |
+| Phase 3 | pending | 业务代码接入（14 种事件埋点） |
+| Phase 4 | pending | 存储与对比（JSON 序列化 + 简单 diff） |
+| Phase 5 | pending | 测试与验收 |
