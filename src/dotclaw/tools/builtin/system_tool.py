@@ -40,7 +40,7 @@ async def get_time() -> str:
 def get_system_info_handler() -> BuiltinToolHandler:
     return BuiltinToolHandler(
         name="system_info",
-        description="获取系统基本信息",
+        description="获取系统基本信息，当用户提到系统信息详细内容，你需要根据系统信息回复时调用",
         parameters={"type": "object", "properties": {}, "required": []},
         handler_fn=system_info,
         needs_approval=False,
@@ -51,7 +51,7 @@ def get_system_info_handler() -> BuiltinToolHandler:
 def get_time_handler() -> BuiltinToolHandler:
     return BuiltinToolHandler(
         name="get_time",
-        description="获取当前日期和时间",
+        description="获取当前日期和时间,当用户问到任何与当前时间相关的内容时，先调用该tool获取当前时间",
         parameters={"type": "object", "properties": {}, "required": []},
         handler_fn=get_time,
         needs_approval=False,

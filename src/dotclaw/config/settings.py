@@ -163,6 +163,7 @@ class MemoryConfig:
     vector_weight: float = 0.7
     keyword_weight: float = 0.3
     sync_on_search: bool = True
+    # [已废弃] flush 改为每轮触发，不再使用阈值和消息数限制
     flush_threshold: int = 20
     flush_max_messages: int = 10
     dream_enabled: bool = True

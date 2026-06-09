@@ -272,15 +272,14 @@ class AgentLoop:
             ))
             await self.session_mgr.save(self.session)
 
-            # P4：flush 触发（仅在正常完成时）
-            if self._memory_mgr and len(self.session.messages) > self.config.memory.flush_threshold:
-                import asyncio
-                asyncio.create_task(
-                    self._memory_mgr.flush_memory(
-                        messages=self.session.messages[-self.config.memory.flush_max_messages:],
-                        reason="threshold",
-                        metrics_collector=self._metrics_collector,
-                    )
+            # P4：flush 触发（每轮完成后同步写入当前轮次的消息）
+            if self._memory_mgr:
+                # 本轮对话的 user + assistant 消息（最后两条）
+                current_round = self.session.messages[-2:]
+                await self._memory_mgr.flush_memory(
+                    messages=current_round,
+                    reason="round_end",
+                    metrics_collector=self._metrics_collector,
                 )
 
             trace.final_response = final_response
