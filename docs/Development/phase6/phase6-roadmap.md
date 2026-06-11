@@ -3,7 +3,7 @@
 > 创建时间：2026-06-03
 > 状态：已完成 ✅（2026-06-03）
 > 依赖：Phase 1-5 已完成
-> 变更日志：[docs/phase6/phase6-record.md](./phase6-record.md)
+> 变更日志：[docs/phase6/phase6-record.md](phase6-record.md)
 > 协议版本：MCP 2025-03（最新规范，Streamable HTTP 传输）
 
 ---

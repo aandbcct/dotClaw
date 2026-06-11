@@ -575,7 +575,7 @@ P5:  tools/base.py                    — ToolDefinition（+source/needs_approva
 
 ### Phase 6：MCP 协议集成（已完成 ✅）
 
-> 详细开发文档：[docs/phase6/phase6-roadmap.md](./phase6/phase6-roadmap.md) | 变更日志：[docs/phase6/phase6-record.md](./phase6/phase6-record.md)
+> 详细开发文档：[docs/phase6/phase6-roadmap.md](phase6hase6-roadmap.md) | 变更日志：[docs/phase6/phase6-record.md](phase6hase6-record.md)
 
 **总体内容描述**
 
@@ -686,7 +686,7 @@ P6:  mcp/client.py                  — McpClient（双传输封装 + 状态机 
 
 ### Phase 7：Skill 系统完善（已完成 ✅）
 
-> 详细开发文档：[docs/phase7/phase7-roadmap.md](./phase7/phase7-roadmap.md) | 变更日志：[docs/phase7/phase7-record.md](./phase7/phase7-record.md)
+> 详细开发文档：[docs/phase7/phase7-roadmap.md](phase7hase7-roadmap.md) | 变更日志：[docs/phase7/phase7-record.md](phase7hase7-record.md)
 
 **总体内容描述**
 

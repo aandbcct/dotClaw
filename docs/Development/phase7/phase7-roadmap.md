@@ -3,9 +3,9 @@
 > 创建时间：2026-06-05
 > 状态：已完成 ✅（2026-06-05）
 > 依赖：Phase 1-6 已完成
-> 变更日志：[docs/phase7/phase7-record.md](./phase7-record.md)
-> 数据结构设计：[docs/phase7/skill-dataclass-design.md](./skill-dataclass-design.md)
-> 审计报告：[docs/phase7/phase7-roadmap-review.md](./phase7-roadmap-review.md)
+> 变更日志：[docs/phase7/phase7-record.md](phase7-record.md)
+> 数据结构设计：[docs/phase7/skill-dataclass-design.md](skill-dataclass-design.md)
+> 审计报告：[docs/phase7/phase7-roadmap-review.md](phase7-roadmap-review.md)
 > 协议版本：dotClaw Skill 规范 v1.0
 
 ---
