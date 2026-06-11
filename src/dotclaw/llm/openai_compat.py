@@ -178,7 +178,11 @@ class OpenAICompatibleClient(LLMClient):
                         ),
                     )
 
-            yield ChatChunk(content="", is_final=True)
+            yield ChatChunk(
+                content="",
+                is_final=True,
+                finish_reason=chunk.choices[0].finish_reason,
+            )
             self._reset_stream_state()
         else:
             if content:

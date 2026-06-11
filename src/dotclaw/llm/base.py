@@ -39,6 +39,7 @@ class ChatChunk:
     content: str = ""
     tool_call: ToolCall | None = None
     is_final: bool = False  # 是否是最后一个 chunk
+    finish_reason: str | None = None  # P13: "stop" / "tool_calls" / "length"
 
 
 class LLMClient(ABC):

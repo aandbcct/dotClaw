@@ -250,6 +250,10 @@ async def _run_cli():
     # ── P11：数据统计采集器 ──
     metrics_collector = MetricsCollector()
 
+    # ── P13：会话跟踪器 ──
+    from dotclaw.agent.tracer import AgentTracer
+    tracer = AgentTracer(config.debug, data_root=str(project_root))
+
     agent = AgentLoop(
         llm=llm_proxy,
         session=current_session,
@@ -262,6 +266,7 @@ async def _run_cli():
         memory_mgr=memory_mgr,           # P4 新增
         skill_registry=skill_registry,   # P7 新增
         metrics_collector=metrics_collector,  # P11 新增
+        tracer=tracer,                   # P13 新增
     )
 
     while True:

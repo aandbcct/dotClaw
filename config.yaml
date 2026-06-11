@@ -86,3 +86,4 @@ scheduler:
 debug:
   level: INFO
   log_file: ./data/dotclaw.log
+  enable_tracer: true

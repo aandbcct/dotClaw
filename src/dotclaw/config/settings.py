@@ -194,6 +194,7 @@ class SchedulerConfig:
 class DebugConfig:
     level: str = "INFO"
     log_file: str = "./data/dotclaw.log"
+    enable_tracer: bool = True   # P13: 是否开启会话跟踪
 
 
 @dataclass
@@ -526,6 +527,7 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
     debug = DebugConfig(
         level=debug_raw.get("level", "INFO"),
         log_file=debug_raw.get("log_file", "./data/dotclaw.log"),
+        enable_tracer=debug_raw.get("enable_tracer", False),
     )
 
     return Config(

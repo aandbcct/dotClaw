@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from .prompt.builder import PromptBuilder
     from ..memory.manager import MemoryManager
     from ..skills.registry import SkillRegistry  # P7 新增
+    from .tracer import AgentTracer  # P13 新增
 
 
 def _find_project_root() -> Path:
@@ -56,6 +57,7 @@ class AgentLoop:
         memory_mgr: "MemoryManager | None" = None,
         skill_registry: "SkillRegistry | None" = None,  # P7 新增
         metrics_collector: "Any | None" = None,  # P11 新增
+        tracer: "AgentTracer | None" = None,  # P13 新增
     ):
         self.llm = llm
         self.session = session
@@ -69,6 +71,7 @@ class AgentLoop:
         self._memory_mgr = memory_mgr
         self._skill_registry = skill_registry  # P7 新增
         self._metrics_collector = metrics_collector  # P11 新增
+        self._tracer = tracer  # P13 新增
 
         # Phase 5: _logger 直接管理 trace（合并 DebugManager 能力）
         self._logger = logger or AgentLogger(
@@ -93,6 +96,13 @@ class AgentLoop:
         # 构建上下文（P4：异步语义检索）
         context = await self._build_context(user_message)
         collector = context.metrics_collector
+
+        # ── P13 会话跟踪：开始 ──
+        if self._tracer:
+            self._tracer.start_session(
+                req_id=context.request_id,
+                user_message=user_message,
+            )
 
         # ── P11 指标埋点：会话开始 ──
         if collector:
@@ -120,6 +130,17 @@ class AgentLoop:
             messages = self._build_messages(user_message, context)
             trace.messages_sent.append([m.__dict__ for m in messages])
 
+            # ── P13 会话跟踪：prompt 构造完毕 ──
+            if self._tracer:
+                est_tokens = sum(
+                    len(m.content or "") for m in messages
+                )  # 粗略估算：字符数
+                self._tracer.prompt_built(
+                    messages=messages,
+                    msg_count=len(messages),
+                    est_tokens=est_tokens,
+                )
+
             final_response = ""
             max_iterations = 10
 
@@ -127,8 +148,16 @@ class AgentLoop:
                 iterations = i + 1
                 tool_calls_pending = []
                 current_content = ""
+                first_chunk = True       # P13: 标记第一个 chunk
+                loop_finish_reason = "stop"  # P13
+                sid_call = ""            # P13
+                sid_resp = ""            # P13
 
                 loop_start_ts = time.time()
+
+                # ── P13 会话跟踪：每轮循环开始 ──
+                if self._tracer:
+                    self._tracer.start_loop(round_num=i)
 
                 # ── P11 指标埋点：ReAct 循环开始 ──
                 if collector:
@@ -138,6 +167,13 @@ class AgentLoop:
                         data={"loop_index": i},
                     ))
 
+                # ── P13 会话跟踪：LLM 调用开始 ──
+                sid_call = ""
+                sid_resp = ""
+                resp_start = 0.0
+                if self._tracer:
+                    sid_call = self._tracer.llm_call_start(model=context.model)
+
                 async for chunk in self.llm.chat(
                     messages=messages,
                     tools=context.tool_definitions if context.tool_definitions else None,
@@ -146,6 +182,14 @@ class AgentLoop:
                     stream=self.config.llm.stream,
                     metrics_collector=collector,
                 ):
+                    # ── P13：第一个 chunk → llm_call 成功，llm_response 开始 ──
+                    if first_chunk and self._tracer:
+                        call_dur = (time.time() - loop_start_ts) * 1000
+                        self._tracer.llm_call_done(sid_call, success=True, duration_ms=call_dur)
+                        sid_resp = self._tracer.llm_response_start()
+                        resp_start = time.time()
+                        first_chunk = False
+
                     if chunk.content:
                         current_content += chunk.content
                         await self.channel.stream(chunk.content)
@@ -154,7 +198,18 @@ class AgentLoop:
                         tool_calls_pending.append(chunk.tool_call)
 
                     if chunk.is_final:
+                        loop_finish_reason = chunk.finish_reason or "stop"
                         break
+
+                # ── P13：LLM 流式回复完成 ──
+                if sid_resp and self._tracer:
+                    resp_dur = (time.time() - resp_start) * 1000 if resp_start else 0
+                    self._tracer.llm_response_done(
+                        sid_resp,
+                        success=True,
+                        finish_reason=loop_finish_reason,
+                        duration_ms=resp_dur,
+                    )
 
                 if not tool_calls_pending:
                     final_response = current_content
@@ -182,6 +237,9 @@ class AgentLoop:
                                 "duration_ms": round(loop_duration, 1),
                             },
                         ))
+                    # ── P13：本轮结束（无工具调用）──
+                    if self._tracer:
+                        self._tracer.end_loop()
                     break
 
                 trace.tool_calls.append([tc.__dict__ for tc in tool_calls_pending])
@@ -208,6 +266,15 @@ class AgentLoop:
                     if self._tool_executor:
                         self.channel.print_info(f"\n🔧 调用工具: {tc.name}({json.dumps(args, ensure_ascii=False)})")
 
+                        # ── P13 会话跟踪：工具执行开始 ──
+                        sid_tool = ""
+                        tool_start = time.time()
+                        if self._tracer:
+                            sid_tool = self._tracer.tool_exec_start(
+                                tool_name=tc.name,
+                                args=args,
+                            )
+
                         # ── P11 指标埋点：工具调用开始 ──
                         if collector:
                             collector.on_event(AgentEvent(
@@ -222,6 +289,17 @@ class AgentLoop:
                             channel=self.channel,
                             metrics_collector=collector,
                         )
+
+                        # ── P13：工具执行完成 ──
+                        if sid_tool and self._tracer:
+                            tool_dur = (time.time() - tool_start) * 1000
+                            self._tracer.tool_exec_done(
+                                sid_tool,
+                                success=True,
+                                tool_name=tc.name,
+                                result=result.output[:500],
+                                duration_ms=tool_dur,
+                            )
                         trace.tool_results.append({
                             "tool": tc.name,
                             "result": result.output,
@@ -258,6 +336,9 @@ class AgentLoop:
                             "tool_calls_count": len(tool_calls_pending),
                         },
                     ))
+                # ── P13：本轮结束（含工具调用）──
+                if self._tracer:
+                    self._tracer.end_loop()
 
             # 保存会话历史
             from ..memory.store import SessionMessage
@@ -303,6 +384,14 @@ class AgentLoop:
             if self._logger:
                 self._logger.record(trace)
 
+            # ── P13：会话结束（成功）──
+            if self._tracer:
+                self._tracer.end_session(success=True, final_response=final_response)
+                try:
+                    self._tracer.build_report()
+                except Exception:
+                    pass  # report 构建失败不影响会话结果
+
             return AgentResult(
                 final_text=final_response,
                 tool_calls_count=tool_calls_total,
@@ -318,6 +407,14 @@ class AgentLoop:
 
             trace.final_response = f"ERROR: {error_msg}"
             trace.duration_ms = int((time.time() - start_time) * 1000)
+
+            # ── P13：会话结束（失败）──
+            if self._tracer:
+                self._tracer.end_session(success=False, error=error_msg)
+                try:
+                    self._tracer.build_report()
+                except Exception:
+                    pass
 
             # ── P11 指标埋点：会话结束（失败）──
             if collector:
