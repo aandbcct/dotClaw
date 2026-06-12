@@ -4,12 +4,11 @@
 """
 
 from dotclaw.journal.events import AgentEvent, EventType
-from dotclaw.journal.journal import Journal, JournalConfig
+from dotclaw.journal.journal import Journal
 from dotclaw.journal.storage import diff_snapshots, load_snapshot, save_snapshot
 
 __all__ = [
     "Journal",
-    "JournalConfig",
     "AgentEvent",
     "EventType",
     "save_snapshot",

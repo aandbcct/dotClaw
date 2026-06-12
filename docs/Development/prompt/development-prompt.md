@@ -17,7 +17,7 @@
 @skill:Code Reviewcode-review-prompt.mdphase5-record.md  目前phase5阶段开发已完成，根据要求，完成phase5阶段的code review，review结果写到phase5-codeReview.md中
 
 ## 代码审计文档给出，开发人员根据审计文档fix
-@skill:Code Simplifier@skill:Ralph Loops 代码审查员完成了代码审查，根据审查报告 phase6-codeReview.md  ，修复warming和minor。并更新变更日志 phase6-record.md ，并将修复情况记入phase6-codeReview.md 审查总览下面
+@skill:Code Simplifier@skill:Ralph Loops 代码审查员完成了代码审查，根据审查报告 phase6-codeReview.md ，修复Critical、warming、minor。并更新变更日志 phase6-record.md 先和我讨论每个漏洞该怎么修复，进行任务拆分后保证每个漏洞都有确切的修复策略，再进行修复。修复完成后将修复情况记入phase6-codeReview.md 审查总览下面
 
 ## 开发完成更新开发文档与开发路线完成情况
 根据项目中phase5实际开发实现情况，结合phase5-record.md，更新phase5-roadmap.md，更新 architecture-and-roadmap.md 中目标架构、当前实现状态、开发路线phase5部分内容，并在phase5部分后面附上架构变化，开发路线图部分不要修改其他阶段的内容，如果有本阶段设定的需要在后续阶段进行声明的内容，可以在后续phase的开发路线中补充。不要修改与 CowAgent 的对比分析、dotClaw 可借鉴的设计、不需要借鉴的部分。并同步更新README.md

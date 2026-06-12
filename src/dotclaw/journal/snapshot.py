@@ -178,16 +178,12 @@ class SnapshotBuilder:
                 self._retry_count += 1
             self._current_loop_tools.add(tool_name)
 
-        elif etype == EventType.SKILL_TRIGGER:
+        elif etype == EventType.SKILL_BODY_LOADED:
+            # skill body 加载 = skill 被激活（一事件二义，合并计数）
             self._skill_triggers += 1
+            self._skill_body_total += 1
             skill_name = data.get("skill_name", "unknown")
             self._skill_triggers_by_name[skill_name] = self._skill_triggers_by_name.get(skill_name, 0) + 1
-
-        elif etype == EventType.SKILL_BODY_LOADED:
-            self._skill_body_total += 1
-            dur = data.get("duration_ms", 0.0)
-            if dur > 0:
-                self._skill_body_load_ms.append(dur)
             if data.get("cached", False):
                 self._skill_body_cache_hits += 1
             token_count = data.get("token_count", 0)
@@ -329,24 +325,20 @@ class SnapshotBuilder:
 
     def _build_skills(self, task_count: int) -> SkillMetrics:
         trigger_rate = _safe_div(self._skill_triggers, task_count)
-        avg_load = _safe_div(sum(self._skill_body_load_ms), self._skill_body_total)
         cache_rate = _safe_div(self._skill_body_cache_hits, self._skill_body_total)
         avg_scripts = _safe_div(self._skill_script_count, self._skill_triggers)
         script_rate = _safe_div(self._skill_script_success, self._skill_script_count)
         avg_token_overhead = _safe_div(sum(self._skill_token_overhead), self._skill_triggers)
 
-        # avg_skill_duration_ms: body load duration only (scripts measured separately via skill.script_exec)
-        skill_dur = _safe_div(sum(self._skill_body_load_ms), len(self._skill_body_load_ms))
-
         return SkillMetrics(
             total_triggers=self._skill_triggers,
             triggers_by_skill=dict(self._skill_triggers_by_name),
             trigger_rate=round(trigger_rate, 4),
-            avg_body_load_ms=round(avg_load, 1),
+            avg_body_load_ms=0.0,    # body 注入在 prompt 阶段，无实际耗时
             body_cache_hit_rate=round(cache_rate, 4),
             avg_scripts_per_trigger=round(avg_scripts, 2),
             script_success_rate=round(script_rate, 4),
-            avg_skill_duration_ms=round(skill_dur, 1),
+            avg_skill_duration_ms=0.0,   # 脚本执行由 tool_start/end 记录
             token_overhead_per_skill=round(avg_token_overhead, 1),
         )
 

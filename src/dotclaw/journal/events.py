@@ -1,6 +1,6 @@
 """Journal 事件定义。
 
-17 种标准化事件覆盖 5 个域：
+16 种标准化事件覆盖 5 个域：
 会话 / ReAct 循环 / LLM 调用 / 工具调用 / Skill+记忆+错误
 """
 
@@ -24,7 +24,7 @@ class AgentEvent:
 
 
 class EventType:
-    """17 种标准事件类型常量。"""
+    """16 种标准事件类型常量。"""
 
     # ── 会话 ──
     SESSION_START = "session.start"
@@ -47,7 +47,6 @@ class EventType:
     TOOL_END = "tool.call_end"
 
     # ── Skill ──
-    SKILL_TRIGGER = "skill.trigger"
     SKILL_BODY_LOADED = "skill.body_loaded"
     SKILL_SCRIPT_EXEC = "skill.script_exec"
 

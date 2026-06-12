@@ -45,7 +45,7 @@ async def _run_cli():
     """运行 CLI 交互"""
     _print_banner()
 
-    config = load_config()
+    config = get_config()
     channel = CLIChannel()
 
     # 初始化各组件

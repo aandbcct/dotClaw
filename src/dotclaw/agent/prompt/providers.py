@@ -118,7 +118,7 @@ class SkillsProvider(DataProvider):
         if journal:
             all_metas = registry.list_all()
             for meta in all_metas:
-                journal.skill_trigger(meta.name)
+                # skill body 被注入到 system prompt
                 journal.skill_body_loaded(meta.name, cached=False)
                 for sp in meta.script_paths:
                     journal.skill_script_exec(meta.name, "success")

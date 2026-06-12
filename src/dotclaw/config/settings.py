@@ -197,8 +197,8 @@ class DebugConfig:
 
 
 @dataclass
-class JournalSettingsConfig:
-    """从 config.yaml 加载的 Journal 配置。"""
+class JournalConfig:
+    """从 config.yaml 加载的 Journal 配置（含默认值）。"""
     trace_dir: str = "./data/traces"
     snapshot_dir: str = "./data/snapshots"
     console: bool = True
@@ -216,7 +216,7 @@ class Config:
     session: SessionConfig = field(default_factory=SessionConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
-    journal: JournalSettingsConfig = field(default_factory=JournalSettingsConfig)
+    journal: JournalConfig = field(default_factory=JournalConfig)
 
 
 # ============================================================
@@ -540,7 +540,7 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
     )
 
     journal_raw = raw.get("journal", {})
-    journal = JournalSettingsConfig(
+    journal = JournalConfig(
         trace_dir=journal_raw.get("trace_dir", "./data/traces"),
         snapshot_dir=journal_raw.get("snapshot_dir", "./data/snapshots"),
         console=journal_raw.get("console", True),

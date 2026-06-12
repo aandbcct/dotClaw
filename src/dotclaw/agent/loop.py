@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from ..llm.base import Message
 from .result import AgentResult
 from .message_utils import validate as msg_validate, trim as msg_trim, clean as msg_clean
-from ..journal import Journal, JournalConfig
+from ..journal import Journal
 
 if TYPE_CHECKING:
     from ..llm.proxy import LLMProxy
@@ -85,18 +85,8 @@ class AgentLoop:
         # 构建上下文（传入 journal 引用）
         context = await self._build_context(user_message, journal)
 
-        # ── Journal：会话开始，填入 session_id/model/request_id ──
-        journal_cfg = getattr(self.config, 'journal', None)
-        if journal_cfg:
-            journal.session_start(context, JournalConfig(
-                trace_dir=getattr(journal_cfg, 'trace_dir', './data/traces'),
-                snapshot_dir=getattr(journal_cfg, 'snapshot_dir', './data/snapshots'),
-                console=getattr(journal_cfg, 'console', True),
-                trace=getattr(journal_cfg, 'trace', True),
-                snapshot=getattr(journal_cfg, 'snapshot', True),
-            ))
-        else:
-            journal.session_start(context, JournalConfig())
+        # ── Journal：会话开始 ──
+        journal.session_start(context, self.config.journal)
 
         tool_calls_total = 0
         iterations = 0
@@ -110,7 +100,7 @@ class AgentLoop:
             journal.prompt_built(
                 message_count=len(messages),
                 context_length=est_tokens,
-                system_prompt_hash=context.system_prompt[:8] if context.system_prompt else "",
+                system_prompt=context.system_prompt,
                 skills_injected=[s.name for s in skills_loaded] if skills_loaded else [],
                 tool_count=len(context.tool_definitions),
             )

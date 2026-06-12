@@ -3,34 +3,32 @@
 一次 AgentLoop.run() 创建一个实例。
 所有事件通过具名方法发射，参数只传业务事实。
 loop_idx / model / timestamp / duration 全部内化。
+
+配置由 dotclaw.config.settings.JournalConfig 提供，
+通过 session_start(config) 传入。
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from dotclaw.journal.events import AgentEvent, EventType
 
 if TYPE_CHECKING:
     from dotclaw.agent.context import AgentContext
 
-
-# ═══════════════════════════════════════════════════════════════════
-# JournalConfig
-# ═══════════════════════════════════════════════════════════════════
+_warned: set[str] = set()
 
 
-@dataclass
-class JournalConfig:
-    """Journal 配置，控制各 sink 的启停和输出路径。"""
-
-    trace_dir: str = "./data/traces"
-    snapshot_dir: str = "./data/snapshots"
-    console: bool = True
-    trace: bool = True
-    snapshot: bool = True
+def _warn_once(key: str, message: str) -> None:
+    """只在首次失败时记录一条 warning。"""
+    if key not in _warned:
+        import logging
+        logging.getLogger("dotclaw.journal").warning(
+            f"{key} failed (suppressed): {message}"
+        )
+        _warned.add(key)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -52,9 +50,10 @@ class Journal:
         self._loop_idx: int = 0
         self._events: list[AgentEvent] = []
         self._timers: dict[str, float] = {}
-        self._config: JournalConfig | None = None
+        self._config: JournalConfig = None  # JournalConfig from settings
         self._session_start_ts: float = 0.0
         self._ttft_ms: float = 0.0  # 最新一轮的 TTFT
+        self._session_start_day: str = ""  # 日期固定，跨午夜不变
 
     # ═══ 内部辅助 ═══
 
@@ -72,15 +71,16 @@ class Journal:
             if self._config.trace:
                 try:
                     from dotclaw.journal.sinks.trace import trace_sink
-                    trace_sink(event, self._config.trace_dir, self._request_id)
-                except Exception:
-                    pass
+                    trace_sink(event, self._config.trace_dir,
+                               self._request_id, date_str=self._session_start_day)
+                except Exception as e:
+                    _warn_once("trace_sink", str(e))
             if self._config.console and event_type == EventType.ERROR:
                 try:
                     from dotclaw.journal.sinks.console import console_sink
                     console_sink(event)
-                except Exception:
-                    pass
+                except Exception as e:
+                    _warn_once("console_sink", str(e))
 
     def _require_session(self) -> None:
         """确保 session_start() 已被调用。"""
@@ -99,8 +99,11 @@ class Journal:
 
     # ═══ 会话 ═══
 
-    def session_start(self, ctx: "AgentContext", config: JournalConfig) -> None:
-        """开始会话。从 AgentContext 提取 session_id、request_id、model。"""
+    def session_start(self, ctx: "AgentContext", config: Any) -> None:
+        """开始会话。从 AgentContext 提取 session_id、request_id、model。
+        config 是 dotclaw.config.settings.JournalConfig 实例。
+        """
+        from datetime import date as _date
         self._session_id = ctx.session_id
         self._request_id = ctx.request_id
         self._model = ctx.model
@@ -109,6 +112,7 @@ class Journal:
         self._events = []
         self._timers = {}
         self._session_start_ts = time.time()
+        self._session_start_day = _date.today().isoformat()
 
         self._emit(EventType.SESSION_START, {
             "session_id": self._session_id,
@@ -152,17 +156,17 @@ class Journal:
         self,
         message_count: int,
         context_length: int,
-        system_prompt_hash: str = "",
+        system_prompt: str = "",
         skills_injected: list[str] | None = None,
         tool_count: int = 0,
     ) -> None:
-        """提示词构建完成。记录上下文快照。"""
+        """提示词构建完成。记录完整 system_prompt 用于调试。"""
         self._require_session()
         self._emit(EventType.PROMPT_BUILT, {
             "loop_idx": self._loop_idx,
             "message_count": message_count,
             "context_length": context_length,
-            "system_prompt_hash": system_prompt_hash,
+            "system_prompt": system_prompt,
             "skills_injected": skills_injected or [],
             "tool_count": tool_count,
         })
@@ -254,35 +258,21 @@ class Journal:
 
     # ═══ Skill ═══
 
-    def skill_trigger(self, skill_name: str) -> None:
-        self._require_session()
-        self._timer_start(f"skill_{skill_name}")
-        self._emit(EventType.SKILL_TRIGGER, {
-            "loop_idx": self._loop_idx,
-            "skill_name": skill_name,
-        })
-
     def skill_body_loaded(self, skill_name: str, cached: bool = False) -> None:
+        """记录 Skill body 已加载到 system prompt。"""
         self._require_session()
-        # 从 skill_trigger 到 now 的耗时
-        duration_ms = self._timer_end_ms(f"skill_{skill_name}")
         self._emit(EventType.SKILL_BODY_LOADED, {
             "loop_idx": self._loop_idx,
             "skill_name": skill_name,
-            "duration_ms": round(duration_ms, 1),
             "cached": cached,
         })
-        # 为 skill_script_exec 重新开始计时
-        self._timer_start(f"skill_{skill_name}")
 
     def skill_script_exec(self, skill_name: str, status: str) -> None:
+        """记录 Skill 脚本执行（实际执行由 tool_start/end 记录）。"""
         self._require_session()
-        # 从 skill_body_loaded 到 now 的耗时
-        duration_ms = self._timer_end_ms(f"skill_{skill_name}")
         self._emit(EventType.SKILL_SCRIPT_EXEC, {
             "loop_idx": self._loop_idx,
             "skill_name": skill_name,
-            "duration_ms": round(duration_ms, 1),
             "status": status,
         })
 
@@ -406,22 +396,22 @@ def _build_report(
         etype = event.event_type
         data = event.data
 
-        if etype == "react.loop_start":
+        if etype == EventType.LOOP_START:
             current_loop = {
                 "idx": data.get("loop_idx", 0),
                 "llm_calls": [],
                 "tools": [],
             }
-        elif etype == "react.loop_end" and current_loop:
+        elif etype == EventType.LOOP_END and current_loop:
             current_loop["action"] = data.get("action", "")
             loops.append(current_loop)
             current_loop = None
-        elif etype == "llm.call_start" and current_loop:
+        elif etype == EventType.LLM_CALL_START and current_loop:
             current_loop["llm_calls"].append({
                 "model": data.get("model", ""),
                 "attempt": data.get("attempt", 1),
             })
-        elif etype == "llm.response_end" and current_loop and current_loop["llm_calls"]:
+        elif etype == EventType.LLM_RESPONSE_END and current_loop and current_loop["llm_calls"]:
             last_llm = current_loop["llm_calls"][-1]
             last_llm.update({
                 "input_tokens": data.get("input_tokens", 0),
@@ -430,30 +420,30 @@ def _build_report(
                 "status": data.get("status", "unknown"),
                 "stop_reason": data.get("stop_reason", ""),
             })
-        elif etype == "tool.call_start" and current_loop:
+        elif etype == EventType.TOOL_START and current_loop:
             current_loop["tools"].append({
                 "name": data.get("tool_name", ""),
             })
-        elif etype == "tool.call_end" and current_loop and current_loop["tools"]:
+        elif etype == EventType.TOOL_END and current_loop and current_loop["tools"]:
             last_tool = current_loop["tools"][-1]
             last_tool.update({
                 "duration_ms": data.get("duration_ms", 0),
                 "result_len": data.get("result_len", 0),
                 "status": data.get("status", "unknown"),
             })
-        elif etype == "system.error":
+        elif etype == EventType.ERROR:
             errors_list.append({
                 "level": data.get("level", ""),
                 "source": data.get("source", ""),
                 "message": data.get("message", ""),
             })
-        elif etype == "memory.retrieval":
+        elif etype == EventType.MEMORY_RETRIEVAL:
             memory_events.append({
                 "type": "retrieval",
                 "query": data.get("query", ""),
                 "hit_count": data.get("hit_count", 0),
             })
-        elif etype == "memory.write":
+        elif etype == EventType.MEMORY_WRITE:
             memory_events.append({
                 "type": "write",
                 "write_type": data.get("write_type", ""),
@@ -465,7 +455,8 @@ def _build_report(
         current_loop["action"] = "incomplete"
         loops.append(current_loop)
 
-    session_events = [e for e in events if e.event_type in ("session.start", "session.end")]
+    session_events = [e for e in events if e.event_type in (
+        EventType.SESSION_START, EventType.SESSION_END)]
     total_duration = 0.0
     if len(session_events) >= 2:
         total_duration = (session_events[-1].timestamp - session_events[0].timestamp) * 1000

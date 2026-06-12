@@ -49,7 +49,7 @@ def fake_context():
 @pytest.fixture
 def journal_config():
     """创建一个最小可用的 JournalConfig。"""
-    from dotclaw.journal.journal import JournalConfig
+    from dotclaw.config.settings import JournalConfig
 
     return JournalConfig(
         trace_dir="/tmp/test_traces",
@@ -249,7 +249,7 @@ class TestLLMCall:
         journal.loop_start()
         journal.prompt_built(
             message_count=15, context_length=8000,
-            system_prompt_hash="a1b2", skills_injected=["code-review"],
+            system_prompt="You are a helpful assistant.", skills_injected=["code-review"],
             tool_count=12
         )
 
@@ -257,6 +257,7 @@ class TestLLMCall:
         assert len(prompt_events) == 1
         assert prompt_events[0].data["message_count"] == 15
         assert prompt_events[0].data["context_length"] == 8000
+        assert prompt_events[0].data["system_prompt"] == "You are a helpful assistant."
         assert prompt_events[0].data["skills_injected"] == ["code-review"]
 
 
@@ -268,27 +269,25 @@ class TestLLMCall:
 class TestSkill:
     """测试 Skill 相关事件。"""
 
-    def test_skill_trigger_emits_event(self, fake_context, journal_config):
+    def test_skill_body_loaded_emits_event(self, fake_context, journal_config):
         journal = Journal()
         journal.session_start(fake_context, journal_config)
         journal.loop_start()
-        journal.skill_trigger("code-review")
+        journal.skill_body_loaded("code-review")
 
-        events = [e for e in journal._events if e.event_type == "skill.trigger"]
+        events = [e for e in journal._events if e.event_type == "skill.body_loaded"]
         assert len(events) == 1
         assert events[0].data["skill_name"] == "code-review"
 
-    def test_skill_body_loaded_calculates_duration(self, fake_context, journal_config):
+    def test_skill_body_loaded_records_cache(self, fake_context, journal_config):
         journal = Journal()
         journal.session_start(fake_context, journal_config)
         journal.loop_start()
-        journal.skill_trigger("code-review")  # 先触发，设置 timer
         journal.skill_body_loaded("code-review", cached=True)
 
         events = [e for e in journal._events if e.event_type == "skill.body_loaded"]
         assert len(events) == 1
         assert events[0].data["cached"] is True
-        assert events[0].data["duration_ms"] >= 0  # 耗时从 trigger 开始计算
 
     def test_skill_script_exec_emits_with_status(self, fake_context, journal_config):
         journal = Journal()
@@ -366,7 +365,7 @@ class TestEventImmutability:
             EventType.LLM_CALL_START, EventType.LLM_CALL_END,
             EventType.LLM_RESPONSE_START, EventType.LLM_RESPONSE_END,
             EventType.TOOL_START, EventType.TOOL_END,
-            EventType.SKILL_TRIGGER, EventType.SKILL_BODY_LOADED,
+            EventType.SKILL_BODY_LOADED,
             EventType.SKILL_SCRIPT_EXEC,
             EventType.MEMORY_RETRIEVAL, EventType.MEMORY_WRITE,
             EventType.ERROR,

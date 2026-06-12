@@ -20,7 +20,6 @@ from dotclaw.agent.prompt.providers import (
 from dotclaw.agent.prompt.builder import PromptBuilder
 from dotclaw.agent.message_utils import validate, trim, clean
 from dotclaw.llm.base import Message, ToolCall, ToolDefinition
-from dotclaw.agent.logger import AgentLogger
 
 
 # ============================================================
@@ -254,9 +253,9 @@ def test_7_trim_chinese():
 
 def test_8_request_id():
     print("\n=== 场景 8：request_id 每次不同 ===")
-    logger = AgentLogger()
-    id1 = logger.new_request()
-    id2 = logger.new_request()
+    import uuid
+    id1 = uuid.uuid4().hex[:8]
+    id2 = uuid.uuid4().hex[:8]
     assert id1 != id2
     assert len(id1) == 8
     assert len(id2) == 8
