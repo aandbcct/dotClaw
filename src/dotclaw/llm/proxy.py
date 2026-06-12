@@ -87,6 +87,10 @@ class LLMProxy:
         provider = self._router._config.models.get(resolved_model)
         provider_name = provider.provider if provider else "unknown"
 
+        # ── Journal：LLM 调用开始 ──
+        if journal:
+            journal.llm_call_start()
+
         first_chunk_ts: float | None = None
         output_token_count = 0
 
@@ -102,12 +106,15 @@ class LLMProxy:
             ):
                 if first_chunk_ts is None:
                     first_chunk_ts = time.perf_counter() * 1000
+                    # ── Journal：LLM 调用结束 / 响应开始 ──
+                    if journal:
+                        journal.llm_call_end()
                 if chunk.content:
                     output_token_count += len(chunk.content)
                 yield chunk
 
         finally:
-            pass  # journal 由调用方（AgentLoop）负责发射 LLM 事件
+            pass
 
     async def _call_with_fallback(
         self,

@@ -215,17 +215,18 @@ class SnapshotBuilder:
                 self._write_failures += 1
 
         elif etype == EventType.LLM_CALL_START:
+            # model tracking only — actual token counts are in LLM_RESPONSE_END
+            pass
+
+        elif etype == EventType.LLM_RESPONSE_END:
             input_tokens_val = data.get("input_tokens", 0)
             if input_tokens_val:
                 self._input_tokens.append(input_tokens_val)
-            model = data.get("model", "unknown")
-            self._model_input_tokens[model] = self._model_input_tokens.get(model, 0) + input_tokens_val
-
-        elif etype == EventType.LLM_RESPONSE_END:
             output_tokens_val = data.get("output_tokens", 0)
             if output_tokens_val:
                 self._output_tokens.append(output_tokens_val)
             model = data.get("model", "unknown")
+            self._model_input_tokens[model] = self._model_input_tokens.get(model, 0) + input_tokens_val
             self._model_output_tokens[model] = self._model_output_tokens.get(model, 0) + output_tokens_val
 
             dur = data.get("duration_ms", 0.0)

@@ -41,14 +41,22 @@ class ToolExecutor:
         journal: Any | None = None,
     ) -> ToolResult:
         """执行工具：查找 Handler → 审批检查 → 超时控制 → 返回 ToolResult"""
+        # ── Journal：工具执行开始 ──
+        if journal:
+            journal.tool_start(name)
+
         handler = self._registry.get(name)
         if not handler:
-            return ToolResult(
+            result = ToolResult(
                 output=f"错误：未找到工具 '{name}'",
                 is_error=True,
                 error_code="TOOL_NOT_FOUND",
                 error_type="not_found",
             )
+            if journal:
+                journal.tool_end(name, result_len=len(result.output),
+                                 status="error", error_type=result.error_type)
+            return result
 
         definition = handler.definition()
 
@@ -60,12 +68,16 @@ class ToolExecutor:
                 channel=channel,
             )
             if not approved:
-                return ToolResult(
+                result = ToolResult(
                     output=f"用户拒绝了 {name} 的执行",
                     is_error=True,
                     error_code="APPROVAL_DENIED",
                     error_type="approval",
                 )
+                if journal:
+                    journal.tool_end(name, result_len=len(result.output),
+                                     status="error", error_type=result.error_type)
+                return result
 
         # 超时控制 + 执行
         timeout = definition.timeout
@@ -76,20 +88,32 @@ class ToolExecutor:
                 handler.execute(arguments, ctx),
                 timeout=timeout,
             )
+            if journal:
+                status = "error" if result.is_error else "success"
+                journal.tool_end(name, result_len=len(result.output),
+                                 status=status, error_type=result.error_type if result.is_error else "")
             return result
         except asyncio.TimeoutError:
             logger.warning(f"工具 {name} 执行超时（{timeout}s）")
-            return ToolResult(
+            result = ToolResult(
                 output=f"错误：工具执行超时（{int(timeout)}秒）",
                 is_error=True,
                 error_code="TIMEOUT",
                 error_type="timeout",
             )
+            if journal:
+                journal.tool_end(name, result_len=len(result.output),
+                                 status="error", error_type="timeout")
+            return result
         except Exception as e:
             logger.exception(f"工具 {name} 调度出错")
-            return ToolResult(
+            result = ToolResult(
                 output=f"错误：工具调度异常 - {e}",
                 is_error=True,
                 error_code="EXECUTOR_ERROR",
                 error_type="executor",
             )
+            if journal:
+                journal.tool_end(name, result_len=len(result.output),
+                                 status="error", error_type="executor")
+            return result

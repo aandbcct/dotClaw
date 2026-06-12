@@ -79,11 +79,13 @@ class AgentLoop:
         self._running = True
         start_time = time.time()
 
-        # 构建上下文
-        context = await self._build_context(user_message)
-
-        # ── Journal：会话开始 ──
+        # ── Journal：先创建空壳，后面 session_start 填参数 ──
         journal = Journal()
+
+        # 构建上下文（传入 journal 引用）
+        context = await self._build_context(user_message, journal)
+
+        # ── Journal：会话开始，填入 session_id/model/request_id ──
         journal_cfg = getattr(self.config, 'journal', None)
         if journal_cfg:
             journal.session_start(context, JournalConfig(
@@ -104,9 +106,12 @@ class AgentLoop:
 
             # ── Journal：prompt 构建完成 ──
             est_tokens = sum(len(m.content or "") for m in messages)
+            skills_loaded = list(self._skill_registry.list_all()) if self._skill_registry else []
             journal.prompt_built(
                 message_count=len(messages),
                 context_length=est_tokens,
+                system_prompt_hash=context.system_prompt[:8] if context.system_prompt else "",
+                skills_injected=[s.name for s in skills_loaded] if skills_loaded else [],
                 tool_count=len(context.tool_definitions),
             )
 
@@ -117,16 +122,12 @@ class AgentLoop:
                 iterations += 1
                 tool_calls_pending = []
                 current_content = ""
-                first_chunk = True
                 loop_finish_reason = "stop"
                 input_tokens = 0
                 output_tokens = 0
 
                 # ── Journal：每轮循环开始 ──
                 journal.loop_start()
-
-                # ── Journal：LLM 调用开始 ──
-                journal.llm_call_start()
 
                 async for chunk in self.llm.chat(
                     messages=messages,
@@ -136,11 +137,6 @@ class AgentLoop:
                     stream=self.config.llm.stream,
                     journal=journal,
                 ):
-                    # 第一个 chunk → llm_call 结束，llm_response 开始
-                    if first_chunk:
-                        journal.llm_call_end()
-                        first_chunk = False
-
                     if chunk.content:
                         current_content += chunk.content
                         await self.channel.stream(chunk.content)
@@ -156,12 +152,15 @@ class AgentLoop:
                         break
 
                 # ── Journal：LLM 响应结束 ──
-                resp_dur = time.time()  # duration 由 journal 内部计算
+                # llm_response_end status 根据 finish_reason 动态判定
+                llm_status = "error" if loop_finish_reason == "error" else (
+                    "truncated" if loop_finish_reason == "length" else "success"
+                )
                 journal.llm_response_end(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens or len(current_content),
                     tps=0.0,
-                    status="success",
+                    status=llm_status,
                     stop_reason=loop_finish_reason,
                 )
 
@@ -193,18 +192,11 @@ class AgentLoop:
                     if self._tool_executor:
                         self.channel.print_info(f"\n🔧 调用工具: {tc.name}({json.dumps(args, ensure_ascii=False)})")
 
-                        # ── Journal：工具执行 ──
-                        journal.tool_start(tc.name)
                         result = await self._tool_executor.execute(
                             name=tc.name,
                             arguments=args,
                             channel=self.channel,
                             journal=journal,
-                        )
-                        journal.tool_end(
-                            tc.name,
-                            result_len=len(result.output),
-                            status="success",
                         )
 
                         self.channel.print_info(f"  结果: {result.output[:100]}{'...' if len(result.output) > 100 else ''}")
@@ -215,11 +207,13 @@ class AgentLoop:
                             tool_call_id=tc.id,
                         ))
                     else:
+                        journal.tool_start(tc.name)
                         messages.append(Message(
                             role="tool",
                             content="错误：工具执行器未初始化",
                             tool_call_id=tc.id,
                         ))
+                        journal.tool_end(tc.name, result_len=0, status="error", error_type="no_executor")
 
                 journal.loop_end("tool_call")
 
@@ -287,7 +281,7 @@ class AgentLoop:
         finally:
             self._running = False
 
-    async def _build_context(self, user_message: str) -> "AgentContext":
+    async def _build_context(self, user_message: str, journal: "Journal") -> "AgentContext":
         """构建 AgentContext 不可变快照"""
         from .context import AgentContext as Ctx
 
@@ -298,7 +292,12 @@ class AgentLoop:
         memory_summary = ""
         if self._memory_mgr:
             try:
+                journal.memory_retrieval_start()
                 results = await self._memory_mgr.search(user_message, max_results=3)
+                journal.memory_retrieval(
+                    query=user_message[:100],
+                    hit_count=len(results),
+                )
                 if results:
                     memory_summary = "\n".join(
                         f"- ({r.source}:{r.path}) {r.snippet}" for r in results
@@ -330,7 +329,7 @@ class AgentLoop:
             memory_summary=memory_summary,
             channel=self.channel,
             skill_registry=self._skill_registry,
-            journal=None,  # 由 run() 中创建后设入
+            journal=journal,
         )
 
     def _build_messages(

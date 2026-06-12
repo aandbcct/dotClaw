@@ -67,6 +67,21 @@ class Journal:
         )
         self._events.append(event)
 
+        # 实时输出：trace_sink 逐行追加，console_sink 仅 ERROR/WARNING
+        if self._config and self._request_id:
+            if self._config.trace:
+                try:
+                    from dotclaw.journal.sinks.trace import trace_sink
+                    trace_sink(event, self._config.trace_dir, self._request_id)
+                except Exception:
+                    pass
+            if self._config.console and event_type == EventType.ERROR:
+                try:
+                    from dotclaw.journal.sinks.console import console_sink
+                    console_sink(event)
+                except Exception:
+                    pass
+
     def _require_session(self) -> None:
         """确保 session_start() 已被调用。"""
         if self._session_id is None:
@@ -274,18 +289,23 @@ class Journal:
     # ═══ 记忆 ═══
 
     def memory_retrieval(self, query: str, hit_count: int) -> None:
+        """记录一次记忆检索。调用方应在检索完成后调用此方法。
+        耗时由调用方通过 memory_retrieval_start/memory_retrieval 配对计算。
+        """
         self._require_session()
-        self._timer_start("memory_retrieval")
-        # 计算检索耗时（调用方在实际检索完成后调用此方法）
-        # 这里做微小延时以模拟非零耗时
-        import time as _t
-        duration_ms = (_t.time() - self._timers["memory_retrieval"]) * 1000 + 0.5  # 最小 0.5ms
+        # 从上次 _timer_start("memory_retrieval") 到现在的耗时
+        duration_ms = self._timer_end_ms("memory_retrieval")
         self._emit(EventType.MEMORY_RETRIEVAL, {
             "loop_idx": self._loop_idx,
             "query": query,
             "duration_ms": round(duration_ms, 1),
             "hit_count": hit_count,
         })
+
+    def memory_retrieval_start(self) -> None:
+        """标记记忆检索开始（调用方在开始检索前调用）。"""
+        self._require_session()
+        self._timer_start("memory_retrieval")
 
     def memory_write(self, write_type: str, status: str) -> None:
         self._require_session()
@@ -309,8 +329,11 @@ class Journal:
     # ═══ 生命周期 ═══
 
     def finalize(self) -> None:
-        """会话结束处理：写入 trace.jsonl + report.json + snapshot.json，清空事件列表。"""
-        import json as _json
+        """会话结束处理：构建 report.json + snapshot.json，清空事件列表。
+
+        注意：trace.jsonl 由 _emit() 中的 trace_sink 实时逐行写入，
+        finalize() 不再重复写入。
+        """
         import os as _os
         from datetime import date as _date, datetime as _dt, timezone as _tz
 
@@ -318,26 +341,15 @@ class Journal:
             self._events = []
             return
 
-        # 1. 写入 trace.jsonl
+        # 1. 构建并写入 report.json
         if self._config.trace:
+            # trace_dir 用于 report.json 路径
             date_str = _date.today().isoformat()
             trace_dir = _os.path.join(
                 self._config.trace_dir, date_str, self._request_id
             )
             _os.makedirs(trace_dir, exist_ok=True)
 
-            trace_path = _os.path.join(trace_dir, "trace.jsonl")
-            with open(trace_path, "w", encoding="utf-8") as f:
-                for event in self._events:
-                    line = _json.dumps({
-                        "ts": event.timestamp,
-                        "type": event.event_type,
-                        "data": event.data,
-                    }, ensure_ascii=False)
-                    f.write(line + "\n")
-
-        # 2. 构建并写入 report.json
-        if self._config.trace:
             try:
                 report = _build_report(
                     events=self._events,
@@ -348,8 +360,8 @@ class Journal:
                 report_path = _os.path.join(trace_dir, "report.json")
                 with open(report_path, "w", encoding="utf-8") as f:
                     _json.dump(report, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
+            except Exception as e:
+                self.error("ERROR", "journal.report", f"构建 report.json 失败: {e}")
 
         # 3. 构建并写入 snapshot.json
         if self._config.snapshot:
@@ -370,8 +382,8 @@ class Journal:
                     builder.process(event)
                 snapshot = builder.build()
                 save_snapshot(snapshot, self._config.snapshot_dir)
-            except Exception:
-                pass
+            except Exception as e:
+                self.error("ERROR", "journal.snapshot", f"构建 snapshot.json 失败: {e}")
 
         # 4. 清空事件列表
         self._events = []
