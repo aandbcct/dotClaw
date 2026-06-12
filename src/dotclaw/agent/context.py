@@ -68,8 +68,8 @@ class AgentContext:
     skill_registry: "SkillRegistry | None" = None
     """P7 新增：Skill 注册表（skill_enabled=False 时为 None）"""
 
-    metrics_collector: "Any | None" = None
-    """P11 新增：指标采集器（None 时跳过埋点，有实例时自动生效）"""
+    journal: "Any | None" = None
+    """Journal 观测实例（None 时跳过埋点，有实例时自动生效）"""
 
     def __post_init__(self):
         """设置 workspace 默认值（绕过 frozen 限制）"""

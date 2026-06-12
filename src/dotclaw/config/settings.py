@@ -194,7 +194,16 @@ class SchedulerConfig:
 class DebugConfig:
     level: str = "INFO"
     log_file: str = "./data/dotclaw.log"
-    enable_tracer: bool = True   # P13: 是否开启会话跟踪
+
+
+@dataclass
+class JournalSettingsConfig:
+    """从 config.yaml 加载的 Journal 配置。"""
+    trace_dir: str = "./data/traces"
+    snapshot_dir: str = "./data/snapshots"
+    console: bool = True
+    trace: bool = True
+    snapshot: bool = True
 
 
 @dataclass
@@ -207,6 +216,7 @@ class Config:
     session: SessionConfig = field(default_factory=SessionConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
+    journal: JournalSettingsConfig = field(default_factory=JournalSettingsConfig)
 
 
 # ============================================================
@@ -527,7 +537,15 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
     debug = DebugConfig(
         level=debug_raw.get("level", "INFO"),
         log_file=debug_raw.get("log_file", "./data/dotclaw.log"),
-        enable_tracer=debug_raw.get("enable_tracer", False),
+    )
+
+    journal_raw = raw.get("journal", {})
+    journal = JournalSettingsConfig(
+        trace_dir=journal_raw.get("trace_dir", "./data/traces"),
+        snapshot_dir=journal_raw.get("snapshot_dir", "./data/snapshots"),
+        console=journal_raw.get("console", True),
+        trace=journal_raw.get("trace", True),
+        snapshot=journal_raw.get("snapshot", True),
     )
 
     return Config(
@@ -539,6 +557,7 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         session=session,
         scheduler=scheduler,
         debug=debug,
+        journal=journal,
     )
 
 

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from dotclaw.metrics.events import EventType
-from dotclaw.metrics.snapshot import (
+from dotclaw.journal.events import EventType
+from dotclaw.journal.metrics_types import (
     AgentGeneralMetrics,
     AgentRunSnapshot,
     MemoryMetrics,
@@ -20,7 +20,7 @@ from dotclaw.metrics.snapshot import (
 )
 
 if TYPE_CHECKING:
-    from dotclaw.metrics.events import AgentEvent
+    from dotclaw.journal.events import AgentEvent
 
 
 def _p95(values: list[float]) -> float:
@@ -113,13 +113,14 @@ class SnapshotBuilder:
 
         elif etype == EventType.SESSION_END:
             self._task_loop_counts.append(self._current_task_loops)
-            if data.get("success", False):
+            success_val = data.get("success")
+            if success_val is True or success_val == "success":
                 self._task_success_count += 1
             e2e = data.get("total_duration_ms", 0.0)
             if e2e > 0:
                 self._e2e_durations.append(e2e)
 
-        elif etype == EventType.REACT_LOOP_START:
+        elif etype == EventType.LOOP_START:
             self._total_loops += 1
             self._current_task_loops += 1
             # reset per-loop tracking
@@ -128,7 +129,7 @@ class SnapshotBuilder:
             if thought_tokens:
                 self._reasoning_tokens.append(thought_tokens)
 
-        elif etype == EventType.REACT_LOOP_END:
+        elif etype == EventType.LOOP_END:
             dur = data.get("duration_ms", 0.0)
             if dur > 0:
                 self._loop_durations.append(dur)
@@ -141,13 +142,13 @@ class SnapshotBuilder:
                     self._redundant_action_count += 1
                 self._last_action = current
 
-        elif etype == EventType.REACT_EMPTY_ACTION:
+        elif etype == EventType.EMPTY_ACTION:
             self._empty_action_count += 1
 
-        elif etype == EventType.TOOL_CALL_START:
+        elif etype == EventType.TOOL_START:
             pass  # tracking done on call_end
 
-        elif etype == EventType.TOOL_CALL_END:
+        elif etype == EventType.TOOL_END:
             self._total_tool_calls += 1
             tool_name = data.get("tool_name", "unknown")
             dur = data.get("duration_ms", 0.0)
@@ -155,8 +156,9 @@ class SnapshotBuilder:
             # count by tool
             self._tool_call_counts[tool_name] = self._tool_call_counts.get(tool_name, 0) + 1
 
-            # success/failure
-            if data.get("success", False):
+            # success/failure — support both "status": "success" (string) and "success": True (bool)
+            tool_success = data.get("status") == "success" or data.get("success", False)
+            if tool_success:
                 self._tool_success_total += 1
                 self._tool_success_by_name[tool_name] = self._tool_success_by_name.get(tool_name, 0) + 1
             else:
@@ -194,31 +196,32 @@ class SnapshotBuilder:
 
         elif etype == EventType.SKILL_SCRIPT_EXEC:
             self._skill_script_count += 1
-            if data.get("success", False):
+            if data.get("status") == "success" or data.get("success", False):
                 self._skill_script_success += 1
 
         elif etype == EventType.MEMORY_RETRIEVAL:
             dur = data.get("duration_ms", 0.0)
             if dur > 0:
                 self._retrieval_durations.append(dur)
-            if data.get("hit", False):
+            hit_count = data.get("hit_count", 0)
+            if hit_count > 0 or data.get("hit", False):
                 self._retrieval_hits += 1
 
         elif etype == EventType.MEMORY_WRITE:
             self._total_writes += 1
-            mem_type = data.get("memory_type", "unknown")
+            mem_type = data.get("write_type") or data.get("memory_type", "unknown")
             self._writes_by_type[mem_type] = self._writes_by_type.get(mem_type, 0) + 1
             if not data.get("success", True):
                 self._write_failures += 1
 
-        elif etype == EventType.LLM_REQUEST_START:
+        elif etype == EventType.LLM_CALL_START:
             input_tokens_val = data.get("input_tokens", 0)
             if input_tokens_val:
                 self._input_tokens.append(input_tokens_val)
             model = data.get("model", "unknown")
             self._model_input_tokens[model] = self._model_input_tokens.get(model, 0) + input_tokens_val
 
-        elif etype == EventType.LLM_REQUEST_END:
+        elif etype == EventType.LLM_RESPONSE_END:
             output_tokens_val = data.get("output_tokens", 0)
             if output_tokens_val:
                 self._output_tokens.append(output_tokens_val)

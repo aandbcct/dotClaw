@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from dotclaw.metrics.snapshot import (
+from dotclaw.journal.metrics_types import (
     AgentGeneralMetrics,
     AgentRunSnapshot,
     MemoryMetrics,
@@ -25,10 +25,7 @@ from dotclaw.metrics.snapshot import (
     ToolCallMetrics,
 )
 
-if TYPE_CHECKING:
-    pass
-
-logger = logging.getLogger("dotclaw.metrics.storage")
+logger = logging.getLogger("dotclaw.journal.storage")
 
 
 # =============================================================================

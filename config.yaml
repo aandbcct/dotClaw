@@ -86,4 +86,10 @@ scheduler:
 debug:
   level: INFO
   log_file: ./data/dotclaw.log
-  enable_tracer: true
+
+journal:
+  trace_dir: ./data/traces
+  snapshot_dir: ./data/snapshots
+  console: true
+  trace: true
+  snapshot: true

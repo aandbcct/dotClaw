@@ -8,7 +8,6 @@ import time
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .base import ChatChunk, LLMClient, Message, ToolDefinition
-from ..metrics.events import AgentEvent, EventType
 
 if TYPE_CHECKING:
     from .model_router import ModelRouter
@@ -76,7 +75,7 @@ class LLMProxy:
         model: str | None = None,
         purpose: str = "chat",
         stream: bool = True,
-        metrics_collector: "Any | None" = None,
+        journal: "Any | None" = None,
     ) -> AsyncIterator[ChatChunk]:
         """
         统一聊天接口：限流 → 路由 → 调用 → 降级。
@@ -88,21 +87,8 @@ class LLMProxy:
         provider = self._router._config.models.get(resolved_model)
         provider_name = provider.provider if provider else "unknown"
 
-        # ── P11 指标埋点：LLM 请求开始 ──
-        request_start_ts = time.perf_counter() * 1000
         first_chunk_ts: float | None = None
         output_token_count = 0
-
-        if metrics_collector:
-            metrics_collector.on_event(AgentEvent(
-                timestamp=request_start_ts,
-                event_type=EventType.LLM_REQUEST_START,
-                data={
-                    "model": resolved_model,
-                    "input_tokens": sum(len(m.content) for m in messages if m.content),  # NOTE: char count, NOT real tokens (Chinese ~2-4 tokens/char)
-                    "client_start_ts": request_start_ts,
-                },
-            ))
 
         try:
             async for chunk in self._call_with_fallback(
@@ -121,25 +107,7 @@ class LLMProxy:
                 yield chunk
 
         finally:
-            # ── P11 指标埋点：LLM 请求结束 ──
-            if metrics_collector:
-                end_ts = time.perf_counter() * 1000
-
-                ttft_ms = (first_chunk_ts - request_start_ts) if first_chunk_ts else 0.0
-                total_duration = end_ts - request_start_ts
-                tps = (output_token_count / (end_ts - first_chunk_ts)) if first_chunk_ts and first_chunk_ts < end_ts else 0.0
-
-                metrics_collector.on_event(AgentEvent(
-                    timestamp=end_ts,
-                    event_type=EventType.LLM_REQUEST_END,
-                    data={
-                        "model": resolved_model,
-                        "output_tokens": output_token_count,
-                        "duration_ms": round(total_duration, 1),
-                        "ttft_ms": round(ttft_ms, 1),
-                        "tps": round(tps, 1),
-                    },
-                ))
+            pass  # journal 由调用方（AgentLoop）负责发射 LLM 事件
 
     async def _call_with_fallback(
         self,

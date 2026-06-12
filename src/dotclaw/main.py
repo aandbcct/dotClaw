@@ -10,6 +10,15 @@ from pathlib import Path
 # 确保 src 在路径中
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# 配置 logging 基础设施
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("./data/dotclaw.log", encoding="utf-8"),
+    ],
+)
 # 屏蔽第三方库的 INFO 日志（避免在交互界面输出 HTTP 请求日志）
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
@@ -20,7 +29,6 @@ from dotclaw.channel.cli import CLIChannel
 from dotclaw.memory.store import SessionManager
 from dotclaw.agent.loop import AgentLoop
 from dotclaw.llm.proxy import LLMProxy
-from dotclaw.metrics.collector import MetricsCollector  # P11
 
 
 def _print_banner():
@@ -227,32 +235,20 @@ async def _run_cli():
             channel.print_info(f"  已加载 {len(metas)} 个 Skill")
     # ---- Phase 7 Skill 初始化结束 ----
 
-    # ---- P3 新增：PromptBuilder + AgentLogger（Phase 5 升级） ----
-    from dotclaw.agent.logger import AgentLogger
+    # ---- PromptBuilder + AgentLoop ----
     from dotclaw.agent.prompt.builder import PromptBuilder
     from dotclaw.agent.prompt.providers import (
         RoleProvider, RulesProvider, ToolsProvider,
         MemoryProvider, SkillsProvider,
     )
 
-    agent_logger = AgentLogger(
-        level=config.debug.level,
-        log_file=config.debug.log_file,
-    )
     prompt_builder = PromptBuilder([
         RoleProvider(),
         RulesProvider(),
         ToolsProvider(),
         MemoryProvider(),
-        SkillsProvider(),     # ← P7 激活
+        SkillsProvider(),
     ])
-
-    # ── P11：数据统计采集器 ──
-    metrics_collector = MetricsCollector()
-
-    # ── P13：会话跟踪器 ──
-    from dotclaw.agent.tracer import AgentTracer
-    tracer = AgentTracer(config.debug, data_root=str(project_root))
 
     agent = AgentLoop(
         llm=llm_proxy,
@@ -261,12 +257,9 @@ async def _run_cli():
         channel=channel,
         config=config,
         tool_executor=tool_executor,
-        prompt_builder=prompt_builder,   # P3 新增
-        logger=agent_logger,             # P3 新增（Phase 5 合并 DebugManager）
-        memory_mgr=memory_mgr,           # P4 新增
-        skill_registry=skill_registry,   # P7 新增
-        metrics_collector=metrics_collector,  # P11 新增
-        tracer=tracer,                   # P13 新增
+        prompt_builder=prompt_builder,
+        memory_mgr=memory_mgr,
+        skill_registry=skill_registry,
     )
 
     while True:
@@ -312,8 +305,6 @@ async def _run_cli():
                         await _cmd_delete(channel, session_mgr, agent, args)
                     else:
                         channel.print_error("用法: /delete <会话ID>")
-                elif cmd == "/debug":
-                    agent.debug_trace(channel)
                 elif cmd == "/dream":
                     await _cmd_dream_async(channel, memory_dream)
                 elif cmd == "/tools":
@@ -348,7 +339,6 @@ dotClaw 命令:
   /list            列出所有对话
   /switch <id>     切换到指定对话
   /delete <id>      删除对话
-  /debug           查看最近推理过程
   /tools           列出可用工具
   /mcp             查看 MCP servers 状态
   /skills          列出已加载技能
