@@ -80,7 +80,9 @@ class Journal:
                 try:
                     from dotclaw.journal.sinks.trace import trace_sink
                     trace_sink(event, self._config.trace_dir,
-                               self._request_id, date_str=self._session_start_day)
+                               self._request_id,
+                               session_start_ts=self._session_start_ts,
+                               date_str=self._session_start_day)
                 except Exception as e:
                     _warn_once("trace_sink", str(e))
             if self._config.console and event_type == EventType.ERROR:
@@ -268,21 +270,36 @@ class Journal:
 
     # ═══ Skill ═══
 
-    def skill_body_loaded(self, skill_name: str, cached: bool = False) -> None:
-        """记录 Skill body 已加载到 system prompt。"""
+    def skill_body_loaded(self, skill_name: str, status: str = "success",
+                          cached: bool = False) -> None:
+        """记录 Skill body 已加载。"""
         self._require_session()
         self._emit(EventType.SKILL_BODY_LOADED, {
             "loop_idx": self._loop_idx,
             "skill_name": skill_name,
+            "status": status,
             "cached": cached,
         })
 
-    def skill_script_exec(self, skill_name: str, status: str) -> None:
+    def skill_reference_load(self, skill_name: str, reference_name: str,
+                             status: str = "success") -> None:
+        """记录 Skill 的 reference 文件被读取。"""
+        self._require_session()
+        self._emit(EventType.SKILL_REFERENCE, {
+            "loop_idx": self._loop_idx,
+            "skill_name": skill_name,
+            "reference_name": reference_name,
+            "status": status,
+        })
+
+    def skill_script_exec(self, skill_name: str, script_name: str,
+                          status: str) -> None:
         """记录 Skill 脚本执行（实际执行由 tool_start/end 记录）。"""
         self._require_session()
         self._emit(EventType.SKILL_SCRIPT_EXEC, {
             "loop_idx": self._loop_idx,
             "skill_name": skill_name,
+            "script_name": script_name,
             "status": status,
         })
 
@@ -342,10 +359,11 @@ class Journal:
 
         # 1. 构建并写入 report.json
         if self._config.trace:
-            # trace_dir 用于 report.json 路径
             date_str = _date.today().isoformat()
+            ts_prefix = str(int(self._session_start_ts))
+            sub_dir = f"{ts_prefix}_{self._request_id}"
             trace_dir = _os.path.join(
-                self._config.trace_dir, date_str, self._request_id
+                self._config.trace_dir, date_str, sub_dir
             )
             _os.makedirs(trace_dir, exist_ok=True)
 
@@ -380,7 +398,7 @@ class Journal:
                 for event in self._events:
                     builder.process(event)
                 snapshot = builder.build()
-                save_snapshot(snapshot, self._config.snapshot_dir)
+                save_snapshot(snapshot, trace_dir)
             except Exception as e:
                 self.error("ERROR", "journal.snapshot", f"构建 snapshot.json 失败: {e}")
 

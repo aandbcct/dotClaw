@@ -21,6 +21,7 @@ def trace_sink(
     event: AgentEvent,
     output_dir: str | Path,
     request_id: str,
+    session_start_ts: float = 0.0,
     date_str: str | None = None,
 ) -> None:
     """实时追加事件到 trace.jsonl。
@@ -28,7 +29,8 @@ def trace_sink(
     Args:
         event: Journal 事件。
         output_dir: 输出根目录（如 "./data/traces"）。
-        request_id: 请求 ID，用于子目录命名。
+        request_id: 请求 ID。
+        session_start_ts: 会话开始时间戳，用于子目录前缀。
         date_str: 日期字符串（YYYY-MM-DD），默认用今天。
     """
     import datetime
@@ -36,7 +38,8 @@ def trace_sink(
     if date_str is None:
         date_str = datetime.date.today().isoformat()
 
-    trace_dir = Path(output_dir) / date_str / request_id
+    ts_str = f"{int(session_start_ts)}" if session_start_ts else str(int(event.timestamp))
+    trace_dir = Path(output_dir) / date_str / f"{ts_str}_{request_id}"
     _ensure_dir(trace_dir)
 
     filepath = trace_dir / "trace.jsonl"

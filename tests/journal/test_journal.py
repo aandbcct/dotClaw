@@ -293,7 +293,7 @@ class TestSkill:
         journal = Journal()
         journal.session_start(fake_context, journal_config)
         journal.loop_start()
-        journal.skill_script_exec("code-review", "success")
+        journal.skill_script_exec("code-review", "run_tests.sh", "success")
 
         events = [e for e in journal._events if e.event_type == "skill.script_exec"]
         assert len(events) == 1

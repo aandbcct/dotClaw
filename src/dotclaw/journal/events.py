@@ -50,6 +50,7 @@ class EventType:
 
     # ── Skill ──
     SKILL_BODY_LOADED = "skill.body_loaded"
+    SKILL_REFERENCE = "skill.reference_load"
     SKILL_SCRIPT_EXEC = "skill.script_exec"
 
     # ── 记忆 ──

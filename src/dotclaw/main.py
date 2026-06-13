@@ -83,6 +83,33 @@ async def _run_cli():
     llm_proxy = LLMProxy(model_router=model_router, rate_limiter=rate_limiter)
     # ---- P2 路由初始化结束 ----
 
+    # ---- Phase 7 新增：Skill 系统初始化 ----
+    skill_registry = None
+    if config.skills.enabled:
+        from dotclaw.skills.scanner import SkillScanner
+        from dotclaw.skills.registry import SkillRegistry
+
+        skill_dirs = config.skills.directory
+        if isinstance(skill_dirs, str):
+            skill_dirs = [skill_dirs]
+
+        skill_paths = []
+        from pathlib import Path
+        for d in skill_dirs:
+            p = Path(d)
+            skill_paths.append(str(p) if p.is_absolute() else str(project_root / d))
+
+        scanner = SkillScanner(skill_paths, skip_prefix=config.skills.skip_prefix)
+        metas = scanner.scan()
+
+        skill_registry = SkillRegistry()
+        for meta in metas:
+            skill_registry.register(meta)
+
+        if metas:
+            channel.print_info(f"  已加载 {len(metas)} 个 Skill")
+    # ---- Phase 7 Skill 初始化结束 ----
+
     # ---- Phase 5 新增：工具层新架构初始化 ----
     from dotclaw.tools.registry import ToolRegistry
     from dotclaw.tools.executor import ToolExecutor
@@ -132,10 +159,14 @@ async def _run_cli():
         mcp_task = None
     # ---- Phase 6 MCP 初始化结束 ----
 
-    # 4. 创建执行器
+    # 4. 创建执行器（注入 SkillParser 用于检测 skill 相关操作）
+    from dotclaw.tools.parser import SkillParser
+
+    skill_parser = SkillParser(skill_registry) if skill_registry else None
     tool_executor = ToolExecutor(
         registry=tool_registry,
         approval_manager=approval_mgr,
+        skill_parser=skill_parser,
     )
     # ---- Phase 5 工具层初始化结束 ----
 
@@ -208,32 +239,7 @@ async def _run_cli():
     channel.print_info(f"可用模型: {', '.join(llm_proxy.available_models)}")
     channel.print_info("输入 /help 查看命令\n")
 
-    # ---- Phase 7 新增：Skill 系统初始化 ----
-    skill_registry = None
-    if config.skills.enabled:
-        from dotclaw.skills.scanner import SkillScanner
-        from dotclaw.skills.registry import SkillRegistry
 
-        skill_dirs = config.skills.directory
-        if isinstance(skill_dirs, str):
-            skill_dirs = [skill_dirs]
-
-        skill_paths = []
-        from pathlib import Path
-        for d in skill_dirs:
-            p = Path(d)
-            skill_paths.append(str(p) if p.is_absolute() else str(project_root / d))
-
-        scanner = SkillScanner(skill_paths, skip_prefix=config.skills.skip_prefix)
-        metas = scanner.scan()
-
-        skill_registry = SkillRegistry()
-        for meta in metas:
-            skill_registry.register(meta)
-
-        if metas:
-            channel.print_info(f"  已加载 {len(metas)} 个 Skill")
-    # ---- Phase 7 Skill 初始化结束 ----
 
     # ---- PromptBuilder + AgentLoop ----
     from dotclaw.agent.prompt.builder import PromptBuilder
@@ -325,6 +331,7 @@ async def _run_cli():
 
             # 普通对话
             await agent.run(user_input)
+            sys.stdout.flush()   # 确保日志输出在 >>> 之前
 
         except KeyboardInterrupt:
             channel.print_info("\n(输入 /quit 退出)")

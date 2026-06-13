@@ -11,6 +11,10 @@ from .handler import ToolHandler
 from .registry import ToolRegistry
 from .approval import ApprovalManager
 from dotclaw.journal import Journal
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .parser import SkillParser
 
 logger = logging.getLogger("dotclaw.tools.executor")
 
@@ -22,9 +26,11 @@ class ToolExecutor:
         self,
         registry: ToolRegistry,
         approval_manager: ApprovalManager | None = None,
+        skill_parser: "SkillParser | None" = None,
     ):
         self._registry = registry
         self._approval = approval_manager or ApprovalManager()
+        self._skill_parser = skill_parser
 
     def get_definitions(self) -> list:
         """返回所有工具定义（转发给 Registry）。"""
@@ -33,6 +39,22 @@ class ToolExecutor:
     def get_handler(self, name: str) -> ToolHandler | None:
         """按名称获取 Handler（转发给 Registry）。"""
         return self._registry.get(name)
+
+    def _check_skill(self, tool_name: str, args: dict,
+                     journal: Any, status: str) -> None:
+        """工具执行后检查是否命中 skill，命中则发射对应 journal 事件。"""
+        if not self._skill_parser:
+            return
+        result = self._skill_parser.parse(tool_name, args)
+        if result is None:
+            return
+        skill_name, part, osname = result
+        if part == "body":
+            journal.skill_body_loaded(skill_name, status=status)
+        elif part == "reference":
+            journal.skill_reference_load(skill_name, osname, status=status)
+        elif part == "script":
+            journal.skill_script_exec(skill_name, osname, status=status)
 
     async def execute(
         self,
@@ -93,6 +115,7 @@ class ToolExecutor:
                 status = "error" if result.is_error else "success"
                 journal.tool_end(name, result_len=len(result.output),
                                  status=status, error_type=result.error_type if result.is_error else "")
+                self._check_skill(name, arguments, journal, status)
             return result
         except asyncio.TimeoutError:
             logger.warning(f"工具 {name} 执行超时（{timeout}s）")
