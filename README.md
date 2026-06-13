@@ -4,33 +4,32 @@
 
 **轻量级开源 Agent Harness 项目**
 
-ReAct 推理循环 · 多模型路由降级 · 三级记忆 · 可插拔工具与技能
+ReAct推理循环 · 多模型路由降级 · 三级记忆 · 可插拔工具与技能
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/ttguy0707/dotClaw?color=orange)](https://github.com/ttguy0707/dotClaw)
+[![Last Commit](https://img.shields.io/github/last-commit/ttguy0707/dotClaw?color=orange)](https://github.com/aandbcct/dotClaw)
 
 </div>
 
 ---
 
-> **dotClaw** — 一个从零搭建的 Agent Harness 项目。不是封装 SDK，不是调用 API，而是**自己实现推理循环、工具调度、记忆管理和模型路由**的完整链路。
->
-> 适用于想理解 Agent 内部机制的开发者：ReAct 循环怎么转、工具调用怎么编排、上下文怎么裁剪、多模型怎么降级——每个模块的设计决策和踩坑过程都记录在开发文档中。
+> **dotClaw** — 一个从零搭建的 Agent Harness 项目。**实现ReAct循环、工具调度、记忆管理和模型路由**的完整链路。
+> 
 
 ---
 
 ## ✨ 核心特性
 
-| 特性 | 说明 |
-|------|------|
-| 🔄 **ReAct 循环** | 思考→行动→观察的推理循环，让 Agent 决策过程透明可追溯 |
-| 🔀 **多模型路由** | 多供应商适配（Qwen / DeepSeek / OpenAI），优先级自动选择 + 跨供应商降级 |
-| 🧠 **三级记忆** | L1 Session / L2 日记忆 / L3 蒸馏，上下文管理不失控 |
-| 🔧 **可插拔工具** | ToolHandler/Registry/Executor 三层架构 + 8 个内置工具 + 审批机制 |
-| 📡 **MCP 协议** | stdio + Streamable HTTP 双传输，无缝接入外部工具服务 |
-| 🎯 **Skill 系统** | 扫描注册 + prompt 注入，技能即插即用 |
-| ⏰ **定时提醒** | 后台 Scheduler，支持 cron 表达式 |
+| 特性            | 说明                                               |
+|---------------|--------------------------------------------------|
+| **ReAct推理循环** | 思考→行动→观察的推理循环，让agent逐步思考，动态响应复杂任务                |
+| **链路白盒化**     | 16类事件覆盖5大模块，三类统计结果支持请求全链路追溯                      |
+| **多模型路由**     | 多供应商适配（Qwen / DeepSeek / OpenAI），优先级自动选择 + 跨供应商降级 |
+| **三级记忆**      | L1 Session / L2 日记忆 / L3 蒸馏，上下文管理不失控             |
+| **可插拔工具**     | ToolHandler/Registry/Executor 三层架构 + 8 个内置工具 + 审批机制 |
+| **MCP 协议**    | stdio + Streamable HTTP 双传输，无缝接入外部工具服务           |
+| **Skill 系统**  | 扫描注册 + prompt 注入，技能即插即用                          |
 
 ---
 
@@ -67,6 +66,7 @@ dotclaw
 dotClaw/
 ├── src/dotclaw/             # 源代码
 │   ├── agent/               # Agent 核心循环
+│   ├── journal/              # 统一观测模块
 │   ├── llm/                 # LLM 客户端
 │   ├── tools/               # 工具系统
 │   ├── mcp/                 # MCP 协议客户端
@@ -88,8 +88,9 @@ dotClaw/
 | 模块 | 路径 | 职责 |
 |------|------|------|
 | **Agent 循环** | `agent/` | ReAct 推理循环 + AgentContext 上下文 + PromptBuilder 提示构建 |
+| **统一观测** | `journal/` | 16 种事件覆盖 5 大域，一个入口多路输出：trace.jsonl / report.json / snapshot.json |
 | **LLM 客户端** | `llm/` | Qwen / DeepSeek / OpenAI 适配，OpenAICompatibleClient 基类统一接口 |
-| **工具系统** | `tools/` | ToolHandler/Registry/Executor 三层分离，内置 8 工具 + 审批机制 + ToolProvider ABC |
+| **工具系统** | `tools/` | ToolHandler/Registry/Executor 三层分离 + 审批机制 + SkillParser |
 | **MCP 协议** | `mcp/` | stdio + Streamable HTTP 双传输，McpClient 状态机 + 三个 Handler |
 | **Skill 系统** | `skills/` | 扫描注册 + prompt 注入 + SkillsProvider |
 | **记忆系统** | `memory/` | L1 Session / L2 日记忆 / L3 蒸馏，MemoryProvider 统一接口 |
@@ -168,9 +169,10 @@ python tests/test_phase7_acceptance.py   # Skill 系统
 | Phase 5 | ![完成](https://img.shields.io/badge/✅-完成-brightgreen) | 工具层架构重构：ToolHandler/Registry/Executor 三层分离、去硬编码审批、ToolProvider ABC |
 | Phase 6 | ![完成](https://img.shields.io/badge/✅-完成-brightgreen) | MCP 协议集成：双传输 + McpClient 状态机 + MCPToolProvider + /mcp 命令 |
 | Phase 7 | ![完成](https://img.shields.io/badge/✅-完成-brightgreen) | Skill 系统完善：扫描注册 + prompt 注入 + SkillsProvider + /skills 命令 |
-| Phase 8 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | Scheduler cron 增强 |
-| Phase 9 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | 取消机制（CancelTokenRegistry） |
-| Phase 10 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | 测试覆盖率 + Web Channel |
+| Phase 8 | ![完成](https://img.shields.io/badge/✅-完成-brightgreen) | Journal 统一观测：16 种事件 / 一个入口多路输出 / trace + report + snapshot |
+| Phase 9 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | Scheduler cron 增强 |
+| Phase 10 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | 取消机制（CancelTokenRegistry） |
+| Phase 11 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | 测试覆盖率 + Web Channel |
 
 ---
 
@@ -178,7 +180,7 @@ python tests/test_phase7_acceptance.py   # Skill 系统
 
 | 模块         |   状态   | 说明                                       |
 |------------|:------:|------------------------------------------|
-| 重构数据统计模块   | 🔜 进行中 | 将logger、tracer、metrics三种数据统计聚合，体系化数据统计内容 |
+| 重构数据统计模块 | ✅ 已完成 | 合并 logger/tracer/metrics 为统一 Journal 观测模块 |
 | agent实体类包装 | 🔜 待开发 | 将session、memory、content以agent实体包装，拓宽适用范围 |
 | 工具安全护栏     | 🔜 待开发 | 控制模型调用工具的边界，完善工具调用的前置处理                  |
 | 上下文工程      | 🔜 待开发 | 重构会话上下文的构成，精细化会话时模型可见内容                  |
