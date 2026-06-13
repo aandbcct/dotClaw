@@ -10,6 +10,7 @@ from .base import ToolExecutionContext, ToolResult
 from .handler import ToolHandler
 from .registry import ToolRegistry
 from .approval import ApprovalManager
+from dotclaw.journal import Journal
 
 logger = logging.getLogger("dotclaw.tools.executor")
 
@@ -38,12 +39,12 @@ class ToolExecutor:
         name: str,
         arguments: dict[str, Any],
         channel: Any | None = None,
-        journal: Any | None = None,
+        journal: Journal | None = None,
     ) -> ToolResult:
         """执行工具：查找 Handler → 审批检查 → 超时控制 → 返回 ToolResult"""
         # ── Journal：工具执行开始 ──
         if journal:
-            journal.tool_start(name)
+            journal.tool_start(name, args=arguments)
 
         handler = self._registry.get(name)
         if not handler:

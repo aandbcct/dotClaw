@@ -43,6 +43,7 @@ def trace_sink(
 
     line = json.dumps({
         "ts": event.timestamp,
+        "t": event.created_at,
         "type": event.event_type,
         "data": event.data,
     }, ensure_ascii=False)

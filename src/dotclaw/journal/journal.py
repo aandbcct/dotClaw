@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import time
 from typing import Any, TYPE_CHECKING
-
 from dotclaw.journal.events import AgentEvent, EventType
+from dotclaw.config.settings import JournalConfig
+import json as _json
+import os as _os
+from datetime import date as _date, datetime as _dt, timezone as _tz
 
 if TYPE_CHECKING:
     from dotclaw.agent.context import AgentContext
@@ -59,8 +62,13 @@ class Journal:
 
     def _emit(self, event_type: str, data: dict | None = None) -> None:
         """发射事件：追加到事件列表，触发各 sink。"""
+        ts = time.time()
+        created_at = time.strftime("%H:%M:%S", time.localtime(ts))
+        ms = int((ts - int(ts)) * 1000)
+
         event = AgentEvent(
-            timestamp=time.time(),
+            timestamp=ts,
+            created_at=f"{created_at}.{ms:03d}",
             event_type=event_type,
             data=data or {},
         )
@@ -226,13 +234,15 @@ class Journal:
 
     # ═══ 工具调用 ═══
 
-    def tool_start(self, tool_name: str, attempt: int = 1) -> None:
-        """开始执行工具。内部记录时间戳。"""
+    def tool_start(self, tool_name: str, args: dict | None = None,
+                   attempt: int = 1) -> None:
+        """开始执行工具。记录工具名和调用参数。"""
         self._require_session()
         self._timer_start(f"tool_{tool_name}")
         self._emit(EventType.TOOL_START, {
             "loop_idx": self._loop_idx,
             "tool_name": tool_name,
+            "args": args or {},
             "attempt": attempt,
         })
 
@@ -324,8 +334,7 @@ class Journal:
         注意：trace.jsonl 由 _emit() 中的 trace_sink 实时逐行写入，
         finalize() 不再重复写入。
         """
-        import os as _os
-        from datetime import date as _date, datetime as _dt, timezone as _tz
+
 
         if not self._config or not self._request_id:
             self._events = []

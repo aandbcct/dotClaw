@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -113,15 +112,8 @@ class SkillsProvider(DataProvider):
         if not descriptions:
             return None
 
-        # ── Journal：Skill 注入 prompt ──
-        journal = context.journal
-        if journal:
-            all_metas = registry.list_all()
-            for meta in all_metas:
-                # skill body 被注入到 system prompt
-                journal.skill_body_loaded(meta.name, cached=False)
-                for sp in meta.script_paths:
-                    journal.skill_script_exec(meta.name, "success")
+        # SkillsProvider 只负责将 skill frontmatter（描述块）注入 system prompt。
+        # body 加载和脚本执行不在此处记录——它们在实际触发时由工具层处理。
 
         return (
             "## 技能系统（mandatory）\n\n"

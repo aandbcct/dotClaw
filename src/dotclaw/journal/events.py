@@ -14,11 +14,13 @@ class AgentEvent:
 
     Attributes:
         timestamp: Unix 时间戳（秒）。
+        created_at: 人类可读时间（HH:MM:SS.ms）。
         event_type: 事件类型标识，见 EventType。
         data: 事件携带的结构化数据。
     """
 
     timestamp: float
+    created_at: str
     event_type: str
     data: dict[str, Any] = field(default_factory=dict)
 

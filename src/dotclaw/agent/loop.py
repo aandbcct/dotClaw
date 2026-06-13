@@ -172,7 +172,7 @@ class AgentLoop:
                     content=current_content or "",
                     tool_calls=list(tool_calls_pending),
                 ))
-
+                # ===工具调用===
                 for tc in tool_calls_pending:
                     try:
                         args = json.loads(tc.arguments)
@@ -197,7 +197,7 @@ class AgentLoop:
                             tool_call_id=tc.id,
                         ))
                     else:
-                        journal.tool_start(tc.name)
+                        journal.tool_start(tc.name, args=args)
                         messages.append(Message(
                             role="tool",
                             content="错误：工具执行器未初始化",

@@ -352,7 +352,8 @@ class TestEventImmutability:
     """测试 AgentEvent 的 frozen 特性。"""
 
     def test_event_is_immutable(self):
-        event = AgentEvent(timestamp=123.456, event_type="session.start")
+        event = AgentEvent(timestamp=123.456, created_at="00:00:00.000",
+                          event_type="session.start")
         with pytest.raises(Exception):
             event.timestamp = 999.0
 
