@@ -6,7 +6,7 @@ from dotclaw.journal.events import AgentEvent, EventType
 
 _ERROR_LEVELS = {"ERROR", "WARNING"}
 
-
+# todo 使用rich库设计一套终端监控看板，好看
 def console_sink(event: AgentEvent) -> None:
     """实时输出 ERROR 和 WARNING 事件到 stderr。
 

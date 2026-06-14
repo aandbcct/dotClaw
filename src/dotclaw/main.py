@@ -27,7 +27,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 from dotclaw.config import get_config, load_config
 from dotclaw.channel.cli import CLIChannel
 from dotclaw.memory.store import SessionManager
-from dotclaw.agent.loop import AgentLoop
+from dotclaw.agent import Agent, AgentConfig, load_agent_config
 from dotclaw.llm.proxy import LLMProxy
 
 
@@ -241,7 +241,7 @@ async def _run_cli():
 
 
 
-    # ---- PromptBuilder + AgentLoop ----
+    # ---- PromptBuilder ----
     from dotclaw.agent.prompt.builder import PromptBuilder
     from dotclaw.agent.prompt.providers import (
         RoleProvider, RulesProvider, ToolsProvider,
@@ -256,17 +256,20 @@ async def _run_cli():
         SkillsProvider(),
     ])
 
-    agent = AgentLoop(
+    # ---- Agent 实例构建 ----
+    agent_config = load_agent_config()
+    agent = Agent(
+        agent_config=agent_config,
+        config=config,
         llm=llm_proxy,
-        session=current_session,
         session_mgr=session_mgr,
         channel=channel,
-        config=config,
         tool_executor=tool_executor,
         prompt_builder=prompt_builder,
         memory_mgr=memory_mgr,
         skill_registry=skill_registry,
     )
+    agent.session = current_session  # 设置初始会话
 
     while True:
         try:
@@ -296,19 +299,32 @@ async def _run_cli():
                     _print_help(channel)
                 elif cmd == "/new":
                     title = args or "新对话"
-                    current_session = await session_mgr.create(title)
-                    agent.session = current_session
-                    channel.print_info(f"已创建并切换到新对话: [{current_session.id}] {title}")
+                    session = await agent.new_session(title)
+                    channel.print_info(f"已创建并切换到新对话: [{session.id}] {title}")
                 elif cmd == "/list":
-                    await _cmd_list(channel, session_mgr, current_session)
+                    await _cmd_list(channel, agent)
                 elif cmd == "/switch":
                     if args:
-                        await _cmd_switch(channel, session_mgr, agent, args)
+                        session = await agent.switch_session(args)
+                        if session:
+                            channel.print_info(f"已切换到 [{session.id}] {session.title}")
+                        else:
+                            channel.print_error(f"未找到会话: {args}")
                     else:
                         channel.print_error("用法: /switch <会话ID>")
                 elif cmd == "/delete":
                     if args:
-                        await _cmd_delete(channel, session_mgr, agent, args)
+                        deleted = await session_mgr.delete(args)
+                        if deleted:
+                            channel.print_info(f"已删除会话: {args}")
+                            # 如果删除的是当前会话，回退到第一个可用会话
+                            if agent.session and agent.session.id == args:
+                                sessions = await agent.list_sessions()
+                                if sessions:
+                                    agent.session = sessions[0]
+                                    channel.print_info(f"已切换到 [{agent.session.id}] {agent.session.title}")
+                        else:
+                            channel.print_error(f"未找到会话: {args}")
                     else:
                         channel.print_error("用法: /delete <会话ID>")
                 elif cmd == "/dream":
@@ -330,7 +346,7 @@ async def _run_cli():
                 continue
 
             # 普通对话
-            await agent.run(user_input)
+            await agent.chat(user_input)
             sys.stdout.flush()   # 确保日志输出在 >>> 之前
 
         except KeyboardInterrupt:
@@ -356,11 +372,12 @@ dotClaw 命令:
 """)
 
 
-async def _cmd_list(channel, session_mgr, current):
-    sessions = await session_mgr.list_all()
+async def _cmd_list(channel, agent):
+    sessions = await agent.list_sessions()
     channel.print_info("所有对话:")
     for s in sessions:
-        mark = " ← 当前" if s.id == current.id else ""
+        current_id = agent.session.id if agent.session else ""
+        mark = " ← 当前" if s.id == current_id else ""
         channel.print_info(f"  [{s.id}] {s.title} ({s.updated_at[:10]}){mark}")
 
 
@@ -464,28 +481,6 @@ async def _cmd_dream_async(channel, dream):
         channel.print_info(f"Dream: {result}")
     except Exception as e:
         channel.print_error(f"Dream 失败: {e}")
-
-
-async def _cmd_switch(channel, session_mgr, agent, session_id: str):
-    session = await session_mgr.load(session_id)
-    if session:
-        agent.session = session
-        channel.print_info(f"已切换到 [{session.id}] {session.title}")
-    else:
-        channel.print_error(f"未找到会话: {session_id}")
-
-
-async def _cmd_delete(channel, session_mgr, agent, session_id: str):
-    deleted = await session_mgr.delete(session_id)
-    if deleted:
-        channel.print_info(f"已删除会话: {session_id}")
-        if agent.session.id == session_id:
-            sessions = await session_mgr.list_all()
-            if sessions:
-                agent.session = sessions[0]
-                channel.print_info(f"已切换到 [{agent.session.id}] {agent.session.title}")
-    else:
-        channel.print_error(f"未找到会话: {session_id}")
 
 
 def main():

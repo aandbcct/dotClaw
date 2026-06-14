@@ -82,7 +82,7 @@ class ToolExecutor:
             return result
 
         definition = handler.definition()
-
+        # todo 将安全模块独立出去，包括workspace限制、鉴权、工具审批、
         # 审批检查
         if definition.needs_approval:
             approved = await self._approval.check(
