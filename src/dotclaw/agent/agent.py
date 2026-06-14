@@ -519,6 +519,60 @@ class Agent:
             output_tokens=output_tokens,
         )
 
+    async def _execute_single_tool(
+        self, tc, journal: "Journal"
+    ) -> Message:
+        """
+        执行单个工具调用，返回 tool 角色 Message。
+
+        Loop 侧通过 asyncio.gather 并行调用此方法，实现工具并行执行。
+
+        Args:
+            tc: ToolCall 对象（有 name / arguments / id 属性）
+            journal: Journal 观测实例
+
+        Returns:
+            role="tool" 的 Message
+        """
+        import json as _json
+
+        try:
+            args = _json.loads(tc.arguments)
+        except (_json.JSONDecodeError, TypeError):
+            args = {}
+
+        if not self._tool_executor:
+            journal.tool_start(tc.name, args=args)
+            journal.tool_end(tc.name, result_len=0, status="error", error_type="no_executor")
+            return Message(
+                role="tool",
+                content="错误：工具执行器未初始化",
+                tool_call_id=tc.id,
+            )
+
+        if self._channel:
+            self._channel.print_info(
+                f"\n🔧 调用工具: {tc.name}({_json.dumps(args, ensure_ascii=False)})"
+            )
+
+        result = await self._tool_executor.execute(
+            name=tc.name,
+            arguments=args,
+            channel=self._channel,
+            journal=journal,
+        )
+
+        if self._channel:
+            self._channel.print_info(
+                f"  结果: {result.output[:100]}{'...' if len(result.output) > 100 else ''}"
+            )
+
+        return Message(
+            role="tool",
+            content=result.output,
+            tool_call_id=tc.id,
+        )
+
     async def _recall_memory(
         self, query: str, journal: "Journal"
     ) -> str:

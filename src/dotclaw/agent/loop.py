@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import time
 from typing import TYPE_CHECKING
 
@@ -109,40 +109,13 @@ class AgentLoop:
                     content=llm_resp.content or "",
                     tool_calls=list(llm_resp.tool_calls),
                 ))
-                # ===工具调用===
-                for tc in llm_resp.tool_calls:
-                    try:
-                        args = json.loads(tc.arguments)
-                    except (json.JSONDecodeError, TypeError):
-                        args = {}
 
-                    if self.agent.tool_executor:
-                        if self.agent.channel:
-                            self.agent.channel.print_info(f"\n🔧 调用工具: {tc.name}({json.dumps(args, ensure_ascii=False)})")
-
-                        result = await self.agent.tool_executor.execute(
-                            name=tc.name,
-                            arguments=args,
-                            channel=self.agent.channel,
-                            journal=journal,
-                        )
-
-                        if self.agent.channel:
-                            self.agent.channel.print_info(f"  结果: {result.output[:100]}{'...' if len(result.output) > 100 else ''}")
-
-                        messages.append(Message(
-                            role="tool",
-                            content=result.output,
-                            tool_call_id=tc.id,
-                        ))
-                    else:
-                        journal.tool_start(tc.name, args=args)
-                        messages.append(Message(
-                            role="tool",
-                            content="错误：工具执行器未初始化",
-                            tool_call_id=tc.id,
-                        ))
-                        journal.tool_end(tc.name, result_len=0, status="error", error_type="no_executor")
+                # ── 并行执行工具调用 ──
+                tool_messages = await asyncio.gather(*[
+                    self.agent._execute_single_tool(tc, journal)
+                    for tc in llm_resp.tool_calls
+                ])
+                messages.extend(tool_messages)
 
                 journal.loop_end("tool_call")
 
