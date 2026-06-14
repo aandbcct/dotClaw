@@ -206,6 +206,9 @@ class Agent:
         prompt_builder: "PromptBuilder | None" = None,
         memory_mgr: "MemoryManager | None" = None,
         skill_registry: "SkillRegistry | None" = None,
+        mcp_provider: Any = None,
+        memory_dream: Any = None,
+        mcp_task: Any = None,
     ):
         """
         通过依赖注入构造 Agent。
@@ -220,6 +223,9 @@ class Agent:
             prompt_builder: System prompt 构建器
             memory_mgr: 记忆管理器
             skill_registry: Skill 注册表
+            mcp_provider: MCP 工具提供器（可选）
+            memory_dream: DeepDream 记忆蒸馏实例（可选）
+            mcp_task: MCP 后台初始化 task（可选）
         """
         self.agent_config = agent_config
         self._config = config
@@ -231,6 +237,9 @@ class Agent:
         self._prompt_builder = prompt_builder
         self._memory_mgr = memory_mgr
         self._skill_registry = skill_registry
+        self._mcp_provider = mcp_provider
+        self._memory_dream = memory_dream
+        self._mcp_task = mcp_task
 
     # ======================== 只读属性 ========================
 
@@ -298,6 +307,29 @@ class Agent:
     def skill_registry(self) -> "SkillRegistry | None":
         """Skill 注册表"""
         return self._skill_registry
+
+    @property
+    def mcp_provider(self) -> Any:
+        """MCP 工具提供器（可为 None）"""
+        return self._mcp_provider
+
+    @property
+    def memory_dream(self) -> Any:
+        """DeepDream 记忆蒸馏实例（可为 None）"""
+        return self._memory_dream
+
+    # ======================== 生命周期 ========================
+
+    async def shutdown(self) -> None:
+        """关闭 Agent 持有的所有运行时资源（MCP、后台 task 等）。"""
+        if self._mcp_task and not self._mcp_task.done():
+            self._mcp_task.cancel()
+            try:
+                await self._mcp_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._mcp_provider:
+            await self._mcp_provider.shutdown()
 
     # ======================== Session 管理 ========================
 

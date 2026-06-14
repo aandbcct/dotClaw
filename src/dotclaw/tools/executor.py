@@ -32,6 +32,11 @@ class ToolExecutor:
         self._approval = approval_manager or ApprovalManager()
         self._skill_parser = skill_parser
 
+    @property
+    def registry(self) -> ToolRegistry:
+        """工具注册表（供工厂/MCP 等需要直接操作注册表的场景）"""
+        return self._registry
+
     def get_definitions(self) -> list:
         """返回所有工具定义（转发给 Registry）。"""
         return self._registry.get_definitions()

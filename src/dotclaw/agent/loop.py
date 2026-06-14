@@ -30,6 +30,13 @@ class AgentLoop:
         """
         处理一条用户消息，返回 AgentResult。
 
+        # 这是 agent 的主循环，可以按“感知 -> 决策 -> 行动 -> 记录”来理解：
+        # 1. 感知：重新组 prompt，把当前状态整理给模型看
+        # 2. 决策：让模型返回一个工具调用，或一个最终答案
+        # 3. 行动：如果是工具调用，就执行工具
+        # 4. 记录：把结果写回 history / task_state / trace / memory
+        # 然后进入下一轮，直到停机条件满足
+
         完整流程：
         1. 通过 agent 构建 AgentContext（不可变快照）
         2. 创建 Journal 开始观测
