@@ -71,51 +71,27 @@ class AgentLoop:
 
             for _ in range(max_iterations):
                 iterations += 1
-                tool_calls_pending = []
-                current_content = ""
-                loop_finish_reason = "stop"
-                input_tokens = 0
-                output_tokens = 0
 
                 # ── Journal：每轮循环开始 ──
                 journal.loop_start()
 
-                async for chunk in self.agent.llm.chat(
-                    messages=messages,
-                    tools=context.tool_definitions if context.tool_definitions else None,
-                    model=context.model,
-                    purpose=context.purpose,
-                    stream=self.agent.config.llm.stream,
-                    journal=journal,
-                ):
-                    if chunk.content:
-                        current_content += chunk.content
-                        if self.agent.channel:
-                            await self.agent.channel.stream(chunk.content)
-
-                    if chunk.tool_call:
-                        tool_calls_pending.append(chunk.tool_call)
-
-                    if chunk.is_final:
-                        loop_finish_reason = chunk.finish_reason or "stop"
-                        input_tokens = getattr(chunk, "input_tokens", 0)
-                        output_tokens = getattr(chunk, "output_tokens", len(current_content))
-                        break
+                # ── 通过 Agent 调用 LLM ──
+                llm_resp = await self.agent._invoke_llm(messages, context, journal)
 
                 # ── Journal：LLM 响应结束 ──
-                llm_status = "error" if loop_finish_reason == "error" else (
-                    "truncated" if loop_finish_reason == "length" else "success"
+                llm_status = "error" if llm_resp.finish_reason == "error" else (
+                    "truncated" if llm_resp.finish_reason == "length" else "success"
                 )
                 journal.llm_response_end(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens or len(current_content),
+                    input_tokens=llm_resp.input_tokens,
+                    output_tokens=llm_resp.output_tokens,
                     tps=0.0,
                     status=llm_status,
-                    stop_reason=loop_finish_reason,
+                    stop_reason=llm_resp.finish_reason,
                 )
 
-                if not tool_calls_pending:
-                    final_response = current_content
+                if not llm_resp.tool_calls:
+                    final_response = llm_resp.content
                     if self.agent.channel:
                         await self.agent.channel.send("\n")
 
@@ -125,16 +101,16 @@ class AgentLoop:
                     journal.loop_end("response")
                     break
 
-                tool_calls_total += len(tool_calls_pending)
+                tool_calls_total += len(llm_resp.tool_calls)
 
                 # 将 assistant 消息（含 tool_calls）追加到 messages
                 messages.append(Message(
                     role="assistant",
-                    content=current_content or "",
-                    tool_calls=list(tool_calls_pending),
+                    content=llm_resp.content or "",
+                    tool_calls=list(llm_resp.tool_calls),
                 ))
                 # ===工具调用===
-                for tc in tool_calls_pending:
+                for tc in llm_resp.tool_calls:
                     try:
                         args = json.loads(tc.arguments)
                     except (json.JSONDecodeError, TypeError):

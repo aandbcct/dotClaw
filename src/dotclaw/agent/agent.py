@@ -33,6 +33,34 @@ if TYPE_CHECKING:
     from ..journal import Journal
 
 
+# ============================================================================
+# LLMResponse — 单次 LLM 调用的完整结果
+# ============================================================================
+
+@dataclass
+class LLMResponse:
+    """一次 LLM 调用的完整返回。
+
+    Agent._invoke_llm() 返回此结构，Loop 用它判断下一步：
+    有 tool_calls → 执行工具；没有 → 返回最终回复。
+    """
+
+    content: str = ""
+    """LLM 返回的文本内容"""
+
+    tool_calls: list = field(default_factory=list)
+    """LLM 返回的工具调用列表（ToolCall 对象）"""
+
+    finish_reason: str = "stop"
+    """停止原因：stop / tool_calls / length / error"""
+
+    input_tokens: int = 0
+    """本次调用消耗的输入 token 数"""
+
+    output_tokens: int = 0
+    """本次调用产生的输出 token 数"""
+
+
 def _find_project_root() -> Path:
     """从 dotClaw 模块位置向上找到项目根目录（包含 config.yaml）"""
     import dotclaw
@@ -435,6 +463,61 @@ class Agent:
         messages = msg_clean(messages)
 
         return messages
+
+    async def _invoke_llm(
+        self,
+        messages: list[Message],
+        context: "AgentContextType",
+        journal: "Journal",
+    ) -> LLMResponse:
+        """
+        调用 LLM 并收集完整响应。
+
+        封装：流式接收 → channel 推送 → 收集文本/tool_calls/token 信息。
+
+        Args:
+            messages: 待发送的消息列表
+            context: AgentContext 快照（提供 model / tool_definitions / purpose 等）
+            journal: Journal 观测实例（透传给 llm.chat）
+
+        Returns:
+            LLMResponse（content + tool_calls + finish_reason + tokens）
+        """
+        current_content = ""
+        tool_calls: list = []
+        finish_reason = "stop"
+        input_tokens = 0
+        output_tokens = 0
+
+        async for chunk in self._llm.chat(
+            messages=messages,
+            tools=context.tool_definitions if context.tool_definitions else None,
+            model=context.model,
+            purpose=context.purpose,
+            stream=self._config.llm.stream,
+            journal=journal,
+        ):
+            if chunk.content:
+                current_content += chunk.content
+                if self._channel:
+                    await self._channel.stream(chunk.content)
+
+            if chunk.tool_call:
+                tool_calls.append(chunk.tool_call)
+
+            if chunk.is_final:
+                finish_reason = chunk.finish_reason or "stop"
+                input_tokens = getattr(chunk, "input_tokens", 0)
+                output_tokens = getattr(chunk, "output_tokens", len(current_content))
+                break
+
+        return LLMResponse(
+            content=current_content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
 
     async def _recall_memory(
         self, query: str, journal: "Journal"
