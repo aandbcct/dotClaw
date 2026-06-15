@@ -1,0 +1,55 @@
+# ============================================
+# dotClaw Agent 配置 (coding-assistant.yaml)
+# ============================================
+
+# ── 身份标识 ──
+agent_id: coding-assistant
+agent_name: "CodeClaw 编程助手"
+description: "专注于代码编写、重构和调试的 AI 编程助手"
+
+# ── 模型 ──
+model: ""                  # 空字符串 = 使用 config.llm.default_model
+
+# ── 工作空间 ──
+workspace: "."             # . = 跟随 project_root
+
+# ── 模型参数覆盖 ──
+model_params:
+  temperature: 0.7
+  max_tokens: 8192
+  top_p: 0.95
+
+# ── 工具白名单 ──
+allowed_tools: []          # 空列表 = 所有已注册工具均可用
+
+# ── Skill 白名单 ──
+registered_skills: []      # 空 = 跟随 config.skills.enabled 使用全局 skill 列表
+
+# ── 循环控制 ──
+max_loop_steps: 15         # ReAct 最大迭代数
+
+# ── System Prompt ──
+system_prompt_template: ""
+# 示例模板（取消注释生效）：
+# system_prompt_template: |
+#   你是 {agent_name}，一个专业的编程助手。
+#   你的工作目录是 {workspace}。
+#
+#   核心能力：
+#   - 阅读和理解代码库
+#   - 编写高质量、可维护的代码
+#   - 重构和优化现有代码
+#   - 调试和修复 bug
+#   - 解释技术概念
+#
+#   行为准则：
+#   - 先理解再行动
+#   - 代码变更前先阅读相关文件
+#   - 遵循项目现有代码风格
+#   - 对危险操作请求确认
+
+# ── 标签 ──
+tags:
+  - programming
+  - code-review
+  - refactoring

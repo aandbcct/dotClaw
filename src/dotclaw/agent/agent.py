@@ -68,12 +68,12 @@ def _find_project_root() -> Path:
 
 
 # ============================================================================
-# AgentConfig — Agent 级配置（从 agent.yaml 加载）
+# AgentConfig — Agent 级配置（从 coding-assistant.yaml 加载）
 # ============================================================================
 
 @dataclass
 class AgentConfig:
-    """Agent 级配置，从 agent.yaml 加载。
+    """Agent 级配置，从 coding-assistant.yaml 加载。
 
     与 config.settings.AgentConfig 不同：那个是从 config.yaml 的 agent: 段加载的
     全局 Agent 默认值，这个是单个 Agent 角色的专属配置。
@@ -92,7 +92,7 @@ class AgentConfig:
 
     # ── 工作空间 ──
     workspace: str = "."
-    """工作目录。相对路径基于 agent.yaml 所在目录解析。"" 表示跟随 project_root"""
+    """工作目录。相对路径基于 coding-assistant.yaml 所在目录解析。"" 表示跟随 project_root"""
 
     # ── 工具过滤 ──
     allowed_tools: list[str] = field(default_factory=list)
@@ -127,17 +127,17 @@ def load_agent_config(
     path: str | Path | None = None,
 ) -> AgentConfig:
     """
-    加载 agent.yaml。
+    加载 {agent_id}.yaml。
 
     路径解析：
     - 指定 path 时使用指定路径（绝对路径或相对于项目根目录）
-    - 未指定时按约定路径：.dotclaw/agentConfig/{agent_id}/agent.yaml
+    - 未指定时按约定路径：.dotclaw/agentConfig/{agent_id}.yaml
     - 支持 ${ENV_VAR} 环境变量展开
     - YAML 解析失败时返回默认 AgentConfig（agent_id 会写入返回的配置）
 
     Args:
-        agent_id: Agent 标识，用于定位 agent.yaml（默认 "default"）
-        path: 显式 agent.yaml 路径，可选（优先级高于 agent_id）
+        agent_id: Agent 标识，用于定位配置文件（默认 "default"）
+        path: 显式配置文件路径，可选（优先级高于 agent_id）
 
     Returns:
         AgentConfig 实例
@@ -148,7 +148,7 @@ def load_agent_config(
         else:
             config_path = _find_project_root() / path
     else:
-        config_path = _find_project_root() / ".dotclaw" / "agentConfig" / agent_id / "agent.yaml"
+        config_path = _find_project_root() / ".dotclaw" / "agentConfig" / f"{agent_id}.yaml"
 
     if not config_path.exists():
         return AgentConfig(agent_id=agent_id)
@@ -214,7 +214,7 @@ class Agent:
         通过依赖注入构造 Agent。
 
         Args:
-            agent_config: Agent 级配置（从 agent.yaml 加载）
+            agent_config: Agent 级配置（从 coding-assistant.yaml 加载）
             config: 全局 Config（从 config.yaml 加载，用于 model/system_prompt 回退）
             llm: LLM 代理
             session_mgr: 会话管理器
