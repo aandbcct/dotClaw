@@ -124,20 +124,6 @@ class LLMProxy:
                         output_tokens = chunk.output_tokens
                 yield chunk
 
-            # ── Journal：LLM 响应结束（携带 token / TTFT / TPS）──
-            if journal:
-                total_ms = (time.perf_counter() - call_start) * 1000
-                if total_ms > 0 and output_token_count > 0:
-                    tps = output_token_count / (total_ms / 1000)
-                else:
-                    tps = 0.0
-                journal.llm_response_end(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    ttft_ms=ttft_ms,
-                    tps=tps,
-                )
-
         finally:
             pass
 

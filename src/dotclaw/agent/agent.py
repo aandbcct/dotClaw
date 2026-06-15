@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from ..llm.base import Message
-from .message_utils import validate as msg_validate, trim as msg_trim, clean as msg_clean
+from .message_utils import trim as msg_trim, clean as msg_clean
 
 if TYPE_CHECKING:
     from ..llm.proxy import LLMProxy

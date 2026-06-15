@@ -65,6 +65,7 @@ class OpenAICompatibleClient(LLMClient):
     def _reset_stream_state(self):
         """重置流式解析的临时状态"""
         self._pending_tool_calls: dict[int, dict] = {}  # index → {id, name, arguments}
+        self._stream_finish_reason: str = "stop"
 
     # ---- 核心 chat 方法 ----
 
@@ -109,14 +110,15 @@ class OpenAICompatibleClient(LLMClient):
             input_tokens = 0
             output_tokens = 0
             async for chunk in response:
-                # 从最终 chunk 提取 usage（仅 stream_options 开启时才返回）
+                # 从 usage chunk 提取 token 统计（stream_options 开启时才返回）
                 if hasattr(chunk, "usage") and chunk.usage:
                     input_tokens = chunk.usage.prompt_tokens or 0
                     output_tokens = chunk.usage.completion_tokens or 0
                 for sub in self._parse_stream_chunk(chunk):
                     yield sub
-            # 最终携带 token 信息的 chunk（可能重复 is_final，取最大值）
-            yield ChatChunk(content="", is_final=True, finish_reason="stop",
+            # 统一 yield 最终的 is_final chunk（携带 tokens + finish_reason）
+            yield ChatChunk(content="", is_final=True,
+                           finish_reason=self._stream_finish_reason,
                            input_tokens=input_tokens, output_tokens=output_tokens)
         else:
             choice = response.choices[0]
@@ -185,6 +187,7 @@ class OpenAICompatibleClient(LLMClient):
         is_final = chunk.choices[0].finish_reason is not None
 
         if is_final:
+            self._stream_finish_reason = chunk.choices[0].finish_reason
             for idx, pending in self._pending_tool_calls.items():
                 if pending["name"]:
                     yield ChatChunk(
@@ -196,11 +199,8 @@ class OpenAICompatibleClient(LLMClient):
                         ),
                     )
 
-            yield ChatChunk(
-                content="",
-                is_final=True,
-                finish_reason=chunk.choices[0].finish_reason,
-            )
+            # 只 yield tool_calls，不设置 is_final
+            # 由外层 chat() 统一 yield 最终的 is_final  chunk（带 token 信息）
             self._reset_stream_state()
         else:
             if content:

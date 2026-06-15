@@ -84,7 +84,7 @@ scheduler:
   enabled: true
 
 debug:
-  level: WARNING
+  level: DEBUG
   log_file: ./data/dotclaw.log
 
 journal:
