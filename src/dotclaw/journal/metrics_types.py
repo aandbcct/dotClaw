@@ -168,16 +168,24 @@ class AgentGeneralMetrics:
 
 @dataclass(frozen=True)
 class InitPerfMetrics:
-    """初始化性能评测指标 — 各核心组件构造耗时（P50, 毫秒）。"""
+    """初始化性能评测指标 — 各核心组件构造耗时（P50/P95, 毫秒）。"""
 
     config_load_ms: float = 0.0
+    config_load_p95_ms: float = 0.0
     llm_build_ms: float = 0.0
+    llm_build_p95_ms: float = 0.0
     skill_scan_ms: float = 0.0
+    skill_scan_p95_ms: float = 0.0
     tool_build_ms: float = 0.0
+    tool_build_p95_ms: float = 0.0
     session_mgr_ms: float = 0.0
+    session_mgr_p95_ms: float = 0.0
     prompt_builder_ms: float = 0.0
+    prompt_builder_p95_ms: float = 0.0
     memory_build_ms: float = 0.0
+    memory_build_p95_ms: float = 0.0
     agent_full_ms: float = 0.0
+    agent_full_p95_ms: float = 0.0
 
 
 # =============================================================================

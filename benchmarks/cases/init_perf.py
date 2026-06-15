@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
-import statistics
 import time
 from pathlib import Path
 
-from dotclaw.journal.metrics_types import AgentRunSnapshot
+from benchmarks.stats import p50, p95
+from dotclaw.journal.metrics_types import InitPerfMetrics
 from dotclaw.journal.storage import build_run_meta
 
 
@@ -17,19 +17,8 @@ async def run(
     warmup: int = 3,
     repeat: int = 10,
     project_root: str | Path | None = None,
-) -> AgentRunSnapshot:
-    """运行初始化性能评测。
-
-    测量各核心组件构造耗时。
-
-    Args:
-        warmup: 前 N 次迭代丢弃。
-        repeat: 实际测量迭代次数。
-        project_root: 项目根目录。
-
-    Returns:
-        AgentRunSnapshot。
-    """
+) -> tuple[InitPerfMetrics, "RunMeta"]:
+    """运行初始化性能评测，返回 (InitPerfMetrics, RunMeta)。"""
     root = Path(project_root) if project_root else Path(__file__).parent.parent.parent
 
     results: dict[str, list[float]] = {}
@@ -49,48 +38,31 @@ async def run(
 
     _print_stats(results)
 
-    # ── 构建 Snapshot ──
     meta = build_run_meta(
         run_id=f"bench_init_perf_{time.strftime('%H%M%S')}",
         test_dataset="framework_perf",
         test_dataset_size=repeat,
     )
 
-    from dotclaw.journal.metrics_types import (
-        AgentGeneralMetrics, ReactLoopMetrics,
-        ToolCallMetrics, SkillMetrics, MemoryMetrics,
-        InitPerfMetrics,
-    )
-
-    # 构建 InitPerfMetrics（组件分项明细，不进 snapshot）
     perf = InitPerfMetrics(
-        config_load_ms=_p50(results.get("config_load", [])),
-        llm_build_ms=_p50(results.get("llm_build", [])),
-        skill_scan_ms=_p50(results.get("skill_scan", [])),
-        tool_build_ms=_p50(results.get("tool_build", [])),
-        session_mgr_ms=_p50(results.get("session_mgr", [])),
-        prompt_builder_ms=_p50(results.get("prompt_builder", [])),
-        memory_build_ms=_p50(results.get("memory_build", [])),
-        agent_full_ms=_p50(results.get("agent_full", [])),
+        config_load_ms=p50(results.get("config_load", [])),
+        config_load_p95_ms=p95(results.get("config_load", [])),
+        llm_build_ms=p50(results.get("llm_build", [])),
+        llm_build_p95_ms=p95(results.get("llm_build", [])),
+        skill_scan_ms=p50(results.get("skill_scan", [])),
+        skill_scan_p95_ms=p95(results.get("skill_scan", [])),
+        tool_build_ms=p50(results.get("tool_build", [])),
+        tool_build_p95_ms=p95(results.get("tool_build", [])),
+        session_mgr_ms=p50(results.get("session_mgr", [])),
+        session_mgr_p95_ms=p95(results.get("session_mgr", [])),
+        prompt_builder_ms=p50(results.get("prompt_builder", [])),
+        prompt_builder_p95_ms=p95(results.get("prompt_builder", [])),
+        memory_build_ms=p50(results.get("memory_build", [])),
+        memory_build_p95_ms=p95(results.get("memory_build", [])),
+        agent_full_ms=p50(results.get("agent_full", [])),
+        agent_full_p95_ms=p95(results.get("agent_full", [])),
     )
-
-    snapshot = AgentRunSnapshot(
-        run_id=meta.run_id,
-        timestamp=meta.timestamp,
-        git_commit=meta.git_commit,
-        config_hash=meta.config_hash,
-        test_dataset=meta.test_dataset,
-        test_dataset_size=meta.test_dataset_size,
-        react=ReactLoopMetrics(),
-        tools=ToolCallMetrics(),
-        skills=SkillMetrics(),
-        memory=MemoryMetrics(),
-        general=AgentGeneralMetrics(
-            avg_e2e_latency_ms=perf.agent_full_ms,
-            p95_e2e_latency_ms=_p95(results.get("agent_full", [])),
-        ),
-    )
-    return snapshot
+    return perf, meta
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -102,47 +74,38 @@ async def _measure_one_iteration(root: Path) -> dict[str, float]:
     """测量一轮所有组件的初始化耗时。"""
     times: dict[str, float] = {}
 
-    # ── 1. Config 加载 ──
-    t0 = time.perf_counter()
     from dotclaw.config.settings import load_config
+    from dotclaw.agent.factory import _build_llm, _build_prompt_builder, _build_memory
+    from dotclaw.memory.store import SessionManager
+
+    t0 = time.perf_counter()
     config = load_config(str(root / "config.yaml"))
     times["config_load"] = (time.perf_counter() - t0) * 1000
 
-    # ── 2. LLMProxy ──
-    from dotclaw.agent.factory import _build_llm
     t0 = time.perf_counter()
     llm = _build_llm(config, root)
     times["llm_build"] = (time.perf_counter() - t0) * 1000
 
-    # ── 3. SkillRegistry（扫描 benchmark dataset）──
     t0 = time.perf_counter()
     skill_registry = _scan_bench_skills(config, root)
     times["skill_scan"] = (time.perf_counter() - t0) * 1000
 
-    # ── 4. ToolExecutor ──
     t0 = time.perf_counter()
     tool_executor = _build_tools(config, skill_registry)
     times["tool_build"] = (time.perf_counter() - t0) * 1000
 
-    # ── 5. SessionManager ──
-    from dotclaw.memory.store import SessionManager
     t0 = time.perf_counter()
     session_mgr = SessionManager(config.session.directory)
     times["session_mgr"] = (time.perf_counter() - t0) * 1000
 
-    # ── 6. PromptBuilder ──
-    from dotclaw.agent.factory import _build_prompt_builder
     t0 = time.perf_counter()
     prompt_builder = _build_prompt_builder()
     times["prompt_builder"] = (time.perf_counter() - t0) * 1000
 
-    # ── 7. MemoryManager（异步）──
-    from dotclaw.agent.factory import _build_memory
     t0 = time.perf_counter()
     await _build_memory(config, llm, root)
     times["memory_build"] = (time.perf_counter() - t0) * 1000
 
-    # ── 8. 完整 Agent 装配 ──
     t0 = time.perf_counter()
     await _assemble_agent(root, config, llm, session_mgr, skill_registry)
     times["agent_full"] = (time.perf_counter() - t0) * 1000
@@ -192,7 +155,7 @@ async def _assemble_agent(root, config, llm, session_mgr, skill_registry):
     tool_executor = _build_tools(config, skill_registry)
     mem_mgr, mem_dream = await _build_memory(config, llm, root)
 
-    agent = Agent(
+    return Agent(
         agent_config=agent_config, config=config, llm=llm,
         session_mgr=session_mgr, channel=None,
         tool_executor=tool_executor, prompt_builder=None,
@@ -200,7 +163,6 @@ async def _assemble_agent(root, config, llm, session_mgr, skill_registry):
         mcp_provider=None, memory_dream=mem_dream,
         mcp_task=None,
     )
-    return agent
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -229,23 +191,29 @@ def _print_stats(results: dict[str, list[float]]) -> None:
         durs = results.get(key, [])
         if not durs:
             continue
-        p50 = _p50(durs); p95 = _p95(durs); mn = min(durs); mx = max(durs)
-        print(f"  {label:<{w}} {p50:>7.1f} {p95:>7.1f} {mn:>7.1f} {mx:>7.1f}")
+        v50 = p50(durs); v95 = p95(durs); mn = min(durs); mx = max(durs)
+        print(f"  {label:<{w}} {v50:>7.1f} {v95:>7.1f} {mn:>7.1f} {mx:>7.1f}")
         if key != "agent_full":
-            total_p50 += p50
+            total_p50 += v50
     print(f"  {'-'*w} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
-    agent_p50 = _p50(results.get("agent_full", []))
+    agent_p50 = p50(results.get("agent_full", []))
     print(f"  {'TOTAL (sum)':<{w}} {total_p50:>7.1f}")
     print(f"  {'Agent (measured)':<{w}} {agent_p50:>7.1f}")
 
 
-def _p50(values: list[float]) -> float:
-    if not values: return 0.0
-    s = sorted(values)
-    return s[int(len(s) * 0.50)]
-
-
-def _p95(values: list[float]) -> float:
-    if not values: return 0.0
-    s = sorted(values)
-    return s[int(len(s) * 0.95)]
+def describe(perf: InitPerfMetrics) -> str:
+    """返回该 case 的 Markdown 详情。"""
+    rows = [
+        f"| Config Load | {perf.config_load_ms:.1f} ms | {perf.config_load_p95_ms:.1f} ms |",
+        f"| LLMProxy | {perf.llm_build_ms:.1f} ms | {perf.llm_build_p95_ms:.1f} ms |",
+        f"| SkillRegistry (100) | {perf.skill_scan_ms:.1f} ms | {perf.skill_scan_p95_ms:.1f} ms |",
+        f"| ToolExecutor | {perf.tool_build_ms:.1f} ms | {perf.tool_build_p95_ms:.1f} ms |",
+        f"| SessionManager | {perf.session_mgr_ms:.1f} ms | {perf.session_mgr_p95_ms:.1f} ms |",
+        f"| PromptBuilder | {perf.prompt_builder_ms:.1f} ms | {perf.prompt_builder_p95_ms:.1f} ms |",
+        f"| MemoryManager | {perf.memory_build_ms:.1f} ms | {perf.memory_build_p95_ms:.1f} ms |",
+        f"| **Agent Total** | **{perf.agent_full_ms:.1f} ms** | **{perf.agent_full_p95_ms:.1f} ms** |",
+    ]
+    return "\n".join([
+        "| Component | P50 | P95 |",
+        "|-----------|-----|-----|",
+    ] + rows)

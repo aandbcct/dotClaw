@@ -12,6 +12,7 @@ import asyncio
 import time
 from pathlib import Path
 
+from benchmarks.stats import p50, p95
 from dotclaw.journal.metrics_types import AgentRunSnapshot
 from dotclaw.journal.storage import build_run_meta
 
@@ -88,19 +89,19 @@ async def run(
             total_calls=50 * repeat,
             overall_success_rate=1.0,
             avg_duration_by_tool={
-                "concurrent_50": _p50(results.get("concurrent", [])),
-                **{k: _p50(v) for k, v in ctx_durs.items() if v},
+                "concurrent_50": p50(results.get("concurrent", [])),
+                **{k: p50(v) for k, v in ctx_durs.items() if v},
             },
             p95_duration_by_tool={
-                "concurrent_50": _p95(results.get("concurrent", [])),
-                **{k: _p95(v) for k, v in ctx_durs.items() if v},
+                "concurrent_50": p95(results.get("concurrent", [])),
+                **{k: p95(v) for k, v in ctx_durs.items() if v},
             },
         ),
         skills=SkillMetrics(),
         memory=MemoryMetrics(),
         general=AgentGeneralMetrics(
-            avg_e2e_latency_ms=_p50(results.get("long_react", [])),
-            p95_e2e_latency_ms=_p95(results.get("long_react", [])),
+            avg_e2e_latency_ms=p50(results.get("long_react", [])),
+            p95_e2e_latency_ms=p95(results.get("long_react", [])),
         ),
     )
     return snapshot
@@ -244,17 +245,5 @@ def _print_scenario(label: str, durs: list[float]) -> None:
     if not durs:
         print(f"  {label}: no data")
         return
-    print(f"  {label}: P50={_p50(durs):.1f}ms  P95={_p95(durs):.1f}ms  "
+    print(f"  {label}: P50={p50(durs):.1f}ms  P95={p95(durs):.1f}ms  "
           f"Avg={sum(durs)/len(durs):.1f}ms  Min={min(durs):.1f}ms  Max={max(durs):.1f}ms")
-
-
-def _p50(v: list[float]) -> float:
-    if not v: return 0.0
-    s = sorted(v)
-    return s[int(len(s) * 0.50)]
-
-
-def _p95(v: list[float]) -> float:
-    if not v: return 0.0
-    s = sorted(v)
-    return s[int(len(s) * 0.95)]
