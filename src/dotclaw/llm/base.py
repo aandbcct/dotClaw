@@ -40,6 +40,8 @@ class ChatChunk:
     tool_call: ToolCall | None = None
     is_final: bool = False  # 是否是最后一个 chunk
     finish_reason: str | None = None  # P13: "stop" / "tool_calls" / "length"
+    input_tokens: int = 0   # 本次调用消耗的 prompt tokens（仅 is_final=True 的 chunk 携带）
+    output_tokens: int = 0  # 本次调用产生的 completion tokens（同上）
 
 
 class LLMClient(ABC):

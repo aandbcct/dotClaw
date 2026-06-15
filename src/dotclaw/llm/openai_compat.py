@@ -98,19 +98,34 @@ class OpenAICompatibleClient(LLMClient):
             "messages": openai_messages,
             "stream": stream,
         }
+        if stream:
+            params["stream_options"] = {"include_usage": True}
         if openai_tools:
             params["tools"] = openai_tools
 
         response = await client.chat.completions.create(**params)
 
         if stream:
+            input_tokens = 0
+            output_tokens = 0
             async for chunk in response:
+                # 从最终 chunk 提取 usage（仅 stream_options 开启时才返回）
+                if hasattr(chunk, "usage") and chunk.usage:
+                    input_tokens = chunk.usage.prompt_tokens or 0
+                    output_tokens = chunk.usage.completion_tokens or 0
                 for sub in self._parse_stream_chunk(chunk):
                     yield sub
+            # 最终携带 token 信息的 chunk（可能重复 is_final，取最大值）
+            yield ChatChunk(content="", is_final=True, finish_reason="stop",
+                           input_tokens=input_tokens, output_tokens=output_tokens)
         else:
             choice = response.choices[0]
             content = choice.message.content or ""
-            yield ChatChunk(content=content, is_final=True)
+            usage = getattr(response, "usage", None)
+            in_tok = usage.prompt_tokens if usage else 0
+            out_tok = usage.completion_tokens if usage else 0
+            yield ChatChunk(content=content, is_final=True,
+                           input_tokens=in_tok, output_tokens=out_tok)
 
     # ---- 消息格式转换 ----
 
@@ -141,7 +156,10 @@ class OpenAICompatibleClient(LLMClient):
     # ---- 流式 chunk 解析 ----
 
     def _parse_stream_chunk(self, chunk) -> Iterator[ChatChunk]:
-        """解析 OpenAI SSE chunk，正确处理跨 chunk 的 arguments 增量拼接"""
+        """解析 OpenAI SSE chunk，正确处理跨 chunk 的 arguments 增量拼接。"""
+        # usage-only chunk（stream_options 开启时返回），跳过
+        if not chunk.choices:
+            return
         delta = chunk.choices[0].delta
         content = delta.content or ""
 

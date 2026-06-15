@@ -166,8 +166,8 @@ class SnapshotBuilder:
                 error_type = data.get("error_type", "unknown")
                 self._tool_error_types[error_type] = self._tool_error_types.get(error_type, 0) + 1
 
-            # duration
-            if dur > 0:
+            # duration (>= 0 to capture sub-millisecond tool executions)
+            if dur >= 0:
                 self._tool_durations.append(dur)
                 if tool_name not in self._tool_durations_by_tool:
                     self._tool_durations_by_tool[tool_name] = []
