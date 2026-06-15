@@ -10,6 +10,10 @@ from pathlib import Path
 # 确保 src 在路径中
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Rich / 终端 UTF-8 支持（Block 字符需要）
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # 配置 logging 基础设施（模块级默认 WARNING，具体级别等 config 加载后调整）
 logging.basicConfig(
     level=logging.WARNING,
@@ -26,35 +30,27 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from dotclaw.channel.cli import CLIChannel
 from dotclaw.agent import build_agent
-
-
-def _print_banner():
-    banner = """
-+============================================+
-|         dotClaw v0.1.0                    |
-|   Lightweight AI Agent Framework          |
-+============================================+
-"""
-    print(banner)
-
+from dotclaw.cli.banner import build_banner, console as rich_console
 
 async def _run_cli():
     """运行 CLI 交互"""
-    _print_banner()
-
     channel = CLIChannel()
 
     # ── 工厂装配 Agent ──
     channel.print_info("组件初始化中...")
     agent = await build_agent(channel=channel)
 
-    # 根据 config 设置日志级别（覆盖模块级默认的 WARNING）
+    # 根据 config 设置日志级别
     logging.getLogger().setLevel(agent.config.debug.level)
 
-    channel.print_info(f"当前对话: [{agent.session.id}] {agent.session.title}")
-    channel.print_info(f"可用模型: {', '.join(agent.llm.available_models)}")
-    channel.print_info(f"Agent: {agent.agent_name} ({agent.agent_id})")
-    channel.print_info("输入 /help 查看命令\n")
+    # ── Banner ──
+    from dotclaw.config import _find_project_root
+    rich_console.print(build_banner(
+        agent_name=agent.agent_name,
+        model=agent.model,
+        session_title=agent.session.title if agent.session else "无",
+        workspace=str(_find_project_root()),
+    ))
 
     while True:
         try:

@@ -399,6 +399,8 @@ class Agent:
         loop = AgentLoop(self)
         return await loop.run(message)
 
+    #todo 加一个类方法，新建agent
+
     # ======================== 内部方法（供 AgentLoop 调用） ========================
 
     async def _build_context(
