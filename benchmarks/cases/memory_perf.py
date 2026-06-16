@@ -20,6 +20,7 @@ async def run(
     warmup: int = 3,
     repeat: int = 10,
     project_root: str | Path | None = None,
+    output_dir: str | None = None,
 ) -> tuple[dict[str, MemoryMetrics], "RunMeta"]:
     """运行记忆检索性能评测，返回 (dict[str, MemoryMetrics], RunMeta)。"""
     root = Path(project_root) if project_root else Path(__file__).parent.parent.parent
@@ -77,6 +78,9 @@ async def run(
         test_dataset="framework_perf",
         test_dataset_size=repeat,
     )
+    if output_dir:
+        from benchmarks.stats import save_case_result
+        save_case_result(by_size, meta, str(output_dir))
     return by_size, meta
 
 

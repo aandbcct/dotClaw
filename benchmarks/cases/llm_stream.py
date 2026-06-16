@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from benchmarks.stats import p50, p95
-from dotclaw.journal.metrics_types import AgentGeneralMetrics
+from dotclaw.journal.metrics_types import AgentGeneralMetrics, RunMeta
 from dotclaw.journal.storage import build_run_meta
 from dotclaw.llm.base import Message
 
@@ -23,7 +23,8 @@ async def run(
     warmup: int = 3,
     repeat: int = 10,
     project_root: str | Path | None = None,
-) -> tuple[AgentGeneralMetrics, "RunMeta"]:
+    output_dir: str | None = None,
+) -> tuple[AgentGeneralMetrics, RunMeta]:
     """运行 LLM 流式延迟评测，返回 (AgentGeneralMetrics, RunMeta)。"""
     root = Path(project_root) if project_root else Path(__file__).parent.parent.parent
 
@@ -69,6 +70,9 @@ async def run(
         avg_e2e_latency_ms=p50(e2e_list),
         p95_e2e_latency_ms=p95(e2e_list),
     )
+    if output_dir:
+        from benchmarks.stats import save_case_result
+        save_case_result(metrics, meta, str(output_dir))
     return metrics, meta
 
 

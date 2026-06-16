@@ -11,6 +11,7 @@
 ```
 benchmarks/
 ├── runner.py          # 评测入口（CLI）
+├── stats.py           # 公共工具（p50/p95/snapshot 转换）
 ├── cases/             # 6 个评测用例
 │   ├── init_perf.py       # 初始化性能
 │   ├── tool_dispatch.py   # 工具调度延迟
@@ -54,6 +55,48 @@ python -m benchmarks.runner --warmup 5 --repeat 30
 - **控制台**：直接输出各 case 的 P50/P95/Min/Max
 - **Markdown 报告**：`benchmarks/reports/benchmark_report_*.md`
 - **快照文件**：`benchmarks/reports/snapshots/*.json`
+
+### 4. 独立运行单个 case（不需要 runner）
+
+除了通过 runner 批量跑，也可以直接调用单个评测脚本。每个 case 的 `run()` 函数签名统一：
+
+```python
+async def run(
+    warmup=3,
+    repeat=10,
+    project_root=None,   # 项目根目录，默认自动检测
+    output_dir=None,     # 传入路径则自动写 AgentRunSnapshot
+) -> tuple[Metrics, RunMeta]:
+```
+
+示例：
+
+```python
+import asyncio
+from pathlib import Path
+from benchmarks.cases.init_perf import run
+
+# 只返回内存对象（不写文件）
+metrics, meta = asyncio.run(run(warmup=2, repeat=5))
+print(f"Agent Init P95: {metrics.agent_full_p95_ms:.1f} ms")
+
+# 同时也输出 snapshot JSON
+metrics, meta = asyncio.run(run(
+    warmup=2, repeat=5,
+    output_dir="benchmarks/reports/my_test"
+))
+```
+
+各 case 返回的 `metrics` 类型：
+
+| Case | 返回类型 |
+|------|---------|
+| `init_perf` | `InitPerfMetrics` |
+| `tool_dispatch` | `ToolCallMetrics` |
+| `llm_stream` | `AgentGeneralMetrics` |
+| `memory_perf` | `dict[str, MemoryMetrics]`  (key: small/medium/large) |
+| `skill_load` | `dict[int, SkillMetrics]`  (key: 10/50/100) |
+| `stress` | `AgentRunSnapshot` |
 
 ## 建立基线 & 回归对比
 

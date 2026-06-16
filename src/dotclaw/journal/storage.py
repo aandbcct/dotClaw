@@ -48,18 +48,23 @@ def snapshot_from_json(json_str: str) -> AgentRunSnapshot:
     memory = MemoryMetrics(**d.get("memory", {}))
     general = AgentGeneralMetrics(**d.get("general", {}))
 
+    # backward compat: old snapshots have flat fields, new ones have nested "meta"
+    meta_raw = d.get("meta", None)
+    if meta_raw is not None:
+        meta = RunMeta(**meta_raw)
+    else:
+        meta = RunMeta(
+            run_id=d.get("run_id", ""),
+            timestamp=d.get("timestamp", ""),
+            git_commit=d.get("git_commit", ""),
+            config_hash=d.get("config_hash", ""),
+            test_dataset=d.get("test_dataset", ""),
+            test_dataset_size=d.get("test_dataset_size", 0),
+        )
+
     return AgentRunSnapshot(
-        run_id=d.get("run_id", ""),
-        timestamp=d.get("timestamp", ""),
-        git_commit=d.get("git_commit", ""),
-        config_hash=d.get("config_hash", ""),
-        test_dataset=d.get("test_dataset", ""),
-        test_dataset_size=d.get("test_dataset_size", 0),
-        react=react,
-        tools=tools,
-        skills=skills,
-        memory=memory,
-        general=general,
+        meta=meta,
+        react=react, tools=tools, skills=skills, memory=memory, general=general,
     )
 
 
@@ -81,7 +86,7 @@ def save_snapshot(snapshot: AgentRunSnapshot, directory: str | Path | None = Non
     out_dir = Path(directory) if directory else Path("data/snapshots")
     _ensure_dir(out_dir)
 
-    filename = f"{snapshot.run_id}.json"
+    filename = f"{snapshot.meta.run_id}.json"
     filepath = out_dir / filename
 
     json_str = snapshot_to_json(snapshot)

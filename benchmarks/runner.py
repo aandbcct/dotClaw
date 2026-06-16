@@ -18,13 +18,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+from benchmarks.stats import build_bench_snapshot
 from dotclaw.journal.metrics_types import (
     AgentGeneralMetrics, AgentRunSnapshot,
-    InitPerfMetrics, MemoryMetrics, ReactLoopMetrics,
+    InitPerfMetrics, MemoryMetrics,
     SkillMetrics, ToolCallMetrics,
 )
 from dotclaw.journal.storage import (
-    build_run_meta, diff_snapshots, load_snapshot, save_snapshot,
+    build_run_meta, diff_snapshots, load_snapshot,
 )
 
 # ── Case 注册表 ──
@@ -83,6 +84,7 @@ class BenchmarkRunner:
                     warmup=self.warmup,
                     repeat=self.repeat,
                     project_root=self._project_root,
+                    output_dir=str(self.output_dir / "snapshots"),
                 )
                 self.results[name] = {"metrics": metrics, "meta": case_meta, "mod": mod}
                 self._print_case_result(name, metrics)
@@ -92,7 +94,7 @@ class BenchmarkRunner:
                 traceback.print_exc()
 
         report_path = self._generate_report(meta)
-        self._save_snapshots()
+        # snapshots are saved by each case when output_dir is set
 
         if self.baseline_path:
             self._diff_baseline()
@@ -125,66 +127,23 @@ class BenchmarkRunner:
         label, val = _extract_case_result(name, metrics)
         print(f"  [OK] {label}: {val}")
 
-    # ── Snapshot 构建 ──
+    # ── 基线对比 ──
 
-    def _to_snapshot(self, name: str, info: dict) -> AgentRunSnapshot:
-        """将 case 返回的 metrics 转为 AgentRunSnapshot。"""
-        metrics = info["metrics"]
-        meta = info["meta"]
+    def _diff_baseline(self) -> None:
+        print(f"\n{'='*60}")
+        print(f"  Diff vs Baseline: {self.baseline_path}")
+        print(f"{'='*60}")
 
-        if name == "init_perf":
-            perf: InitPerfMetrics = metrics
-            gen = AgentGeneralMetrics(
-                avg_e2e_latency_ms=perf.agent_full_ms,
-                p95_e2e_latency_ms=perf.agent_full_p95_ms,
-            )
-        elif name == "tool_dispatch":
-            gen = AgentGeneralMetrics()
-        elif name == "llm_stream":
-            gen: AgentGeneralMetrics = metrics
-        elif name == "memory_perf":
-            by_size: dict[str, MemoryMetrics] = metrics
-            large = by_size.get("large", MemoryMetrics())
-            gen = AgentGeneralMetrics(
-                avg_e2e_latency_ms=large.avg_retrieval_ms,
-                p95_e2e_latency_ms=large.p95_retrieval_ms,
-            )
-            return AgentRunSnapshot(
-                run_id=meta.run_id, timestamp=meta.timestamp,
-                git_commit=meta.git_commit, config_hash=meta.config_hash,
-                test_dataset=meta.test_dataset, test_dataset_size=meta.test_dataset_size,
-                react=ReactLoopMetrics(), tools=ToolCallMetrics(),
-                skills=SkillMetrics(), memory=large, general=gen,
-            )
-        elif name == "skill_load":
-            by_count: dict[int, SkillMetrics] = metrics
-            sk = by_count.get(100, SkillMetrics())
-            gen = AgentGeneralMetrics(
-                avg_e2e_latency_ms=sk.avg_body_load_ms,
-                p95_e2e_latency_ms=0.0,
-            )
-            return AgentRunSnapshot(
-                run_id=meta.run_id, timestamp=meta.timestamp,
-                git_commit=meta.git_commit, config_hash=meta.config_hash,
-                test_dataset=meta.test_dataset, test_dataset_size=meta.test_dataset_size,
-                react=ReactLoopMetrics(), tools=ToolCallMetrics(),
-                skills=sk, memory=MemoryMetrics(), general=gen,
-            )
-        elif name == "stress":
-            gen = AgentGeneralMetrics()
-        else:
-            gen = AgentGeneralMetrics()
-
-        tools = metrics if name == "tool_dispatch" else ToolCallMetrics()
-        return AgentRunSnapshot(
-            run_id=meta.run_id, timestamp=meta.timestamp,
-            git_commit=meta.git_commit, config_hash=meta.config_hash,
-            test_dataset=meta.test_dataset, test_dataset_size=meta.test_dataset_size,
-            react=ReactLoopMetrics(), tools=tools,
-            skills=SkillMetrics(), memory=MemoryMetrics(), general=gen,
-        )
-
-    # ── 报告 ──
+        baseline = load_snapshot(self.baseline_path)
+        for name, info in self.results.items():
+            snapshot = build_bench_snapshot(info["metrics"], info["meta"])
+            diff_lines = diff_snapshots(baseline, snapshot, threshold=5.0)
+            if diff_lines:
+                print(f"\n  [{name}]:")
+                for line in diff_lines:
+                    print(f"    {line}")
+            else:
+                print(f"\n  [{name}]: no significant change")
 
     def _generate_report(self, meta: Any) -> Path:
         from datetime import datetime
@@ -234,16 +193,6 @@ class BenchmarkRunner:
         report_path = self.output_dir / f"benchmark_report_{ts}.md"
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return report_path
-
-    # ── Snapshot 持久化 ──
-
-    def _save_snapshots(self) -> None:
-        snap_dir = self.output_dir / "snapshots"
-        snap_dir.mkdir(exist_ok=True)
-        for name, info in self.results.items():
-            snapshot = self._to_snapshot(name, info)
-            path = save_snapshot(snapshot, str(snap_dir))
-            print(f"  Snapshot: {path}")
 
     # ── 基线对比 ──
 

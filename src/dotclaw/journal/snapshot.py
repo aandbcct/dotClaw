@@ -255,12 +255,7 @@ class SnapshotBuilder:
         general = self._build_general(task_count)
 
         return AgentRunSnapshot(
-            run_id=self._meta.run_id,
-            timestamp=self._meta.timestamp,
-            git_commit=self._meta.git_commit,
-            config_hash=self._meta.config_hash,
-            test_dataset=self._meta.test_dataset,
-            test_dataset_size=self._meta.test_dataset_size,
+            meta=self._meta,
             react=react,
             tools=tools,
             skills=skills,

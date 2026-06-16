@@ -197,16 +197,11 @@ class InitPerfMetrics:
 class AgentRunSnapshot:
     """一次评测运行的所有指标快照。
 
-    包含 6 个元信息字段 + 5 个子系统指标对象。
+    包含 1 个元信息对象 + 5 个子系统指标对象。
     """
 
     # ── 元信息 ──
-    run_id: str = ""
-    timestamp: str = ""
-    git_commit: str = ""
-    config_hash: str = ""
-    test_dataset: str = ""
-    test_dataset_size: int = 0
+    meta: RunMeta = field(default_factory=RunMeta)
 
     # ── 子系统指标 ──
     react: ReactLoopMetrics = field(default_factory=ReactLoopMetrics)

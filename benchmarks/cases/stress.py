@@ -21,7 +21,8 @@ async def run(
     warmup: int = 3,
     repeat: int = 10,
     project_root: str | Path | None = None,
-) -> AgentRunSnapshot:
+    output_dir: str | None = None,
+) -> tuple[AgentRunSnapshot, "RunMeta"]:
     """运行压力测试。
 
     三个场景：并发工具、大上下文、超长 ReAct。
@@ -75,12 +76,7 @@ async def run(
     )
 
     snapshot = AgentRunSnapshot(
-        run_id=meta.run_id,
-        timestamp=meta.timestamp,
-        git_commit=meta.git_commit,
-        config_hash=meta.config_hash,
-        test_dataset=meta.test_dataset,
-        test_dataset_size=meta.test_dataset_size,
+        meta=meta,
         react=ReactLoopMetrics(
             total_loops=20 * repeat,
             task_completion_rate=1.0,
@@ -104,7 +100,10 @@ async def run(
             p95_e2e_latency_ms=p95(results.get("long_react", [])),
         ),
     )
-    return snapshot
+    if output_dir:
+        from dotclaw.journal.storage import save_snapshot
+        save_snapshot(snapshot, str(output_dir))
+    return snapshot, meta
 
 
 # ═══════════════════════════════════════════════════════════════════

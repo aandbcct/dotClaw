@@ -26,6 +26,7 @@ async def run(
     warmup: int = 3,
     repeat: int = 10,
     project_root: str | Path | None = None,
+    output_dir: str | None = None,
 ) -> tuple[ToolCallMetrics, "RunMeta"]:
     """运行工具调度延迟评测，返回 (ToolCallMetrics, RunMeta)。"""
     root = Path(project_root) if project_root else Path(__file__).parent.parent.parent
@@ -83,6 +84,9 @@ async def run(
     snapshot = builder.build()
     _print_stats(durations)
 
+    if output_dir:
+        from benchmarks.stats import save_case_result
+        save_case_result(snapshot.tools, meta, str(output_dir))
     return snapshot.tools, meta
 
 

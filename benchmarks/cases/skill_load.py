@@ -20,8 +20,9 @@ async def run(
     warmup: int = 3,
     repeat: int = 10,
     project_root: str | Path | None = None,
+    output_dir: str | None = None,
 ) -> tuple[dict[int, SkillMetrics], "RunMeta"]:
-    """运行 Skill 加载性能评测，返回 (dict[int, SkillsMetrics], RunMeta)。"""
+    """运行 Skill 加载性能评测，返回 (dict[int, SkillMetrics], RunMeta)。"""
     root = Path(project_root) if project_root else Path(__file__).parent.parent.parent
     dataset_dir = root / "benchmarks" / "dataset" / "sample_skills"
 
@@ -59,6 +60,9 @@ async def run(
         test_dataset="framework_perf",
         test_dataset_size=repeat,
     )
+    if output_dir:
+        from benchmarks.stats import save_case_result
+        save_case_result(by_count, meta, str(output_dir))
     return by_count, meta
 
 

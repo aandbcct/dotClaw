@@ -17,6 +17,7 @@ async def run(
     warmup: int = 3,
     repeat: int = 10,
     project_root: str | Path | None = None,
+    output_dir: str | None = None,
 ) -> tuple[InitPerfMetrics, "RunMeta"]:
     """运行初始化性能评测，返回 (InitPerfMetrics, RunMeta)。"""
     root = Path(project_root) if project_root else Path(__file__).parent.parent.parent
@@ -62,6 +63,9 @@ async def run(
         agent_full_ms=p50(results.get("agent_full", [])),
         agent_full_p95_ms=p95(results.get("agent_full", [])),
     )
+    if output_dir:
+        from benchmarks.stats import save_case_result
+        save_case_result(perf, meta, str(output_dir))
     return perf, meta
 
 
