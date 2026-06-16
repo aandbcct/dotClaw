@@ -57,12 +57,14 @@ class BenchmarkRunner:
         warmup: int = 3,
         repeat: int = 10,
         baseline_path: str | None = None,
+        save_baseline_path: str | None = None,
         output_dir: str = "benchmarks/reports",
     ):
         self.cases = cases or list(_CASES.keys())
         self.warmup = warmup
         self.repeat = repeat
         self.baseline_path = baseline_path
+        self.save_baseline_path = save_baseline_path
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.results: dict[str, dict] = {}  # name → {metrics, meta, mod}
@@ -88,6 +90,9 @@ class BenchmarkRunner:
                 )
                 self.results[name] = {"metrics": metrics, "meta": case_meta, "mod": mod}
                 self._print_case_result(name, metrics)
+
+                if self.save_baseline_path:
+                    self._save_baseline_case(name, metrics, case_meta)
             except Exception as exc:
                 print(f"\n  [FAILED] {exc}")
                 import traceback
@@ -194,6 +199,18 @@ class BenchmarkRunner:
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return report_path
 
+    def _save_baseline_case(self, name: str, metrics: Any, case_meta: Any) -> None:
+        """将当前 case 的 metrics 转为 AgentRunSnapshot 并保存到基线目录。"""
+        from dotclaw.journal.storage import save_snapshot
+        snapshot = build_bench_snapshot(metrics, case_meta)
+        path = Path(self.save_baseline_path) / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # save_snapshot 用 run_id 做文件名，我们绕过它直接写
+        import dataclasses, json
+        from dotclaw.journal.storage import snapshot_to_json
+        path.write_text(snapshot_to_json(snapshot), encoding="utf-8")
+        print(f"  Baseline: {path}")
+
     # ── 基线对比 ──
 
     def _diff_baseline(self) -> None:
@@ -201,14 +218,22 @@ class BenchmarkRunner:
         print(f"  Diff vs Baseline: {self.baseline_path}")
         print(f"{'='*60}")
 
-        baseline = load_snapshot(self.baseline_path)
         for name, info in self.results.items():
-            snapshot = self._to_snapshot(name, info)
-            diff_lines = diff_snapshots(baseline, snapshot, threshold=5.0)
+            baseline_file = Path(self.baseline_path) / f"{name}.json"
+            if not baseline_file.exists():
+                print(f"\n  [{name}]: no baseline file ({baseline_file.name})")
+                continue
+
+            baseline = load_snapshot(str(baseline_file))
+            current = build_bench_snapshot(info["metrics"], info["meta"])
+            diff_lines = diff_snapshots(baseline, current, threshold=5.0)
             if diff_lines:
                 print(f"\n  [{name}]:")
                 for line in diff_lines:
-                    print(f"    {line}")
+                    try:
+                        print(f"    {line}")
+                    except UnicodeEncodeError:
+                        print(f"    {line.encode('ascii', errors='replace').decode('ascii')}")
             else:
                 print(f"\n  [{name}]: no significant change")
 
@@ -259,7 +284,10 @@ def main():
     parser.add_argument("--filter", type=str, default=None)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--repeat", type=int, default=10)
-    parser.add_argument("--baseline", type=str, default=None)
+    parser.add_argument("--baseline", type=str, default=None,
+                        help="Baseline directory path (reads {case}.json from this dir)")
+    parser.add_argument("--save-baseline", type=str, default=None,
+                        help="Save AgentRunSnapshot snapshot per case to this directory")
     parser.add_argument("--output", type=str, default="benchmarks/reports")
     args = parser.parse_args()
 
@@ -275,6 +303,7 @@ def main():
         warmup=args.warmup,
         repeat=args.repeat,
         baseline_path=args.baseline,
+        save_baseline_path=args.save_baseline,
         output_dir=args.output,
     )
     asyncio.run(runner.run())

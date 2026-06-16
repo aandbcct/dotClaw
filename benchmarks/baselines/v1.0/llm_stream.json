@@ -1,0 +1,72 @@
+{
+  "meta": {
+    "run_id": "bench_llm_stream_111750",
+    "timestamp": "2026-06-16T03:17:50.258371+00:00",
+    "git_commit": "bdf05915171665337d082e292eedf817e03708a0",
+    "config_hash": "c0eb438148a138e7",
+    "test_dataset": "framework_perf",
+    "test_dataset_size": 20
+  },
+  "react": {
+    "total_loops": 0,
+    "avg_loops_per_task": 0.0,
+    "max_loops_single_task": 0,
+    "task_completion_rate": 0.0,
+    "empty_action_rate": 0.0,
+    "redundant_action_rate": 0.0,
+    "avg_reasoning_tokens_per_loop": 0,
+    "avg_loop_duration_ms": 0.0,
+    "avg_llm_duration_ms": 0.0,
+    "avg_tool_duration_ms": 0.0,
+    "p95_loop_duration_ms": 0.0
+  },
+  "tools": {
+    "total_calls": 0,
+    "calls_by_tool": {},
+    "overall_success_rate": 0.0,
+    "success_rate_by_tool": {},
+    "errors_by_tool": {},
+    "errors_by_type": {},
+    "retry_rate": 0.0,
+    "avg_duration_by_tool": {},
+    "p95_duration_by_tool": {}
+  },
+  "skills": {
+    "total_triggers": 0,
+    "triggers_by_skill": {},
+    "trigger_rate": 0.0,
+    "avg_body_load_ms": 0.0,
+    "body_cache_hit_rate": 0.0,
+    "avg_scripts_per_trigger": 0.0,
+    "script_success_rate": 0.0,
+    "avg_skill_duration_ms": 0.0,
+    "token_overhead_per_skill": 0.0
+  },
+  "memory": {
+    "total_retrievals": 0,
+    "retrieval_rate": 0.0,
+    "hit_rate": 0.0,
+    "avg_retrieval_ms": 0.0,
+    "p95_retrieval_ms": 0.0,
+    "index_size": 0,
+    "index_size_mb": 0.0,
+    "total_writes": 0,
+    "writes_by_type": {},
+    "write_failures": 0,
+    "avg_memory_tokens_per_request": 0.0,
+    "memory_token_ratio": 0.0
+  },
+  "general": {
+    "total_input_tokens": 24,
+    "total_output_tokens": 1373,
+    "avg_tokens_per_task": 0.0,
+    "cost_usd": 0.0,
+    "cost_by_model": {},
+    "avg_ttft_ms": 25089.225200001238,
+    "avg_tps": 53.97152740157054,
+    "avg_e2e_latency_ms": 25383.881900001143,
+    "p95_e2e_latency_ms": 48078.610800001115,
+    "avg_context_length": 0,
+    "context_overflow_count": 0
+  }
+}
