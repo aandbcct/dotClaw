@@ -1,7 +1,7 @@
 """Agent 工厂 —— 把配置和组件装配成可运行的 Agent 实例。
 
 职责：
-- 按 config.yaml + coding-assistant.yaml 创建所有依赖
+- 按 config.yaml + daily-assistant.yaml 创建所有依赖
 - 恢复上次状态（agent_id、session_id）
 - 统一初始化失败策略（critical 崩 vs degradable 降级）
 - 返回完全就绪的 Agent 实例
@@ -271,7 +271,7 @@ async def build_agent(
 ) -> "Agent":
     """装配一个完全就绪的 Agent 实例。
 
-    从 config.yaml + coding-assistant.yaml + 上次状态重建所有依赖，
+    从 config.yaml + daily-assistant.yaml + 上次状态重建所有依赖，
     失败组件按策略降级（nonexistent）或崩溃（critical）。
 
     Args:

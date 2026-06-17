@@ -1,11 +1,11 @@
 # ============================================
-# dotClaw Agent 配置 (coding-assistant.yaml)
+# dotClaw Agent 配置 (daily-assistant.yaml)
 # ============================================
 
 # ── 身份标识 ──
-agent_id: coding-assistant
-agent_name: "CodeClaw 编程助手"
-description: "专注于代码编写、重构和调试的 AI 编程助手"
+agent_id: daily-assistant
+agent_name: "日常助手"
+description: "默认日常助手"
 
 # ── 模型 ──
 model: ""                  # 空字符串 = 使用 config.llm.default_model
@@ -29,7 +29,11 @@ registered_skills: []      # 空 = 跟随 config.skills.enabled 使用全局 ski
 max_loop_steps: 15         # ReAct 最大迭代数
 
 # ── System Prompt ──
-system_prompt_template: ""
+agent_prompt: |
+    你是一个有用、诚实、友好、说话干脆的 AI 助手。
+    你可以调用工具来帮助用户完成任务。
+    当需要执行危险操作时会请求确认。
+    专注于当前会话，历史会话信息仅用作本次会话的参考，严禁在本次会话中提到与本次会话无关的内容"
 # 示例模板（取消注释生效）：
 # system_prompt_template: |
 #   你是 {agent_name}，一个专业的编程助手。

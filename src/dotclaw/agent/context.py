@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class AgentContext:
-    """一次 Agent.run() 调用的不可变上下文快照"""
+    """一次 Agent.run() 调用的不可变上下文快照，不是传进LLM的上下文，是系统上下文"""
 
     session_id: str
     """当前会话 ID"""

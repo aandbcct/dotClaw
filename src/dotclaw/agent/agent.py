@@ -68,12 +68,12 @@ def _find_project_root() -> Path:
 
 
 # ============================================================================
-# AgentConfig — Agent 级配置（从 coding-assistant.yaml 加载）
+# AgentConfig — Agent 级配置（从 daily-assistant.yaml 加载）
 # ============================================================================
 
 @dataclass
 class AgentConfig:
-    """Agent 级配置，从 coding-assistant.yaml 加载。
+    """Agent 级配置，从 daily-assistant.yaml 加载。
 
     与 config.settings.AgentConfig 不同：那个是从 config.yaml 的 agent: 段加载的
     全局 Agent 默认值，这个是单个 Agent 角色的专属配置。
@@ -92,7 +92,7 @@ class AgentConfig:
 
     # ── 工作空间 ──
     workspace: str = "."
-    """工作目录。相对路径基于 coding-assistant.yaml 所在目录解析。"" 表示跟随 project_root"""
+    """工作目录。相对路径基于 daily-assistant.yaml 所在目录解析。"" 表示跟随 project_root"""
 
     # ── 工具过滤 ──
     allowed_tools: list[str] = field(default_factory=list)
@@ -214,7 +214,7 @@ class Agent:
         通过依赖注入构造 Agent。
 
         Args:
-            agent_config: Agent 级配置（从 coding-assistant.yaml 加载）
+            agent_config: Agent 级配置（从 daily-assistant.yaml 加载）
             config: 全局 Config（从 config.yaml 加载，用于 model/system_prompt 回退）
             llm: LLM 代理
             session_mgr: 会话管理器
