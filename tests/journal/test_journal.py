@@ -70,7 +70,7 @@ class TestSessionStart:
 
     def test_session_start_pulls_from_context(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
 
         assert journal._session_id == "test-session-001"
         assert journal._request_id == "req-abcd1234"
@@ -81,7 +81,7 @@ class TestSessionStart:
 
     def test_session_start_initializes_loop_idx(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         assert journal._loop_idx == 0
 
 
@@ -90,7 +90,7 @@ class TestSessionEnd:
 
     def test_session_end_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.session_end("success")
 
         end_events = [e for e in journal._events if e.event_type == "session.end"]
@@ -108,7 +108,7 @@ class TestLoop:
 
     def test_loop_start_increments_counter(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
 
         journal.loop_start()
         assert journal._loop_idx == 1
@@ -118,7 +118,7 @@ class TestLoop:
 
     def test_loop_start_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
 
         loop_events = [e for e in journal._events if e.event_type == "react.loop_start"]
@@ -127,7 +127,7 @@ class TestLoop:
 
     def test_loop_end_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.loop_end("tool_call")
 
@@ -137,7 +137,7 @@ class TestLoop:
 
     def test_empty_action_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.empty_action()
 
@@ -156,7 +156,7 @@ class TestToolCall:
 
     def test_tool_start_emits_event_with_loop_idx(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.tool_start("read_file")
 
@@ -168,7 +168,7 @@ class TestToolCall:
 
     def test_tool_end_calculates_duration(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.tool_start("read_file")
         time.sleep(0.01)  # 确保非零耗时
@@ -197,7 +197,7 @@ class TestLLMCall:
 
     def test_llm_call_start_uses_context_model(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.llm_call_start()
 
@@ -207,7 +207,7 @@ class TestLLMCall:
 
     def test_llm_call_end_emits_call_end_and_response_start(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.llm_call_start()
         time.sleep(0.001)  # 确保非零耗时
@@ -223,7 +223,7 @@ class TestLLMCall:
 
     def test_llm_response_end_calculates_response_duration(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.llm_call_start()
         time.sleep(0.005)
@@ -245,7 +245,7 @@ class TestLLMCall:
 
     def test_prompt_built_records_context_snapshot(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.prompt_built(
             message_count=15, context_length=8000,
@@ -271,7 +271,7 @@ class TestSkill:
 
     def test_skill_body_loaded_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.skill_body_loaded("code-review")
 
@@ -281,7 +281,7 @@ class TestSkill:
 
     def test_skill_body_loaded_records_cache(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.skill_body_loaded("code-review", cached=True)
 
@@ -291,7 +291,7 @@ class TestSkill:
 
     def test_skill_script_exec_emits_with_status(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.skill_script_exec("code-review", "run_tests.sh", "success")
 
@@ -305,7 +305,7 @@ class TestMemory:
 
     def test_memory_retrieval_records_timing_and_hits(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.memory_retrieval("latest design docs", hit_count=3)
 
@@ -317,7 +317,7 @@ class TestMemory:
 
     def test_memory_write_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.memory_write("daily_note", "success")
 
@@ -332,7 +332,7 @@ class TestError:
 
     def test_error_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.error("ERROR", "llm.proxy", "Connection timeout")
 
@@ -386,8 +386,8 @@ class TestConcurrencySafety:
         j1 = Journal()
         j2 = Journal()
 
-        j1.session_start(fake_context, journal_config)
-        j2.session_start(fake_context, journal_config)
+        j1.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
+        j2.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
 
         j1.loop_start()
         j2.loop_start()
@@ -414,7 +414,7 @@ class TestFinalize:
 
     def test_finalize_clears_events(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(fake_context, journal_config)
+        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
         journal.loop_start()
         journal.tool_start("read_file")
         journal.tool_end("read_file", 100, "success")

@@ -118,7 +118,6 @@ async def _bench_concurrent_tools() -> float:
     from dotclaw.tools.handler import BuiltinToolHandler
     from dotclaw.config.settings import JournalConfig
     from dotclaw.journal import Journal
-    from dotclaw.agent.context import AgentContext
     from pathlib import Path
 
     registry = ToolRegistry()
@@ -141,14 +140,12 @@ async def _bench_concurrent_tools() -> float:
     jc = JournalConfig(trace=False, snapshot=False, console=False, trace_dir="./tmp", snapshot_dir="./tmp")
 
     journal = Journal()
-    ctx = AgentContext(
+    journal.session_start(
         session_id="bench_stress_concurrent",
-        workspace=Path("."),
-        project_root=Path("."),
+        request_id="req-001",
         model="none",
-        system_prompt="benchmark",
+        config=jc,
     )
-    journal.session_start(ctx, jc)
 
     t0 = time.perf_counter()
     tasks = [
@@ -164,30 +161,28 @@ async def _bench_concurrent_tools() -> float:
 
 def _bench_large_context(root: Path, size_kb: int) -> float:
     """测量大上下文构建耗时。"""
-    from dotclaw.agent.prompt.builder import PromptBuilder
-    from dotclaw.agent.prompt.providers import (
-        RoleProvider, RulesProvider, ToolsProvider, MemoryProvider, SkillsProvider,
-    )
-    from dotclaw.agent.context import AgentContext
+    from dotclaw.agent.slotContext import ContextAssembler, SlotContext
 
-    # 构建大 system prompt
     large_prompt = "You are a helpful assistant. " * (size_kb * 50)
 
-    ctx = AgentContext(
+    # 构建大 IdentitySlot（直接设置缓存）
+    from dotclaw.agent.slotContextImp import IdentitySlot
+    slot = IdentitySlot()
+    slot._cached = large_prompt
+    slot._cache_valid = True
+
+    assembler = ContextAssembler([slot])
+    ctx = SlotContext(
+        query="bench",
+        request_id="r1",
         session_id="bench_stress_ctx",
-        workspace=root,
         project_root=root,
-        model="bench-model",
-        system_prompt=large_prompt,
-        available_tools=["tool_1", "tool_2", "tool_3", "tool_4", "tool_5"],
+        max_context_tokens=100000,
     )
 
-    builder = PromptBuilder([
-        RoleProvider(), RulesProvider(), ToolsProvider(), MemoryProvider(), SkillsProvider(),
-    ])
-
     t0 = time.perf_counter()
-    _ = builder.build(ctx)
+    import asyncio
+    _ = asyncio.get_event_loop().run_until_complete(assembler.build_system_prompt(ctx))
     return (time.perf_counter() - t0) * 1000
 
 
@@ -197,7 +192,6 @@ async def _bench_long_react(root: Path) -> float:
     from dotclaw.tools.handler import BuiltinToolHandler
     from dotclaw.config.settings import JournalConfig
     from dotclaw.journal import Journal
-    from dotclaw.agent.context import AgentContext
 
     # 注册一个 no-op
     registry = ToolRegistry()
@@ -213,12 +207,12 @@ async def _bench_long_react(root: Path) -> float:
 
     jc = JournalConfig(trace=False, snapshot=False, console=False, trace_dir="./tmp", snapshot_dir="./tmp")
     journal = Journal()
-    ctx = AgentContext(
+    journal.session_start(
         session_id="bench_stress_react",
-        workspace=root, project_root=root,
-        model="none", system_prompt="benchmark",
+        request_id="req-001",
+        model="none",
+        config=jc,
     )
-    journal.session_start(ctx, jc)
 
     from dotclaw.tools.executor import ToolExecutor
     executor = ToolExecutor(registry)

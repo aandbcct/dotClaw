@@ -245,19 +245,23 @@ def _build_mcp(config, tool_registry):
     return _init()
 
 
-def _build_prompt_builder():
-    """构建 PromptBuilder。"""
-    from dotclaw.agent.prompt.builder import PromptBuilder
-    from dotclaw.agent.prompt.providers import (
-        RoleProvider, RulesProvider, ToolsProvider,
-        MemoryProvider, SkillsProvider,
+def _build_assembler():
+    """构建 ContextAssembler。"""
+    from dotclaw.agent.slotContext import ContextAssembler
+    from dotclaw.agent.slotContextImp import (
+        IdentitySlot, ToolsSlot, SkillsSlot,
+        WorkspaceSlot, UserInfoSlot,
+        MemorySlot, KnowledgeSlot, ProjectSlot,
     )
-    return PromptBuilder([
-        RoleProvider(),
-        RulesProvider(),
-        ToolsProvider(),
-        MemoryProvider(),
-        SkillsProvider(),
+    return ContextAssembler([
+        IdentitySlot(),
+        ToolsSlot(),
+        SkillsSlot(),
+        WorkspaceSlot(),
+        UserInfoSlot(),
+        MemorySlot(),
+        KnowledgeSlot(),
+        ProjectSlot(),
     ])
 
 
@@ -296,7 +300,7 @@ async def build_agent(
     # ── 关键组件：失败则崩 ──
     llm_proxy = _build_llm(config, project_root)
     session_mgr = SessionManager(config.session.directory)
-    prompt_builder = _build_prompt_builder()
+    assembler = _build_assembler()
 
     # ── 可降级组件 ──
     skill_registry = _init_sync("技能", lambda: _build_skills(config, project_root))
@@ -321,12 +325,12 @@ async def build_agent(
         session_mgr=session_mgr,
         channel=channel,
         tool_executor=tool_executor,
-        prompt_builder=prompt_builder,
         memory_mgr=memory_mgr,
         skill_registry=skill_registry,
         mcp_provider=mcp_provider,
         memory_dream=memory_dream,
         mcp_task=mcp_task,
+        assembler=assembler,
     )
 
     # ── 恢复上次 session ──

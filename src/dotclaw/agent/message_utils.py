@@ -86,97 +86,91 @@ def validate(messages: list["Message"]) -> list[str]:
 
 def trim(messages: list["Message"], max_tokens: int) -> list["Message"]:
     """
-    按 token 预算裁剪消息列表（从旧到新逐条移除）。
+    按 token 预算从旧到新移除消息组。
 
     保护规则：
     - system 消息始终不可裁
-    - (assistant(tool_calls), tool_1, tool_2, ...) 配对组不可拆散
-    - 配对组要么全保留，要么全裁
-    - 极端情况（单条 > max_tokens）：记录 warning，保留该消息
+    - (assistant(tool_calls), tool_1, tool_2, ...) 作为一个整体，要么全留、要么全裁
+    - 即使最后（最新）一组超出预算也完整保留（不可拆散）
     """
     if not messages:
         return []
 
-    # 分离 system 消息
-    system_msgs = [m for m in messages if m.role == "system"]
-    body_msgs = [m for m in messages if m.role != "system"]
+    groups = _build_groups(messages)
 
-    # 计算 system 的 token 数
-    system_tokens = sum(_msg_tokens(m) for m in system_msgs)
+    # system 组始终保留
+    system_groups = [g for g in groups if g[0].role == "system"]
+    body_groups = [g for g in groups if g[0].role != "system"]
+
+    system_tokens = sum(_group_tokens(g) for g in system_groups)
     budget = max_tokens - system_tokens
 
     if budget <= 0:
-        logger.warning(f"system 消息已超出 token 预算 ({system_tokens} > {max_tokens})")
-        return system_msgs + body_msgs  # 保留全部
+        logger.warning("system 消息已超出 token 预算 (%d > %d)", system_tokens, max_tokens)
+        return _flatten(system_groups + body_groups)
 
-    # 构建配对组索引
-    pairing = _build_pairing_groups(body_msgs)
-
-    # 从后向前累计 token，找到裁剪边界
-    total = system_tokens
-    keep_from = len(body_msgs)  # 默认保留到最前面
-
-    for i in range(len(body_msgs) - 1, -1, -1):
-        group = pairing.get(i)
-        if group is not None:
-            # 当前消息属于一个配对组，跳过整个组
-            # 配对组已经在配对构建时标记了范围
-            continue
-
-        t = _msg_tokens(body_msgs[i])
-        if total + t <= max_tokens:
+    # 从后向前，累计可以塞进 budget 的组
+    total = 0
+    keep_from = len(body_groups)
+    for i in range(len(body_groups) - 1, -1, -1):
+        t = _group_tokens(body_groups[i])
+        if total + t <= budget:
             total += t
             keep_from = i
         else:
             break
 
-    # 配对组处理：如果 keep_from 落在配对组内部，扩展到组开始
-    for i in range(keep_from, len(body_msgs)):
-        group = pairing.get(i)
-        if group is not None and group["start"] < keep_from:
-            keep_from = group["start"]
-            break
+    # 极端情况：最后一组就超出预算 → 保留它（不可拆散）
+    if keep_from == len(body_groups) and body_groups:
+        keep_from = len(body_groups) - 1
 
-    # 极端情况：单条消息超过预算
-    if keep_from == len(body_msgs) and body_msgs:
-        logger.warning(
-            f"单条消息 token 超出预算 ({_msg_tokens(body_msgs[-1])} > {budget})，保留该消息"
-        )
-        keep_from = len(body_msgs) - 1
-
-    return system_msgs + body_msgs[keep_from:]
+    return _flatten(system_groups + body_groups[keep_from:])
 
 
-def _build_pairing_groups(messages: list["Message"]) -> dict[int, dict]:
+def _build_groups(messages: list["Message"]) -> list[list["Message"]]:
+    """将消息列表划分为不可拆散的组。
+
+    system 消息：每一条单独成组。
+    assistant+tool 配对：assistant(tool_calls) + 后续匹配的 tool 消息形成一个组。
+    其他消息：每条单独成组。
     """
-    构建配对组索引。
-
-    返回：{msg_index: {"start": start_idx, "end": end_idx}}
-    配对组 = assistant(tool_calls=[id_a,id_b]) + 所有 tool_call_id in {id_a,id_b} 的 tool 消息
-    """
-    pairing: dict[int, dict] = {}
-
-    for i, msg in enumerate(messages):
-        if msg.role == "assistant" and msg.tool_calls:
+    groups: list[list["Message"]] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.role == "system":
+            groups.append([msg])
+            i += 1
+        elif msg.role == "assistant" and msg.tool_calls:
             call_ids = {tc.id for tc in msg.tool_calls if tc.id}
-            if not call_ids:
-                continue
+            group = [msg]
+            i += 1
+            # 收集后续匹配的 tool 消息
+            matched = 0
+            while i < len(messages) and matched < len(call_ids):
+                nxt = messages[i]
+                if nxt.role == "tool" and nxt.tool_call_id in call_ids:
+                    group.append(nxt)
+                    matched += 1
+                i += 1
+            groups.append(group)
+        else:
+            groups.append([msg])
+            i += 1
+    return groups
 
-            # 找到所有匹配的 tool 消息
-            matched_indices = [i]
-            for j in range(i + 1, len(messages)):
-                if messages[j].role == "tool" and messages[j].tool_call_id in call_ids:
-                    matched_indices.append(j)
-                    # 消息已匹配则停止（tool 消息只属于一个配对组）
-                    if len(matched_indices) - 1 >= len(call_ids):
-                        break
 
-            start = matched_indices[0]
-            end = matched_indices[-1]
-            for idx in matched_indices:
-                pairing[idx] = {"start": start, "end": end}
+def _group_tokens(group: list["Message"]) -> int:
+    """计算一组消息的总 token 数"""
+    return sum(_msg_tokens(m) for m in group)
 
-    return pairing
+
+def _flatten(groups: list[list["Message"]]) -> list["Message"]:
+    """将消息组展平为单层列表"""
+    result: list["Message"] = []
+    for g in groups:
+        result.extend(g)
+    return result
 
 
 # ---- clean ----

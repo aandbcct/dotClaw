@@ -38,29 +38,39 @@ class AgentLoop:
         # 然后进入下一轮，直到停机条件满足
 
         完整流程：
-        1. 通过 agent 构建 AgentContext（不可变快照）
+        1. 通过 agent 构建 SlotContext
         2. 创建 Journal 开始观测
-        3. 通过 agent 构建 messages
-        4. 调用 LLM（流式）→ 处理 tool_calls → 循环
-        5. Journal.finalize() → 返回 AgentResult
+        3. Assembler 组装 system_prompt
+        4. 通过 agent 构建 messages（含 _history）
+        5. 调用 LLM（流式）→ 处理 tool_calls → 循环
+        6. Journal.finalize() → 返回 AgentResult
         """
         self._running = True
         start_time = time.time()
 
-        # ── Journal：先创建空壳，后面 session_start 填参数 ──
+        # ── Journal：先创建空壳 ──
         journal = Journal()
 
-        # 构建上下文（传入 journal 引用）
-        context = await self.agent._build_context(user_message, journal)
+        # ── 构建 SlotContext + 使用 Assembler ──
+        slot_ctx = self.agent._build_slot_context(user_message, journal)
+        self.agent.assembler.on_new_request()
+        system_prompt = await self.agent.assembler.build_system_prompt(slot_ctx)
 
-        # ── Journal：会话开始 ──
-        journal.session_start(context, self.agent.config.journal)
+        # Journal: session_start
+        journal.session_start(
+            session_id=slot_ctx.session_id,
+            request_id=slot_ctx.request_id,
+            model=self.agent.model,
+            config=self.agent.config.journal,
+        )
 
         tool_calls_total = 0
         iterations = 0
 
         try:
-            messages = self.agent._build_messages(user_message, context)
+            # 从 _history + system_prompt 构建 messages
+            messages = self.agent._build_messages(
+                user_input=user_message, system_prompt=system_prompt)
 
             # ── Journal：prompt 构建完成 ──
             est_tokens = sum(len(m.content or "") for m in messages)
@@ -68,9 +78,9 @@ class AgentLoop:
             journal.prompt_built(
                 message_count=len(messages),
                 context_length=est_tokens,
-                system_prompt=context.system_prompt,
+                system_prompt=slot_ctx.system_prompt,
                 skills_injected=[s.name for s in skills_loaded] if skills_loaded else [],
-                tool_count=len(context.tool_definitions),
+                tool_count=len(slot_ctx.tool_definitions),
             )
 
             final_response = ""
@@ -79,11 +89,16 @@ class AgentLoop:
             for _ in range(max_iterations):
                 iterations += 1
 
+                # ── 每 turn 重建 messages（包含最新 _history） ──
+                messages = self.agent._build_messages(
+                    user_input=user_message, system_prompt=system_prompt)
+
                 # ── Journal：每轮循环开始 ──
                 journal.loop_start()
 
                 # ── 通过 Agent 调用 LLM ──
-                llm_resp = await self.agent._invoke_llm(messages, context, journal)
+                llm_resp = await self.agent._invoke_llm(
+                    messages, self.agent.model, slot_ctx.tool_definitions, journal)
 
                 # ── Journal：LLM 响应结束 ──
                 llm_status = "error" if llm_resp.finish_reason == "error" else (
@@ -110,19 +125,22 @@ class AgentLoop:
 
                 tool_calls_total += len(llm_resp.tool_calls)
 
-                # 将 assistant 消息（含 tool_calls）追加到 messages
-                messages.append(Message(
+                # 将 assistant 消息（含 tool_calls）追加
+                asst_msg = Message(
                     role="assistant",
                     content=llm_resp.content or "",
                     tool_calls=list(llm_resp.tool_calls),
-                ))
+                )
 
                 # ── 并行执行工具调用 ──
                 tool_messages = await asyncio.gather(*[
                     self.agent._execute_single_tool(tc, journal)
                     for tc in llm_resp.tool_calls
                 ])
-                messages.extend(tool_messages)
+
+                # 追加到 _history（下轮 _build_messages 自动包含）
+                self.agent._history.append(asst_msg)
+                self.agent._history.extend(tool_messages)
 
                 journal.loop_end("tool_call")
 
@@ -140,7 +158,7 @@ class AgentLoop:
                 tool_calls_count=tool_calls_total,
                 iterations=iterations,
                 duration_ms=duration_ms,
-                request_id=context.request_id,
+                request_id=slot_ctx.request_id,
             )
 
         except Exception as e:
@@ -167,7 +185,7 @@ class AgentLoop:
                 iterations=iterations,
                 duration_ms=duration_ms,
                 error=error_msg,
-                request_id=context.request_id,
+                request_id=slot_ctx.request_id,
             )
         finally:
             self._running = False

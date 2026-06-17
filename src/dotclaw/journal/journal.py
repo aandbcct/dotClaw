@@ -19,7 +19,7 @@ import os as _os
 from datetime import date as _date, datetime as _dt, timezone as _tz
 
 if TYPE_CHECKING:
-    from dotclaw.agent.context import AgentContext
+    pass
 
 _warned: set[str] = set()
 
@@ -109,14 +109,23 @@ class Journal:
 
     # ═══ 会话 ═══
 
-    def session_start(self, ctx: "AgentContext", config: Any) -> None:
-        """开始会话。从 AgentContext 提取 session_id、request_id、model。
-        config 是 dotclaw.config.settings.JournalConfig 实例。
+    def session_start(self, session_id: str,
+                       request_id: str,
+                       model: str,
+                       config: "Any") -> None:
+        """开始会话。
+
+        Args:
+            session_id: 会话 ID
+            request_id: 请求 ID
+            model: 模型名
+            config: JournalConfig 实例
         """
         from datetime import date as _date
-        self._session_id = ctx.session_id
-        self._request_id = ctx.request_id
-        self._model = ctx.model
+
+        self._session_id = session_id
+        self._request_id = request_id
+        self._model = model
         self._loop_idx = 0
         self._config = config
         self._events = []

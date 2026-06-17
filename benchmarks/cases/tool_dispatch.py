@@ -11,7 +11,6 @@ import time
 from pathlib import Path
 
 from benchmarks.stats import p50, p95
-from dotclaw.agent.context import AgentContext
 from dotclaw.config.settings import JournalConfig
 from dotclaw.journal import Journal
 from dotclaw.journal.metrics_types import ToolCallMetrics
@@ -54,12 +53,12 @@ async def run(
 
     for i in range(warmup + repeat):
         journal = Journal()
-        fake_ctx = AgentContext(
+        journal.session_start(
             session_id=f"bench_dispatch_{i}",
-            workspace=root, project_root=root,
-            model="none", system_prompt="benchmark",
+            request_id=f"td_{i:04d}",
+            model="none",
+            config=jc,
         )
-        journal.session_start(fake_ctx, jc)
 
         t0 = time.perf_counter()
         result = await executor.execute("noop", {}, channel=None, journal=journal)

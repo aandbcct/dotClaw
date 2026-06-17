@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from ..llm.base import Message
-from .message_utils import trim as msg_trim, clean as msg_clean
+from .message_utils import trim as msg_trim, clean as msg_clean, _msg_tokens
 
 if TYPE_CHECKING:
     from ..llm.proxy import LLMProxy
@@ -25,12 +25,11 @@ if TYPE_CHECKING:
     from ..config import Config
     from ..tools.executor import ToolExecutor
     from ..tools.base import ToolDefinition
-    from .context import AgentContext as AgentContextType
-    from .prompt.builder import PromptBuilder
     from ..memory.manager import MemoryManager
     from ..skills.registry import SkillRegistry
     from .result import AgentResult
     from ..journal import Journal
+    from .slotContext import ContextAssembler, SlotContext
 
 
 # ============================================================================
@@ -189,8 +188,8 @@ class Agent:
     职责：
     - 持有 AgentConfig + Config + 所有依赖
     - 管理 Session 生命周期（new / switch / list）
-    - 构建 AgentContext 快照（含 memory recall）
-    - 构建 messages 列表（含 system prompt + 历史 + 当前消息）
+    - 构建 SlotContext 数据篮
+    - 构建 messages 列表（含 system prompt + _history + 当前消息）
     - 提供 chat() 公开 API（内部创建 AgentLoop 并调用 run）
     - 封装 after-loop 收尾（session 保存 + memory flush）
     """
@@ -203,12 +202,12 @@ class Agent:
         session_mgr: "SessionManager",
         channel: "Channel | None" = None,
         tool_executor: "ToolExecutor | None" = None,
-        prompt_builder: "PromptBuilder | None" = None,
         memory_mgr: "MemoryManager | None" = None,
         skill_registry: "SkillRegistry | None" = None,
         mcp_provider: Any = None,
         memory_dream: Any = None,
         mcp_task: Any = None,
+        assembler: "ContextAssembler | None" = None,
     ):
         """
         通过依赖注入构造 Agent。
@@ -220,12 +219,12 @@ class Agent:
             session_mgr: 会话管理器
             channel: 通信通道（可为 None，如 Scheduler 场景）
             tool_executor: 工具执行器
-            prompt_builder: System prompt 构建器
             memory_mgr: 记忆管理器
             skill_registry: Skill 注册表
             mcp_provider: MCP 工具提供器（可选）
             memory_dream: DeepDream 记忆蒸馏实例（可选）
             mcp_task: MCP 后台初始化 task（可选）
+            assembler: ContextAssembler（可选）
         """
         self.agent_config = agent_config
         self._config = config
@@ -234,12 +233,13 @@ class Agent:
         self._session: "Session | None" = None
         self._channel = channel
         self._tool_executor = tool_executor
-        self._prompt_builder = prompt_builder
         self._memory_mgr = memory_mgr
         self._skill_registry = skill_registry
         self._mcp_provider = mcp_provider
         self._memory_dream = memory_dream
         self._mcp_task = mcp_task
+        self._assembler: "ContextAssembler | None" = assembler
+        self._history: list[Message] = []
 
     # ======================== 只读属性 ========================
 
@@ -294,11 +294,6 @@ class Agent:
         return self._tool_executor
 
     @property
-    def prompt_builder(self) -> "PromptBuilder | None":
-        """System prompt 构建器"""
-        return self._prompt_builder
-
-    @property
     def memory_mgr(self) -> "MemoryManager | None":
         """记忆管理器"""
         return self._memory_mgr
@@ -317,6 +312,16 @@ class Agent:
     def memory_dream(self) -> Any:
         """DeepDream 记忆蒸馏实例（可为 None）"""
         return self._memory_dream
+
+    @property
+    def assembler(self) -> "ContextAssembler | None":
+        """上下文 Assembler（新模式，可为 None 退化到旧 Provider 模式）"""
+        return self._assembler
+
+    @property
+    def history(self) -> list[Message]:
+        """本轮对话历史（tier 3 消息列表，每 turn 追加）"""
+        return self._history
 
     # ======================== 生命周期 ========================
 
@@ -403,105 +408,69 @@ class Agent:
 
     # ======================== 内部方法（供 AgentLoop 调用） ========================
 
-    async def _build_context(
-        self, user_message: str, journal: "Journal"
-    ) -> "AgentContextType":
-        """
-        构建不可变 AgentContext 快照。
-
-        职责：
-        - 触发 memory recall（语义检索）
-        - 组装 AgentContext dataclass
-        - 应用 AgentConfig 参数（model / workspace / allowed_tools / max_loop_steps 等）
-
-        Args:
-            user_message: 用户原始消息（用于记忆检索查询）
-            journal: Journal 观测实例
-
-        Returns:
-            AgentContext 不可变快照
-        """
-        from .context import AgentContext as Ctx
-
-        request_id = uuid.uuid4().hex[:8]
-        project_root = _find_project_root()
-
-        # 语义检索
-        memory_summary = await self._recall_memory(user_message, journal)
-
-        # 应用 agent 级配置
-        resolved_model = self._resolve_model()
-        resolved_system_prompt = self._resolve_system_prompt()
-        tool_defs = self._resolve_tool_definitions()
-
-        return Ctx(
-            session_id=self._session.id if self._session else "",
-            workspace=project_root,
-            project_root=project_root,
-            model=resolved_model,
-            system_prompt=resolved_system_prompt,
-            available_tools=(
-                [d.name for d in tool_defs] if tool_defs else []
-            ),
-            tool_definitions=tool_defs,
-            request_id=request_id,
-            purpose="chat",
-            max_context_tokens=self._config.agent.max_context_tokens,
-            rules=self._config.agent.rules,
-            memory_summary=memory_summary,
-            channel=self._channel,
-            skill_registry=self._skill_registry,
-            journal=journal,
-        )
-
-    def _build_messages(
-        self, user_message: str, context: "AgentContextType"
-    ) -> list[Message]:
-        """
-        构建发送给 LLM 的 messages 列表。
-
-        职责：
-        - 通过 PromptBuilder 生成 system prompt
-        - 拼接历史消息（从 self.session.messages）
-        - 追加当前 user 消息
-        - 调用 msg_trim / msg_clean 处理 token 限制
+    def _build_slot_context(self, user_message: str,
+                             journal: "Journal") -> "SlotContext":
+        """构建 SlotContext（上下文工程的输入参数篮）。
 
         Args:
             user_message: 用户原始消息
-            context: AgentContext 快照
+            journal: Journal 观测实例
+
+        Returns:
+            SlotContext 数据篮
+        """
+        from .slotContext import SlotContext as SCtx
+
+        request_id = uuid.uuid4().hex[:8]
+        project_root = _find_project_root()
+        resolved_system_prompt = self._resolve_system_prompt()
+        tool_defs = self._resolve_tool_definitions()
+
+        return SCtx(
+            query=user_message,
+            request_id=request_id,
+            session_id=self._session.id if self._session else "",
+            project_root=project_root,
+            max_context_tokens=self._config.agent.max_context_tokens,
+            system_prompt=resolved_system_prompt,
+            tool_definitions=tool_defs,
+            skill_registry=self._skill_registry,
+            memory_manager=self._memory_mgr,
+            knowledge_base=None,
+            user_profile=None,
+            journal=journal,
+        )
+
+    def _build_messages(self, user_input: str,
+                         system_prompt: str) -> list[Message]:
+        """从 _history + system_prompt 构建 messages。只裁 _history。
+
+        Args:
+            user_input: 用户当前输入
+            system_prompt: 已组装的 system prompt 文本
 
         Returns:
             LLM 消息列表
         """
-        messages: list[Message] = []
+        system_msg = Message(role="system", content=system_prompt)
+        user_msg = Message(role="user", content=user_input)
 
-        if self._prompt_builder:
-            system_prompt = self._prompt_builder.build(context)
+        budget = (self._config.agent.max_context_tokens
+                  - _msg_tokens(system_msg)
+                  - _msg_tokens(user_msg))
+
+        if budget > 0:
+            history = msg_trim(list(self._history), budget)
         else:
-            system_prompt = context.system_prompt
+            history: list[Message] = []
 
-        messages.append(Message(role="system", content=system_prompt))
-
-        if self._session:
-            for msg in self._session.messages:
-                messages.append(Message(
-                    role=msg.role,
-                    content=msg.content,
-                    name=msg.name,
-                    tool_call_id=msg.tool_call_id,
-                ))
-
-        messages.append(Message(role="user", content=user_message))
-
-        messages = msg_trim(messages, context.max_context_tokens)
-        messages = msg_clean(messages)
-
-        return messages
+        return [system_msg] + history + [user_msg]
 
     async def _invoke_llm(
         self,
         messages: list[Message],
-        context: "AgentContextType",
+        model: str,
+        tool_definitions: list[Any],
         journal: "Journal",
     ) -> LLMResponse:
         """
@@ -511,7 +480,8 @@ class Agent:
 
         Args:
             messages: 待发送的消息列表
-            context: AgentContext 快照（提供 model / tool_definitions / purpose 等）
+            model: 模型名
+            tool_definitions: 工具定义列表
             journal: Journal 观测实例（透传给 llm.chat）
 
         Returns:
@@ -525,9 +495,9 @@ class Agent:
 
         async for chunk in self._llm.chat(
             messages=messages,
-            tools=context.tool_definitions if context.tool_definitions else None,
-            model=context.model,
-            purpose=context.purpose,
+            tools=tool_definitions if tool_definitions else None,
+            model=model,
+            purpose="chat",
             stream=self._config.llm.stream,
             journal=journal,
         ):
