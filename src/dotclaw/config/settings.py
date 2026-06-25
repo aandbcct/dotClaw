@@ -204,6 +204,8 @@ class JournalConfig:
     console: bool = True
     trace: bool = True
     snapshot: bool = True
+    history: bool = True
+    state: bool = True
 
 
 @dataclass
