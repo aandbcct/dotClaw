@@ -73,12 +73,14 @@ def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def save_snapshot(snapshot: AgentRunSnapshot, directory: str | Path | None = None) -> Path:
+def save_snapshot(snapshot: AgentRunSnapshot, directory: str | Path | None = None,
+                  filename: str | None = None) -> Path:
     """保存快照到文件。
 
     Args:
         snapshot: AgentRunSnapshot 实例。
         directory: 输出目录，默认 "data/snapshots/"。
+        filename: 自定义文件名（不含扩展名）。为 None 时使用 run_id。
 
     Returns:
         写入的文件路径。
@@ -86,8 +88,8 @@ def save_snapshot(snapshot: AgentRunSnapshot, directory: str | Path | None = Non
     out_dir = Path(directory) if directory else Path("data/snapshots")
     _ensure_dir(out_dir)
 
-    filename = f"{snapshot.meta.run_id}.json"
-    filepath = out_dir / filename
+    name = f"{filename}.json" if filename else f"{snapshot.meta.run_id}.json"
+    filepath = out_dir / name
 
     json_str = snapshot_to_json(snapshot)
     filepath.write_text(json_str, encoding="utf-8")

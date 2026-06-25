@@ -133,12 +133,13 @@ class Journal:
         if not self._config or not self._session_id or not self._request_id:
             return None
         date_str = self._session_start_day or _date.today().isoformat()
+        ts_str = time.strftime("%H%M%S", time.localtime(self._session_start_ts))
 
         return (
             Path(self._config.trace_dir)
             / self._session_id
             / date_str
-            / self._request_id
+            / f"{ts_str}-{self._request_id}"
         )
 
     def _ensure_output_dir(self) -> Path | None:
@@ -167,7 +168,7 @@ class Journal:
         self._session_id = session_id
         self._request_id = request_id
         self._model = model
-        self._loop_idx = 0
+        self._loop_idx = -1
         self._config = config
         self._events = []
         self._timers = {}
@@ -419,16 +420,40 @@ class Journal:
 
     # ═══ 对话内容记录 ═══
 
-    def record_history(self, entry: dict) -> None:
-        """追加一条消息记录到 history.jsonl。
+    def record_message(self, message: Any) -> None:
+        """记录一个 Message 实例到 history.jsonl。
 
-        在 session_start 之后、finalize 之前调用。
-        如果 config.history=False 或 session 未开始，则无操作。
+        loop 取自 _loop_idx；ts 内部计算；step/role 从 Message 提取。
+        调用方只需传入 Message 实体，不需要传 loop/ts/role。
         """
         if not self._config or not self._config.history:
             return
         if not self._request_id:
             return
+
+        entry = {
+            "loop": self._loop_idx,
+            "ts": _dt.now(_tz.utc).isoformat(),
+            "role": message.role,
+            "content": message.content,
+        }
+
+        if message.role == "user":
+            entry["step"] = "user_input"
+        elif message.role == "assistant":
+            entry["step"] = "llm_response"
+            if message.tool_calls:
+                entry["tool_calls"] = [
+                    {"id": tc.id, "name": tc.name, "args": tc.arguments}
+                    for tc in message.tool_calls
+                ]
+            else:
+                entry["tool_calls"] = None
+        elif message.role == "tool":
+            entry["step"] = "tool_result"
+            entry["tool_call_id"] = message.tool_call_id
+            entry["name"] = message.name
+
         if self._history_sink is None:
             out_dir = self._ensure_output_dir()
             if out_dir is None:
@@ -488,11 +513,8 @@ class Journal:
             self._close_sinks()
             return
 
-        out_dir = self._ensure_output_dir()
-        if out_dir is None:
-            self._events = []
-            self._close_sinks()
-            return
+        need_dir = self._config.trace or self._config.snapshot
+        out_dir = self._ensure_output_dir() if need_dir else None
 
         # 1. 构建并写入 report.json
         if self._config.trace:
@@ -529,7 +551,7 @@ class Journal:
                 for event in self._events:
                     builder.process(event)
                 snapshot = builder.build()
-                save_snapshot(snapshot, str(out_dir))
+                save_snapshot(snapshot, str(out_dir), filename="snapshot")
             except Exception as e:
                 self.error("ERROR", "journal.snapshot", f"构建 snapshot.json 失败: {e}")
 

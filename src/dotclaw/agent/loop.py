@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime as _dt, timezone as _tz
 from typing import TYPE_CHECKING
 
 from ..llm.base import Message
@@ -66,11 +65,8 @@ class AgentLoop:
         )
 
         # ── 记录用户输入 ──
-        journal.record_history({
-            "loop": -1, "step": "user_input",
-            "ts": _dt.now(_tz.utc).isoformat(),
-            "role": "user", "content": user_message,
-        })
+        user_msg = Message(role="user", content=user_message)
+        journal.record_message(user_msg)
 
         tool_calls_total = 0
         iterations = 0
@@ -86,7 +82,7 @@ class AgentLoop:
             journal.prompt_built(
                 message_count=len(messages),
                 context_length=est_tokens,
-                system_prompt=slot_ctx.system_prompt,
+                system_prompt=system_prompt,
                 skills_injected=[s.name for s in skills_loaded] if skills_loaded else [],
                 tool_count=len(slot_ctx.tool_definitions),
             )
@@ -94,7 +90,7 @@ class AgentLoop:
             final_response = ""
             max_iterations = self.agent.agent_config.max_loop_steps
 
-            for loop_idx in range(max_iterations):
+            for _ in range(max_iterations):
                 iterations += 1
 
                 # ── 每 turn 重建 messages（包含最新 _history） ──
@@ -121,20 +117,12 @@ class AgentLoop:
                 )
 
                 # ── 记录 LLM 返回内容 ──
-                journal.record_history({
-                    "loop": loop_idx, "step": "llm_response",
-                    "ts": _dt.now(_tz.utc).isoformat(),
-                    "role": "assistant",
-                    "content": llm_resp.content,
-                    "tool_calls": [
-                        {"id": tc.id, "name": tc.name, "args": tc.arguments}
-                        for tc in (llm_resp.tool_calls or [])
-                    ] or None,
-                    "tokens": {
-                        "input": llm_resp.input_tokens,
-                        "output": llm_resp.output_tokens,
-                    },
-                })
+                asst_msg = Message(
+                    role="assistant",
+                    content=llm_resp.content or "",
+                    tool_calls=list(llm_resp.tool_calls) if llm_resp.tool_calls else None,
+                )
+                journal.record_message(asst_msg)
 
                 if not llm_resp.tool_calls:
                     final_response = llm_resp.content
@@ -149,13 +137,6 @@ class AgentLoop:
 
                 tool_calls_total += len(llm_resp.tool_calls)
 
-                # 将 assistant 消息（含 tool_calls）追加
-                asst_msg = Message(
-                    role="assistant",
-                    content=llm_resp.content or "",
-                    tool_calls=list(llm_resp.tool_calls),
-                )
-
                 # ── 并行执行工具调用 ──
                 tool_messages = await asyncio.gather(*[
                     self.agent._execute_single_tool(tc, journal)
@@ -163,15 +144,8 @@ class AgentLoop:
                 ])
 
                 # ── 记录工具结果 ──
-                for tc, tr in zip(llm_resp.tool_calls, tool_messages):
-                    journal.record_history({
-                        "loop": loop_idx, "step": "tool_result",
-                        "ts": _dt.now(_tz.utc).isoformat(),
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "content": tr.content,
-                    })
+                for tr in tool_messages:
+                    journal.record_message(tr)
 
                 # 追加到 _history（下轮 _build_messages 自动包含）
                 self.agent._history.append(asst_msg)

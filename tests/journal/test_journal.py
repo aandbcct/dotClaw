@@ -57,6 +57,7 @@ def journal_config():
         console=False,   # 测试中关闭控制台输出
         trace=False,     # 测试中关闭文件写入
         snapshot=False,  # 测试中关闭快照保存
+        state=False,     # 测试中关闭 state 写入
     )
 
 
@@ -75,14 +76,14 @@ class TestSessionStart:
         assert journal._session_id == "test-session-001"
         assert journal._request_id == "req-abcd1234"
         assert journal._model == "deepseek-v4"
-        assert journal._loop_idx == 0
+        assert journal._loop_idx == -1
         assert len(journal._events) == 1
         assert journal._events[0].event_type == "session.start"
 
     def test_session_start_initializes_loop_idx(self, fake_context, journal_config):
         journal = Journal()
         journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        assert journal._loop_idx == 0
+        assert journal._loop_idx == -1
 
 
 class TestSessionEnd:
@@ -111,10 +112,10 @@ class TestLoop:
         journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
 
         journal.loop_start()
-        assert journal._loop_idx == 1
+        assert journal._loop_idx == 0
 
         journal.loop_start()
-        assert journal._loop_idx == 2
+        assert journal._loop_idx == 1
 
     def test_loop_start_emits_event(self, fake_context, journal_config):
         journal = Journal()
@@ -123,7 +124,7 @@ class TestLoop:
 
         loop_events = [e for e in journal._events if e.event_type == "react.loop_start"]
         assert len(loop_events) == 1
-        assert loop_events[0].data["loop_idx"] == 1
+        assert loop_events[0].data["loop_idx"] == 0
 
     def test_loop_end_emits_event(self, fake_context, journal_config):
         journal = Journal()
@@ -143,7 +144,7 @@ class TestLoop:
 
         empty_events = [e for e in journal._events if e.event_type == "react.empty_action"]
         assert len(empty_events) == 1
-        assert empty_events[0].data["loop_idx"] == 1
+        assert empty_events[0].data["loop_idx"] == 0
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -163,7 +164,7 @@ class TestToolCall:
         tool_events = [e for e in journal._events if e.event_type == "tool.call_start"]
         assert len(tool_events) == 1
         assert tool_events[0].data["tool_name"] == "read_file"
-        assert tool_events[0].data["loop_idx"] == 1
+        assert tool_events[0].data["loop_idx"] == 0
         assert tool_events[0].data["attempt"] == 1
 
     def test_tool_end_calculates_duration(self, fake_context, journal_config):
@@ -397,8 +398,8 @@ class TestConcurrencySafety:
         j2.loop_end("tool_call")
 
         # j1 和 j2 的 loop_idx 独立
-        assert j1._loop_idx == 1
-        assert j2._loop_idx == 2
+        assert j1._loop_idx == 0
+        assert j2._loop_idx == 1
 
         # j1 和 j2 的事件列表独立
         assert len(j1._events) != len(j2._events)
