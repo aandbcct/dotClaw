@@ -6,9 +6,9 @@
 
 ReAct推理循环 · 多模型路由降级 · 上下文感知注入 · 三级记忆 · 可插拔工具与技能
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/ttguy0707/dotClaw?color=orange)](https://github.com/aandbcct/dotClaw)
+[![Last Commit](https://img.shields.io/github/last-commit/aandbcct/dotClaw?color=orange)](https://github.com/aandbcct/dotClaw)
 
 </div>
 
@@ -24,14 +24,13 @@ ReAct推理循环 · 多模型路由降级 · 上下文感知注入 · 三级记
 | 特性 | 说明                                                          |
 |------|-------------------------------------------------------------|
 | **ReAct 推理循环** | 思考→行动→观察的推理循环，让agent逐步思考，动态响应复杂任务                           |
-| **链路白盒化**     | 16类事件覆盖5大模块，三类统计结果支持请求全链路追溯                                 |
-| **多模型路由** | 多供应商适配（Qwen / DeepSeek / OpenAI），优先级自动选择 + 跨供应商降级           |
-| **三层记忆分级** | L1 工作记忆（当前会话）/ L2 短期记忆（日记忆）/ L3 长期记忆（DeepDream 蒸馏），跨会话记忆不丢失 |
-| **上下文感知注入** | PromptBuilder 多 Provider 分层构建，记忆按时效性/相关性排序注入，token 预算精细分配   |
-| **Skill 按需激活** | 扫描注册 + prompt 注入，根据对话场景动态激活相关技能                             |
-| **可插拔工具** | ToolHandler/Registry/Executor 三层架构 + 8 个内置工具 + 审批机制         |
-| **MCP 协议** | stdio + Streamable HTTP 双传输，无缝接入外部工具服务                      |
-| **全链路观测** | 16 类事件覆盖 5 大模块，trace / report / snapshot 三路输出 |
+| **三层记忆分级** | L0 工作记忆 / L1 日记忆（FTS5+向量双路召回） / L2 DeepDream 蒸馏，跨会话记忆不丢失 |
+| **上下文感知注入** | ContextSlot 四级分层组装（Static→Session→Conditional→Dynamic），token 预算精细分配 |
+| **多模型路由** | Qwen / DeepSeek / OpenAI 多供应商适配，LLMProxy 优先级自动选择 + 跨供应商降级 |
+| **全链路观测** | Journal 16 类事件覆盖 5 大域，trace / report / snapshot 三路输出，链路完全白盒化 |
+| **Skill 按需激活** | 扫描注册 + prompt 注入，根据对话场景动态激活相关技能 |
+| **可插拔工具** | ToolHandler/Registry/Executor 三层架构 + 8 个内置工具 + 审批机制 |
+| **MCP 协议** | stdio + Streamable HTTP 双传输，无缝接入外部工具服务 |
 
 ---
 
@@ -94,17 +93,18 @@ dotClaw 的记忆系统是个人助手场景的核心——agent 需要跨会话
 ```
 dotClaw/
 ├── src/dotclaw/             # 源代码
-│   ├── agent/               # Agent 核心：ReAct 循环 + PromptBuilder + 工厂
+│   ├── agent/               # Agent 核心：ReAct 循环 + ContextSlot + 工厂 + 中断恢复
 │   ├── journal/             # 统一观测：16 种事件 / 三路输出 / Snapshot
-│   ├── llm/                 # LLM 客户端：多供应商适配 + ModelRouter
+│   ├── llm/                 # LLM 客户端：多供应商适配 + LLMProxy + ModelRouter
 │   ├── tools/               # 工具系统：三层架构 + 审批 + SkillParser
 │   ├── mcp/                 # MCP 协议：stdio + Streamable HTTP 双传输
 │   ├── skills/              # Skill 系统：扫描注册 + prompt 注入
-│   ├── memory/              # 三层记忆：L0/L1/L2 + DeepDream 蒸馏
-│   ├── channel/             # 通道（CLI）
+│   ├── memory/              # 三层记忆：session记忆 + 日记忆 + 长期记忆 + DeepDream + Embedding
+│   ├── channel/             # 通道（CLI，Rich 渲染）
+│   ├── cli/                 # CLI Banner（dotClaw ASCII art）
 │   ├── scheduler/           # 定时提醒
-│   ├── common/              # 通用工具库（限流器等）
-│   └── config/              # 配置加载
+│   ├── common/              # 通用工具库（限流器 / 单例 / 工具函数）
+│   └── config/              # 配置加载（YAML → dataclass）
 ├── benchmarks/              # 评测系统
 │   ├── runner.py            # 评测总控
 │   ├── cases/               # 6 个评测用例
@@ -121,15 +121,16 @@ dotClaw/
 
 | 模块 | 路径 | 职责 |
 |------|------|------|
-| **Agent 循环** | `agent/` | ReAct 推理循环 + AgentContext + PromptBuilder + 工厂装配 |
-| **三层记忆** | `memory/` | L0 工作记忆 / L1 日记忆（FTS5+向量双路） / L2 蒸馏（DeepDream） |
-| **统一观测** | `journal/` | 16 种事件覆盖 5 大域，trace.jsonl / report.json / snapshot.json |
-| **工具系统** | `tools/` | Handler/Registry/Executor 三层 + 审批机制 + SkillParser + SkillResolver |
-| **LLM 客户端** | `llm/` | Qwen/DeepSeek/OpenAI 适配，ModelRouter 优先级路由 + 降级 |
-| **MCP 协议** | `mcp/` | stdio + Streamable HTTP，McpClient 状态机 |
-| **Skill 系统** | `skills/` | 扫描注册 + prompt 注入 + SkillsProvider 场景感知激活 |
+| **Agent 循环** | `agent/` | ReAct 推理循环 + ContextSlot 分层装配 + Agent 工厂 + ResumeManager 中断恢复 |
+| **上下文工程** | `agent/slotContext.py` | Tier 分层 Slot 插拔系统：Static → Session → Conditional → Dynamic 四级组装 |
+| **三层记忆** | `memory/` | L0 工作记忆 / L1 日记忆（FTS5+向量双路召回） / L2 DeepDream 蒸馏 |
+| **LLM 路由** | `llm/` | LLMProxy 统一入口 + ModelRouter 优先级路由 + 限流降级 + 流式代理 |
+| **统一观测** | `journal/` | 16 种事件覆盖 5 大域，trace.jsonl / report.json / snapshot.json 三路输出 |
+| **工具系统** | `tools/` | Handler/Registry/Executor 三层 + 审批机制 + SkillParser |
+| **MCP 协议** | `mcp/` | stdio + Streamable HTTP 双传输，McpClient 状态机 + 工具适配 |
+| **Skill 系统** | `skills/` | 扫描注册 + prompt 注入 + SkillsProvider 按需激活 |
 | **评测系统** | `benchmarks/` | 6 维评测 + 基线对比 + AgentRunSnapshot + Markdown 报告 |
-| **配置管理** | `config/` | YAML → dataclass，类型安全的配置加载 + 环境变量展开 |
+| **配置管理** | `config/` | YAML → dataclass 类型安全加载 + 环境变量 ${ENV} 展开 |
 
 ---
 
@@ -210,14 +211,18 @@ python -m benchmarks.runner --baseline benchmarks/baselines/v1.0/init_perf.json
 # 安装开发依赖
 pip install -e ".[dev]"
 
-# 运行验收测试
+# Phase 验收测试
 python tests/test_phase1_acceptance.py   # ReAct 循环 + 工具系统
 python tests/test_phase2_acceptance.py   # 多供应商路由
 python tests/test_phase3_acceptance.py   # AgentContext + PromptBuilder
 python tests/test_phase4_acceptance.py   # 三级记忆
-python tests/test_phase5_acceptance.py   # 工具层架构重构
 python tests/test_phase7_acceptance.py   # Skill 系统
-python tests/test_phase8_acceptance.py   # Journal 统一观测
+
+# 模块单元测试
+pytest tests/context/ -v                  # ContextSlot 上下文工程
+pytest tests/journal/ -v                  # Journal 事件 + 状态
+pytest tests/metrics/ -v                  # Snapshot 指标计算
+pytest tests/agent/ -v                    # ResumeManager 中断恢复
 ```
 
 ---
@@ -236,8 +241,9 @@ python tests/test_phase8_acceptance.py   # Journal 统一观测
 | Phase 8 | ![完成](https://img.shields.io/badge/✅-完成-brightgreen) | Journal 统一观测：16 种事件 / 三路输出 / trace + report + snapshot |
 | Phase 9 | ![完成](https://img.shields.io/badge/✅-完成-brightgreen) | 评测系统：6 维评测 + 基线对比 + AgentRunSnapshot + Markdown 报告 |
 | Phase 10 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | Scheduler cron 增强 |
-| Phase 11 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | 取消机制（CancelTokenRegistry） |
-| Phase 12 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | Web Channel |
+| Phase 11 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | 数据统计：性能指标采集 + 基准对比 + 趋势分析 |
+| Phase 12 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | 取消机制（CancelTokenRegistry） |
+| Phase 13 | ![搁置](https://img.shields.io/badge/⏸️-搁置-yellow) | Web Channel |
 
 ---
 
