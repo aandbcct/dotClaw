@@ -318,6 +318,10 @@ async def build_agent(
 
     # ── 组装 ──
     from dotclaw.agent import Agent as AgentCls
+    from dotclaw.agent.resume import ResumeManager
+
+    resume_mgr = ResumeManager(trace_root=config.journal.trace_dir)
+
     agent = AgentCls(
         agent_config=agent_config,
         config=config,
@@ -331,6 +335,7 @@ async def build_agent(
         memory_dream=memory_dream,
         mcp_task=mcp_task,
         assembler=assembler,
+        resume_manager=resume_mgr,
     )
 
     # ── 恢复上次 session ──

@@ -8,6 +8,7 @@ AgentLoop 退化为纯执行引擎，通过 Agent 获取所需的所有依赖。
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from .result import AgentResult
     from ..journal import Journal
     from .slotContext import ContextAssembler, SlotContext
+    from .resume import ResumeManager
 
 
 # ============================================================================
@@ -208,6 +210,7 @@ class Agent:
         memory_dream: Any = None,
         mcp_task: Any = None,
         assembler: "ContextAssembler | None" = None,
+        resume_manager: Any = None,
     ):
         """
         通过依赖注入构造 Agent。
@@ -240,6 +243,7 @@ class Agent:
         self._mcp_task = mcp_task
         self._assembler: "ContextAssembler | None" = assembler
         self._history: list[Message] = []
+        self._resume_manager : ResumeManager = resume_manager
 
     # ======================== 只读属性 ========================
 
@@ -380,14 +384,53 @@ class Agent:
 
     # ======================== 公开 API ========================
 
+    async def resume(self, session_id: str | None = None) -> bool:
+        """从中断的 request 恢复对话历史。
+
+        从 Journal trace 目录读取 state.json + history.jsonl，
+        重建 _history 并补执行未完成的工具调用。
+
+        Args:
+            session_id: 要恢复的会话 ID。None 时使用当前活跃 session。
+
+        Returns:
+            True 表示恢复成功（_history 已填充），False 表示无需恢复。
+        """
+        sid = session_id or (self._session.id if self._session else None)
+        if not sid or not self._resume_manager:
+            return False
+
+        ctx = self._resume_manager.get_resume_context(sid)
+        if ctx is None:
+            return False
+
+        # 注入恢复的消息
+        self._history = ctx["messages"]
+
+        # 补执行未完成的工具调用
+        for tc in ctx["incomplete_tools"]:
+            try:
+                result = await self._execute_single_tool(tc, journal=None)
+                self._history.append(result)
+            except Exception:
+                # 工具执行失败不阻塞恢复
+                self._history.append(Message(
+                    role="tool",
+                    content=f"错误：工具 {tc.name} 恢复执行失败",
+                    tool_call_id=tc.id,
+                ))
+
+        return True
+
     async def chat(self, message: str) -> "AgentResult":
         """
         处理一条用户消息。
 
         内部流程：
         1. 确保有活跃 session（无则创建）
-        2. 创建 AgentLoop(self)，调用 loop.run(message)
-        3. Loop 内部完成 ReAct 循环后返回 AgentResult
+        2. 自动检测中断的 request 并恢复 _history
+        3. 创建 AgentLoop(self)，调用 loop.run(message)
+        4. Loop 内部完成 ReAct 循环后返回 AgentResult
 
         Args:
             message: 用户输入文本
@@ -397,6 +440,10 @@ class Agent:
         """
         if self._session is None:
             await self.new_session()
+
+        # 自动检测并恢复中断的对话
+        if not self._history:
+            await self.resume()
 
         # 延迟导入避免循环依赖
         from .loop import AgentLoop
@@ -524,7 +571,7 @@ class Agent:
         )
 
     async def _execute_single_tool(
-        self, tc, journal: "Journal"
+        self, tc, journal: "Journal | None"
     ) -> Message:
         """
         执行单个工具调用，返回 tool 角色 Message。
@@ -533,7 +580,7 @@ class Agent:
 
         Args:
             tc: ToolCall 对象（有 name / arguments / id 属性）
-            journal: Journal 观测实例
+            journal: Journal 观测实例（resume 场景可为 None）
 
         Returns:
             role="tool" 的 Message
@@ -546,8 +593,9 @@ class Agent:
             args = {}
 
         if not self._tool_executor:
-            journal.tool_start(tc.name, args=args)
-            journal.tool_end(tc.name, result_len=0, status="error", error_type="no_executor")
+            if journal:
+                journal.tool_start(tc.name, args=args)
+                journal.tool_end(tc.name, result_len=0, status="error", error_type="no_executor")
             return Message(
                 role="tool",
                 content="错误：工具执行器未初始化",
