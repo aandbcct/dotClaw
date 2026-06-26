@@ -226,7 +226,8 @@ class TestResumeManagerIntegration:
 
         session_dir = tmp_path / "s-test"
         _write_trace(session_dir, "120000-req-int",
-                     {"status": "running"}, [
+                     {"status": "running", "loop_index": 0,
+                      "total_input_tokens": 500, "total_output_tokens": 50}, [
             {"loop": -1, "step": "user_input", "role": "user", "content": "do it"},
             {"loop": 0, "step": "llm_response", "role": "assistant",
              "content": "", "tool_calls": [
@@ -243,7 +244,9 @@ class TestResumeManagerIntegration:
         assert len(ctx["messages"]) == 3
         assert len(ctx["incomplete_tools"]) == 1
         assert ctx["incomplete_tools"][0].name == "write"
-        assert ctx["interrupted_request_id"] == "req-int"
+        assert ctx["request_id"] == "req-int"
+        assert ctx["state"]["loop_index"] == 0
+        assert ctx["state"]["total_input_tokens"] == 500
 
     def test_resume_context_none_for_completed(self, tmp_path):
         from dotclaw.agent.resume import ResumeManager
@@ -257,3 +260,43 @@ class TestResumeManagerIntegration:
         mgr = ResumeManager(trace_root=str(tmp_path))
         ctx = mgr.get_resume_context("s-test")
         assert ctx is None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Journal restore_state
+# ═══════════════════════════════════════════════════════════════════
+
+class TestJournalRestoreState:
+    """Journal.restore_state() 恢复累加器。"""
+
+    def test_restores_loop_idx(self):
+        from dotclaw.journal.journal import Journal
+        journal = Journal()
+        journal._loop_idx = -1
+        journal.restore_state({"loop_index": 3})
+        assert journal._loop_idx == 3
+
+    def test_restores_all_accumulators(self):
+        from dotclaw.journal.journal import Journal
+        journal = Journal()
+        journal.restore_state({
+            "loop_index": 2,
+            "total_input_tokens": 3200,
+            "total_output_tokens": 500,
+            "total_tool_calls": 3,
+            "errors": [{"source": "tool", "message": "timeout"}],
+            "message_count": 8,
+        })
+        assert journal._loop_idx == 2
+        assert journal._token_accum["input"] == 3200
+        assert journal._token_accum["output"] == 500
+        assert journal._tool_count == 3
+        assert len(journal._errors_list) == 1
+        assert journal._message_count == 8
+
+    def test_restores_missing_fields_as_defaults(self):
+        from dotclaw.journal.journal import Journal
+        journal = Journal()
+        journal.restore_state({})  # 空 state
+        assert journal._loop_idx == -1
+        assert journal._token_accum["input"] == 0

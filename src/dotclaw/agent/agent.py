@@ -384,44 +384,6 @@ class Agent:
 
     # ======================== 公开 API ========================
 
-    async def resume(self, session_id: str | None = None) -> bool:
-        """从中断的 request 恢复对话历史。
-
-        从 Journal trace 目录读取 state.json + history.jsonl，
-        重建 _history 并补执行未完成的工具调用。
-
-        Args:
-            session_id: 要恢复的会话 ID。None 时使用当前活跃 session。
-
-        Returns:
-            True 表示恢复成功（_history 已填充），False 表示无需恢复。
-        """
-        sid = session_id or (self._session.id if self._session else None)
-        if not sid or not self._resume_manager:
-            return False
-
-        ctx = self._resume_manager.get_resume_context(sid)
-        if ctx is None:
-            return False
-
-        # 注入恢复的消息
-        self._history = ctx["messages"]
-
-        # 补执行未完成的工具调用
-        for tc in ctx["incomplete_tools"]:
-            try:
-                result = await self._execute_single_tool(tc, journal=None)
-                self._history.append(result)
-            except Exception:
-                # 工具执行失败不阻塞恢复
-                self._history.append(Message(
-                    role="tool",
-                    content=f"错误：工具 {tc.name} 恢复执行失败",
-                    tool_call_id=tc.id,
-                ))
-
-        return True
-
     async def chat(self, message: str) -> "AgentResult":
         """
         处理一条用户消息。
@@ -440,10 +402,6 @@ class Agent:
         """
         if self._session is None:
             await self.new_session()
-
-        # 自动检测并恢复中断的对话
-        if not self._history:
-            await self.resume()
 
         # 延迟导入避免循环依赖
         from .loop import AgentLoop

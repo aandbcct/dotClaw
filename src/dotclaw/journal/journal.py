@@ -501,6 +501,19 @@ class Journal:
 
     # ═══ 生命周期 ═══
 
+    def restore_state(self, state: dict) -> None:
+        """从上次 state.json 恢复累加器和 loop_idx。
+
+        resume 时在 session_start() 之后调用，使得追加写入的
+        history.jsonl/state.json 与中断前的记录连续。
+        """
+        self._loop_idx = state.get("loop_index", -1)
+        self._token_accum["input"] = state.get("total_input_tokens", 0)
+        self._token_accum["output"] = state.get("total_output_tokens", 0)
+        self._tool_count = state.get("total_tool_calls", 0)
+        self._errors_list = list(state.get("errors", []))
+        self._message_count = state.get("message_count", 0)
+
     def finalize(self) -> None:
         """会话结束处理：构建 report.json + snapshot.json，清空事件列表。
 

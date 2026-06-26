@@ -56,13 +56,51 @@ class AgentLoop:
         self.agent.assembler.on_new_request()
         system_prompt = await self.agent.assembler.build_system_prompt(slot_ctx)
 
-        # Journal: session_start
-        journal.session_start(
-            session_id=slot_ctx.session_id,
-            request_id=slot_ctx.request_id,
-            model=self.agent.model,
-            config=self.agent.config.journal,
-        )
+        # ── Resume hook: 检测中断并恢复 ──
+        resumed = False
+        resume_mgr = getattr(self.agent, '_resume_manager', None)
+        if resume_mgr and slot_ctx.session_id:
+            # 使用 object.__setattr__ 绕过 frozen SlotContext
+            resume_ctx = resume_mgr.get_resume_context(slot_ctx.session_id)
+            if resume_ctx:
+                # 复用中断的 request_id，指向同一 Journal 目录
+                object.__setattr__(slot_ctx, 'request_id', resume_ctx["request_id"])
+                journal.session_start(
+                    session_id=slot_ctx.session_id,
+                    request_id=slot_ctx.request_id,
+                    model=self.agent.model,
+                    config=self.agent.config.journal,
+                )
+                journal.restore_state(resume_ctx.get("state", {}))
+
+                # 注入恢复的对话历史
+                self.agent._history = resume_ctx["messages"]
+
+                # 补执行未完成的工具
+                for tc in resume_ctx["incomplete_tools"]:
+                    try:
+                        result = await self.agent._execute_single_tool(tc, journal)
+                        self.agent._history.append(result)
+                        journal.record_message(result)
+                    except Exception:
+                        err_msg = Message(
+                            role="tool",
+                            content=f"错误：工具 {tc.name} 恢复执行失败",
+                            tool_call_id=tc.id,
+                        )
+                        self.agent._history.append(err_msg)
+                        journal.record_message(err_msg)
+
+                resumed = True
+
+        if not resumed:
+            # Journal: session_start
+            journal.session_start(
+                session_id=slot_ctx.session_id,
+                request_id=slot_ctx.request_id,
+                model=self.agent.model,
+                config=self.agent.config.journal,
+            )
 
         # ── 记录用户输入 ──
         user_msg = Message(role="user", content=user_message)

@@ -34,11 +34,12 @@ class ResumeManager:
         """获取 session 的恢复上下文。
 
         Returns:
-            None 如果无需恢复（没有中断的 request 或已经完成）。
-            dict 包含:
-                messages: list[Message]      重建的对话消息
-                incomplete_tools: list[ToolCall]  未完成的工具调用
-                interrupted_request_id: str  被中断的 request_id
+            None 如果无需恢复。
+            dict:
+                messages: list[Message]       重建的对话消息
+                incomplete_tools: list[ToolCall] 未完成的工具调用
+                request_id: str               被中断的 request_id
+                state: dict                   旧 state.json 内容（供 journal.restore_state）
         """
         path = self.find_interrupted(session_id)
         if path is None:
@@ -49,13 +50,21 @@ class ResumeManager:
             return None
 
         messages, incomplete = self.reconstruct(entries)
-        # 从目录名提取 request_id（格式 HHMMSS-{request_id}）
         request_id = path.name.split("-", 1)[1] if "-" in path.name else path.name
+
+        state = {}
+        state_path = path / "state.json"
+        if state_path.is_file():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
 
         return {
             "messages": messages,
             "incomplete_tools": incomplete,
-            "interrupted_request_id": request_id,
+            "request_id": request_id,
+            "state": state,
         }
 
     # ═══ 内部方法 ═══
