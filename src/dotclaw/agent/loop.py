@@ -56,13 +56,55 @@ class AgentLoop:
         self.agent.assembler.on_new_request()
         system_prompt = await self.agent.assembler.build_system_prompt(slot_ctx)
 
-        # Journal: session_start
-        journal.session_start(
-            session_id=slot_ctx.session_id,
-            request_id=slot_ctx.request_id,
-            model=self.agent.model,
-            config=self.agent.config.journal,
-        )
+        # ── Resume hook: 检测中断并恢复 ──
+        resumed = False
+        resume_mgr = getattr(self.agent, '_resume_manager', None)
+        if resume_mgr and slot_ctx.session_id:
+            # 使用 object.__setattr__ 绕过 frozen SlotContext
+            resume_ctx = resume_mgr.get_resume_context(slot_ctx.session_id)
+            if resume_ctx:
+                # 复用中断的 request_id，指向同一 Journal 目录
+                object.__setattr__(slot_ctx, 'request_id', resume_ctx["request_id"])
+                journal.session_start(
+                    session_id=slot_ctx.session_id,
+                    request_id=slot_ctx.request_id,
+                    model=self.agent.model,
+                    config=self.agent.config.journal,
+                )
+                journal.restore_state(resume_ctx.get("state", {}))
+
+                # 注入恢复的对话历史
+                self.agent._history = resume_ctx["messages"]
+
+                # 补执行未完成的工具
+                for tc in resume_ctx["incomplete_tools"]:
+                    try:
+                        result = await self.agent._execute_single_tool(tc, journal)
+                        self.agent._history.append(result)
+                        journal.record_message(result)
+                    except Exception:
+                        err_msg = Message(
+                            role="tool",
+                            content=f"错误：工具 {tc.name} 恢复执行失败",
+                            tool_call_id=tc.id,
+                        )
+                        self.agent._history.append(err_msg)
+                        journal.record_message(err_msg)
+
+                resumed = True
+
+        if not resumed:
+            # Journal: session_start
+            journal.session_start(
+                session_id=slot_ctx.session_id,
+                request_id=slot_ctx.request_id,
+                model=self.agent.model,
+                config=self.agent.config.journal,
+            )
+
+        # ── 记录用户输入 ──
+        user_msg = Message(role="user", content=user_message)
+        journal.record_message(user_msg)
 
         tool_calls_total = 0
         iterations = 0
@@ -78,7 +120,7 @@ class AgentLoop:
             journal.prompt_built(
                 message_count=len(messages),
                 context_length=est_tokens,
-                system_prompt=slot_ctx.system_prompt,
+                system_prompt=system_prompt,
                 skills_injected=[s.name for s in skills_loaded] if skills_loaded else [],
                 tool_count=len(slot_ctx.tool_definitions),
             )
@@ -112,6 +154,14 @@ class AgentLoop:
                     stop_reason=llm_resp.finish_reason,
                 )
 
+                # ── 记录 LLM 返回内容 ──
+                asst_msg = Message(
+                    role="assistant",
+                    content=llm_resp.content or "",
+                    tool_calls=list(llm_resp.tool_calls) if llm_resp.tool_calls else None,
+                )
+                journal.record_message(asst_msg)
+
                 if not llm_resp.tool_calls:
                     final_response = llm_resp.content
                     if self.agent.channel:
@@ -125,18 +175,15 @@ class AgentLoop:
 
                 tool_calls_total += len(llm_resp.tool_calls)
 
-                # 将 assistant 消息（含 tool_calls）追加
-                asst_msg = Message(
-                    role="assistant",
-                    content=llm_resp.content or "",
-                    tool_calls=list(llm_resp.tool_calls),
-                )
-
                 # ── 并行执行工具调用 ──
                 tool_messages = await asyncio.gather(*[
                     self.agent._execute_single_tool(tc, journal)
                     for tc in llm_resp.tool_calls
                 ])
+
+                # ── 记录工具结果 ──
+                for tr in tool_messages:
+                    journal.record_message(tr)
 
                 # 追加到 _history（下轮 _build_messages 自动包含）
                 self.agent._history.append(asst_msg)

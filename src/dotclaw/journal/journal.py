@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, TYPE_CHECKING
+from pathlib import Path
 from dotclaw.journal.events import AgentEvent, EventType
 from dotclaw.config.settings import JournalConfig
 import json as _json
@@ -57,6 +58,16 @@ class Journal:
         self._session_start_ts: float = 0.0
         self._ttft_ms: float = 0.0  # 最新一轮的 TTFT
         self._session_start_day: str = ""  # 日期固定，跨午夜不变
+        # history / state sinks（lazy init）
+        self._history_sink: Any = None
+        self._state_sink: Any = None
+        # state 累加器
+        self._token_accum: dict[str, int] = {"input": 0, "output": 0}
+        self._tool_count: int = 0
+        self._errors_list: list[dict] = []
+        self._message_count: int = 0
+        self._max_loop_steps: int = 10
+        self._creat_at: str = ""
 
     # ═══ 内部辅助 ═══
 
@@ -78,11 +89,17 @@ class Journal:
         if self._config and self._request_id:
             if self._config.trace:
                 try:
-                    from dotclaw.journal.sinks.trace import trace_sink
-                    trace_sink(event, self._config.trace_dir,
-                               self._request_id,
-                               session_start_ts=self._session_start_ts,
-                               date_str=self._session_start_day)
+                    out_dir = self._ensure_output_dir()
+                    if out_dir is not None:
+                        filepath = out_dir / "trace.jsonl"
+                        line = _json.dumps({
+                            "ts": event.timestamp,
+                            "t": event.created_at,
+                            "type": event.event_type,
+                            "data": event.data,
+                        }, ensure_ascii=False)
+                        with open(filepath, "a", encoding="utf-8") as f:
+                            f.write(line + "\n")
                 except Exception as e:
                     _warn_once("trace_sink", str(e))
             if self._config.console and event_type == EventType.ERROR:
@@ -107,6 +124,31 @@ class Journal:
             return 0.0
         return (time.time() - start) * 1000
 
+    def _output_dir(self) -> Path | None:
+        """返回本次对话的产出目录。
+
+        格式: {trace_dir}/{session_id}/{date}/{request_id}
+        None 表示 session_start() 尚未调用。
+        """
+        if not self._config or not self._session_id or not self._request_id:
+            return None
+        date_str = self._session_start_day or _date.today().isoformat()
+        ts_str = time.strftime("%H%M%S", time.localtime(self._session_start_ts))
+
+        return (
+            Path(self._config.trace_dir)
+            / self._session_id
+            / date_str
+            / f"{ts_str}-{self._request_id}"
+        )
+
+    def _ensure_output_dir(self) -> Path | None:
+        """确保产出目录存在，返回路径。"""
+        out_dir = self._output_dir()
+        if out_dir is not None:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        return out_dir
+
     # ═══ 会话 ═══
 
     def session_start(self, session_id: str,
@@ -126,12 +168,20 @@ class Journal:
         self._session_id = session_id
         self._request_id = request_id
         self._model = model
-        self._loop_idx = 0
+        self._loop_idx = -1
         self._config = config
         self._events = []
         self._timers = {}
         self._session_start_ts = time.time()
         self._session_start_day = _date.today().isoformat()
+        self._creat_at = time.strftime("%H:%M:%S", time.localtime(time.time()))
+        # 重置累加器
+        self._token_accum = {"input": 0, "output": 0}
+        self._tool_count = 0
+        self._errors_list = []
+        self._message_count = 0
+        if hasattr(config, 'max_loop_steps'):
+            self._max_loop_steps = config.max_loop_steps
 
         self._emit(EventType.SESSION_START, {
             "session_id": self._session_id,
@@ -148,6 +198,8 @@ class Journal:
             "success": success,
             "total_duration_ms": round(total_duration_ms, 1),
         })
+        status = "completed" if success else "error"
+        self._update_state(status)
 
     # ═══ ReAct 循环 ═══
 
@@ -163,6 +215,7 @@ class Journal:
         self._emit(EventType.LOOP_END, {
             "loop_idx": self._loop_idx, "action": action,
         })
+        self._update_state("running")
 
     def empty_action(self) -> None:
         """记录一次空转。"""
@@ -181,6 +234,7 @@ class Journal:
     ) -> None:
         """提示词构建完成。记录完整 system_prompt 用于调试。"""
         self._require_session()
+        self._message_count = message_count
         self._emit(EventType.PROMPT_BUILT, {
             "loop_idx": self._loop_idx,
             "message_count": message_count,
@@ -229,6 +283,10 @@ class Journal:
         self._require_session()
         response_ms = self._timer_end_ms("llm_response")
 
+        # 累加 token 消耗
+        self._token_accum["input"] += input_tokens
+        self._token_accum["output"] += output_tokens
+
         # TPS：基于实际响应耗时计算，覆盖调用方传入的值
         actual_tps = (output_tokens / (response_ms / 1000)) if response_ms > 0 else 0.0
 
@@ -267,6 +325,8 @@ class Journal:
         """工具执行结束。内部计算 duration_ms。"""
         self._require_session()
         duration_ms = self._timer_end_ms(f"tool_{tool_name}")
+
+        self._tool_count += 1
 
         self._emit(EventType.TOOL_END, {
             "loop_idx": self._loop_idx,
@@ -345,6 +405,12 @@ class Journal:
 
     def error(self, level: str, source: str, message: str) -> None:
         """记录错误/警告。触发 console_sink 和 trace_sink。"""
+        err = {
+            "source": source,
+            "message": message,
+            "level": level,
+        }
+        self._errors_list.append(err)
         self._emit(EventType.ERROR, {
             "loop_idx": self._loop_idx,
             "level": level,
@@ -352,7 +418,101 @@ class Journal:
             "message": message,
         })
 
+    # ═══ 对话内容记录 ═══
+
+    def record_message(self, message: Any) -> None:
+        """记录一个 Message 实例到 history.jsonl。
+
+        loop 取自 _loop_idx；ts 内部计算；step/role 从 Message 提取。
+        调用方只需传入 Message 实体，不需要传 loop/ts/role。
+        """
+        if not self._config or not self._config.history:
+            return
+        if not self._request_id:
+            return
+
+        entry = {
+            "loop": self._loop_idx,
+            "ts": _dt.now(_tz.utc).isoformat(),
+            "role": message.role,
+            "content": message.content,
+        }
+
+        if message.role == "user":
+            entry["step"] = "user_input"
+        elif message.role == "assistant":
+            entry["step"] = "llm_response"
+            if message.tool_calls:
+                entry["tool_calls"] = [
+                    {"id": tc.id, "name": tc.name, "args": tc.arguments}
+                    for tc in message.tool_calls
+                ]
+            else:
+                entry["tool_calls"] = None
+        elif message.role == "tool":
+            entry["step"] = "tool_result"
+            entry["tool_call_id"] = message.tool_call_id
+            entry["name"] = message.name
+
+        if self._history_sink is None:
+            out_dir = self._ensure_output_dir()
+            if out_dir is None:
+                return
+            from dotclaw.journal.sinks.history_sink import HistorySink
+            self._history_sink = HistorySink(out_dir / "history.jsonl")
+        self._history_sink.write(entry)
+
+    def _update_state(self, status: str) -> None:
+        """覆盖写入 state.json（内部调用）。
+
+        Args:
+            status: "running" | "completed" | "error"
+        """
+        if not self._config or not self._config.state:
+            return
+        if not self._request_id:
+            return
+        if self._state_sink is None:
+            out_dir = self._ensure_output_dir()
+            if out_dir is None:
+                return
+            from dotclaw.journal.sinks.state_sink import StateSink
+            self._state_sink = StateSink(out_dir / "state.json")
+
+        from datetime import datetime as _dt2, timezone as _tz2
+        elapsed = int((time.time() - self._session_start_ts) * 1000) if self._session_start_ts else 0
+
+        state = {
+            "session_id": self._session_id or "",
+            "request_id": self._request_id or "",
+            "loop_index": self._loop_idx,
+            "status": status,
+            "message_count": self._message_count,
+            "total_input_tokens": self._token_accum["input"],
+            "total_output_tokens": self._token_accum["output"],
+            "total_tool_calls": self._tool_count,
+            "elapsed_ms": elapsed,
+            "errors": list(self._errors_list),
+            "model": self._model,
+            "max_loop_steps": self._max_loop_steps,
+            "updated_at": _dt2.now(_tz2.utc).isoformat(),
+        }
+        self._state_sink.write(state)
+
     # ═══ 生命周期 ═══
+
+    def restore_state(self, state: dict) -> None:
+        """从上次 state.json 恢复累加器和 loop_idx。
+
+        resume 时在 session_start() 之后调用，使得追加写入的
+        history.jsonl/state.json 与中断前的记录连续。
+        """
+        self._loop_idx = state.get("loop_index", -1)
+        self._token_accum["input"] = state.get("total_input_tokens", 0)
+        self._token_accum["output"] = state.get("total_output_tokens", 0)
+        self._tool_count = state.get("total_tool_calls", 0)
+        self._errors_list = list(state.get("errors", []))
+        self._message_count = state.get("message_count", 0)
 
     def finalize(self) -> None:
         """会话结束处理：构建 report.json + snapshot.json，清空事件列表。
@@ -361,21 +521,16 @@ class Journal:
         finalize() 不再重复写入。
         """
 
-
         if not self._config or not self._request_id:
             self._events = []
+            self._close_sinks()
             return
+
+        need_dir = self._config.trace or self._config.snapshot
+        out_dir = self._ensure_output_dir() if need_dir else None
 
         # 1. 构建并写入 report.json
         if self._config.trace:
-            date_str = _date.today().isoformat()
-            ts_prefix = str(int(self._session_start_ts))
-            sub_dir = f"{ts_prefix}_{self._request_id}"
-            trace_dir = _os.path.join(
-                self._config.trace_dir, date_str, sub_dir
-            )
-            _os.makedirs(trace_dir, exist_ok=True)
-
             try:
                 report = _build_report(
                     events=self._events,
@@ -383,13 +538,15 @@ class Journal:
                     request_id=self._request_id or "",
                     model=self._model,
                 )
-                report_path = _os.path.join(trace_dir, "report.json")
-                with open(report_path, "w", encoding="utf-8") as f:
-                    _json.dump(report, f, ensure_ascii=False, indent=2)
+                report_path = out_dir / "report.json"
+                report_path.write_text(
+                    _json.dumps(report, ensure_ascii=False, indent=2),
+                    encoding="utf-8"
+                )
             except Exception as e:
                 self.error("ERROR", "journal.report", f"构建 report.json 失败: {e}")
 
-        # 3. 构建并写入 snapshot.json
+        # 2. 构建并写入 snapshot.json
         if self._config.snapshot:
             try:
                 from dotclaw.journal.snapshot import SnapshotBuilder
@@ -407,12 +564,24 @@ class Journal:
                 for event in self._events:
                     builder.process(event)
                 snapshot = builder.build()
-                save_snapshot(snapshot, trace_dir)
+                save_snapshot(snapshot, str(out_dir), filename="snapshot")
             except Exception as e:
                 self.error("ERROR", "journal.snapshot", f"构建 snapshot.json 失败: {e}")
 
-        # 4. 清空事件列表
+        # 3. 关闭 sinks，清空事件列表
+        self._close_sinks()
         self._events = []
+
+    def _close_sinks(self) -> None:
+        """关闭 history_sink 和 state_sink 句柄。"""
+        if self._history_sink is not None:
+            try:
+                self._history_sink.close()
+            except Exception:
+                pass
+            self._history_sink = None
+        if self._state_sink is not None:
+            self._state_sink = None
 
 
 def _build_report(
