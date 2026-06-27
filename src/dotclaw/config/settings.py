@@ -237,6 +237,7 @@ class ProviderConfig:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     rate_limit: dict = field(default_factory=dict)
+    circuit_breaker: dict = field(default_factory=dict)  # phase: llmRouter refactoring
     retry: ProviderRetryConfig = field(default_factory=ProviderRetryConfig)
 
 

@@ -21,6 +21,10 @@ providers:
 #    base_url: https://invalid-host-99999.example.com/v1
     rate_limit:
       requests_per_minute: 0
+    circuit_breaker:
+      failure_threshold: 5
+      cooldown_seconds: 30
+      half_open_max: 1
     retry:
       max_attempts: 3
       backoff_factor: 2.0
@@ -29,16 +33,28 @@ providers:
     base_url: https://api.deepseek.com
     rate_limit:
       requests_per_minute: 0
+    circuit_breaker:
+      failure_threshold: 5
+      cooldown_seconds: 30
+      half_open_max: 1
     retry:
       max_attempts: 2
   gemini:
     api_key: ${GEMINI_API_KEY}
     base_url:
+    circuit_breaker:
+      failure_threshold: 5
+      cooldown_seconds: 30
+      half_open_max: 1
   openai:
     api_key: ${OPENAI_API_KEY}
     base_url: https://api.openai.com/v1
     rate_limit:
       requests_per_minute: 0
+    circuit_breaker:
+      failure_threshold: 5
+      cooldown_seconds: 30
+      half_open_max: 1
 
 # Level 3: 模型配置
 models:

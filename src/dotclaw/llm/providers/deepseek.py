@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from openai import AsyncOpenAI
 
-from .openai_compat import OpenAICompatibleClient
+from ..openai_compat import OpenAICompatibleClient
+from . import register
 
 
+@register("deepseek")
 class DeepSeekClient(OpenAICompatibleClient):
     """DeepSeek API 客户端（OpenAI 兼容）"""
 

@@ -1,14 +1,23 @@
-"""OpenAI LLM 客户端"""
+"""千问（Qwen）LLM 客户端实现
+
+基于 OpenAICompatibleClient，仅覆写 provider 特定的钩子方法。
+"""
 
 from __future__ import annotations
 
 from openai import AsyncOpenAI
 
-from .openai_compat import OpenAICompatibleClient
+from ..openai_compat import OpenAICompatibleClient
+from . import register
 
 
-class OpenAIClient(OpenAICompatibleClient):
-    """OpenAI API 客户端"""
+@register("qwen")
+class QwenClient(OpenAICompatibleClient):
+    """
+    千问 API 客户端。
+
+    千问兼容 OpenAI SDK，只需改 base_url 和 model。
+    """
 
     def __init__(self, api_key: str, base_url: str, model: str):
         super().__init__()

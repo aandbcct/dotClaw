@@ -1,8 +1,10 @@
 """LLM 模块"""
 
 from .base import LLMClient, ChatChunk, Message, ToolCall, ToolDefinition
-from .qwen import QwenClient
 from .proxy import LLMProxy
+from .model_router import ModelRouter
+from .rate_limiter import RateLimiter, RateLimitConfig, RateLimitTimeout
+from .circuit_breaker import CircuitBreaker, BreakerConfig, BreakerState
 
 __all__ = [
     "LLMClient",
@@ -10,6 +12,12 @@ __all__ = [
     "Message",
     "ToolCall",
     "ToolDefinition",
-    "QwenClient",
     "LLMProxy",
+    "ModelRouter",
+    "RateLimiter",
+    "RateLimitConfig",
+    "RateLimitTimeout",
+    "CircuitBreaker",
+    "BreakerConfig",
+    "BreakerState",
 ]

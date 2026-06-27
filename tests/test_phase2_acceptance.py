@@ -1,5 +1,5 @@
 """
-Phase 2 验收测试 — 7 个场景（优先级制路由）
+Phase 2 验收测试 — 7 个场景（优先级制路由 + 熔断器 + 限流）
 
 运行方式:
     cd D:/dev/dotClaw
@@ -19,7 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from dotclaw.llm.base import ChatChunk, Message, ToolCall
 from dotclaw.llm.openai_compat import OpenAICompatibleClient
-from dotclaw.common.rate_limiter import RateLimiter, RateLimitConfig
+from dotclaw.llm.rate_limiter import RateLimiter, RateLimitConfig, RateLimitTimeout
+from dotclaw.llm.circuit_breaker import CircuitBreaker, BreakerConfig
+from dotclaw.llm.model_router import ModelRouter
 from dotclaw.llm.proxy import LLMProxy, CallSetupError, NonRetryableStreamError
 from dotclaw.config.settings import (
     RouterConfig, DefaultsConfig, ProviderConfig, ProviderRetryConfig,
@@ -27,6 +29,7 @@ from dotclaw.config.settings import (
 )
 
 logging.getLogger("dotclaw.llm").setLevel(logging.WARNING)
+logging.getLogger("dotclaw.llm.router").setLevel(logging.WARNING)
 
 
 # ============================================================
@@ -68,6 +71,13 @@ def _make_minimal_router_config(
             ),
         },
     )
+
+
+def _make_router(config: RouterConfig) -> ModelRouter:
+    """构建带默认 RateLimiter + CircuitBreaker 的 ModelRouter。"""
+    rl = RateLimiter({})
+    cb = CircuitBreaker({})
+    return ModelRouter(config, rl, cb)
 
 
 # ============================================================
@@ -139,35 +149,33 @@ async def test_1_equivalence():
 
 
 # ============================================================
-# 场景 2：优先级制选择（确定性）
+# 场景 2：优先级制选择（select() 接口）
 # ============================================================
 
 async def test_2_priority():
-    print("\n=== 场景 2：优先级制选择 ===")
+    print("\n=== 场景 2：优先级制选择（select()） ===")
     config = _make_minimal_router_config(
         priorities=[
             PurposePriority(model="qwen-turbo", priority=1),
             PurposePriority(model="qwen3.7-max", priority=2),
         ],
     )
-    from dotclaw.llm.model_router import ModelRouter
-    router = ModelRouter(config)
+    router = _make_router(config)
 
-    # 确定性选择：总是返回 priority 最小的 active model
-    for _ in range(100):
-        _, m = router.resolve(purpose="chat")
-        assert m == "qwen-turbo", f"应始终选 priority=1 的 qwen-turbo，实际: {m}"
+    # select() 返回按 priority 升序排列的候选列表
+    for _ in range(10):
+        candidates = router.select(purpose="chat")
+        assert candidates[0] == "qwen-turbo", (
+            f"应始终优先选 priority=1 的 qwen-turbo，实际: {candidates[0]}"
+        )
+        assert len(candidates) == 2
 
-    # 降级链按 priority 升序排列
-    chain = router.get_fallback_chain("chat")
-    assert chain == ["qwen-turbo", "qwen3.7-max"], f"降级链应为 priority 升序: {chain}"
-
-    print(f"  ✅ 100 次 resolve 全部返回 qwen-turbo（priority=1）")
-    print(f"  ✅ 降级链: {chain}")
+    print(f"  ✅ select() 始终返回 [qwen-turbo, qwen3.7-max]")
+    print(f"  ✅ 候选列表: {router.select('chat')}")
 
 
 # ============================================================
-# 场景 3：Proxy 降级链（实际 API，按优先级依次降级）
+# 场景 3：Proxy 降级链（实际 API）
 # ============================================================
 
 async def test_3_fallback_actual():
@@ -177,8 +185,6 @@ async def test_3_fallback_actual():
     if not api_key:
         print("  ⚠️ API Key 未设置，跳过")
         return
-
-    from dotclaw.llm.model_router import ModelRouter
 
     config = RouterConfig(
         defaults=DefaultsConfig(provider="qwen", model="test-fail",
@@ -213,8 +219,8 @@ async def test_3_fallback_actual():
         },
     )
 
-    router = ModelRouter(config)
-    proxy = LLMProxy(model_router=router, rate_limiter=RateLimiter({}))
+    router = _make_router(config)
+    proxy = LLMProxy(model_router=router)
     chunks = [c.content async for c in proxy.chat(
         [Message(role="user", content="hi")], purpose="chat", stream=False
     )]
@@ -224,11 +230,11 @@ async def test_3_fallback_actual():
 
 
 # ============================================================
-# 场景 4：forced_model 三层匹配
+# 场景 4：forced_model 三层匹配（via select()）
 # ============================================================
 
 async def test_4_forced_model():
-    print("\n=== 场景 4：forced_model 三层匹配 ===")
+    print("\n=== 场景 4：forced_model 三层匹配（via select()） ===")
     config = _make_minimal_router_config(
         defaults={"provider": "qwen", "model": "qwen3.7-max"},
         providers={
@@ -241,32 +247,41 @@ async def test_4_forced_model():
             "deepseek-v3": ModelConfig(provider="deepseek", model_id="deepseek-chat"),
         },
     )
-    from dotclaw.llm.model_router import ModelRouter
-    router = ModelRouter(config)
+    router = _make_router(config)
 
-    _, m1 = router.resolve(purpose="chat", forced_model="qwen3.7-max")
-    assert m1 == "qwen3.7-max"
-    _, m2 = router.resolve(purpose="chat", forced_model="deepseek")
-    assert m2 == "deepseek-v3"
-    _, m3 = router.resolve(purpose="chat", forced_model="nonexistent")
-    assert m3 == "qwen3.7-max"  # fallback to default
+    # 精确匹配：forced_model 排在候选列表第一位
+    c1 = router.select(purpose="chat", forced_model="qwen3.7-max")
+    assert c1[0] == "qwen3.7-max"
 
-    print(f"  ✅ 精确: qwen3.7-max → {m1}")
-    print(f"  ✅ 前缀: deepseek → {m2}")
-    print(f"  ✅ 降级: nonexistent → {m3}")
+    # provider 匹配：该 provider 的所有模型排在最前面
+    c2 = router.select(purpose="chat", forced_model="deepseek")
+    assert c2[0] == "deepseek-v3"  # deepseek provider 下唯一的 active model
+
+    # 不匹配：保持原顺序
+    c3 = router.select(purpose="chat", forced_model="nonexistent")
+    assert c3[0] == "qwen3.7-max"  # 默认 priority=1
+
+    print(f"  ✅ 精确: qwen3.7-max → candidate 首位: {c1}")
+    print(f"  ✅ 前缀: deepseek → 首位: {c2[0]}")
+    print(f"  ✅ 降级: nonexistent → 保持 priority 序: {c3}")
 
 
 # ============================================================
-# 场景 5：RateLimiter
+# 场景 5：RateLimiter（增强版：check + timeout）
 # ============================================================
 
 async def test_5_rate_limiter():
-    print("\n=== 场景 5：RateLimiter ===")
+    print("\n=== 场景 5：RateLimiter（check + timeout） ===")
     rl = RateLimiter({"qwen": RateLimitConfig(requests_per_minute=0)})
     t0 = time.monotonic()
     for _ in range(3): await rl.acquire("qwen")
     assert time.monotonic() - t0 < 0.5
 
+    # check(): 无锁近似读
+    assert rl.check("qwen")  # 不限流 → True
+    assert rl.check("unknown")  # 未配置 → True
+
+    # 限流 + timeout
     rl2 = RateLimiter({"qwen": RateLimitConfig(requests_per_minute=3)})
     orig = asyncio.sleep
     called = []
@@ -277,7 +292,21 @@ async def test_5_rate_limiter():
     finally:
         asyncio.sleep = orig
     assert len(called) >= 1
-    print(f"  ✅ 不限流立即返回, 限流触发 {len(called)} 次 sleep")
+    print(f"  ✅ 不限流立即返回, check() 无锁工作, 限流触发 {len(called)} 次 sleep")
+
+
+async def test_5b_rate_limit_timeout():
+    print("\n=== 场景 5b：RateLimiter timeout ===")
+    rl = RateLimiter({"qwen": RateLimitConfig(requests_per_minute=1)})
+    # 消耗唯一令牌
+    await rl.acquire("qwen")
+    # 下次 acquire 需要等待，但 timeout=0.01 秒太短
+    try:
+        await rl.acquire("qwen", timeout=0.01)
+        assert False, "应超时"
+    except RateLimitTimeout:
+        pass
+    print(f"  ✅ timeout=0.01 秒触发 RateLimitTimeout")
 
 
 # ============================================================
@@ -293,17 +322,24 @@ async def test_6_stream_no_fallback():
             raise RuntimeError("broke")
 
     class SpyRouter:
-        def __init__(self):
-            self._config = _make_minimal_router_config(
-                models={"m": ModelConfig(provider="qwen", model_id="m")},
-                priorities=[PurposePriority(model="m", priority=1)],
-            )
-        def resolve(self, p="chat", fm=None): return FailClient(), "m"
-        def get_fallback_chain(self, p="chat"): return ["m"]
-        def get_available_models(self): return ["m"]
-        def _get_or_create_client(self, n): return FailClient()
+        def select(self, purpose="chat", forced_model=None):
+            return ["m"]
+        def get_client(self, model_name):
+            return FailClient()
+        def get_provider_name(self, model_name):
+            return "qwen"
+        async def try_acquire(self, provider, timeout):
+            pass
+        def report_success(self, model_name):
+            pass
+        def report_failure(self, model_name):
+            pass
+        def _get_retry_config(self, model_name):
+            return 1
+        def _get_backoff_config(self, model_name):
+            return 0.01
 
-    p = LLMProxy(model_router=SpyRouter(), rate_limiter=RateLimiter({}))
+    p = LLMProxy(model_router=SpyRouter())
     try:
         async for _ in p.chat([Message(role="user", content="x")], purpose="chat"):
             pass
@@ -328,30 +364,85 @@ async def test_7_setup_fallback():
             yield ChatChunk(content="ok", is_final=True)
 
     class SpyRouter:
-        def __init__(self):
-            self._config = _make_minimal_router_config(
-                models={
-                    "fail": ModelConfig(provider="qwen", model_id="f"),
-                    "ok": ModelConfig(provider="qwen", model_id="o"),
-                },
-                priorities=[
-                    PurposePriority(model="fail", priority=1),
-                    PurposePriority(model="ok", priority=2),
-                ],
-            )
-        def resolve(self, p="chat", fm=None): return FailClient(), "fail"
-        def get_fallback_chain(self, p="chat"): return ["fail", "ok"]
-        def get_available_models(self): return ["fail", "ok"]
-        def _get_or_create_client(self, n):
-            return OkClient() if n == "ok" else FailClient()
+        def select(self, purpose="chat", forced_model=None):
+            return ["fail", "ok"]
+        def get_client(self, model_name):
+            return OkClient() if model_name == "ok" else FailClient()
+        def get_provider_name(self, model_name):
+            return "qwen"
+        async def try_acquire(self, provider, timeout):
+            pass
+        def report_success(self, model_name):
+            pass
+        def report_failure(self, model_name):
+            pass
+        def _get_retry_config(self, model_name):
+            return 1
+        def _get_backoff_config(self, model_name):
+            return 0.01
 
-    p = LLMProxy(model_router=SpyRouter(), rate_limiter=RateLimiter({}))
+    p = LLMProxy(model_router=SpyRouter())
     chunks = [c.content async for c in p.chat(
-        [Message(role="user", content="x")], purpose="chat", model="fail"
+        [Message(role="user", content="x")], purpose="chat"
     )]
     r = "".join(chunks)
     assert "ok" in r
     print(f"  ✅ 降级成功: {r}")
+
+
+# ============================================================
+# 场景 8：CircuitBreaker 状态机（新增）
+# ============================================================
+
+async def test_8_circuit_breaker():
+    print("\n=== 场景 8：CircuitBreaker 状态机 ===")
+    cb = CircuitBreaker({"qwen": BreakerConfig(
+        failure_threshold=3, cooldown_seconds=0.1, half_open_max=1,
+    )})
+
+    # 初始 CLOSED
+    assert not cb.is_open("qwen")
+    assert cb.get_state("qwen").value == "closed"
+
+    # 连续失败 → OPEN
+    cb.on_failure("qwen")
+    cb.on_failure("qwen")
+    assert not cb.is_open("qwen")  # 还没到阈值
+    cb.on_failure("qwen")
+    assert cb.is_open("qwen")      # 触发熔断
+
+    # OPEN → HALF_OPEN（冷却后）
+    await asyncio.sleep(0.15)
+    assert not cb.is_open("qwen")  # 自动进入 HALF_OPEN
+    assert cb.get_state("qwen").value == "half_open"
+
+    # HALF_OPEN 探测成功 → CLOSED
+    cb.on_success("qwen")
+    assert not cb.is_open("qwen")
+    assert cb.get_state("qwen").value == "closed"
+
+    print(f"  ✅ CLOSED → OPEN → HALF_OPEN → CLOSED 状态流转正常")
+
+
+async def test_8b_circuit_breaker_half_open_failure():
+    print("\n=== 场景 8b：HALF_OPEN 探测失败 → OPEN ===")
+    cb = CircuitBreaker({"qwen": BreakerConfig(
+        failure_threshold=2, cooldown_seconds=0.05, half_open_max=1,
+    )})
+
+    # 触发熔断
+    cb.on_failure("qwen")
+    cb.on_failure("qwen")
+    assert cb.is_open("qwen")
+
+    # 冷却后进入 HALF_OPEN
+    await asyncio.sleep(0.1)
+    assert cb.get_state("qwen").value == "half_open"
+
+    # 探测失败 → 重新 OPEN
+    cb.on_failure("qwen")
+    assert cb.is_open("qwen")
+    print(f"  ✅ HALF_OPEN 探测失败 → 立即回到 OPEN")
 
 
 # ============================================================
@@ -361,12 +452,15 @@ async def test_7_setup_fallback():
 async def main_async():
     tests = [
         ("场景1-OpenAICompatClient等价性", test_1_equivalence),
-        ("场景2-优先级制选择", test_2_priority),
+        ("场景2-优先级制选择(select)", test_2_priority),
         ("场景3-Proxy降级链(实际API)", test_3_fallback_actual),
         ("场景4-forced_model三层匹配", test_4_forced_model),
-        ("场景5-RateLimiter", test_5_rate_limiter),
+        ("场景5-RateLimiter(check+timeout)", test_5_rate_limiter),
+        ("场景5b-RateLimiter-timeout", test_5b_rate_limit_timeout),
         ("场景6-Proxy流式不降级", test_6_stream_no_fallback),
         ("场景7-Proxy调用前失败降级", test_7_setup_fallback),
+        ("场景8-CircuitBreaker状态机", test_8_circuit_breaker),
+        ("场景8b-CircuitBreaker-半开失败", test_8b_circuit_breaker_half_open_failure),
     ]
     passed, failed = 0, 0
     failures = []

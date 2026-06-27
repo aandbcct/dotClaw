@@ -79,10 +79,11 @@ def _save_state(project_root: Path, state: dict) -> None:
 # ============================================================================
 
 def _build_llm(config, project_root: Path):
-    """构建 LLMProxy + ModelRouter + RateLimiter。"""
+    """构建 LLMProxy ← ModelRouter（内持 RateLimiter + CircuitBreaker）。"""
     from dotclaw.config import load_router_config, _build_router_config_from_legacy
     from dotclaw.llm.model_router import ModelRouter
-    from dotclaw.common.rate_limiter import RateLimiter, RateLimitConfig
+    from dotclaw.llm.rate_limiter import RateLimiter, RateLimitConfig
+    from dotclaw.llm.circuit_breaker import CircuitBreaker, BreakerConfig
     from dotclaw.llm.proxy import LLMProxy
 
     router_config_path = project_root / "model_router_config.yaml"
@@ -91,17 +92,25 @@ def _build_llm(config, project_root: Path):
     else:
         router_config = _build_router_config_from_legacy(config.llm)
 
-    model_router = ModelRouter(router_config)
-
     rate_limit_configs = {}
+    breaker_configs = {}
     for prov_name, prov_cfg in router_config.providers.items():
         rl_raw = prov_cfg.rate_limit
         rate_limit_configs[prov_name] = RateLimitConfig(
             requests_per_minute=rl_raw.get("requests_per_minute", 0),
         )
-    rate_limiter = RateLimiter(rate_limit_configs)
+        cb_raw = prov_cfg.circuit_breaker if hasattr(prov_cfg, "circuit_breaker") else {}
+        breaker_configs[prov_name] = BreakerConfig(
+            failure_threshold=cb_raw.get("failure_threshold", 5),
+            cooldown_seconds=cb_raw.get("cooldown_seconds", 30),
+            half_open_max=cb_raw.get("half_open_max", 1),
+        )
 
-    return LLMProxy(model_router=model_router, rate_limiter=rate_limiter)
+    rate_limiter = RateLimiter(rate_limit_configs)
+    circuit_breaker = CircuitBreaker(breaker_configs)
+    model_router = ModelRouter(router_config, rate_limiter, circuit_breaker)
+
+    return LLMProxy(model_router=model_router)
 
 
 def _build_skills(config, project_root: Path):

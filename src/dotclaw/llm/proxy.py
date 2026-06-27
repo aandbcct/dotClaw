@@ -1,4 +1,8 @@
-"""LLM 代理：多供应商路由 + 限流 + 降级 + 流式统一接口"""
+"""LLM 代理：路由编排 + 降级 + 流式统一接口
+
+重写版：Router 负责所有路由智能（选路/限流/熔断），
+Proxy 只管重试编排 + 流式保护 + Journal 追踪。
+"""
 
 from __future__ import annotations
 
@@ -11,13 +15,12 @@ from .base import ChatChunk, LLMClient, Message, ToolDefinition
 
 if TYPE_CHECKING:
     from .model_router import ModelRouter
-    from ..common.rate_limiter import RateLimiter
 
 logger = logging.getLogger("dotclaw.llm")
 
 
 # ============================================================
-# P2 新增异常类
+# 异常类
 # ============================================================
 
 class CallSetupError(Exception):
@@ -46,27 +49,23 @@ class NonRetryableStreamError(Exception):
 
 class LLMProxy:
     """
-    LLM 代理：统一入口。
+    LLM 代理：薄层编排。
 
-    P2 职责：
-    - 通过 ModelRouter 解析 purpose → (client, model)
-    - RateLimiter 限流保护
-    - CallSetupError → 降级到 fallback_chain 的下一个模型
+    职责：
+    - 通过 ModelRouter.select() 获取候选列表
+    - 迭代候选列表，逐个尝试（含单模型内指数退避重试）
+    - CallSetupError / RateLimitTimeout → 降级到下一个候选
     - NonRetryableStreamError → 直接向上抛出
-    - 单模型内重试（指数退避）
+    - Journal 追踪（llm_call_start/end）
     """
 
-    def __init__(
-        self,
-        model_router: "ModelRouter",
-        rate_limiter: "RateLimiter",
-    ):
+    def __init__(self, model_router: "ModelRouter"):
         self._router = model_router
-        self._rate_limiter = rate_limiter
 
     @property
     def available_models(self) -> list[str]:
-        return self._router.get_available_models()
+        """返回当前可用的模型列表（经过限流+熔断过滤）。"""
+        return self._router.select("chat")
 
     async def chat(
         self,
@@ -78,14 +77,12 @@ class LLMProxy:
         journal: "Any | None" = None,
     ) -> AsyncIterator[ChatChunk]:
         """
-        统一聊天接口：限流 → 路由 → 调用 → 降级。
+        统一聊天接口：选路 → 迭代候选 → 调用 → 降级。
         """
-        # 1. 路由解析
-        client, resolved_model = self._router.resolve(purpose, model)
+        from .rate_limiter import RateLimitTimeout
 
-        # 2. 查找 provider 以进行限流
-        provider = self._router._config.models.get(resolved_model)
-        provider_name = provider.provider if provider else "unknown"
+        # 1. 路由选出候选列表
+        candidates = self._router.select(purpose, model)
 
         # ── Journal：LLM 调用开始 ──
         if journal:
@@ -97,136 +94,114 @@ class LLMProxy:
         output_tokens = 0
         ttft_ms = 0.0
         call_start = time.perf_counter()
+        last_error: Exception | None = None
 
         try:
-            async for chunk in self._call_with_fallback(
-                client=client,
-                resolved_model=resolved_model,
-                provider_name=provider_name,
-                purpose=purpose,
-                messages=messages,
-                tools=tools,
-                stream=stream,
-            ):
-                if first_chunk_ts is None:
-                    first_chunk_ts = time.perf_counter()
-                    ttft_ms = (first_chunk_ts - call_start) * 1000
-                    # ── Journal：LLM 调用结束 / 响应开始 ──
-                    if journal:
-                        journal.llm_call_end()
-                if chunk.content:
-                    output_token_count += len(chunk.content)
-                # 从最终 chunk 收集 token 数据
-                if chunk.is_final:
-                    if chunk.input_tokens:
-                        input_tokens = chunk.input_tokens
-                    if chunk.output_tokens:
-                        output_tokens = chunk.output_tokens
-                yield chunk
+            for model_name in candidates:
+                provider = self._router.get_provider_name(model_name)
+                client = self._router.get_client(model_name)
+
+                # 单模型内指数退避重试
+                max_retries = self._get_retry_config(model_name)
+                base_delay = self._get_backoff_config(model_name)
+
+                try:
+                    for attempt in range(max_retries):
+                        try:
+                            # 限流令牌获取（timeout=100ms）
+                            await self._router.try_acquire(provider, timeout=0.1)
+
+                            # 调用 client.chat()
+                            chat_iter = client.chat(messages, tools, stream)
+
+                            # 尝取第一个 chunk（区分 CallSetupError vs 流式异常）
+                            first_chunk = await anext(chat_iter)
+
+                            # 第一个 chunk 成功
+                            if first_chunk_ts is None:
+                                first_chunk_ts = time.perf_counter()
+                                ttft_ms = (first_chunk_ts - call_start) * 1000
+                                if journal:
+                                    journal.llm_call_end()
+
+                            yield first_chunk
+                            try:
+                                async for chunk in chat_iter:
+                                    if chunk.content:
+                                        output_token_count += len(chunk.content)
+                                    if chunk.is_final:
+                                        if chunk.input_tokens:
+                                            input_tokens = chunk.input_tokens
+                                        if chunk.output_tokens:
+                                            output_tokens = chunk.output_tokens
+                                    yield chunk
+                            except Exception as e:
+                                raise NonRetryableStreamError(
+                                    f"流式响应中断 ({model_name}): {e}"
+                                ) from e
+
+                            # 成功 → 上报
+                            self._router.report_success(model_name)
+                            return
+
+                        except NonRetryableStreamError:
+                            raise
+
+                        except StopAsyncIteration:
+                            self._router.report_success(model_name)
+                            return  # 正常空响应
+
+                        except RateLimitTimeout as e:
+                            # 限流超时 → 降级到下一个候选
+                            last_error = e
+                            logger.warning(
+                                "限流 %s 超时，降级到下一个候选", model_name
+                            )
+                            raise CallSetupError(str(e)) from e
+
+                        except CallSetupError as e:
+                            # 构造错误 → 降级
+                            last_error = e
+                            self._router.report_failure(model_name)
+                            raise  # 抛给外层 except 处理
+
+                        except Exception as e:
+                            # 未知异常 → 指数退避重试
+                            last_error = e
+                            self._router.report_failure(model_name)
+                            if attempt < max_retries - 1:
+                                delay = base_delay * (2 ** attempt)
+                                logger.warning(
+                                    "模型 %s 调用失败 (attempt %d/%d): %s，%.1fs 后重试...",
+                                    model_name, attempt + 1, max_retries, e, delay,
+                                )
+                                await asyncio.sleep(delay)
+                            else:
+                                logger.error(
+                                    "模型 %s 全部 %d 次重试失败: %s",
+                                    model_name, max_retries, e,
+                                )
+                                raise CallSetupError(
+                                    f"模型 {model_name} 调用失败（{max_retries} 次重试后）: {e}"
+                                ) from e
+
+                except CallSetupError:
+                    # 当前模型最终失败 → 尝试下一个候选
+                    logger.warning("降级：%s 失败，尝试下一个候选...", model_name)
+                    continue
+
+            # 全部候选失败
+            raise RuntimeError(
+                f"所有候选模型 ({', '.join(candidates)}) 均调用失败。最后错误: {last_error}"
+            )
 
         finally:
             pass
 
-    async def _call_with_fallback(
-        self,
-        client: LLMClient,
-        resolved_model: str,
-        provider_name: str,
-        purpose: str,
-        messages: list[Message],
-        tools: list[ToolDefinition] | None,
-        stream: bool,
-    ) -> AsyncIterator[ChatChunk]:
-        """带降级的调用：当前模型失败后依次尝试 fallback_chain"""
-        fallback_chain = self._router.get_fallback_chain(purpose)
+    def _get_retry_config(self, model_name: str) -> int:
+        """获取 model 的重试次数（从 Router 门面获取）。"""
+        return self._router._get_retry_config(model_name)
 
-        # 构建完整的尝试列表：[当前模型] + [fallback 中不同于当前的模型]
-        models_to_try = [resolved_model]
-        for fb in fallback_chain:
-            if fb != resolved_model:
-                models_to_try.append(fb)
-
-        last_error = None
-
-        for attempt_model in models_to_try:
-            try:
-                # 限流
-                model_cfg = self._router._config.models.get(attempt_model)
-                if model_cfg is None:
-                    logger.warning(
-                        f"模型 '{attempt_model}' 未在配置中找到，跳过"
-                    )
-                    continue
-
-                await self._rate_limiter.acquire(model_cfg.provider)
-
-                # 获取 client
-                if attempt_model == resolved_model:
-                    current_client = client
-                else:
-                    current_client = self._router._get_or_create_client(attempt_model)
-
-                # 单模型内重试
-                provider_cfg = self._router._config.providers.get(model_cfg.provider)
-                max_retries = provider_cfg.retry.max_attempts if provider_cfg else 3
-                base_delay = provider_cfg.retry.backoff_factor if provider_cfg else 2.0
-
-                for attempt in range(max_retries):
-                    try:
-                        # 调用 client.chat()
-                        chat_iter = current_client.chat(messages, tools, stream)
-
-                        # 尝试获取第一个 chunk（区分 CallSetupError vs NonRetryableStreamError）
-                        first_chunk = await anext(chat_iter)
-
-                        # 第一个 chunk 成功，进入流式阶段
-                        yield first_chunk
-                        try:
-                            async for chunk in chat_iter:
-                                yield chunk
-                        except Exception as e:
-                            # 流式中途异常 → 不降级
-                            raise NonRetryableStreamError(
-                                f"流式响应中断 ({attempt_model}): {e}"
-                            ) from e
-
-                        return  # 成功完成
-
-                    except NonRetryableStreamError:
-                        raise  # 直接向上抛出
-
-                    except StopAsyncIteration:
-                        return  # 正常的空响应
-
-                    except CallSetupError:
-                        raise  # 不重试，直接触发降级
-
-                    except Exception as e:
-                        # 在获取第一个 chunk 之前的异常 → 可能是 CallSetupError
-                        if attempt < max_retries - 1:
-                            delay = base_delay * (2 ** attempt)
-                            logger.warning(
-                                f"模型 {attempt_model} 调用失败 "
-                                f"(attempt {attempt + 1}/{max_retries}): {e}，"
-                                f" {delay:.1f}s 后重试..."
-                            )
-                            await asyncio.sleep(delay)
-                        else:
-                            logger.error(
-                                f"模型 {attempt_model} 全部 {max_retries} 次重试失败: {e}"
-                            )
-                            raise CallSetupError(
-                                f"模型 {attempt_model} 调用失败（{max_retries} 次重试后）: {e}"
-                            ) from e
-
-            except CallSetupError as e:
-                last_error = e
-                logger.warning(f"降级：{attempt_model} 失败，尝试下一个模型...")
-                continue
-
-            except NonRetryableStreamError:
-                raise  # 不降级
-
-        raise RuntimeError(
-            f"所有模型 ({', '.join(models_to_try)}) 均调用失败。最后错误: {last_error}"
-        )
+    def _get_backoff_config(self, model_name: str) -> float:
+        """获取 model 的退避因子（从 Router 门面获取）。"""
+        return self._router._get_backoff_config(model_name)
