@@ -170,7 +170,7 @@ def test_4_manager_fallback():
 
         manager = MemoryManager(
             storage=s, chunker=chunker,
-            embedding_provider=None,  # 无 embedding → 降级
+            llm_proxy=None,  # 无 embedding → 降级
             sync_on_search=False,
         )
 

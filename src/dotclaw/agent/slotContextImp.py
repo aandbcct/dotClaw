@@ -157,14 +157,19 @@ class MemorySlot(ContextSlot):
             return None
 
         try:
-            result: str | None = await manager.search(ctx.query)
+            results = await manager.search(ctx.query)
         except Exception as e:
             logger.warning("记忆检索失败: %s", e)
             return None
 
-        if not result:
+        if not results:
             return None
-        return f"## 相关记忆\n\n{result}"
+        # Format SearchResult list into readable Markdown
+        lines: list[str] = []
+        for r in results:
+            title_prefix: str = f"[{r.title}] " if r.title else ""
+            lines.append(f"- ({r.source}:{r.path}) {title_prefix}{r.snippet}")
+        return "## 相关记忆\n\n" + "\n".join(lines)
 
 
 # ======================== KnowledgeSlot (tier 2) ========================

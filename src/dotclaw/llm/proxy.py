@@ -67,6 +67,7 @@ class LLMProxy:
         """返回当前可用的模型列表（经过限流+熔断过滤）。"""
         return self._router.select("chat")
 
+    # todo 目前chat方法应该是llm调用总入口，但方法内部写死了chat()，不能进行emb或其他功能，需要解耦
     async def chat(
         self,
         messages: list[Message],
@@ -197,6 +198,27 @@ class LLMProxy:
 
         finally:
             pass
+
+    async def embed(
+        self,
+        texts: list[str],
+        model: str | None = None,
+        purpose: str = "embedding",
+        dimensions: int = 1024,
+    ) -> list[list[float]]:
+        """
+        文本向量化接口。
+
+        通过 ModelRouter.select(purpose) 查找嵌入模型，
+        取第一个候选调用 client.embed()。
+        """
+        candidates: list[str] = self._router.select(purpose, model)
+        if not candidates:
+            raise RuntimeError("无可用 embedding 模型")
+
+        model_name: str = candidates[0]
+        client: LLMClient = self._router.get_client(model_name)
+        return await client.embed(texts, dimensions=dimensions)
 
     def _get_retry_config(self, model_name: str) -> int:
         """获取 model 的重试次数（从 Router 门面获取）。"""

@@ -60,6 +60,35 @@ class OpenAICompatibleClient(LLMClient):
             base_url=self._get_base_url(),
         )
 
+    # ---- 核心 embed 方法 ----
+
+    _EMBED_BATCH_SIZE: int = 16
+
+    async def embed(
+        self,
+        texts: list[str],
+        dimensions: int = 1024,
+    ) -> list[list[float]]:
+        """文本向量化，分批调用 OpenAI Embeddings API。"""
+        if not texts:
+            return []
+
+        client: AsyncOpenAI = self._get_client()
+        model_id: str = self._get_model_id()
+        results: list[list[float]] = []
+
+        for i in range(0, len(texts), self._EMBED_BATCH_SIZE):
+            batch: list[str] = texts[i : i + self._EMBED_BATCH_SIZE]
+            resp = await client.embeddings.create(
+                model=model_id,
+                input=batch,
+                dimensions=dimensions,
+            )
+            for d in resp.data:
+                results.append(list(d.embedding))
+
+        return results
+
     # ---- 流式状态管理 ----
 
     def _reset_stream_state(self):

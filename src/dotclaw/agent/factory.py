@@ -182,44 +182,41 @@ def _build_memory(config, llm_proxy, project_root: Path):
         from dotclaw.memory.manager import MemoryManager
         from dotclaw.memory.flush import MemoryFlushManager
         from dotclaw.memory.dream import DeepDream
+        from dotclaw.memory.embedding import EmbeddingCache
 
-        storage = MemoryStorage(config.memory.get_db_path(project_root))
-        chunker = TextChunker(
+        storage: MemoryStorage = MemoryStorage(config.memory.get_db_path(project_root))
+        chunker: TextChunker = TextChunker(
             max_tokens=config.memory.chunk_max_tokens,
             overlap_tokens=config.memory.chunk_overlap_tokens,
         )
 
-        embedding = None
-        embedding_cache = None
-        if config.memory.embedding_provider and config.memory.embedding_api_key:
-            from dotclaw.memory.embedding import OpenAIEmbeddingProvider, EmbeddingCache
-            embedding = OpenAIEmbeddingProvider(
-                api_base=config.memory.embedding_api_base,
-                api_key=config.memory.embedding_api_key,
-                model=config.memory.embedding_model,
-                dimensions=config.memory.embedding_dimensions,
-            )
-            embedding_cache = EmbeddingCache()
+        # Embedding 由 llm 模块统一管理，MemoryManager 直接通过 llm_proxy 调用
+        embedding_cache: EmbeddingCache = EmbeddingCache()
 
-        flush_mgr = MemoryFlushManager(
+        flush_mgr: MemoryFlushManager = MemoryFlushManager(
             workspace_dir=config.memory.get_workspace(project_root),
             llm=llm_proxy,
         )
 
-        memory_mgr = MemoryManager(
+        memory_mgr: MemoryManager = MemoryManager(
             storage=storage,
             chunker=chunker,
             workspace=config.memory.get_workspace(project_root),
-            embedding_provider=embedding,
+            llm_proxy=llm_proxy,
             flush_manager=flush_mgr,
             embedding_cache=embedding_cache,
+            embedding_dimensions=config.memory.embedding_dimensions,
             sync_on_search=config.memory.sync_on_search,
             vector_weight=config.memory.vector_weight,
             keyword_weight=config.memory.keyword_weight,
             max_results=config.memory.max_results,
             min_score=config.memory.min_score,
         )
-        dream = DeepDream(config.memory.get_workspace(project_root), llm=llm_proxy)
+        dream: DeepDream = DeepDream(
+            config.memory.get_workspace(project_root),
+            llm=llm_proxy,
+            memory_manager=memory_mgr,
+        )
         return memory_mgr, dream
 
     return _init()

@@ -70,6 +70,12 @@ models:
 #    context_window: 1000000
 #    capabilities: [chat, function_calling]
 #    status: active
+  text-embedding-v4:
+    provider: qwen
+    model_id: text-embedding-v4
+    context_window: 33000
+    capabilities: [ embedding ]
+    status: active
   deepseek-v4-flash:
     provider: deepseek
     model_id: deepseek-v4-flash
@@ -102,3 +108,8 @@ purposes:
         priority: 3
       - model: gpt-4o-mini
         priority: 4
+  embedding:
+    description: "向量化"
+    priority:
+      - model: text-embedding-v4
+        priority: 1

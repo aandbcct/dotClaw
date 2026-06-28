@@ -29,6 +29,7 @@ class MemoryChunk:
     embedding: list[float] | None
     hash: str
     source: str  # "memory" | "session" | "knowledge"
+    title: str = ""  # 所属 ## 标题
     metadata: dict | None = None
 
 
@@ -40,6 +41,7 @@ class SearchResult:
     score: float
     snippet: str
     source: str
+    title: str = ""  # 所属 ## 标题
 
 
 class MemoryStorage:
@@ -69,6 +71,7 @@ class MemoryStorage:
                 embedding BLOB,
                 hash TEXT NOT NULL,
                 source TEXT NOT NULL DEFAULT 'memory',
+                title TEXT NOT NULL DEFAULT '',
                 metadata TEXT,
                 created_at INTEGER DEFAULT (strftime('%s', 'now')),
                 updated_at INTEGER DEFAULT (strftime('%s', 'now'))
@@ -93,6 +96,11 @@ class MemoryStorage:
                 tokenize='trigram case_sensitive 0'
             );
         """)
+        # title 列迁移（v1→v2，对已有数据库追加列）
+        try:
+            self._conn.execute("ALTER TABLE chunks ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
         self._conn.commit()
 
     def _rebuild_fts(self):
@@ -121,13 +129,15 @@ class MemoryStorage:
                     emb_blob = json.dumps(c.embedding).encode()
 
             self._conn.execute(
-                """INSERT INTO chunks (id, path, start_line, end_line, text, embedding, hash, source, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """INSERT INTO chunks (id, path, start_line, end_line, text, embedding, hash, source, title, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        text=excluded.text, embedding=excluded.embedding,
-                       hash=excluded.hash, updated_at=strftime('%s', 'now')""",
+                       hash=excluded.hash, title=excluded.title,
+                       updated_at=strftime('%s', 'now')""",
                 (c.id, c.path, c.start_line, c.end_line, c.text,
-                 emb_blob, c.hash, c.source, __import__('json').dumps(c.metadata) if c.metadata else None),
+                 emb_blob, c.hash, c.source, c.title,
+                 __import__('json').dumps(c.metadata) if c.metadata else None),
             )
         self._conn.commit()
 
@@ -182,7 +192,7 @@ class MemoryStorage:
             # 中文 trigram（≥3 字符，避免 FTS5 trigram 短查询异常）
             try:
                 rows = self._conn.execute(
-                    """SELECT c.path, c.start_line, c.end_line, c.text, c.source,
+                    """SELECT c.path, c.start_line, c.end_line, c.text, c.source, c.title,
                               chunks_fts_trigram.rank AS score
                        FROM chunks_fts_trigram
                        JOIN chunks c ON c.rowid = chunks_fts_trigram.rowid
@@ -196,7 +206,7 @@ class MemoryStorage:
             # 英文：unicode61
             try:
                 rows = self._conn.execute(
-                    """SELECT c.path, c.start_line, c.end_line, c.text, c.source,
+                    """SELECT c.path, c.start_line, c.end_line, c.text, c.source, c.title,
                               chunks_fts.rank AS score
                        FROM chunks_fts
                        JOIN chunks c ON c.rowid = chunks_fts.rowid
@@ -207,26 +217,27 @@ class MemoryStorage:
             except Exception:
                 rows = []
 
-        for path, sl, el, text, source, score in rows:
+        for path, sl, el, text, source, title, score in rows:
             results.append(SearchResult(
                 path=path, start_line=sl, end_line=el,
                 score=float(score) if score else 0,
                 snippet=text[:200],
                 source=source,
+                title=title,
             ))
 
         # FTS5 无结果时降级 LIKE
         if not results:
             like_query = f"%{query}%"
             rows = self._conn.execute(
-                "SELECT path, start_line, end_line, text, source FROM chunks "
+                "SELECT path, start_line, end_line, text, source, title FROM chunks "
                 "WHERE text LIKE ? LIMIT ?",
                 (like_query, limit),
             ).fetchall()
-            for path, sl, el, text, source in rows:
+            for path, sl, el, text, source, title in rows:
                 results.append(SearchResult(
                     path=path, start_line=sl, end_line=el,
-                    score=0.05, snippet=text[:200], source=source,
+                    score=0.05, snippet=text[:200], source=source, title=title,
                 ))
 
         return results
@@ -239,7 +250,7 @@ class MemoryStorage:
         """向量余弦相似度检索（numpy 向量化，无 numpy 时纯 Python 降级）"""
         assert self._conn is not None
         rows = self._conn.execute(
-            "SELECT path, start_line, end_line, text, source, embedding "
+            "SELECT path, start_line, end_line, text, source, title, embedding "
             "FROM chunks WHERE embedding IS NOT NULL"
         ).fetchall()
 
@@ -252,38 +263,38 @@ class MemoryStorage:
             logger.warning("numpy 未安装，降级为纯 Python 向量检索（性能差 ~100x）")
             return self._search_vector_python(query_embedding, rows, limit)
 
-    def _search_vector_numpy(self, query_emb, rows, limit) -> list[SearchResult]:
-        query_vec = np.array(query_emb, dtype=np.float32)
-        results = []
-        for path, sl, el, text, source, emb_blob in rows:
-            chunk_vec = np.frombuffer(emb_blob, dtype=np.float32)
-            dot = float(np.dot(query_vec, chunk_vec))
-            norm_q = float(np.linalg.norm(query_vec))
-            norm_c = float(np.linalg.norm(chunk_vec))
-            score = dot / (norm_q * norm_c) if norm_q > 0 and norm_c > 0 else 0.0
+    def _search_vector_numpy(self, query_emb: list[float], rows: list, limit: int) -> list[SearchResult]:
+        query_vec: np.ndarray = np.array(query_emb, dtype=np.float32)
+        results: list[SearchResult] = []
+        for path, sl, el, text, source, title, emb_blob in rows:
+            chunk_vec: np.ndarray = np.frombuffer(emb_blob, dtype=np.float32)
+            dot: float = float(np.dot(query_vec, chunk_vec))
+            norm_q: float = float(np.linalg.norm(query_vec))
+            norm_c: float = float(np.linalg.norm(chunk_vec))
+            score: float = dot / (norm_q * norm_c) if norm_q > 0 and norm_c > 0 else 0.0
             results.append(SearchResult(
                 path=path, start_line=sl, end_line=el,
-                score=score, snippet=text[:200], source=source,
+                score=score, snippet=text[:200], source=source, title=title,
             ))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
-    def _search_vector_python(self, query_emb, rows, limit) -> list[SearchResult]:
+    def _search_vector_python(self, query_emb: list[float], rows: list, limit: int) -> list[SearchResult]:
         import json
         import math
-        results = []
-        for path, sl, el, text, source, emb_blob in rows:
+        results: list[SearchResult] = []
+        for path, sl, el, text, source, title, emb_blob in rows:
             try:
                 chunk_vec = json.loads(emb_blob.decode()) if isinstance(emb_blob, bytes) else emb_blob
             except Exception:
                 continue
-            dot = sum(a * b for a, b in zip(query_emb, chunk_vec))
-            norm_q = math.sqrt(sum(a * a for a in query_emb))
-            norm_c = math.sqrt(sum(b * b for b in chunk_vec))
-            score = dot / (norm_q * norm_c) if norm_q > 0 and norm_c > 0 else 0.0
+            dot: float = sum(a * b for a, b in zip(query_emb, chunk_vec))
+            norm_q: float = math.sqrt(sum(a * a for a in query_emb))
+            norm_c: float = math.sqrt(sum(b * b for b in chunk_vec))
+            score: float = dot / (norm_q * norm_c) if norm_q > 0 and norm_c > 0 else 0.0
             results.append(SearchResult(
                 path=path, start_line=sl, end_line=el,
-                score=score, snippet=text[:200], source=source,
+                score=score, snippet=text[:200], source=source, title=title,
             ))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
