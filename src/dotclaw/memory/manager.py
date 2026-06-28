@@ -58,10 +58,10 @@ class MemoryManager:
     async def search(
         self, query: str, max_results: int = 5, min_score: float = 0.1,
     ) -> list[SearchResult]:
-        """混合检索：向量 + FTS5 + 时间衰减"""
-        if self._sync_on_search:
-            await self.sync()
-
+        """混合检索：向量 + FTS5 + 时间衰减
+        MEMORY.md 由 DeepDream 主动 sync(force=True) 入库，
+        search 时不再触发 sync，避免每次查询重复索引。
+        """
         vector_results: list[SearchResult] = []
         keyword_results: list[SearchResult] = []
 
@@ -96,17 +96,22 @@ class MemoryManager:
         return [r for r in results if r.score >= min_score][:max_results]
 
     async def sync(self, force: bool = False) -> None:
-        """文件变更检测 → 分块 → 批量 embedding → 写入索引"""
+        """文件变更检测 → 分块 → 批量 embedding → 写入索引
+
+        MEMORY.md 由 DeepDream 在蒸馏后主动调用 sync(force=True) 入库，
+        此处只处理 skills/knowledge 等静态知识文件的增量索引。
+        """
         # 递归防护
         if self._syncing:
             return
         self._syncing = True
         try:
-            # 监控的文件列表
-            monitored: list[Path] = [
-                self._memory_dir / "MEMORY.md",
-            ]
-            # 也扫描 skills 目录下的知识文件
+            # 监控的文件列表：仅 skills 知识文件 + force 时加入 MEMORY.md
+            monitored: list[Path] = []
+            if force:
+                mem_path: Path = self._memory_dir / "MEMORY.md"
+                if mem_path.exists():
+                    monitored.append(mem_path)
             skills_knowledge: Path = self._memory_dir.parent.parent / "skills" / "knowledge"
             if skills_knowledge.exists():
                 for f in skills_knowledge.glob("*.md"):
@@ -116,6 +121,9 @@ class MemoryManager:
                 if not file_path.exists():
                     continue
 
+                # 计算相对路径（用于 hash 比对和存储）
+                rel_path: str = str(file_path.relative_to(self._memory_dir.parent.parent))
+
                 # 计算文件 hash
                 content: str = file_path.read_text(encoding="utf-8")
                 file_hash: str = hashlib.sha256(content.encode()).hexdigest()
@@ -123,13 +131,12 @@ class MemoryManager:
                 size: int = file_path.stat().st_size
 
                 # 检查是否需要更新
-                existing: tuple | None = self._storage.get_file_state(str(file_path))
+                existing: tuple | None = self._storage.get_file_state(rel_path)
                 if not force and existing and existing[0] == file_hash:
                     continue
 
                 # 分块
                 chunks: list = self._chunker.chunk_text(content)
-                rel_path: str = str(file_path.relative_to(self._memory_dir.parent.parent))
 
                 # 生成 ID
                 memory_chunks: list[MemoryChunk] = []
