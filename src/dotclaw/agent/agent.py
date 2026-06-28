@@ -583,41 +583,6 @@ class Agent:
             tool_call_id=tc.id,
         )
 
-    async def _recall_memory(
-        self, query: str, journal: "Journal"
-    ) -> str:
-        """
-        语义检索包装 —— 从 _build_context 中抽出的独立方法。
-
-        Args:
-            query: 检索查询文本（通常 = user_message）
-            journal: Journal 观测实例
-
-        Returns:
-            检索结果文本（memory_summary），无结果时返回 ""
-        """
-        if not self._memory_mgr:
-            return ""
-
-        import logging
-        logger = logging.getLogger("dotclaw.agent")
-
-        try:
-            journal.memory_retrieval_start()
-            results = await self._memory_mgr.search(query, max_results=3)
-            journal.memory_retrieval(
-                query=query[:100],
-                hit_count=len(results),
-            )
-            if results:
-                return "\n".join(
-                    f"- ({r.source}:{r.path}) {r.snippet}" for r in results
-                )
-            return ""
-        except Exception as e:
-            logger.debug(f"记忆检索失败（不影响对话）: {e}")
-            return ""
-
     async def _flush_memory(
         self, messages: list, journal: "Journal"
     ) -> bool:
