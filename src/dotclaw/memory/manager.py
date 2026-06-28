@@ -101,6 +101,7 @@ class MemoryManager:
         MEMORY.md 由 DeepDream 在蒸馏后主动调用 sync(force=True) 入库，
         此处只处理 skills/knowledge 等静态知识文件的增量索引。
         """
+        # todo 目前向量入库是全量重新入库，后面需要想办法增量入库
         # 递归防护
         if self._syncing:
             return
