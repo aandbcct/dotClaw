@@ -72,3 +72,26 @@ class LLMClient(ABC):
             流式返回的文本片段或工具调用
         """
         ...
+
+    @abstractmethod
+    async def embed(
+        self,
+        texts: list[str],
+        dimensions: int = 1024,
+    ) -> list[list[float]]:
+        """
+        文本向量化。
+
+        Parameters
+        ----------
+        texts : list[str]
+            待向量化的文本列表
+        dimensions : int
+            输出向量维度，默认 1024
+
+        Returns
+        -------
+        list[list[float]]
+            每个输入文本对应的向量
+        """
+        ...

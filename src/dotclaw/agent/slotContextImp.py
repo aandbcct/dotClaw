@@ -165,7 +165,10 @@ class MemorySlot(ContextSlot):
         if not results:
             return None
         # Format SearchResult list into readable Markdown
-        lines = [f"- ({r.source}:{r.path}) {r.snippet}" for r in results]
+        lines: list[str] = []
+        for r in results:
+            title_prefix: str = f"[{r.title}] " if r.title else ""
+            lines.append(f"- ({r.source}:{r.path}) {title_prefix}{r.snippet}")
         return "## 相关记忆\n\n" + "\n".join(lines)
 
 
