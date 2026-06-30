@@ -182,16 +182,16 @@ dotClaw/
 
 ```bash
 # 运行全部评测
-python -m benchmarks.runner
+python -m Eval.runner
 
 # 指定 case
-python -m benchmarks.runner --filter init_perf,tool_dispatch
+python -m Eval.runner --filter init_perf,tool_dispatch
 
 # 调节参数
-python -m benchmarks.runner --warmup 3 --repeat 10
+python -m Eval.runner --warmup 3 --repeat 10
 
 # 基线对比
-python -m benchmarks.runner --baseline benchmarks/baselines/v1.0/init_perf.json
+python -m Eval.runner --baseline Eval/baselines/v1.0/init_perf.json
 ```
 
 | 评测维度 | 说明 | 核心指标 |

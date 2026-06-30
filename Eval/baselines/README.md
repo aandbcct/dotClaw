@@ -4,11 +4,11 @@
 
 ## 建立基线
 ```bash
-python -m benchmarks.runner --output benchmarks/reports/baseline_$(date +%Y%m%d)
+python -m Eval.runner --output Eval/reports/baseline_$(date +%Y%m%d)
 # 将 reports/snapshots/ 中的文件复制到此目录
 ```
 
 ## 使用基线
 ```bash
-python -m benchmarks.runner --baseline benchmarks/baselines/v1.0.json
+python -m Eval.runner --baseline Eval/baselines/v1.0.json
 ```

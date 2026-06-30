@@ -1,4 +1,4 @@
-"""benchmarks/cases/tool_dispatch.py — 工具调度延迟评测。
+"""Eval/cases/tool_dispatch.py — 工具调度延迟评测。
 
 测量 ToolExecutor 从接收调用到开始执行 handler 的纯调度开销。
 使用 no-op handler (空操作) 排除工具执行时间。
@@ -10,7 +10,7 @@ import statistics
 import time
 from pathlib import Path
 
-from benchmarks.stats import p50, p95
+from Eval.stats import p50, p95
 from dotclaw.config.settings import JournalConfig
 from dotclaw.journal import Journal
 from dotclaw.journal.metrics_types import ToolCallMetrics
@@ -84,7 +84,7 @@ async def run(
     _print_stats(durations)
 
     if output_dir:
-        from benchmarks.stats import save_case_result
+        from Eval.stats import save_case_result
         save_case_result(snapshot.tools, meta, str(output_dir))
     return snapshot.tools, meta
 

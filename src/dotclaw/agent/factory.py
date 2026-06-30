@@ -278,10 +278,10 @@ def _build_assembler():
 async def build_agent(
     agent_id: str | None = None,
     channel: Any = None,
-) -> "Agent":
-    """装配一个完全就绪的 Agent 实例。
+) -> tuple["Agent", "ConversationManager"]:
+    """装配一个完全就绪的 Agent 实例（v2: Identity + Runtime）。
 
-    从 config.yaml + daily-assistant.yaml + 上次状态重建所有依赖，
+    从 config.yaml + agent YAML + 上次状态重建所有依赖，
     失败组件按策略降级（nonexistent）或崩溃（critical）。
 
     Args:
@@ -289,11 +289,13 @@ async def build_agent(
         channel: 通信通道。None = 由 main() 提供
 
     Returns:
-        完全就绪的 Agent
+        (Agent, ConversationManager) — Agent 已就绪，ConversationManager 供调用方管理对话
     """
     from dotclaw.config import get_config, _find_project_root
-    from dotclaw.memory.store import SessionManager
-    from dotclaw.agent import Agent, load_agent_config
+    from dotclaw.storage.conversation import ConversationManager
+    from dotclaw.agent import Agent as AgentCls
+    from dotclaw.agent.identity import load_agent_config as load_id
+    from dotclaw.agent.runtime import AgentRuntime
 
     config = get_config()
     project_root = _find_project_root()
@@ -305,7 +307,7 @@ async def build_agent(
 
     # ── 关键组件：失败则崩 ──
     llm_proxy = _build_llm(config, project_root)
-    session_mgr = SessionManager(config.session.directory)
+    conv_mgr: ConversationManager = ConversationManager(config.session.directory)
     assembler = _build_assembler()
 
     # ── 可降级组件 ──
@@ -313,54 +315,62 @@ async def build_agent(
     tool_executor = _init_sync("工具", lambda: _build_tools(config, skill_registry))
     memory_mgr, memory_dream = await _init_async("记忆", _build_memory(config, llm_proxy, project_root)) or (None, None)
 
-    # MCP 需要 tool_registry，所以从 executor 拿
+    # MCP 需要 tool_registry
     tool_registry = tool_executor.registry if tool_executor else None
     mcp_provider, mcp_task = await _init_async(
         "MCP", _build_mcp(config, tool_registry)
     ) or (None, None)
 
-    # ── Agent 配置 ──
-    agent_config = load_agent_config(agent_id=agent_id)
+    # ── AgentIdentity：直接从 YAML 加载 ──
+    identity = load_id(agent_id=agent_id)
 
-    # ── 组装 ──
-    from dotclaw.agent import Agent as AgentCls
+    # ── AgentRuntime：组装纯能力引用 ──
+    runtime: AgentRuntime = AgentRuntime(
+        llm=llm_proxy,
+        tool_executor=tool_executor,
+        assembler=assembler,
+        conversation_mgr=conv_mgr,
+        channel=channel,
+        memory_mgr=memory_mgr,
+        skill_registry=skill_registry,
+        mcp_provider=mcp_provider,
+        config=config,
+    )
+
+    # ── 组装 Agent ──
     from dotclaw.agent.resume import ResumeManager
 
     resume_mgr = ResumeManager(trace_root=config.journal.trace_dir)
 
-    agent = AgentCls(
-        agent_config=agent_config,
-        config=config,
-        llm=llm_proxy,
-        session_mgr=session_mgr,
-        channel=channel,
-        tool_executor=tool_executor,
-        memory_mgr=memory_mgr,
-        skill_registry=skill_registry,
-        mcp_provider=mcp_provider,
+    agent: AgentCls = AgentCls(
+        identity=identity,
+        runtime=runtime,
         memory_dream=memory_dream,
         mcp_task=mcp_task,
-        assembler=assembler,
         resume_manager=resume_mgr,
     )
 
-    # ── 恢复上次 session ──
-    sessions = await session_mgr.list_all()
-    last_session_id = state.get("last_session_id")
-    if last_session_id:
-        for s in sessions:
-            if s.id == last_session_id:
-                agent.session = s
+    # ── 恢复上次 Conversation（返回给调用方）──
+    conversations: list = await conv_mgr.list_all()
+    last_conv_id: str | None = state.get("last_session_id")
+    if last_conv_id:
+        for c in conversations:
+            if c.id == last_conv_id:
+                current_conv = c
                 break
-    if agent.session is None:
-        agent.session = sessions[0] if sessions else await agent.new_session("主对话")
+        else:
+            current_conv = None
+    else:
+        current_conv = None
+
+    if current_conv is None:
+        current_conv = conversations[0] if conversations else await conv_mgr.create("主对话")
 
     # ── 保存状态 ──
     _save_state(project_root, {
         "last_agent_id": agent.agent_id,
-        "last_session_id": agent.session.id if agent.session else "",
+        "last_session_id": current_conv.id,
     })
 
-    logger.info("Agent [%s] 就绪，session: %s", agent.agent_id,
-                agent.session.id if agent.session else "none")
-    return agent
+    logger.info("Agent [%s] 就绪，conversation: %s", agent.agent_id, current_conv.id)
+    return agent, conv_mgr

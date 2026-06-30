@@ -1,4 +1,4 @@
-"""benchmarks/cases/llm_stream.py — LLM 流式延迟评测。
+"""Eval/cases/llm_stream.py — LLM 流式延迟评测。
 
 默认直连真实 LLM API，测量 TTFT（首 token 延迟）和 TPS（吞吐量）。
 TPS 优先用 API 返回的 output_tokens（更准确），降级时用字符数近似。
@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from benchmarks.stats import p50, p95
+from Eval.stats import p50, p95
 from dotclaw.journal.metrics_types import AgentGeneralMetrics, RunMeta
 from dotclaw.journal.storage import build_run_meta
 from dotclaw.llm.base import Message
@@ -71,7 +71,7 @@ async def run(
         p95_e2e_latency_ms=p95(e2e_list),
     )
     if output_dir:
-        from benchmarks.stats import save_case_result
+        from Eval.stats import save_case_result
         save_case_result(metrics, meta, str(output_dir))
     return metrics, meta
 

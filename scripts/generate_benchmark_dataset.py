@@ -4,9 +4,9 @@
     python scripts/generate_benchmark_dataset.py
 
 产出:
-    benchmarks/dataset/sample_skills/  - 100 个测试 SKILL.md
-    benchmarks/dataset/memory_corpus/  - small/medium/large 文本语料
-    benchmarks/dataset/stress_prompts.json - 压力测试 prompts
+    Eval/dataset/sample_skills/  - 100 个测试 SKILL.md
+    Eval/dataset/memory_corpus/  - small/medium/large 文本语料
+    Eval/dataset/stress_prompts.json - 压力测试 prompts
 """
 
 import json
@@ -15,9 +15,9 @@ import random
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
-SKILLS_DIR = PROJECT_ROOT / "benchmarks" / "dataset" / "sample_skills"
-CORPUS_DIR = PROJECT_ROOT / "benchmarks" / "dataset" / "memory_corpus"
-STRESS_FILE = PROJECT_ROOT / "benchmarks" / "dataset" / "stress_prompts.json"
+SKILLS_DIR = PROJECT_ROOT / "Eval" / "dataset" / "sample_skills"
+CORPUS_DIR = PROJECT_ROOT / "Eval" / "dataset" / "memory_corpus"
+STRESS_FILE = PROJECT_ROOT / "Eval" / "dataset" / "stress_prompts.json"
 
 _SKILL_TEMPLATE = """---
 name: benchmark-skill-{index:03d}

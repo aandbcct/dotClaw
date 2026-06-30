@@ -1,10 +1,10 @@
-"""benchmarks/runner.py — dotClaw Framework Benchmark 评测总控。
+"""Eval/runner.py — dotClaw Framework Benchmark 评测总控。
 
 用法:
-    python -m benchmarks.runner                          # 运行全部
-    python -m benchmarks.runner --filter init_perf       # 指定 case
-    python -m benchmarks.runner --warmup 3 --repeat 10   # 调节参数
-    python -m benchmarks.runner --baseline baselines/v1.0.json  # 基线对比
+    python -m Eval.runner                          # 运行全部
+    python -m Eval.runner --filter init_perf       # 指定 case
+    python -m Eval.runner --warmup 3 --repeat 10   # 调节参数
+    python -m Eval.runner --baseline baselines/v1.0.json  # 基线对比
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from benchmarks.stats import build_bench_snapshot
+from Eval.stats import build_bench_snapshot
 from dotclaw.journal.metrics_types import (
     AgentGeneralMetrics, AgentRunSnapshot,
     InitPerfMetrics, MemoryMetrics,
@@ -30,12 +30,12 @@ from dotclaw.journal.storage import (
 
 # ── Case 注册表 ──
 _CASES: dict[str, str] = {
-    "init_perf": "benchmarks.cases.init_perf",
-    "tool_dispatch": "benchmarks.cases.tool_dispatch",
-    "llm_stream": "benchmarks.cases.llm_stream",
-    "memory_perf": "benchmarks.cases.memory_perf",
-    "skill_load": "benchmarks.cases.skill_load",
-    "stress": "benchmarks.cases.stress",
+    "init_perf": "Eval.cases.init_perf",
+    "tool_dispatch": "Eval.cases.tool_dispatch",
+    "llm_stream": "Eval.cases.llm_stream",
+    "memory_perf": "Eval.cases.memory_perf",
+    "skill_load": "Eval.cases.skill_load",
+    "stress": "Eval.cases.stress",
 }
 
 _CASE_DESCRIPTIONS: dict[str, str] = {
@@ -58,7 +58,7 @@ class BenchmarkRunner:
         repeat: int = 10,
         baseline_path: str | None = None,
         save_baseline_path: str | None = None,
-        output_dir: str = "benchmarks/reports",
+        output_dir: str = "Eval/reports",
     ):
         self.cases = cases or list(_CASES.keys())
         self.warmup = warmup
@@ -288,7 +288,7 @@ def main():
                         help="Baseline directory path (reads {case}.json from this dir)")
     parser.add_argument("--save-baseline", type=str, default=None,
                         help="Save AgentRunSnapshot snapshot per case to this directory")
-    parser.add_argument("--output", type=str, default="benchmarks/reports")
+    parser.add_argument("--output", type=str, default="Eval/reports")
     args = parser.parse_args()
 
     case_names = args.filter.split(",") if args.filter else None
