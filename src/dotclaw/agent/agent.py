@@ -3,7 +3,8 @@
 v2 架构：
   Agent = Identity(声明式约束) + Runtime(纯执行设施)
   Agent 使用 Session，不持有 Session
-  AgentLoop 只依赖 AgentRuntime，Identity 值由 Agent.run() 预解析传入
+  Agent 使用 Session，不持有 Session
+  AgentRuntime 是纯执行引擎，Identity 值由 Agent 预解析传入
 
 职责：
   - 持有 Identity + Runtime
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
 class LLMResponse:
     """一次 LLM 调用的完整返回。
 
-    AgentLoop._invoke_llm() 返回此结构，Loop 用它判断下一步：
+    AgentRuntime._invoke_llm() 返回此结构，用它判断下一步：
     有 tool_calls → 执行工具；没有 → 返回最终回复。
     """
 
@@ -153,10 +154,7 @@ class Agent:
         Returns:
             AgentRun（一次原子调用的完整记录）
         """
-        from .loop import AgentLoop
-
-        loop: AgentLoop = AgentLoop(self._runtime)
-        return await loop.run(
+        return await self._runtime.run(
             session=session,
             user_message=user_message,
             system_prompt=self._resolve_system_prompt(),
@@ -204,7 +202,7 @@ class Agent:
                 final_answer=final or "",
                 agent_run_ids=state.agent_run_ids,
             )
-            session_mgr.save(session)  # type:ignore[union-attr]
+            await session_mgr.save(session)  # type:ignore[union-attr]
             state.finish("completed")
         else:
             state.finish("failed", agent_run.error)
