@@ -11,7 +11,7 @@ AgentRuntime 回答"Agent 能调用什么"：
 - MCP 工具 (mcp_provider)
 - 上下文组装 (assembler)
 - 通信通道 (channel)
-- 对话持久化 (conversation_mgr)
+- 会话管理 (session_mgr)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from ..skills.registry import SkillRegistry
     from .slotContext import ContextAssembler
     from ..channel.base import Channel
-    from ..storage.conversation import ConversationManager
+    from ..session.session import SessionManager
     from ..config import Config
 
 
@@ -50,8 +50,8 @@ class AgentRuntime:
     """上下文 Assembler。None 表示回退到旧 Provider 模式。"""
 
     # ── 持久化 ──
-    conversation_mgr: "ConversationManager"
-    """对话管理器。AgentLoop 在 finalize 时通过它自动持久化 Conversation。"""
+    session_mgr: "SessionManager"
+    """Session 管理器。AgentLoop 通过它自动持久化 Session。"""
 
     # ── 通信 ──
     channel: "Channel | None"

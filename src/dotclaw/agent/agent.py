@@ -144,25 +144,16 @@ class Agent:
     # ======================== 公开 API ========================
 
     async def run(self, session: "SessionType", user_message: str) -> "AgentRun":
-        """处理一条用户消息（v2 纯函数 API）。
-
-        Agent 使用 Session，不持有 Session。
-        调用方负责 Session 生命周期管理。
-
-        内部流程：
-        1. 从 Identity 预解析 system_prompt / tool_definitions / model / max_loop_steps
-        2. 创建 AgentLoop(self._runtime)
-        3. 调用 loop.run(session, msg, ...) → AgentRun
+        """处理一条用户消息（纯执行，不持久化）。
 
         Args:
-            session: 运行时上下文（load from conversation）
+            session: 运行时上下文
             user_message: 用户输入文本
 
         Returns:
-            AgentRun（包装 AgentResult + 执行后的 Session）
+            AgentRun（一次原子调用的完整记录）
         """
         from .loop import AgentLoop
-        from ..session.agent_run import AgentRun as AR
 
         loop: AgentLoop = AgentLoop(self._runtime)
         return await loop.run(
@@ -173,6 +164,52 @@ class Agent:
             model=self._resolve_model(),
             max_loop_steps=self._identity.max_loop_steps,
         )
+
+    async def process(
+        self,
+        session: "SessionType",
+        user_message: str,
+        session_mgr: "object",
+    ) -> "AgentRun":
+        """处理一条用户消息（完整流程：执行 + 状态记录 + 持久化）。
+
+        调度器职责：
+        1. 创建 AgentState 并开始计时
+        2. 调用 run() 执行
+        3. 累加 AgentState
+        4. 成功时追加 Conversation 记录并保存 Session
+
+        Args:
+            session: 运行时上下文
+            user_message: 用户输入文本
+            session_mgr: SessionManager 实例
+
+        Returns:
+            AgentRun（执行结果，含 end_status）
+        """
+        import uuid
+        from ..session.agent_state import AgentState
+
+        state: AgentState = AgentState(
+            request_id=uuid.uuid4().hex[:8],
+        )
+
+        agent_run: "AgentRun" = await self.run(session, user_message)
+        state.accumulate(agent_run)
+
+        if agent_run.end_status == "completed":
+            final: str | None = agent_run.final_output
+            session.add_conversation(
+                user_query=user_message,
+                final_answer=final or "",
+                agent_run_ids=state.agent_run_ids,
+            )
+            session_mgr.save(session)  # type:ignore[union-attr]
+            state.finish("completed")
+        else:
+            state.finish("failed", agent_run.error)
+
+        return agent_run
 
     # ======================== 配置解析（桥接方法） ========================
 
