@@ -79,16 +79,29 @@ class AgentRun:
 
     def to_dict(self) -> dict:
         """序列化为 dict。"""
+        msgs: list[dict] = []
+        for m in self.messages:
+            tc_list: list[dict] | list | None = None
+            if m.tool_calls:
+                try:
+                    tc_list = [
+                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                        for tc in m.tool_calls
+                    ]
+                except AttributeError:
+                    tc_list = list(m.tool_calls)
+            msgs.append({
+                "role": m.role,
+                "content": m.content,
+                "tool_calls": tc_list,
+                "tool_call_id": m.tool_call_id,
+                "name": m.name,
+            })
         return {
             "run_id": self.run_id,
             "agent_id": self.agent_id,
             "parent_run_id": self.parent_run_id,
-            "messages": [
-                {"role": m.role, "content": m.content,
-                 "tool_calls": m.tool_calls, "tool_call_id": m.tool_call_id,
-                 "name": m.name}
-                for m in self.messages
-            ],
+            "messages": msgs,
             "end_status": self.end_status,
             "tool_calls": self.tool_calls,
             "tokens_in": self.tokens_in,
