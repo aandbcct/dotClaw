@@ -152,6 +152,27 @@ class AgentLoop:
         end_status: str = "completed"
         error_msg: str | None = None
 
+        # ── 创建 AgentRun 并首次持久化 ──
+        agent_run = AgentRun(
+            run_id=run_id,
+            agent_id=session.agent_id,
+            parent_run_id="",
+            started_at=started_at,
+        )
+        await self._runtime.run_mgr.save(agent_run)
+
+        async def _save_run() -> None:
+            """增量持久化：同步当前状态到 agent_run 并写盘。"""
+            agent_run.messages = list(all_messages)
+            agent_run.tool_calls = tool_calls_total
+            agent_run.tokens_in = tokens_in_total
+            agent_run.tokens_out = tokens_out_total
+            agent_run.iterations = iterations
+            agent_run.end_status = end_status
+            agent_run.error = error_msg
+            agent_run.ended_at = datetime.now().isoformat()
+            await self._runtime.run_mgr.save(agent_run)
+
         try:
             # ── Journal: prompt built ──
             messages: list[Message] = self._build_messages(
@@ -210,6 +231,7 @@ class AgentLoop:
                 )
                 all_messages.append(asst_msg)
                 journal.record_message(asst_msg)
+                await _save_run()
 
                 if not llm_resp.tool_calls:
                     if self._runtime.channel is not None:
@@ -234,6 +256,7 @@ class AgentLoop:
 
                 session.history.append(asst_msg)
                 session.history.extend(tool_messages)
+                await _save_run()
 
                 journal.loop_end("tool_call")
 
@@ -250,27 +273,24 @@ class AgentLoop:
         duration_ms: int = int((time.time() - start_time) * 1000)
         ended_at: str = datetime.now().isoformat()
 
+        # ── 最终持久化 ──
+        agent_run.messages = list(all_messages)
+        agent_run.end_status = end_status
+        agent_run.tool_calls = tool_calls_total
+        agent_run.tokens_in = tokens_in_total
+        agent_run.tokens_out = tokens_out_total
+        agent_run.iterations = iterations
+        agent_run.duration_ms = duration_ms
+        agent_run.error = error_msg
+        agent_run.ended_at = ended_at
+        await self._runtime.run_mgr.save(agent_run)
+
         journal.session_end(end_status, success=(end_status == "completed"),
                             total_duration_ms=duration_ms)
         journal.finalize()
 
         self._running = False
-
-        return AgentRun(
-            run_id=run_id,
-            agent_id=session.agent_id,
-            parent_run_id="",
-            messages=all_messages,
-            end_status=end_status,
-            tool_calls=tool_calls_total,
-            tokens_in=tokens_in_total,
-            tokens_out=tokens_out_total,
-            iterations=iterations,
-            duration_ms=duration_ms,
-            error=error_msg,
-            started_at=started_at,
-            ended_at=ended_at,
-        )
+        return agent_run
 
     # ======================== 内部方法 ========================
 

@@ -12,6 +12,7 @@ AgentRuntime 回答"Agent 能调用什么"：
 - 上下文组装 (assembler)
 - 通信通道 (channel)
 - 会话管理 (session_mgr)
+- 运行记录 (run_mgr)
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from .slotContext import ContextAssembler
     from ..channel.base import Channel
     from ..session.session import SessionManager
+    from ..session.agent_run import AgentRunManager
     from ..config import Config
 
 
@@ -52,6 +54,9 @@ class AgentRuntime:
     # ── 持久化 ──
     session_mgr: "SessionManager"
     """Session 管理器。AgentLoop 通过它自动持久化 Session。"""
+
+    run_mgr: "AgentRunManager"
+    """AgentRun 持久化管理器。AgentLoop 边跑边增量写盘。"""
 
     # ── 通信 ──
     channel: "Channel | None"

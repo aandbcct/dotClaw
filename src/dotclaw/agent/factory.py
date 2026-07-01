@@ -307,6 +307,8 @@ async def build_agent(
     # ── 关键组件 ──
     llm_proxy = _build_llm(config, project_root)
     session_mgr: SessionManager = SessionManager(config.session.directory)
+    from dotclaw.session.agent_run import AgentRunManager
+    run_mgr: AgentRunManager = AgentRunManager(config.session.directory)
     assembler = _build_assembler()
 
     # ── 可降级组件 ──
@@ -329,6 +331,7 @@ async def build_agent(
         tool_executor=tool_executor,
         assembler=assembler,
         session_mgr=session_mgr,
+        run_mgr=run_mgr,
         channel=channel,
         memory_mgr=memory_mgr,
         skill_registry=skill_registry,
