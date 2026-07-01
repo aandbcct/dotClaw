@@ -1,6 +1,6 @@
 [project]
 name = "dotclaw"
-version = "0.1.0"
+version = "0.5.0"
 description = "A lightweight AI Agent framework for learning AI application development."
 readme = "README.md"
 requires-python = ">=3.13"
