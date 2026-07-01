@@ -278,22 +278,23 @@ def _build_assembler():
 async def build_agent(
     agent_id: str | None = None,
     channel: Any = None,
-) -> "Agent":
+) -> tuple["Agent", "SessionManager"]:
     """装配一个完全就绪的 Agent 实例。
 
-    从 config.yaml + daily-assistant.yaml + 上次状态重建所有依赖，
-    失败组件按策略降级（nonexistent）或崩溃（critical）。
+    从 config.yaml + agent YAML + 上次状态重建所有依赖。
 
     Args:
-        agent_id: Agent 标识。None = 恢复上次使用的 agent，或使用 "default"
-        channel: 通信通道。None = 由 main() 提供
+        agent_id: Agent 标识。None = 恢复上次使用的 agent
+        channel: 通信通道
 
     Returns:
-        完全就绪的 Agent
+        (Agent, SessionManager)
     """
     from dotclaw.config import get_config, _find_project_root
-    from dotclaw.memory.store import SessionManager
-    from dotclaw.agent import Agent, load_agent_config
+    from dotclaw.session.session import SessionManager
+    from dotclaw.agent import Agent as AgentCls
+    from dotclaw.agent.identity import load_agent_config as load_id
+    from dotclaw.agent.runtime import AgentRuntime
 
     config = get_config()
     project_root = _find_project_root()
@@ -303,9 +304,11 @@ async def build_agent(
     if agent_id is None:
         agent_id = state.get("last_agent_id", "default")
 
-    # ── 关键组件：失败则崩 ──
+    # ── 关键组件 ──
     llm_proxy = _build_llm(config, project_root)
-    session_mgr = SessionManager(config.session.directory)
+    session_mgr: SessionManager = SessionManager(config.session.directory)
+    from dotclaw.session.agent_run import AgentRunManager
+    run_mgr: AgentRunManager = AgentRunManager(config.session.directory)
     assembler = _build_assembler()
 
     # ── 可降级组件 ──
@@ -313,54 +316,62 @@ async def build_agent(
     tool_executor = _init_sync("工具", lambda: _build_tools(config, skill_registry))
     memory_mgr, memory_dream = await _init_async("记忆", _build_memory(config, llm_proxy, project_root)) or (None, None)
 
-    # MCP 需要 tool_registry，所以从 executor 拿
+    # MCP 需要 tool_registry
     tool_registry = tool_executor.registry if tool_executor else None
     mcp_provider, mcp_task = await _init_async(
         "MCP", _build_mcp(config, tool_registry)
     ) or (None, None)
 
-    # ── Agent 配置 ──
-    agent_config = load_agent_config(agent_id=agent_id)
+    # ── AgentIdentity：直接从 YAML 加载 ──
+    identity = load_id(agent_id=agent_id)
 
-    # ── 组装 ──
-    from dotclaw.agent import Agent as AgentCls
+    # ── AgentRuntime：组装纯能力引用 ──
+    runtime: AgentRuntime = AgentRuntime(
+        llm=llm_proxy,
+        tool_executor=tool_executor,
+        assembler=assembler,
+        session_mgr=session_mgr,
+        run_mgr=run_mgr,
+        channel=channel,
+        memory_mgr=memory_mgr,
+        skill_registry=skill_registry,
+        mcp_provider=mcp_provider,
+        config=config,
+    )
+
+    # ── 组装 Agent ──
     from dotclaw.agent.resume import ResumeManager
 
     resume_mgr = ResumeManager(trace_root=config.journal.trace_dir)
 
-    agent = AgentCls(
-        agent_config=agent_config,
-        config=config,
-        llm=llm_proxy,
-        session_mgr=session_mgr,
-        channel=channel,
-        tool_executor=tool_executor,
-        memory_mgr=memory_mgr,
-        skill_registry=skill_registry,
-        mcp_provider=mcp_provider,
+    agent: AgentCls = AgentCls(
+        identity=identity,
+        runtime=runtime,
         memory_dream=memory_dream,
         mcp_task=mcp_task,
-        assembler=assembler,
         resume_manager=resume_mgr,
     )
 
-    # ── 恢复上次 session ──
-    sessions = await session_mgr.list_all()
-    last_session_id = state.get("last_session_id")
-    if last_session_id:
+    # ── 恢复上次 Session ──
+    sessions: list = await session_mgr.list_all()
+    last_sid: str | None = state.get("last_session_id")
+    if last_sid:
         for s in sessions:
-            if s.id == last_session_id:
-                agent.session = s
+            if s.id == last_sid:
+                current_session = s
                 break
-    if agent.session is None:
-        agent.session = sessions[0] if sessions else await agent.new_session("主对话")
+        else:
+            current_session = None
+    else:
+        current_session = None
 
-    # ── 保存状态 ──
+    if current_session is None:
+        current_session = sessions[0] if sessions else await session_mgr.create("主对话")
+
     _save_state(project_root, {
         "last_agent_id": agent.agent_id,
-        "last_session_id": agent.session.id if agent.session else "",
+        "last_session_id": current_session.id,
     })
 
-    logger.info("Agent [%s] 就绪，session: %s", agent.agent_id,
-                agent.session.id if agent.session else "none")
-    return agent
+    logger.info("Agent [%s] 就绪，session: %s", agent.agent_id, current_session.id)
+    return agent, session_mgr

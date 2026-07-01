@@ -1,7 +1,12 @@
 """Agent 模块"""
 
-from .loop import AgentLoop
-from .agent import Agent, AgentConfig, LLMResponse, load_agent_config
+from .agent import Agent, LLMResponse
+from .identity import AgentIdentity, load_agent_config
+from .runtime import AgentRuntime
 from .factory import build_agent
 
-__all__ = ["AgentLoop", "Agent", "AgentConfig", "LLMResponse", "build_agent", "load_agent_config"]
+__all__ = [
+    "Agent", "LLMResponse",
+    "AgentIdentity", "AgentRuntime",
+    "build_agent", "load_agent_config",
+]

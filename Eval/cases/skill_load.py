@@ -1,4 +1,4 @@
-"""benchmarks/cases/skill_load.py — Skill 加载性能评测。
+"""Eval/cases/skill_load.py — Skill 加载性能评测。
 
 测量 SkillScanner + SkillRegistry 在不同 skill 数量下的扫描耗时。
 返回 dict[int, SkillsMetrics]，按数量分组。
@@ -11,7 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from benchmarks.stats import p50, p95
+from Eval.stats import p50, p95
 from dotclaw.journal.metrics_types import SkillMetrics
 from dotclaw.journal.storage import build_run_meta
 
@@ -24,7 +24,7 @@ async def run(
 ) -> tuple[dict[int, SkillMetrics], "RunMeta"]:
     """运行 Skill 加载性能评测，返回 (dict[int, SkillMetrics], RunMeta)。"""
     root = Path(project_root) if project_root else Path(__file__).parent.parent.parent
-    dataset_dir = root / "benchmarks" / "dataset" / "sample_skills"
+    dataset_dir = root / "Eval" / "dataset" / "sample_skills"
 
     sizes = [10, 50, 100]
     by_count: dict[int, SkillsMetrics] = {}
@@ -61,7 +61,7 @@ async def run(
         test_dataset_size=repeat,
     )
     if output_dir:
-        from benchmarks.stats import save_case_result
+        from Eval.stats import save_case_result
         save_case_result(by_count, meta, str(output_dir))
     return by_count, meta
 

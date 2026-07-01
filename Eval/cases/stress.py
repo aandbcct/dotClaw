@@ -1,4 +1,4 @@
-"""benchmarks/cases/stress.py — 压力测试。
+"""Eval/cases/stress.py — 压力测试。
 
 测量 dotClaw 框架在极端条件下的稳定性：
 1. 并发工具调用（50 个 no-op）
@@ -12,7 +12,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from benchmarks.stats import p50, p95
+from Eval.stats import p50, p95
 from dotclaw.journal.metrics_types import AgentRunSnapshot
 from dotclaw.journal.storage import build_run_meta
 

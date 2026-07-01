@@ -1,4 +1,4 @@
-"""benchmarks/cases/memory_perf.py — 记忆检索性能评测。
+"""Eval/cases/memory_perf.py — 记忆检索性能评测。
 
 测量 MemoryStorage FTS5 搜索在不同 index_size（100/1000/10000 chunks）下的
 P50/P95 延迟。返回 dict[str, MemoryMetrics]，按 size 分组。
@@ -11,7 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
-from benchmarks.stats import p50, p95
+from Eval.stats import p50, p95
 from dotclaw.journal.metrics_types import MemoryMetrics
 from dotclaw.journal.storage import build_run_meta
 
@@ -24,7 +24,7 @@ async def run(
 ) -> tuple[dict[str, MemoryMetrics], "RunMeta"]:
     """运行记忆检索性能评测，返回 (dict[str, MemoryMetrics], RunMeta)。"""
     root = Path(project_root) if project_root else Path(__file__).parent.parent.parent
-    corpus_dir = root / "benchmarks" / "dataset" / "memory_corpus"
+    corpus_dir = root / "Eval" / "dataset" / "memory_corpus"
 
     sizes = {"small": 100, "medium": 1000, "large": 10000}
     by_size: dict[str, MemoryMetrics] = {}
@@ -79,7 +79,7 @@ async def run(
         test_dataset_size=repeat,
     )
     if output_dir:
-        from benchmarks.stats import save_case_result
+        from Eval.stats import save_case_result
         save_case_result(by_size, meta, str(output_dir))
     return by_size, meta
 

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from .embedding import EmbeddingCache
     from .flush import MemoryFlushManager
     from ..llm.proxy import LLMProxy
-    from ..memory.store import SessionMessage
+    from ..storage.conversation import ConversationMessage as SessionMessage
 
 logger = logging.getLogger("dotclaw.memory.manager")
 

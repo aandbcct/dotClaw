@@ -41,13 +41,13 @@ python scripts/generate_benchmark_dataset.py
 
 ```bash
 # 跑全部 case（默认 warmup=3, repeat=10）
-python -m benchmarks.runner
+python -m Eval.runner
 
 # 只跑指定的 case
-python -m benchmarks.runner --filter init_perf,tool_dispatch
+python -m Eval.runner --filter init_perf,tool_dispatch
 
 # 调节参数
-python -m benchmarks.runner --warmup 5 --repeat 30
+python -m Eval.runner --warmup 5 --repeat 30
 ```
 
 ### 3. 看结果
@@ -74,7 +74,7 @@ async def run(
 ```python
 import asyncio
 from pathlib import Path
-from benchmarks.cases.init_perf import run
+from Eval.cases.init_perf import run
 
 # 只返回内存对象（不写文件）
 metrics, meta = asyncio.run(run(warmup=2, repeat=5))
@@ -83,7 +83,7 @@ print(f"Agent Init P95: {metrics.agent_full_p95_ms:.1f} ms")
 # 同时也输出 snapshot JSON
 metrics, meta = asyncio.run(run(
     warmup=2, repeat=5,
-    output_dir="benchmarks/reports/my_test"
+    output_dir="Eval/reports/my_test"
 ))
 ```
 
@@ -106,7 +106,7 @@ metrics, meta = asyncio.run(run(
 
 ```bash
 # 跑一轮
-python -m benchmarks.runner --warmup 5 --repeat 30
+python -m Eval.runner --warmup 5 --repeat 30
 
 # 把刚跑的 snapshot 复制到 baselines/
 # 报告里 Summary 表的数据就是你的基线值
@@ -119,7 +119,7 @@ python -m benchmarks.runner --warmup 5 --repeat 30
 改完代码后，跟基线对比看有没有退化：
 
 ```bash
-python -m benchmarks.runner --baseline benchmarks/baselines/<baseline_file>.json
+python -m Eval.runner --baseline Eval/baselines/<baseline_file>.json
 ```
 
 输出会标注哪些指标改善了、哪些退化了。

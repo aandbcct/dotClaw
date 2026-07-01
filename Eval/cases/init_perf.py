@@ -1,4 +1,4 @@
-"""benchmarks/cases/init_perf.py — 初始化性能评测。
+"""Eval/cases/init_perf.py — 初始化性能评测。
 
 测量 dotClaw 各核心组件从构造到就绪的耗时。
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from benchmarks.stats import p50, p95
+from Eval.stats import p50, p95
 from dotclaw.journal.metrics_types import InitPerfMetrics
 from dotclaw.journal.storage import build_run_meta
 
@@ -64,7 +64,7 @@ async def run(
         agent_full_p95_ms=p95(results.get("agent_full", [])),
     )
     if output_dir:
-        from benchmarks.stats import save_case_result
+        from Eval.stats import save_case_result
         save_case_result(perf, meta, str(output_dir))
     return perf, meta
 
@@ -123,7 +123,7 @@ def _scan_bench_skills(config, root: Path):
         return None
     from dotclaw.skills.scanner import SkillScanner
     from dotclaw.skills.registry import SkillRegistry
-    bench_dir = str(root / "benchmarks" / "dataset" / "sample_skills")
+    bench_dir = str(root / "Eval" / "dataset" / "sample_skills")
     scanner = SkillScanner([bench_dir], skip_prefix=config.skills.skip_prefix)
     metas = scanner.scan()
     registry = SkillRegistry()
