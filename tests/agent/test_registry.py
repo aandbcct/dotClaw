@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dotclaw.agent.registry import AgentRegistry
+from dotclaw.orchestration.registry import AgentRegistry
 
 
 class TestAgentRegistry:

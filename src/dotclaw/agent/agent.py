@@ -27,8 +27,8 @@ if TYPE_CHECKING:
     from ..tools.base import ToolDefinition
     from ..session.session import Session as SessionType
     from ..session.agent_run import AgentRun
-    from .task import Task
-    from .messaging import AgentMessaging
+    from ..orchestration.task import Task
+    from ..orchestration.messaging import AgentMessaging
 
 
 # ============================================================================
@@ -244,6 +244,7 @@ class Agent:
             RuntimeError: 如果 Agent 未配置 AgentMessaging
         """
         import uuid as _uuid
+        from ..orchestration.task import Task as _Task
 
         if self._messaging is None:
             raise RuntimeError(
@@ -257,7 +258,7 @@ class Agent:
             return self._build_failed_task(target_agent_id, description, parent_run_id)
 
         # 构造 Task
-        task: "Task" = Task(
+        task: "Task" = _Task(
             task_id=_uuid.uuid4().hex[:12],
             requester=target_agent_id,
             description=description,
@@ -280,8 +281,8 @@ class Agent:
     def _build_failed_task(target_agent_id: str, description: str, parent_run_id: str) -> "Task":
         """构造一个标记为 failed 的 Task（目标 Agent 不存在时使用）。"""
         import uuid as _uuid
-        from .task import Task as TaskCls
-        task = TaskCls(
+        from ..orchestration.task import Task as _Task
+        task = _Task(
             task_id=_uuid.uuid4().hex[:12],
             requester=target_agent_id,
             description=description,
@@ -295,8 +296,6 @@ class Agent:
 
         description / context / constraints / input_artifacts 合并为一条消息。
         """
-        from .task import TaskStatus
-
         parts: list[str] = [task.description]
         if task.context:
             parts.append(f"\n[上游上下文]\n{task.context}")

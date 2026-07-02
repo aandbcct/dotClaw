@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ..journal import Journal
     from ..llm.base import ToolDefinition
     from ..skills.registry import SkillRegistry
+    from ..orchestration.registry import AgentRegistry
 
 logger = logging.getLogger("dotclaw.agent.context_slot")
 
@@ -89,6 +90,9 @@ class SlotContext:
 
     user_profile: Any = None
     """用户档案（可能为 None）"""
+
+    agent_registry: "AgentRegistry | None" = None
+    """全局 Agent 目录（供 AvailableAgentsSlot 注入可用子 Agent 列表）"""
 
     # ── 观测 ──
     journal: "Journal | None" = None

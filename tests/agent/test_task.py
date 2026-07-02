@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from datetime import datetime
 
-from dotclaw.agent.task import Task, TaskStatus
+from dotclaw.orchestration.task import Task, TaskStatus
 from dotclaw.agent.artifact import Artifact, ArtifactType
 
 

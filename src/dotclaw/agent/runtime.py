@@ -63,6 +63,7 @@ class AgentRuntime:
         skill_registry: "SkillRegistry | None" = None,
         mcp_provider: object = None,
         config: "Config | None" = None,
+        agent_registry: object = None,
     ) -> None:
         self.llm: LLMProxy = llm
         self.tool_executor: ToolExecutor | None = tool_executor
@@ -74,6 +75,7 @@ class AgentRuntime:
         self.skill_registry: SkillRegistry | None = skill_registry
         self.mcp_provider: object = mcp_provider
         self.config: Config | None = config
+        self.agent_registry: object = agent_registry
         self._running: bool = False
 
     # ======================== 派生（多 Agent 隔离） ========================
@@ -106,6 +108,7 @@ class AgentRuntime:
             skill_registry=self.skill_registry,
             mcp_provider=mcp_provider if mcp_provider is not None else self.mcp_provider,
             config=self.config,
+            agent_registry=self.agent_registry,
         )
 
     # ======================== 执行入口 ========================
@@ -361,6 +364,7 @@ class AgentRuntime:
             tool_definitions=tool_definitions,
             skill_registry=self.skill_registry,
             memory_manager=self.memory_mgr,
+            agent_registry=self.agent_registry,
             knowledge_base=None,
             user_profile=None,
             journal=journal,

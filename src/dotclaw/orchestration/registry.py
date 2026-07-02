@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from .identity import AgentIdentity, load_agent_config
+from ..agent.identity import AgentIdentity, load_agent_config
 
 logger = logging.getLogger("dotclaw.agent.registry")
 

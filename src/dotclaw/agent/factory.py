@@ -258,11 +258,13 @@ def _build_assembler():
         IdentitySlot, ToolsSlot, SkillsSlot,
         WorkspaceSlot, UserInfoSlot,
         MemorySlot, KnowledgeSlot, ProjectSlot,
+        AvailableAgentsSlot,
     )
     return ContextAssembler([
         IdentitySlot(),
         ToolsSlot(),
         SkillsSlot(),
+        AvailableAgentsSlot(),
         WorkspaceSlot(),
         UserInfoSlot(),
         MemorySlot(),
@@ -326,7 +328,7 @@ async def build_agent(
     identity = load_id(agent_id=agent_id)
 
     # ── AgentRegistry：加载所有 Agent 配置 ──
-    from dotclaw.agent.registry import AgentRegistry
+    from dotclaw.orchestration.registry import AgentRegistry
     agent_registry = AgentRegistry()
     agent_config_dir = project_root / ".dotclaw" / "agentConfig"
     agent_registry.load_all(agent_config_dir)
@@ -343,10 +345,11 @@ async def build_agent(
         skill_registry=skill_registry,
         mcp_provider=mcp_provider,
         config=config,
+        agent_registry=agent_registry,
     )
 
     # ── AgentMessaging：A2A 通信层（纯路由+追踪，不持有 runtime）──
-    from dotclaw.agent.messaging import AgentMessaging
+    from dotclaw.orchestration.messaging import AgentMessaging
     messaging = AgentMessaging(registry=agent_registry)
 
     # ── 组装 Agent ──

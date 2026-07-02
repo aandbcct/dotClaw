@@ -57,6 +57,11 @@ def get_spawn_agent_handler(agent: "Agent") -> BuiltinToolHandler:
         description=(
             "派生一个子 Agent 来执行子任务。子 Agent 有独立的上下文和工具白名单，"
             "不会污染当前 Agent 的对话历史。适合需要隔离上下文的并行子任务。"
+            "根据任务类型选择合适的 agent_id：代码任务用 code-engineer，"
+            "数据分析用 data-analyst，写作/内容用 content-creator，"
+            "专业知识问答用 domain-expert，客服/查询用 customer-service，"
+            "任务规划/多步骤协调用 planner-coordinator。"
+            "没有特别合适的就用 daily-assistant。"
             "返回子 Agent 的执行结果文本。"
         ),
         parameters={
@@ -64,7 +69,11 @@ def get_spawn_agent_handler(agent: "Agent") -> BuiltinToolHandler:
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "要派生的 Agent 的唯一标识（agent_id）。",
+                    "description": (
+                        "要派生的 Agent 的唯一标识（agent_id）。"
+                        "根据任务性质选择对应的 Agent。"
+                        "可选值参考 system prompt 中的可用子 Agent 列表。"
+                    ),
                 },
                 "description": {
                     "type": "string",

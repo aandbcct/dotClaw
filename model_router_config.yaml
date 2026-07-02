@@ -60,7 +60,7 @@ providers:
 models:
   qwen3.7-max:
     provider: qwen
-    model_id: qwen3.7-max
+    model_id: qwen3.7-max-2026-05-20
     context_window: 131072
     capabilities: [chat, function_calling]
     status: active

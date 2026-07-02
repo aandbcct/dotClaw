@@ -3,9 +3,9 @@
 import pytest
 
 from dotclaw.agent.identity import AgentIdentity
-from dotclaw.agent.registry import AgentRegistry
-from dotclaw.agent.messaging import AgentMessaging
-from dotclaw.agent.task import Task, TaskStatus
+from dotclaw.orchestration.registry import AgentRegistry
+from dotclaw.orchestration.messaging import AgentMessaging
+from dotclaw.orchestration.task import Task, TaskStatus
 
 
 class TestAgentMessaging:

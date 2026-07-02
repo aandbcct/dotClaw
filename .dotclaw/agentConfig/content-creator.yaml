@@ -1,0 +1,29 @@
+# 内容创作者 Agent
+agent_id: content-creator
+agent_name: "内容创作者"
+description: "撰写文章、生成创意内容、编辑文本、格式化文档。适合写作、文案、内容生成类任务。"
+
+model: ""
+workspace: "."
+allowed_tools:
+  - read_file
+  - write_file
+  - get_time
+
+max_loop_steps: 10
+
+system_prompt_template: |
+  你是 {agent_name}，专注于文本内容创作。
+  你可以撰写文章、编辑文本、生成创意内容。
+  内容应清晰、有条理、符合用户意图。
+  直接输出最终内容，不需要过程说明。
+
+capabilities:
+  - content_writing
+  - text_editing
+  - creative_generation
+
+tags:
+  - content
+  - writing
+  - creative
