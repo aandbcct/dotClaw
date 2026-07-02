@@ -1,205 +1,79 @@
-"""测试 AgentMessaging —— A2A 通信层。"""
-
-import uuid
-from unittest.mock import AsyncMock
+"""测试 AgentMessaging —— 纯通信层（路由 + 追踪 + 取消）。"""
 
 import pytest
 
 from dotclaw.agent.identity import AgentIdentity
 from dotclaw.agent.registry import AgentRegistry
-from dotclaw.agent.runtime import AgentRuntime
-from dotclaw.agent.task import Task, TaskStatus
 from dotclaw.agent.messaging import AgentMessaging
-from dotclaw.session.session import Session, SessionManager
-from dotclaw.session.agent_run import AgentRun, AgentRunManager
-from dotclaw.llm.base import Message
-
-
-# ============================================================================
-# 工厂
-# ============================================================================
-
-def _make_agent_run(run_id: str, agent_id: str, end_status: str,
-                    final: str, error: str = "") -> AgentRun:
-    return AgentRun(
-        run_id=run_id,
-        agent_id=agent_id,
-        messages=[Message(role="assistant", content=final)],
-        end_status=end_status,
-        error=error if error else None,
-        tool_calls=0,
-        tokens_in=0,
-        tokens_out=0,
-        iterations=1,
-        duration_ms=0,
-    )
-
-
-# ============================================================================
-# 可控组件
-# ============================================================================
-
-class FakeSessionManager(SessionManager):
-    def __init__(self) -> None:
-        self._sessions: dict[str, Session] = {}
-        self.create_count: int = 0
-
-    async def create(self, title: str = "新对话", model: str = "",
-                     agent_id: str = "") -> Session:
-        sid: str = uuid.uuid4().hex[:8]
-        s = Session(id=sid, title=title, agent_id=agent_id)
-        self._sessions[sid] = s
-        self.create_count += 1
-        return s
-
-    async def load(self, session_id: str) -> Session | None:
-        return self._sessions.get(session_id)
-
-    async def save(self, session: Session) -> None:
-        pass
-
-    async def list_all(self) -> list[Session]:
-        return list(self._sessions.values())
-
-    async def delete(self, session_id: str) -> bool:
-        return self._sessions.pop(session_id, None) is not None
-
-
-class FakeRunManager(AgentRunManager):
-    def __init__(self) -> None:
-        import tempfile
-        self._tmp = tempfile.mkdtemp()
-        super().__init__(self._tmp)
-
-    async def save(self, run: AgentRun) -> None:
-        pass
-
-    async def load(self, run_id: str) -> AgentRun | None:
-        return None
-
-
-def _make_minimal_runtime() -> AgentRuntime:
-    return AgentRuntime(
-        llm=object(),
-        tool_executor=None,
-        assembler=None,
-        session_mgr=FakeSessionManager(),
-        run_mgr=FakeRunManager(),
-    )
+from dotclaw.agent.task import Task, TaskStatus
 
 
 class TestAgentMessaging:
-    """AgentMessaging.send() 端到端。"""
+    """AgentMessaging route / send / cancel / list_active。"""
 
     @pytest.fixture
     def registry(self) -> AgentRegistry:
         r = AgentRegistry()
         r.register(AgentIdentity(agent_id="researcher", agent_name="Researcher"))
+        r.register(AgentIdentity(agent_id="coder", agent_name="Coder"))
         return r
 
     @pytest.fixture
-    def runtime(self) -> AgentRuntime:
-        return _make_minimal_runtime()
+    def messaging(self, registry: AgentRegistry) -> AgentMessaging:
+        return AgentMessaging(registry=registry)
 
-    @pytest.fixture
-    def messaging(self, registry: AgentRegistry, runtime: AgentRuntime) -> AgentMessaging:
-        return AgentMessaging(registry=registry, base_runtime=runtime)
+    def test_route_returns_identity(self, messaging: AgentMessaging) -> None:
+        """route() 返回正确的 Identity。"""
+        identity = messaging.route("researcher")
+        assert identity is not None
+        assert identity.agent_id == "researcher"
+        assert identity.agent_name == "Researcher"
 
-    @pytest.mark.asyncio
-    async def test_send_completes(self, messaging: AgentMessaging, runtime: AgentRuntime) -> None:
-        """send() 返回 completed Task。"""
-        runtime.run = AsyncMock(return_value=_make_agent_run(  # type: ignore[method-assign]
-            "sub-1", "researcher", "completed", "搜索完成：3个结果"
-        ))
-        runtime.derive = lambda: runtime  # type: ignore[method-assign]
+    def test_route_nonexistent_returns_none(self, messaging: AgentMessaging) -> None:
+        """route() 对不存在的 agent 返回 None。"""
+        assert messaging.route("ghost") is None
 
-        task = await messaging.send(
-            requester="main",
-            target_agent_id="researcher",
-            description="搜索资料",
-        )
-        assert task.status == TaskStatus.COMPLETED
-        assert task.final_result == "搜索完成：3个结果"
+    def test_send_registers_task(self, messaging: AgentMessaging) -> None:
+        """send() 将 Task 注册到活跃追踪表。"""
+        identity = messaging.route("researcher")
+        assert identity is not None
 
-    @pytest.mark.asyncio
-    async def test_send_fills_sub_run_id(self, messaging: AgentMessaging, runtime: AgentRuntime) -> None:
-        """send() 填充 sub_run_id。"""
-        runtime.run = AsyncMock(return_value=_make_agent_run(  # type: ignore[method-assign]
-            "sub-2", "researcher", "completed", "ok"
-        ))
-        runtime.derive = lambda: runtime  # type: ignore[method-assign]
+        task = Task(task_id="t1", requester="researcher", description="x")
+        messaging.send(task, identity)
 
-        task = await messaging.send("main", "researcher", "x")
-        assert task.sub_run_id == "sub-2"
+        active = messaging.list_active()
+        assert len(active) == 1
+        assert active[0].task_id == "t1"
 
-    @pytest.mark.asyncio
-    async def test_send_target_not_found(self, messaging: AgentMessaging) -> None:
-        """目标 Agent 不存在时返回 failed Task。"""
-        task = await messaging.send("main", "ghost", "x")
-        assert task.status == TaskStatus.FAILED
-        assert "ghost" in task.error
+    def test_send_multiple_tasks(self, messaging: AgentMessaging) -> None:
+        """send() 多个 Task 全部注册。"""
+        identity = messaging.route("coder")
+        assert identity is not None
 
-    @pytest.mark.asyncio
-    async def test_send_passes_parent_run_id(self, messaging: AgentMessaging, runtime: AgentRuntime) -> None:
-        """send() 将 parent_run_id 写入 Task。"""
-        runtime.run = AsyncMock(return_value=_make_agent_run(  # type: ignore[method-assign]
-            "sub-3", "researcher", "completed", "ok"
-        ))
-        runtime.derive = lambda: runtime  # type: ignore[method-assign]
+        t1 = Task(task_id="a", requester="coder", description="x")
+        t2 = Task(task_id="b", requester="coder", description="y")
+        messaging.send(t1, identity)
+        messaging.send(t2, identity)
 
-        task = await messaging.send(
-            requester="main",
-            target_agent_id="researcher",
-            description="x",
-            parent_run_id="parent-001",
-        )
-        assert task.parent_run_id == "parent-001"
+        assert len(messaging.list_active()) == 2
 
-    @pytest.mark.asyncio
-    async def test_send_passes_context_and_constraints(
-        self, messaging: AgentMessaging, runtime: AgentRuntime
-    ) -> None:
-        """send() 传递 context 和 constraints。"""
-        runtime.run = AsyncMock(return_value=_make_agent_run(  # type: ignore[method-assign]
-            "sub-4", "researcher", "completed", "done"
-        ))
-        runtime.derive = lambda: runtime  # type: ignore[method-assign]
+    def test_cancel_existing_task(self, messaging: AgentMessaging) -> None:
+        """cancel() 成功取消已注册的 Task。"""
+        identity = messaging.route("researcher")
+        assert identity is not None
 
-        task = await messaging.send(
-            requester="main",
-            target_agent_id="researcher",
-            description="分析",
-            context="日志上下文",
-            constraints="仅用内置工具",
-        )
-        assert task.context == "日志上下文"
-        assert task.constraints == "仅用内置工具"
+        task = Task(task_id="t2", requester="researcher", description="x")
+        messaging.send(task, identity)
 
-    @pytest.mark.asyncio
-    async def test_send_handles_failure(self, messaging: AgentMessaging, runtime: AgentRuntime) -> None:
-        """子 Agent 执行失败时返回 failed Task。"""
-        runtime.run = AsyncMock(return_value=_make_agent_run(  # type: ignore[method-assign]
-            "sub-5", "researcher", "failed", "", error="超时"
-        ))
-        runtime.derive = lambda: runtime  # type: ignore[method-assign]
+        result = messaging.cancel("t2")
+        assert result is True
+        assert task.status == TaskStatus.CANCELED
 
-        task = await messaging.send("main", "researcher", "x")
-        assert task.status == TaskStatus.FAILED
-        assert task.error == "超时"
+    def test_cancel_nonexistent_returns_false(self, messaging: AgentMessaging) -> None:
+        """cancel() 对不存在的 task_id 返回 False。"""
+        result = messaging.cancel("no-such-task")
+        assert result is False
 
-    @pytest.mark.asyncio
-    async def test_send_creates_isolated_session(
-        self, messaging: AgentMessaging, runtime: AgentRuntime
-    ) -> None:
-        """每次 send 创建独立 Session。"""
-        sess_mgr = runtime.session_mgr
-        assert isinstance(sess_mgr, FakeSessionManager)
-        before = sess_mgr.create_count
-
-        runtime.run = AsyncMock(return_value=_make_agent_run(  # type: ignore[method-assign]
-            "sub-6", "researcher", "completed", "ok"
-        ))
-        runtime.derive = lambda: runtime  # type: ignore[method-assign]
-
-        await messaging.send("main", "researcher", "x")
-        assert sess_mgr.create_count == before + 1
+    def test_list_active_empty_initially(self, messaging: AgentMessaging) -> None:
+        """初始时活跃 Task 列表为空。"""
+        assert messaging.list_active() == []

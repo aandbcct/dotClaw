@@ -1,4 +1,6 @@
-"""测试 Task —— Agent 间通信的聚合实体。"""
+"""测试 Task —— Agent 间通信的聚合实体 + 句柄能力。"""
+
+import asyncio
 
 import pytest
 from datetime import datetime
@@ -196,3 +198,71 @@ class TestTask:
         assert t2.sub_run_id == t.sub_run_id
         assert len(t2.input_artifacts) == len(t.input_artifacts)
         assert len(t2.output_artifacts) == len(t.output_artifacts)
+
+
+class TestTaskHandle:
+    """Task 作为句柄的 result() / cancel() 能力。"""
+
+    @pytest.mark.asyncio
+    async def test_result_returns_on_completed(self) -> None:
+        """result() 在 mark_completed 后立即返回。"""
+        t = Task(task_id="h1", requester="p", description="x")
+
+        async def _complete() -> None:
+            await asyncio.sleep(0.01)
+            t.mark_completed(final_result="done")
+
+        asyncio.create_task(_complete())
+        result: Task = await t.result()
+
+        assert result.status == TaskStatus.COMPLETED
+        assert result.final_result == "done"
+
+    @pytest.mark.asyncio
+    async def test_result_returns_on_failed(self) -> None:
+        """result() 在 mark_failed 后立即返回。"""
+        t = Task(task_id="h2", requester="p", description="x")
+
+        async def _fail() -> None:
+            await asyncio.sleep(0.01)
+            t.mark_failed(error="boom")
+
+        asyncio.create_task(_fail())
+        result: Task = await t.result()
+
+        assert result.status == TaskStatus.FAILED
+        assert result.error == "boom"
+
+    @pytest.mark.asyncio
+    async def test_result_timeout_raises(self) -> None:
+        """result() 超时时抛出 asyncio.TimeoutError。"""
+        t = Task(task_id="h3", requester="p", description="x")
+
+        with pytest.raises(asyncio.TimeoutError):
+            await t.result(timeout=0.01)
+
+    @pytest.mark.asyncio
+    async def test_cancel_sets_status(self) -> None:
+        """cancel() 设置 canceled 状态。"""
+        t = Task(task_id="h4", requester="p", description="x")
+        assert t.status == TaskStatus.SUBMITTED
+
+        t.cancel()
+        assert t.status == TaskStatus.CANCELED
+
+    @pytest.mark.asyncio
+    async def test_cancel_notifies_result(self) -> None:
+        """cancel() 后 result() 立即返回。"""
+        t = Task(task_id="h5", requester="p", description="x")
+        t.cancel()
+
+        result: Task = await t.result()
+        assert result.status == TaskStatus.CANCELED
+
+    def test_completion_event_not_serialized(self) -> None:
+        """_completion_event 不出现在 to_dict 中。"""
+        t = Task(task_id="h6", requester="p", description="x")
+        d: dict = t.to_dict()
+        assert "_completion_event" not in d
+        assert "completion_event" not in d
+

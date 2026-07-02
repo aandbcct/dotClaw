@@ -1,96 +1,82 @@
 """AgentMessaging —— A2A 通信层。
 
-Agent 间通信的统一入口。对标 A2A: tasks/send + tasks/cancel。
+纯通信基础设施：路由 + 追踪 + 取消。不创建 Agent、不派生 Runtime、不执行 Task。
 
-职责：
-- 路由：通过 AgentRegistry 查找目标 Agent 的 Identity
-- 创建：构造 Task（含上下文）
-- 执行：derive Runtime → 构造 Agent → execute(task)
-- 生命周期：send（同步等待）/ cancel（取消）
-
-所有 Agent 平等，send/execute 不改变 Agent 类型，运行时决定角色。
+对标 A2A: Service Discovery + tasks/send 追踪 + tasks/cancel。
 """
 
 from __future__ import annotations
 
-import uuid
 from typing import TYPE_CHECKING
 
-from .agent import Agent
-from .task import Task
-
 if TYPE_CHECKING:
+    from .identity import AgentIdentity
     from .registry import AgentRegistry
-    from .runtime import AgentRuntime
-
-# ============================================================================
-# AgentMessaging
-# ============================================================================
+    from .task import Task
 
 
 class AgentMessaging:
     """Agent 间通信层。
 
-    每个 Agent 实例持有一个。父 Agent 通过 send() 派生子 Agent，
-    子 Agent 通过 execute() 接收并执行 Task。
+    职责：
+    - route(agent_id) → AgentIdentity：查 Registry（对标 A2A Service Discovery）
+    - send(task, identity)：注册 Task 到活跃追踪表
+    - cancel(task_id)：取消正在执行的 Task（对标 A2A tasks/cancel）
+
+    不负责：创建 runtime、构造 Agent、执行 Task（由调用方 Agent.send() 处理）。
     """
 
-    def __init__(self, registry: "AgentRegistry", base_runtime: "AgentRuntime") -> None:
-        """初始化。
-
-        Args:
-            registry: 全局 Agent 目录
-            base_runtime: 本 Agent 的 Runtime（子 Agent 从中 derive）
-        """
+    def __init__(self, registry: "AgentRegistry") -> None:
         self._registry: AgentRegistry = registry
-        self._base_runtime: AgentRuntime = base_runtime
+        self._active_tasks: dict[str, "Task"] = {}
 
-    # ── send（同步等待结果）──
+    # ── 路由 ──
 
-    async def send(
-        self,
-        requester: str,
-        target_agent_id: str,
-        description: str,
-        context: str = "",
-        constraints: str = "",
-        parent_run_id: str = "",
-    ) -> Task:
-        """发送 Task 给目标 Agent，阻塞等待执行完成。
-
-        对标 A2A tasks/send（同步模式）。
+    def route(self, agent_id: str) -> "AgentIdentity | None":
+        """按 agent_id 查找 Identity。
 
         Args:
-            requester: 发送方 agent_id
-            target_agent_id: 接收方 agent_id
-            description: 任务描述
-            context: 父 Agent 传入的上下文摘要
-            constraints: 约束条件
-            parent_run_id: 父 AgentRun.run_id
+            agent_id: 目标 Agent ID
 
         Returns:
-            携带执行结果的 Task
+            AgentIdentity，不存在则返回 None
         """
-        from .identity import AgentIdentity
+        return self._registry.get(agent_id)
 
-        # 构造 Task（输入侧）
-        task: Task = Task(
-            task_id=uuid.uuid4().hex[:12],
-            requester=target_agent_id,
-            description=description,
-            context=context,
-            constraints=constraints,
-            parent_run_id=parent_run_id,
-        )
+    # ── 追踪 ──
 
-        # 查 Registry
-        identity: AgentIdentity | None = self._registry.get(target_agent_id)
-        if identity is None:
-            task.mark_failed(error=f"Agent '{target_agent_id}' not found in registry")
-            return task
+    def send(self, task: "Task", target: "AgentIdentity") -> None:
+        """注册 Task 到活跃追踪表。
 
-        # 派生 Runtime + 构造 Agent + 执行
-        child_runtime: AgentRuntime = self._base_runtime.derive()
-        child_agent: Agent = Agent(identity=identity, runtime=child_runtime)
+        调用方在创建子 Agent 并启动执行前调用此方法注册追踪。
 
-        return await child_agent.execute(task)
+        Args:
+            task: 要注册的 Task
+            target: 目标 Agent 的 Identity
+        """
+        self._active_tasks[task.task_id] = task
+
+    # ── 列表 ──
+
+    def list_active(self) -> list["Task"]:
+        """返回所有活跃 Task 列表。"""
+        return list(self._active_tasks.values())
+
+    # ── 取消 ──
+
+    def cancel(self, task_id: str) -> bool:
+        """取消正在执行的 Task。
+
+        对标 A2A tasks/cancel。
+
+        Args:
+            task_id: 要取消的 Task ID
+
+        Returns:
+            True 表示成功取消，False 表示未找到
+        """
+        task: Task | None = self._active_tasks.get(task_id)
+        if task is None:
+            return False
+        task.cancel()
+        return True

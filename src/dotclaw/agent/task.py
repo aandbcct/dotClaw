@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -116,9 +117,20 @@ class Task:
     # ── 生命周期方法 ──
 
     def __post_init__(self) -> None:
-        """自动填充 created_at（如果为空）。"""
+        """自动填充 created_at 和初始化 _completion_event。"""
         if not self.created_at:
             self.created_at = self._now()
+        # _completion_event 作为运行时句柄能力，不参与序列化
+        object.__setattr__(self, "_completion_event", asyncio.Event())
+        # 如果 Task 从序列化恢复时已经是 terminal 状态，直接 set
+        if self.status.is_terminal():
+            self._completion_event.set()
+
+    def _notify_completion(self) -> None:
+        """通知等待者 Task 已完成/失败/取消。"""
+        event: asyncio.Event = getattr(self, "_completion_event", None)  # type: ignore[assignment]
+        if event is not None:
+            event.set()
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -141,21 +153,51 @@ class Task:
             self.output_artifacts = output_artifacts
         self.sub_run_id = sub_run_id
         self.updated_at = self._now()
+        self._notify_completion()
 
     def mark_failed(self, error: str) -> None:
         """子 Agent 执行失败。填充 status + error。"""
         self.status = TaskStatus.FAILED
         self.error = error
         self.updated_at = self._now()
+        self._notify_completion()
 
     def mark_canceled(self) -> None:
         """父 Agent 取消任务。status = canceled。"""
         self.status = TaskStatus.CANCELED
         self.updated_at = self._now()
+        self._notify_completion()
 
     def is_terminal(self) -> bool:
         """Task 是否已进入终止状态。委托给 TaskStatus。"""
         return self.status.is_terminal()
+
+    # ── 句柄能力 ──
+
+    async def result(self, timeout: float | None = None) -> "Task":
+        """等待 Task 完成，返回自身。
+
+        对标 A2A tasks/send 的同步模式。发送方调用此方法阻塞等待子 Agent 完成。
+
+        Args:
+            timeout: 超时秒数，None 表示无限等待
+
+        Returns:
+            自身（已完成，status 为 completed/failed/canceled）
+
+        Raises:
+            asyncio.TimeoutError: 超时
+        """
+        event: asyncio.Event = getattr(self, "_completion_event")  # type: ignore[assignment]
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+        return self
+
+    def cancel(self) -> None:
+        """取消 Task。
+
+        对标 A2A tasks/cancel。发送方调用此方法主动取消任务。
+        """
+        self.mark_canceled()
 
     # ── 序列化 ──
 

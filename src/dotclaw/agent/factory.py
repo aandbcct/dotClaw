@@ -345,9 +345,9 @@ async def build_agent(
         config=config,
     )
 
-    # ── AgentMessaging：A2A 通信层 ──
+    # ── AgentMessaging：A2A 通信层（纯路由+追踪，不持有 runtime）──
     from dotclaw.agent.messaging import AgentMessaging
-    messaging = AgentMessaging(registry=agent_registry, base_runtime=runtime)
+    messaging = AgentMessaging(registry=agent_registry)
 
     # ── 组装 Agent ──
     from dotclaw.agent.resume import ResumeManager
@@ -367,6 +367,11 @@ async def build_agent(
     if tool_executor is not None:
         from dotclaw.tools.builtin.spawn_tool import get_spawn_agent_handler
         tool_executor.registry.register(get_spawn_agent_handler(agent))
+
+    # ── 注册 kill_agent 工具 ──
+    if tool_executor is not None:
+        from dotclaw.tools.builtin.kill_tool import get_kill_agent_handler
+        tool_executor.registry.register(get_kill_agent_handler(agent))
 
     # ── 恢复上次 Session ──
     sessions: list = await session_mgr.list_all()

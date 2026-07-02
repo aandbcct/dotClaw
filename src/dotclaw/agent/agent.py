@@ -228,6 +228,7 @@ class Agent:
         """发送 Task 给目标 Agent，阻塞等待执行完成。
 
         Agent 的一等通信能力。对标 A2A tasks/send。
+        内部完成：路由 → 构造 Task → 创建子Agent → execute → 等待结果。
 
         Args:
             target_agent_id: 接收方 agent_id
@@ -242,19 +243,52 @@ class Agent:
         Raises:
             RuntimeError: 如果 Agent 未配置 AgentMessaging
         """
+        import uuid as _uuid
+
         if self._messaging is None:
             raise RuntimeError(
                 f"Agent '{self.agent_id}' has no messaging configured. "
                 "Use factory.build_agent() to create a fully wired agent."
             )
-        return await self._messaging.send(
-            requester=self.agent_id,
-            target_agent_id=target_agent_id,
+
+        # 路由
+        identity = self._messaging.route(target_agent_id)
+        if identity is None:
+            return self._build_failed_task(target_agent_id, description, parent_run_id)
+
+        # 构造 Task
+        task: "Task" = Task(
+            task_id=_uuid.uuid4().hex[:12],
+            requester=target_agent_id,
             description=description,
             context=context,
             constraints=constraints,
             parent_run_id=parent_run_id,
         )
+
+        # 注册追踪
+        self._messaging.send(task, identity)
+
+        # 创建子 Agent（独立 Runtime + Session）
+        child_runtime = self._runtime.derive()
+        child_agent: Agent = Agent(identity=identity, runtime=child_runtime)
+
+        # 执行并等待
+        return await child_agent.execute(task)
+
+    @staticmethod
+    def _build_failed_task(target_agent_id: str, description: str, parent_run_id: str) -> "Task":
+        """构造一个标记为 failed 的 Task（目标 Agent 不存在时使用）。"""
+        import uuid as _uuid
+        from .task import Task as TaskCls
+        task = TaskCls(
+            task_id=_uuid.uuid4().hex[:12],
+            requester=target_agent_id,
+            description=description,
+            parent_run_id=parent_run_id,
+        )
+        task.mark_failed(error=f"Agent '{target_agent_id}' not found in registry")
+        return task
 
     def _build_task_message(self, task: "Task") -> str:
         """将 Task 输入侧字段组装为子 Agent 的 user_message。
