@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from ..tools.base import ToolDefinition
     from ..session.session import Session as SessionType
     from ..session.agent_run import AgentRun
+    from .task import Task
+    from .messaging import AgentMessaging
 
 
 # ============================================================================
@@ -74,6 +76,7 @@ class Agent:
         self,
         identity: AgentIdentity,
         runtime: AgentRuntime,
+        messaging: "AgentMessaging | None" = None,
         memory_dream: object = None,
         mcp_task: object = None,
         resume_manager: object = None,
@@ -83,12 +86,14 @@ class Agent:
         Args:
             identity: Agent 声明式约束（id/name/allowed_tools/system_prompt/...）
             runtime: Agent 纯执行设施（llm/tool_executor/conversation_mgr/...）
+            messaging: Agent 间通信层（可选，无则不启用 send）
             memory_dream: DeepDream 记忆蒸馏实例（可选）
             mcp_task: MCP 后台初始化 task（可选）
             resume_manager: 中断恢复管理器（可选）
         """
         self._identity: AgentIdentity = identity
         self._runtime: AgentRuntime = runtime
+        self._messaging: AgentMessaging | None = messaging
         self._memory_dream: object = memory_dream
         self._mcp_task: object = mcp_task
         self._resume_manager: object = resume_manager
@@ -162,6 +167,114 @@ class Agent:
             model=self._resolve_model(),
             max_loop_steps=self._identity.max_loop_steps,
         )
+
+    async def execute(self, task: "Task") -> "Task":
+        """主从式入口 —— 内部创建独立 Session，执行后返回填充完成的 Task。
+
+        输入 task 的 description/context/constraints/input_artifacts 已由父 Agent 填充。
+        执行完毕后填充 task 的 status/final_result/output_artifacts/error/sub_run_id。
+
+        Args:
+            task: 父 Agent 创建的任务描述
+
+        Returns:
+            携带执行结果的 task（就地修改后的同一对象）
+        """
+        import uuid as _uuid
+
+        # 创建独立 Session（与父 Agent 完全隔离）
+        child_session: "SessionType" = await self._runtime.session_mgr.create(
+            title=f"sub-{self.agent_id}-{_uuid.uuid4().hex[:6]}",
+            agent_id=self.agent_id,
+            model=self._resolve_model(),
+        )
+
+        task.mark_working()
+
+        # 组装 user_message
+        user_message: str = self._build_task_message(task)
+
+        try:
+            sub_run: "AgentRun" = await self._runtime.run(
+                session=child_session,
+                user_message=user_message,
+                system_prompt=self._resolve_system_prompt(),
+                tool_definitions=self._resolve_tool_definitions(),
+                model=self._resolve_model(),
+                max_loop_steps=self._identity.max_loop_steps,
+            )
+
+            if sub_run.end_status == "completed":
+                task.mark_completed(
+                    final_result=sub_run.final_output or "",
+                    sub_run_id=sub_run.run_id,
+                )
+            else:
+                task.mark_failed(error=sub_run.error or sub_run.end_status)
+                task.sub_run_id = sub_run.run_id
+        except Exception as e:
+            task.mark_failed(error=str(e))
+
+        return task
+
+    async def send(
+        self,
+        target_agent_id: str,
+        description: str,
+        context: str = "",
+        constraints: str = "",
+        parent_run_id: str = "",
+    ) -> "Task":
+        """发送 Task 给目标 Agent，阻塞等待执行完成。
+
+        Agent 的一等通信能力。对标 A2A tasks/send。
+
+        Args:
+            target_agent_id: 接收方 agent_id
+            description: 任务描述
+            context: 父 Agent 传入的上下文摘要
+            constraints: 约束条件
+            parent_run_id: 父 AgentRun.run_id
+
+        Returns:
+            携带执行结果的 Task
+
+        Raises:
+            RuntimeError: 如果 Agent 未配置 AgentMessaging
+        """
+        if self._messaging is None:
+            raise RuntimeError(
+                f"Agent '{self.agent_id}' has no messaging configured. "
+                "Use factory.build_agent() to create a fully wired agent."
+            )
+        return await self._messaging.send(
+            requester=self.agent_id,
+            target_agent_id=target_agent_id,
+            description=description,
+            context=context,
+            constraints=constraints,
+            parent_run_id=parent_run_id,
+        )
+
+    def _build_task_message(self, task: "Task") -> str:
+        """将 Task 输入侧字段组装为子 Agent 的 user_message。
+
+        description / context / constraints / input_artifacts 合并为一条消息。
+        """
+        from .task import TaskStatus
+
+        parts: list[str] = [task.description]
+        if task.context:
+            parts.append(f"\n[上游上下文]\n{task.context}")
+        if task.constraints:
+            parts.append(f"\n[约束]\n{task.constraints}")
+        if task.input_artifacts:
+            refs: str = "\n".join(
+                f"  - {a.name}: {a.uri or a.content[:200]}"
+                for a in task.input_artifacts
+            )
+            parts.append(f"\n[输入产物]\n{refs}")
+        return "\n\n".join(parts)
 
     async def process(
         self,

@@ -76,6 +76,38 @@ class AgentRuntime:
         self.config: Config | None = config
         self._running: bool = False
 
+    # ======================== 派生（多 Agent 隔离） ========================
+
+    def derive(self, *, channel: "Channel | None" = None,
+               mcp_provider: object = None) -> "AgentRuntime":
+        """派生 Runtime。共享 llm/memory/skills/assembler，隔离 channel。
+
+        每个子 Agent 调用一次，开销极小（引用复制，不新建重量对象）。
+
+        Args:
+            channel: 覆盖的 channel（默认 NullChannel，避免子 Agent 输出到用户终端）
+            mcp_provider: 覆盖的 MCP provider
+
+        Returns:
+            新的 AgentRuntime 实例，共享底层能力引用
+        """
+        if channel is None:
+            from ..channel.null import NullChannel
+            channel = NullChannel()
+
+        return AgentRuntime(
+            llm=self.llm,
+            tool_executor=self.tool_executor,
+            assembler=self.assembler,
+            session_mgr=self.session_mgr,
+            run_mgr=self.run_mgr,
+            channel=channel,
+            memory_mgr=self.memory_mgr,
+            skill_registry=self.skill_registry,
+            mcp_provider=mcp_provider if mcp_provider is not None else self.mcp_provider,
+            config=self.config,
+        )
+
     # ======================== 执行入口 ========================
 
     async def run(

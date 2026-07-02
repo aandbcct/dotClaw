@@ -325,6 +325,12 @@ async def build_agent(
     # ── AgentIdentity：直接从 YAML 加载 ──
     identity = load_id(agent_id=agent_id)
 
+    # ── AgentRegistry：加载所有 Agent 配置 ──
+    from dotclaw.agent.registry import AgentRegistry
+    agent_registry = AgentRegistry()
+    agent_config_dir = project_root / ".dotclaw" / "agentConfig"
+    agent_registry.load_all(agent_config_dir)
+
     # ── AgentRuntime：组装纯能力引用 ──
     runtime: AgentRuntime = AgentRuntime(
         llm=llm_proxy,
@@ -339,6 +345,10 @@ async def build_agent(
         config=config,
     )
 
+    # ── AgentMessaging：A2A 通信层 ──
+    from dotclaw.agent.messaging import AgentMessaging
+    messaging = AgentMessaging(registry=agent_registry, base_runtime=runtime)
+
     # ── 组装 Agent ──
     from dotclaw.agent.resume import ResumeManager
 
@@ -347,10 +357,16 @@ async def build_agent(
     agent: AgentCls = AgentCls(
         identity=identity,
         runtime=runtime,
+        messaging=messaging,
         memory_dream=memory_dream,
         mcp_task=mcp_task,
         resume_manager=resume_mgr,
     )
+
+    # ── 注册 spawn_agent 工具 ──
+    if tool_executor is not None:
+        from dotclaw.tools.builtin.spawn_tool import get_spawn_agent_handler
+        tool_executor.registry.register(get_spawn_agent_handler(agent))
 
     # ── 恢复上次 Session ──
     sessions: list = await session_mgr.list_all()

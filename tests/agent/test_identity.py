@@ -55,3 +55,52 @@ class TestAgentIdentity:
         identity = AgentIdentity(agent_id="test")
         result = identity.resolve_model("fallback-model")
         assert result == "fallback-model"
+
+
+class TestAgentIdentityCard:
+    """对标 A2A AgentCard 的新字段：capabilities / input_modes / output_modes。"""
+
+    def test_capabilities_default_empty(self) -> None:
+        """capabilities 默认空列表。"""
+        identity = AgentIdentity(agent_id="test")
+        assert identity.capabilities == []
+
+    def test_capabilities_explicit(self) -> None:
+        """capabilities 显式赋值。"""
+        identity = AgentIdentity(
+            agent_id="test",
+            capabilities=["web_search", "code_generation"],
+        )
+        assert identity.capabilities == ["web_search", "code_generation"]
+
+    def test_input_modes_default_text(self) -> None:
+        """input_modes 默认 ["text"]。"""
+        identity = AgentIdentity(agent_id="test")
+        assert identity.input_modes == ["text"]
+
+    def test_input_modes_explicit(self) -> None:
+        """input_modes 显式赋值。"""
+        identity = AgentIdentity(
+            agent_id="test",
+            input_modes=["text", "file"],
+        )
+        assert identity.input_modes == ["text", "file"]
+
+    def test_output_modes_default_text(self) -> None:
+        """output_modes 默认 ["text"]。"""
+        identity = AgentIdentity(agent_id="test")
+        assert identity.output_modes == ["text"]
+
+    def test_output_modes_explicit(self) -> None:
+        """output_modes 显式赋值。"""
+        identity = AgentIdentity(
+            agent_id="test",
+            output_modes=["text", "json", "file"],
+        )
+        assert identity.output_modes == ["text", "json", "file"]
+
+    def test_new_fields_are_frozen(self) -> None:
+        """新字段也受 frozen=True 约束。"""
+        identity = AgentIdentity(agent_id="test")
+        with pytest.raises(Exception):
+            identity.capabilities = ["other"]  # type: ignore[misc]
