@@ -1,15 +1,14 @@
 """Agent 角色抽象 —— Agent = AgentIdentity + AgentRuntime
 
-v2 架构：
-  Agent = Identity(声明式约束) + Runtime(纯执行设施)
-  Agent 使用 Session，不持有 Session
-  Agent 使用 Session，不持有 Session
-  AgentRuntime 是纯执行引擎，Identity 值由 Agent 预解析传入
+v3 架构（Runtime 重构）：
+  Agent = Identity（声明式约束） + Runtime（外部编排引擎）
+  Agent 不持有 Runtime，Runtime 是顶层基础设施。
+  Agent.process() 接收 Runtime 作为参数。
 
 职责：
-  - 持有 Identity + Runtime
-  - 提供 run(session, msg) 纯函数 API
-  - 桥接 Identity 与 Runtime（如用 allowed_tools 过滤 tool_executor）
+  - 持有 Identity
+  - 提供 process(runtime, session, msg) 入口
+  - 桥接 Identity 约束 + Runtime 能力
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .identity import AgentIdentity
-from .runtime import AgentRuntime
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -29,6 +27,7 @@ if TYPE_CHECKING:
     from ..session.agent_run import AgentRun
     from ..orchestration.task import Task
     from ..orchestration.messaging import AgentMessaging
+    from ..runtime.runtime import Runtime
 
 
 # ============================================================================
@@ -39,7 +38,7 @@ if TYPE_CHECKING:
 class LLMResponse:
     """一次 LLM 调用的完整返回。
 
-    AgentRuntime._invoke_llm() 返回此结构，用它判断下一步：
+    Runtime._invoke_llm() 返回此结构，用它判断下一步：
     有 tool_calls → 执行工具；没有 → 返回最终回复。
     """
 
@@ -66,17 +65,17 @@ class LLMResponse:
 class Agent:
     """Agent 角色抽象 —— Identity + Runtime 的桥梁。
 
-    v2 设计原则：
+    v3 设计原则：
     - 使用 Session，不持有 Session
-    - run(session, msg) 纯函数 API
-    - 桥接方法组合 Identity 约束 + Runtime 能力
+    - 不持有 Runtime，Runtime 由外部传入
+    - process(runtime, session, msg) 统一入口
     """
 
     def __init__(
         self,
         identity: AgentIdentity,
-        runtime: AgentRuntime,
-        messaging: "AgentMessaging | None" = None,
+        runtime: Runtime | None = None,
+        messaging: AgentMessaging | None = None,
         memory_dream: object = None,
         mcp_task: object = None,
         resume_manager: object = None,
@@ -85,14 +84,14 @@ class Agent:
 
         Args:
             identity: Agent 声明式约束（id/name/allowed_tools/system_prompt/...）
-            runtime: Agent 纯执行设施（llm/tool_executor/conversation_mgr/...）
+            runtime: Runtime 编排引擎（可选，process() 时也可传入）
             messaging: Agent 间通信层（可选，无则不启用 send）
             memory_dream: DeepDream 记忆蒸馏实例（可选）
             mcp_task: MCP 后台初始化 task（可选）
             resume_manager: 中断恢复管理器（可选）
         """
         self._identity: AgentIdentity = identity
-        self._runtime: AgentRuntime = runtime
+        self._runtime: Runtime | None = runtime
         self._messaging: AgentMessaging | None = messaging
         self._memory_dream: object = memory_dream
         self._mcp_task: object = mcp_task
@@ -106,8 +105,8 @@ class Agent:
         return self._identity
 
     @property
-    def runtime(self) -> AgentRuntime:
-        """Agent 纯执行设施。"""
+    def runtime(self) -> Runtime | None:
+        """Runtime 编排引擎（可能为 None，外部传入时使用）。"""
         return self._runtime
 
     @property
@@ -121,9 +120,11 @@ class Agent:
         return self._identity.agent_name
 
     @property
-    def config(self) -> "Config | None":
-        """全局配置（从 config.yaml 加载）。"""
-        return self._runtime.config
+    def config(self) -> Config | None:
+        """全局配置（从 Runtime 获取）。"""
+        if self._runtime is not None:
+            return self._runtime.config
+        return None
 
     @property
     def memory_dream(self) -> object:
@@ -135,46 +136,67 @@ class Agent:
     async def shutdown(self) -> None:
         """关闭 Agent 持有的所有运行时资源（MCP、后台 task 等）。"""
         if self._mcp_task is not None:
-            import asyncio as _asyncio
             task = self._mcp_task
             if hasattr(task, 'done') and not task.done():  # type: ignore[union-attr]
                 task.cancel()  # type: ignore[union-attr]
                 try:
                     await task  # type: ignore[union-attr]
-                except (_asyncio.CancelledError, Exception):
+                except (asyncio.CancelledError, Exception):
                     pass
-        mcp = self._runtime.mcp_provider
-        if mcp is not None and hasattr(mcp, 'shutdown'):
-            await mcp.shutdown()  # type: ignore[union-attr]
+        if self._runtime is not None:
+            mcp = self._runtime.mcp_provider
+            if mcp is not None and hasattr(mcp, 'shutdown'):
+                await mcp.shutdown()  # type: ignore[union-attr]
 
     # ======================== 公开 API ========================
 
-    async def run(self, session: "SessionType", user_message: str) -> "AgentRun":
-        """处理一条用户消息（纯执行，不持久化）。
+    async def process(
+        self,
+        runtime: Runtime,
+        session: SessionType,
+        user_message: str,
+        session_mgr: object,
+    ) -> AgentRun:
+        """处理一条用户消息（完整流程：执行 + 持久化）。
+
+        调度器职责：
+        1. 调用 Runtime.run() 执行
+        2. 成功时追加 Conversation 记录并保存 Session
 
         Args:
+            runtime: Runtime 编排引擎
             session: 运行时上下文
             user_message: 用户输入文本
+            session_mgr: SessionManager 实例
 
         Returns:
-            AgentRun（一次原子调用的完整记录）
+            AgentRun（执行结果，含 end_status）
         """
-        return await self._runtime.run(
-            session=session,
+        agent_run: AgentRun = await runtime.run(
+            thread_id=session.id,
+            agent=self,
             user_message=user_message,
-            system_prompt=self._resolve_system_prompt(),
-            tool_definitions=self._resolve_tool_definitions(),
-            model=self._resolve_model(),
-            max_loop_steps=self._identity.max_loop_steps,
         )
 
-    async def execute(self, task: "Task") -> "Task":
+        if agent_run.end_status == "completed":
+            final: str | None = agent_run.final_output
+            session.add_conversation(
+                user_query=user_message,
+                final_answer=final or "",
+                agent_run_ids=[agent_run.run_id],
+            )
+            await session_mgr.save(session)  # type:ignore[union-attr]
+
+        return agent_run
+
+    async def execute(self, runtime: Runtime, task: Task) -> Task:
         """主从式入口 —— 内部创建独立 Session，执行后返回填充完成的 Task。
 
         输入 task 的 description/context/constraints/input_artifacts 已由父 Agent 填充。
         执行完毕后填充 task 的 status/final_result/output_artifacts/error/sub_run_id。
 
         Args:
+            runtime: Runtime 编排引擎
             task: 父 Agent 创建的任务描述
 
         Returns:
@@ -183,10 +205,10 @@ class Agent:
         import uuid as _uuid
 
         # 创建独立 Session（与父 Agent 完全隔离）
-        child_session: "SessionType" = await self._runtime.session_mgr.create(
+        child_session: SessionType = await runtime.session_mgr.create(
             title=f"sub-{self.agent_id}-{_uuid.uuid4().hex[:6]}",
             agent_id=self.agent_id,
-            model=self._resolve_model(),
+            model=self._resolve_model(runtime),
         )
 
         task.mark_working()
@@ -195,13 +217,10 @@ class Agent:
         user_message: str = self._build_task_message(task)
 
         try:
-            sub_run: "AgentRun" = await self._runtime.run(
-                session=child_session,
+            sub_run: AgentRun = await runtime.run(
+                thread_id=child_session.id,
+                agent=self,
                 user_message=user_message,
-                system_prompt=self._resolve_system_prompt(),
-                tool_definitions=self._resolve_tool_definitions(),
-                model=self._resolve_model(),
-                max_loop_steps=self._identity.max_loop_steps,
             )
 
             if sub_run.end_status == "completed":
@@ -219,18 +238,20 @@ class Agent:
 
     async def send(
         self,
+        runtime: Runtime,
         target_agent_id: str,
         description: str,
         context: str = "",
         constraints: str = "",
         parent_run_id: str = "",
-    ) -> "Task":
+    ) -> Task:
         """发送 Task 给目标 Agent，阻塞等待执行完成。
 
         Agent 的一等通信能力。对标 A2A tasks/send。
         内部完成：路由 → 构造 Task → 创建子Agent → execute → 等待结果。
 
         Args:
+            runtime: Runtime 编排引擎
             target_agent_id: 接收方 agent_id
             description: 任务描述
             context: 父 Agent 传入的上下文摘要
@@ -258,7 +279,7 @@ class Agent:
             return self._build_failed_task(target_agent_id, description, parent_run_id)
 
         # 构造 Task
-        task: "Task" = _Task(
+        task: Task = _Task(
             task_id=_uuid.uuid4().hex[:12],
             requester=target_agent_id,
             description=description,
@@ -271,18 +292,18 @@ class Agent:
         self._messaging.send(task, identity)
 
         # 创建子 Agent（独立 Runtime + Session）
-        child_runtime = self._runtime.derive()
+        child_runtime = runtime.derive()
         child_agent: Agent = Agent(identity=identity, runtime=child_runtime)
 
         # 执行并等待
-        return await child_agent.execute(task)
+        return await child_agent.execute(child_runtime, task)
 
     @staticmethod
-    def _build_failed_task(target_agent_id: str, description: str, parent_run_id: str) -> "Task":
+    def _build_failed_task(target_agent_id: str, description: str, parent_run_id: str) -> Task:
         """构造一个标记为 failed 的 Task（目标 Agent 不存在时使用）。"""
         import uuid as _uuid
         from ..orchestration.task import Task as _Task
-        task = _Task(
+        task: Task = _Task(
             task_id=_uuid.uuid4().hex[:12],
             requester=target_agent_id,
             description=description,
@@ -291,7 +312,7 @@ class Agent:
         task.mark_failed(error=f"Agent '{target_agent_id}' not found in registry")
         return task
 
-    def _build_task_message(self, task: "Task") -> str:
+    def _build_task_message(self, task: Task) -> str:
         """将 Task 输入侧字段组装为子 Agent 的 user_message。
 
         description / context / constraints / input_artifacts 合并为一条消息。
@@ -309,71 +330,32 @@ class Agent:
             parts.append(f"\n[输入产物]\n{refs}")
         return "\n\n".join(parts)
 
-    async def process(
-        self,
-        session: "SessionType",
-        user_message: str,
-        session_mgr: "object",
-    ) -> "AgentRun":
-        """处理一条用户消息（完整流程：执行 + 状态记录 + 持久化）。
-
-        调度器职责：
-        1. 创建 AgentState 并开始计时
-        2. 调用 run() 执行
-        3. 累加 AgentState
-        4. 成功时追加 Conversation 记录并保存 Session
-
-        Args:
-            session: 运行时上下文
-            user_message: 用户输入文本
-            session_mgr: SessionManager 实例
-
-        Returns:
-            AgentRun（执行结果，含 end_status）
-        """
-        import uuid
-        from ..session.agent_state import AgentState
-
-        state: AgentState = AgentState(
-            request_id=uuid.uuid4().hex[:8],
-        )
-
-        agent_run: "AgentRun" = await self.run(session, user_message)
-        state.accumulate(agent_run)
-
-        if agent_run.end_status == "completed":
-            final: str | None = agent_run.final_output
-            session.add_conversation(
-                user_query=user_message,
-                final_answer=final or "",
-                agent_run_ids=state.agent_run_ids,
-            )
-            await session_mgr.save(session)  # type:ignore[union-attr]
-            state.finish("completed")
-        else:
-            state.finish("failed", agent_run.error)
-
-        return agent_run
-
     # ======================== 配置解析（桥接方法） ========================
 
-    def _resolve_model(self) -> str:
+    def _resolve_model(self, runtime: Runtime | None = None) -> str:
         """解析最终使用的模型名。
 
-        优先级：Identity.model > config.llm.default_model
+        优先级：Identity.model > Config.llm.default_model
+
+        Args:
+            runtime: Runtime 实例（用于获取 Config）
 
         Returns:
             模型名
         """
-        if self._runtime.config is not None:
-            return self._identity.resolve_model(self._runtime.config.llm.default_model)
+        rt: Runtime | None = runtime or self._runtime
+        if rt is not None and rt.config is not None:
+            return self._identity.resolve_model(rt.config.llm.default_model)
         return self._identity.model
 
-    def _resolve_system_prompt(self) -> str:
+    def _resolve_system_prompt(self, runtime: Runtime | None = None) -> str:
         """解析最终 system prompt。
 
-        优先级：Identity.system_prompt_template > config.agent.system_prompt
+        优先级：Identity.system_prompt_template > Config.agent.system_prompt
         Identity 内部完成 {agent_name} / {workspace} 占位符替换。
+
+        Args:
+            runtime: Runtime 实例（用于获取 Config）
 
         Returns:
             最终 system prompt 文本
@@ -381,24 +363,28 @@ class Agent:
         resolved: str = self._identity.resolve_system_prompt()
         if resolved:
             return resolved
-        if self._runtime.config is not None:
-            return self._runtime.config.agent.system_prompt
+        rt: Runtime | None = runtime or self._runtime
+        if rt is not None and rt.config is not None:
+            return rt.config.agent.system_prompt
         return ""
 
-    def _resolve_tool_definitions(self) -> list["ToolDefinition"]:
+    def _resolve_tool_definitions(self, runtime: Runtime | None = None) -> list[ToolDefinition]:
         """Identity 约束 Runtime: 根据 Identity.allowed_tools 过滤工具定义。
 
         如果 allowed_tools 为空，返回所有已注册工具。
         如果 tool_executor 未初始化，返回空列表。
 
+        Args:
+            runtime: Runtime 实例（用于获取 tool_executor）
+
         Returns:
             过滤后的工具定义列表
         """
-        executor = self._runtime.tool_executor
-        if executor is None:
+        rt: Runtime | None = runtime or self._runtime
+        if rt is None or rt.tool_executor is None:
             return []
 
-        all_defs: list["ToolDefinition"] = executor.get_definitions()
+        all_defs: list[ToolDefinition] = rt.tool_executor.get_definitions()
 
         allowed: list[str] = self._identity.allowed_tools
         if not allowed:

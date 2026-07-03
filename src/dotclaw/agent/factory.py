@@ -280,8 +280,8 @@ def _build_assembler():
 async def build_agent(
     agent_id: str | None = None,
     channel: Any = None,
-) -> tuple["Agent", "SessionManager"]:
-    """装配一个完全就绪的 Agent 实例。
+) -> tuple[AgentCls, Runtime, SessionManager]:
+    """装配一个完全就绪的 Agent + Runtime + SessionManager。
 
     从 config.yaml + agent YAML + 上次状态重建所有依赖。
 
@@ -290,13 +290,13 @@ async def build_agent(
         channel: 通信通道
 
     Returns:
-        (Agent, SessionManager)
+        (Agent, Runtime, SessionManager)
     """
     from dotclaw.config import get_config, _find_project_root
     from dotclaw.session.session import SessionManager
     from dotclaw.agent import Agent as AgentCls
     from dotclaw.agent.identity import load_agent_config as load_id
-    from dotclaw.agent.runtime import AgentRuntime
+    from dotclaw.runtime import Runtime, SQLiteStateStore
 
     config = get_config()
     project_root = _find_project_root()
@@ -333,19 +333,21 @@ async def build_agent(
     agent_config_dir = project_root / ".dotclaw" / "agentConfig"
     agent_registry.load_all(agent_config_dir)
 
-    # ── AgentRuntime：组装纯能力引用 ──
-    runtime: AgentRuntime = AgentRuntime(
+    # ── Runtime：编排引擎 ──
+    state_store = SQLiteStateStore(project_root / "data" / "state.db")
+    runtime: Runtime = Runtime(
         llm=llm_proxy,
         tool_executor=tool_executor,
         assembler=assembler,
+        state_store=state_store,
         session_mgr=session_mgr,
         run_mgr=run_mgr,
+        agent_registry=agent_registry,
         channel=channel,
         memory_mgr=memory_mgr,
         skill_registry=skill_registry,
         mcp_provider=mcp_provider,
         config=config,
-        agent_registry=agent_registry,
     )
 
     # ── AgentMessaging：A2A 通信层（纯路由+追踪，不持有 runtime）──
@@ -398,4 +400,4 @@ async def build_agent(
     })
 
     logger.info("Agent [%s] 就绪，session: %s", agent.agent_id, current_session.id)
-    return agent, session_mgr
+    return agent, runtime, session_mgr
