@@ -296,7 +296,7 @@ async def build_agent(
     from dotclaw.session.session import SessionManager
     from dotclaw.agent import Agent as AgentCls
     from dotclaw.agent.identity import load_agent_config as load_id
-    from dotclaw.runtime import Runtime, SQLiteStateStore
+    from dotclaw.runtime import Runtime
 
     config = get_config()
     project_root = _find_project_root()
@@ -334,12 +334,10 @@ async def build_agent(
     agent_registry.load_all(agent_config_dir)
 
     # ── Runtime：编排引擎 ──
-    state_store = SQLiteStateStore(project_root / "data" / "state.db")
     runtime: Runtime = Runtime(
         llm=llm_proxy,
         tool_executor=tool_executor,
         assembler=assembler,
-        state_store=state_store,
         session_mgr=session_mgr,
         run_mgr=run_mgr,
         agent_registry=agent_registry,

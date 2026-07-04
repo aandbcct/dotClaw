@@ -41,11 +41,6 @@ class FakeSkillRegistry:
     pass
 
 
-class FakeStateStore:
-    """测试用假 StateStore。"""
-    pass
-
-
 class FakeAgentRegistry:
     """测试用假 AgentRegistry。"""
     pass
@@ -66,7 +61,6 @@ class TestRuntimeDerive:
             llm=FakeLLM(),
             tool_executor=FakeToolExecutor(),
             assembler=FakeAssembler(),
-            state_store=FakeStateStore(),
             agent_registry=FakeAgentRegistry(),
             session_mgr=FakeSessionManager(),
             run_mgr=FakeRunManager(),
@@ -99,11 +93,6 @@ class TestRuntimeDerive:
         """derive 后 skill_registry 引用相同。"""
         derived = runtime.derive()
         assert derived.skill_registry is runtime.skill_registry
-
-    def test_derive_shares_state_store(self, runtime: Runtime) -> None:
-        """derive 后 state_store 引用相同。"""
-        derived = runtime.derive()
-        assert derived.state_store is runtime.state_store
 
     def test_derive_shares_agent_registry(self, runtime: Runtime) -> None:
         """derive 后 agent_registry 引用相同。"""

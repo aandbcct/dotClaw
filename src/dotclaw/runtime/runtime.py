@@ -1,27 +1,24 @@
 """Runtime —— Agent 编排引擎。
 
 Runtime 是 dotClaw 的基础设施层，提供：
-- 状态持久化与恢复（StateStore）
 - 任务调度与循环控制（TaskState 状态机）
 - LLM 调用与工具执行协调
 - Handoff 多 Agent 流转
 
 架构关系：
     Runtime（编排引擎）
-      ├── StateStore → State（持久状态）
       ├── TaskState（状态机）→ 驱动 ReAct 循环
       └── Agent（无状态配置）→ 作为 Runtime.run() 的入参
 
 内部逻辑（原子操作封装为方法）：
 1. run() — 公开入口，协调完整执行流程
-2. _load_or_create_state() — 加载或创建 State
-3. _create_task() — 创建 TaskState 实例
-4. _invoke_llm() — 调用 LLM，返回 LLMResponse
-5. _execute_tools() — 执行工具调用，返回结果
-6. _build_messages() — 构建 LLM 输入消息
-7. _build_slot_context() — 构建 SlotContext 给 Assembler
-8. _build_agent_run() — 从 TaskState 构建 AgentRun
-9. _handle_handoff() — 处理 Agent 间任务流转
+2. _create_task() — 创建 TaskState 实例
+3. _invoke_llm() — 调用 LLM，返回 LLMResponse
+4. _execute_tools() — 执行工具调用，返回结果
+5. _build_messages() — 构建 LLM 输入消息
+6. _build_slot_context() — 构建 SlotContext 给 Assembler
+7. _build_agent_run() — 从 TaskState 构建 AgentRun
+8. _handle_handoff() — 处理 Agent 间任务流转
 """
 
 from __future__ import annotations
@@ -36,7 +33,6 @@ from typing import TYPE_CHECKING
 
 from ..llm.base import Message
 from .task_state import (
-    TaskPhase,
     TaskAction,
     TaskStatus,
     TaskState,
@@ -58,8 +54,6 @@ if TYPE_CHECKING:
     from ..session.agent_run import AgentRun, AgentRunManager
     from ..orchestration.registry import AgentRegistry
     from ..config import Config
-    from .state import State
-    from .state_store import StateStore
 
 
 def _find_project_root() -> Path:
@@ -79,18 +73,16 @@ class Runtime:
     Agent 是 Runtime 上调度的无状态"程序"（配置+Prompt+Tools）。
 
     核心循环：
-        1. 加载 State
-        2. 创建 TaskState
-        3. 发送 TaskStartEvent → 进入状态机循环
-        4. 根据 TaskAction 执行 LLM 调用或工具执行
-        5. Handoff 时递归创建新 Task
-        6. 结束后保存 State 和 AgentRun
+        1. 创建 TaskState
+        2. 发送 TaskStartEvent → 进入状态机循环
+        3. 根据 TaskAction 执行 LLM 调用或工具执行
+        4. Handoff 时递归创建新 Task
+        5. 结束后保存 AgentRun
 
     Args:
         llm: LLM 代理，处理所有 LLM 调用
         tool_executor: 工具执行器
         assembler: 上下文组装器（构建 system_prompt）
-        state_store: State 持久化存储
         agent_registry: Agent 注册表（用于 handoff 路由）
         session_mgr: Session 管理器
         run_mgr: AgentRun 持久化管理器
@@ -105,7 +97,6 @@ class Runtime:
         llm: LLMProxy,
         tool_executor: ToolExecutor | None,
         assembler: ContextAssembler | None,
-        state_store: StateStore,
         agent_registry: AgentRegistry,
         session_mgr: SessionManager,
         run_mgr: AgentRunManager,
@@ -118,7 +109,6 @@ class Runtime:
         self.llm: LLMProxy = llm
         self.tool_executor: ToolExecutor | None = tool_executor
         self.assembler: ContextAssembler | None = assembler
-        self.state_store: StateStore = state_store
         self.agent_registry: AgentRegistry = agent_registry
         self.session_mgr: SessionManager = session_mgr
         self.run_mgr: AgentRunManager = run_mgr
@@ -131,7 +121,7 @@ class Runtime:
     # ======================== 派生（多 Agent 隔离） ========================
 
     def derive(self, *, channel: Channel | None = None) -> Runtime:
-        """派生 Runtime。共享 llm/state_store/skills，隔离 channel。
+        """派生 Runtime。共享 llm/skills/registry，隔离 channel。
 
         每个子 Agent 调用一次，开销极小（引用复制，不新建重量对象）。
 
@@ -149,7 +139,6 @@ class Runtime:
             llm=self.llm,
             tool_executor=self.tool_executor,
             assembler=self.assembler,
-            state_store=self.state_store,
             agent_registry=self.agent_registry,
             session_mgr=self.session_mgr,
             run_mgr=self.run_mgr,
@@ -171,14 +160,13 @@ class Runtime:
         """执行一次 Agent 任务。
 
         完整流程：
-        1. 从 StateStore 加载或创建 State
-        2. 创建 TaskState 并发送 TaskStartEvent
-        3. 进入状态机循环：根据 TaskAction 执行对应操作
-        4. Handoff 时递归调用 self.run(target_agent)
-        5. 结束后保存 State 和 AgentRun
+        1. 创建 TaskState 并发送 TaskStartEvent
+        2. 进入状态机循环：根据 TaskAction 执行对应操作
+        3. Handoff 时递归调用 self.run(target_agent)
+        4. 结束后保存 AgentRun
 
         Args:
-            thread_id: Session ID，State 的主键
+            thread_id: Session ID
             agent: 要执行的 Agent 实例（配置+Prompt+Tools）
             user_message: 用户输入文本
 
@@ -191,24 +179,15 @@ class Runtime:
         tool_definitions: list[ToolDefinition] = agent._resolve_tool_definitions()
         max_iterations: int = agent.identity.max_loop_steps
 
-        state: State = await self._load_or_create_state(thread_id)
         task: TaskState = self._create_task(thread_id, agent_id, max_iterations)
-
         run_id: str = task.task_id
         started_at: str = datetime.now(timezone.utc).isoformat()
         start_time: float = time.time()
 
-        # 创建 AgentRun 记录
-        agent_run: AgentRun = await self._create_agent_run_record(
-            run_id=run_id,
-            agent_id=agent_id,
-            started_at=started_at,
-        )
-
         # 发送启动事件
         action: TaskAction = task.handle_event(TaskStartEvent(user_message))
 
-        # 本地消息历史（当前执行周期内的 transient 消息）
+        # 本地消息历史（当前执行周期内累积的所有消息）
         all_messages: list[Message] = []
         tokens_in_total: int = 0
         tokens_out_total: int = 0
@@ -220,7 +199,6 @@ class Runtime:
                 user_message=user_message,
                 system_prompt=system_prompt,
                 tool_definitions=tool_definitions,
-                state=state,
             )
 
             if self.assembler is not None:
@@ -235,7 +213,7 @@ class Runtime:
                         messages = self._build_messages(
                             user_input=user_message,
                             system_prompt=system_prompt,
-                            history=state.messages + all_messages,
+                            history=all_messages,
                         )
                         resp: LLMResponse = await self._invoke_llm(
                             messages=messages,
@@ -248,7 +226,6 @@ class Runtime:
                         # 记录 assistant 消息
                         asst_msg: Message = self._llm_response_to_message(resp)
                         all_messages.append(asst_msg)
-                        state.add_message(asst_msg)
 
                         # 喂入状态机
                         action = task.handle_event(LLMResponseEvent(resp))
@@ -258,9 +235,7 @@ class Runtime:
                         results, stop_signal, handoff_signal, tool_error = (
                             await self._execute_tools(task)
                         )
-                        for tr in results:
-                            all_messages.append(tr)
-                            state.add_message(tr)
+                        all_messages.extend(results)
 
                         # 喂入状态机
                         action = task.handle_event(ToolsDoneEvent(
@@ -271,10 +246,6 @@ class Runtime:
                         ))
 
                     case TaskAction.HANDOFF_TARGET:
-                        # 保存当前状态
-                        state.touch()
-                        await self.state_store.save(state)
-
                         # 递归执行 handoff
                         handoff_agent = task.handoff_target or ""
                         handoff_ctx = task.handoff_context or ""
@@ -311,34 +282,12 @@ class Runtime:
             ended_at=ended_at,
         )
 
-        # 持久化
-        state.touch()
-        await self.state_store.save(state)
+        # 持久化 AgentRun
         await self.run_mgr.save(agent_run)
 
         return agent_run
 
-    # ======================== 原子操作：状态管理 ========================
-
-    async def _load_or_create_state(self, thread_id: str) -> State:
-        """加载或创建 State。
-
-        原子操作：
-        1. 从 StateStore 查询
-        2. 不存在则创建新实例
-
-        Args:
-            thread_id: Session ID
-
-        Returns:
-            State 实例
-        """
-        from .state import State as StateCls
-
-        state: StateCls | None = await self.state_store.get(thread_id)
-        if state is not None:
-            return state
-        return StateCls.new(thread_id)
+    # ======================== 原子操作：Task 创建 ========================
 
     def _create_task(
         self,
@@ -368,32 +317,6 @@ class Runtime:
             max_iterations=max_iterations,
         )
 
-    async def _create_agent_run_record(
-        self,
-        run_id: str,
-        agent_id: str,
-        started_at: str,
-    ) -> AgentRun:
-        """创建 AgentRun 记录并持久化。
-
-        Args:
-            run_id: Run ID
-            agent_id: Agent ID
-            started_at: 开始时间
-
-        Returns:
-            创建好的 AgentRun 实例
-        """
-        from ..session.agent_run import AgentRun as AR
-
-        run: AR = AR(
-            run_id=run_id,
-            agent_id=agent_id,
-            started_at=started_at,
-        )
-        await self.run_mgr.save(run)
-        return run
-
     # ======================== 原子操作：LLM 调用 ========================
 
     def _build_slot_context(
@@ -402,7 +325,6 @@ class Runtime:
         user_message: str,
         system_prompt: str,
         tool_definitions: list[ToolDefinition],
-        state: State,
     ) -> SlotContext:
         """构建 SlotContext 供 Assembler 使用。
 
@@ -411,7 +333,6 @@ class Runtime:
             user_message: 用户输入
             system_prompt: system prompt 模板
             tool_definitions: 工具定义列表
-            state: 当前 State
 
         Returns:
             SlotContext 实例
@@ -455,7 +376,7 @@ class Runtime:
         Args:
             user_input: 用户输入文本
             system_prompt: system prompt 文本
-            history: 消息历史（State.messages + 本地 transient 消息）
+            history: 当前执行周期内累积的消息历史
 
         Returns:
             LLM 输入消息列表
@@ -634,7 +555,7 @@ class Runtime:
     def _detect_stop_signal(self, tool_messages: list[Message]) -> bool:
         """检测工具结果中是否包含停止信号。
 
-        目前检测规则：工具名包含 "task_complete" 或 "stop"。
+        目前检测规则：工具结果内容包含 "TASK_COMPLETE"。
         未来可扩展为从 ToolResult.metadata 中读取。
 
         Args:
@@ -651,7 +572,7 @@ class Runtime:
     def _detect_handoff_signal(self, tool_messages: list[Message]) -> bool:
         """检测工具结果中是否包含 handoff 信号。
 
-        目前检测规则：工具名包含 "delegate" 或 "handoff"。
+        目前检测规则：工具结果内容包含 "HANDOFF"。
         未来可扩展为从 ToolResult.metadata 中读取。
 
         Args:
@@ -704,10 +625,10 @@ class Runtime:
 
         child_agent: AgentCls = AgentCls(
             identity=target_identity,
-            runtime=self,  # 将 Runtime 传给 Agent（Agent 需要其 run 方法）
+            runtime=self,
         )
 
-        # 递归执行（同一 thread_id，同一 State）
+        # 递归执行（同一 thread_id）
         return await self.run(
             thread_id=thread_id,
             agent=child_agent,

@@ -12,7 +12,6 @@ class TestRuntime:
             llm=None,  # type: ignore[arg-type]
             tool_executor=None,
             assembler=None,
-            state_store=None,  # type: ignore[arg-type]
             agent_registry=None,  # type: ignore[arg-type]
             session_mgr=None,  # type: ignore[arg-type]
             run_mgr=None,  # type: ignore[arg-type]
@@ -21,7 +20,6 @@ class TestRuntime:
         assert runtime.llm is None
         assert runtime.tool_executor is None
         assert runtime.assembler is None
-        assert runtime.state_store is None
         assert runtime.agent_registry is None
         assert runtime.session_mgr is None
         assert runtime.run_mgr is None
@@ -33,7 +31,6 @@ class TestRuntime:
             llm=None,  # type: ignore[arg-type]
             tool_executor=None,
             assembler=None,
-            state_store=None,  # type: ignore[arg-type]
             agent_registry=None,  # type: ignore[arg-type]
             session_mgr=None,  # type: ignore[arg-type]
             run_mgr=None,  # type: ignore[arg-type]
