@@ -1,23 +1,24 @@
 """Runtime —— Agent 编排引擎。
 
 Runtime 是 dotClaw 的基础设施层，提供：
-- 任务调度与循环控制（TaskState 状态机）
+- Agent 调度与循环控制（AgentState 状态机）
 - LLM 调用与工具执行协调
 - Handoff 多 Agent 流转
 
 架构关系：
     Runtime（编排引擎）
-      ├── TaskState（状态机）→ 驱动 ReAct 循环
+      ├── AgentState（状态机）→ 驱动 ReAct 循环
+      ├── Task（内部问题拆解）→ Agent 的计划-执行子任务
       └── Agent（无状态配置）→ 作为 Runtime.run() 的入参
 
 内部逻辑（原子操作封装为方法）：
 1. run() — 公开入口，协调完整执行流程
-2. _create_task() — 创建 TaskState 实例
+2. _create_agent_state() — 创建 AgentState 实例
 3. _invoke_llm() — 调用 LLM，返回 LLMResponse
 4. _execute_tools() — 执行工具调用，返回结果
 5. _build_messages() — 构建 LLM 输入消息
 6. _build_slot_context() — 构建 SlotContext 给 Assembler
-7. _build_agent_run() — 从 TaskState 构建 AgentRun
+7. _build_agent_run() — 从 AgentState 构建 AgentRun
 8. _handle_handoff() — 处理 Agent 间任务流转
 """
 
@@ -32,11 +33,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..llm.base import Message
-from .task_state import (
-    TaskAction,
-    TaskStatus,
-    TaskState,
-    TaskStartEvent,
+from .agent_state import (
+    AgentAction,
+    AgentStatus,
+    AgentState,
+    AgentStartEvent,
     LLMResponseEvent,
     ToolsDoneEvent,
 )
@@ -73,9 +74,9 @@ class Runtime:
     Agent 是 Runtime 上调度的无状态"程序"（配置+Prompt+Tools）。
 
     核心循环：
-        1. 创建 TaskState
-        2. 发送 TaskStartEvent → 进入状态机循环
-        3. 根据 TaskAction 执行 LLM 调用或工具执行
+        1. 创建 AgentState
+        2. 发送 AgentStartEvent → 进入状态机循环
+        3. 根据 AgentAction 执行 LLM 调用或工具执行
         4. Handoff 时递归创建新 Task
         5. 结束后保存 AgentRun
 
@@ -160,8 +161,8 @@ class Runtime:
         """执行一次 Agent 任务。
 
         完整流程：
-        1. 创建 TaskState 并发送 TaskStartEvent
-        2. 进入状态机循环：根据 TaskAction 执行对应操作
+        1. 创建 AgentState 并发送 AgentStartEvent
+        2. 进入状态机循环：根据 AgentAction 执行对应操作
         3. Handoff 时递归调用 self.run(target_agent)
         4. 结束后保存 AgentRun
 
@@ -179,13 +180,13 @@ class Runtime:
         tool_definitions: list[ToolDefinition] = agent._resolve_tool_definitions()
         max_iterations: int = agent.identity.max_loop_steps
 
-        task: TaskState = self._create_task(thread_id, agent_id, max_iterations)
+        task: AgentState = self._create_agent_state(thread_id, agent_id, max_iterations)
         run_id: str = task.task_id
         started_at: str = datetime.now(timezone.utc).isoformat()
         start_time: float = time.time()
 
         # 发送启动事件
-        action: TaskAction = task.handle_event(TaskStartEvent(user_message))
+        action: AgentAction = task.handle_event(AgentStartEvent(user_message))
 
         # 本地消息历史（当前执行周期内累积的所有消息）
         all_messages: list[Message] = []
@@ -208,7 +209,7 @@ class Runtime:
             # ── 状态机主循环 ──
             while not task.is_terminal:
                 match action:
-                    case TaskAction.INVOKE_LLM:
+                    case AgentAction.INVOKE_LLM:
                         # 构建消息并调用 LLM
                         messages = self._build_messages(
                             user_input=user_message,
@@ -230,7 +231,7 @@ class Runtime:
                         # 喂入状态机
                         action = task.handle_event(LLMResponseEvent(resp))
 
-                    case TaskAction.EXECUTE_TOOLS:
+                    case AgentAction.EXECUTE_TOOLS:
                         # 执行工具调用
                         results, stop_signal, handoff_signal, tool_error = (
                             await self._execute_tools(task)
@@ -245,7 +246,7 @@ class Runtime:
                             tool_error=tool_error,
                         ))
 
-                    case TaskAction.HANDOFF_TARGET:
+                    case AgentAction.HANDOFF_TARGET:
                         # 递归执行 handoff
                         handoff_agent = task.handoff_target or ""
                         handoff_ctx = task.handoff_context or ""
@@ -256,15 +257,15 @@ class Runtime:
                             parent_run_id=run_id,
                         )
 
-                    case TaskAction.FINALIZE:
+                    case AgentAction.FINALIZE:
                         break
 
-                    case TaskAction.WAIT:
+                    case AgentAction.WAIT:
                         # WAIT 不应在循环中出现（TRUNCATED 在 _transition 中已处理）
                         break
 
         except Exception as e:
-            task.end_status = TaskStatus.FAILED
+            task.end_status = AgentStatus.FAILED
             task.error_message = f"{type(e).__name__}: {e}"
 
         # ── 构建最终 AgentRun ──
@@ -287,30 +288,30 @@ class Runtime:
 
         return agent_run
 
-    # ======================== 原子操作：Task 创建 ========================
+    # ======================== 原子操作：AgentState 创建 ========================
 
-    def _create_task(
+    def _create_agent_state(
         self,
         thread_id: str,
         agent_id: str,
         max_iterations: int,
-    ) -> TaskState:
-        """创建 TaskState 实例。
+    ) -> AgentState:
+        """创建 AgentState 实例。
 
         原子操作：
         1. 生成 task_id
-        2. 构造 TaskState
+        2. 构造 AgentState
 
         Args:
             thread_id: Session ID
-            agent_id: 执行此 Task 的 Agent ID
+            agent_id: 执行此 AgentRun 的 Agent ID
             max_iterations: 最大迭代次数
 
         Returns:
-            初始化好的 TaskState
+            初始化好的 AgentState
         """
         task_id: str = uuid.uuid4().hex[:8]
-        return TaskState(
+        return AgentState(
             task_id=task_id,
             thread_id=thread_id,
             agent_id=agent_id,
@@ -465,7 +466,7 @@ class Runtime:
 
     async def _execute_tools(
         self,
-        task: TaskState,
+        task: AgentState,
     ) -> tuple[list[Message], bool, bool, bool]:
         """执行当前 LLM 响应中的工具调用。
 
@@ -475,7 +476,7 @@ class Runtime:
         3. 分析结果中的 stop/handoff 信号
 
         Args:
-            task: 当前 TaskState
+            task: 当前 AgentState
 
         Returns:
             (results, stop_signal, handoff_signal, tool_error)
@@ -655,7 +656,7 @@ class Runtime:
 
     @staticmethod
     def _build_agent_run(
-        task: TaskState,
+        task: AgentState,
         run_id: str,
         agent_id: str,
         all_messages: list[Message],
@@ -664,14 +665,14 @@ class Runtime:
         duration_ms: int,
         ended_at: str,
     ) -> AgentRun:
-        """从 TaskState 构建 AgentRun。
+        """从 AgentState 构建 AgentRun。
 
         原子操作：
-        1. 映射 TaskStatus → AgentRun.end_status
+        1. 映射 AgentStatus → AgentRun.end_status
         2. 填充所有字段
 
         Args:
-            task: 完成的 TaskState
+            task: 完成的 AgentState
             run_id: Run ID
             agent_id: Agent ID
             all_messages: 所有累积的消息
@@ -685,11 +686,11 @@ class Runtime:
         """
         from ..session.agent_run import AgentRun as AR
 
-        status_mapping: dict[TaskStatus, str] = {
-            TaskStatus.COMPLETED: "completed",
-            TaskStatus.HANDOFF: "handoff",
-            TaskStatus.FAILED: "failed",
-            TaskStatus.RUNNING: "completed",
+        status_mapping: dict[AgentStatus, str] = {
+            AgentStatus.COMPLETED: "completed",
+            AgentStatus.HANDOFF: "handoff",
+            AgentStatus.FAILED: "failed",
+            AgentStatus.RUNNING: "completed",
         }
 
         return AR(

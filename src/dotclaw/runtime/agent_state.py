@@ -1,14 +1,14 @@
-"""TaskState —— 任务级状态机。
+"""AgentState —— Agent 运行时状态机。
 
-TaskState 是单次 AgentRun 的执行状态机，驱动 ReAct 循环。
-采用事件驱动模式：Runtime 喂入事件 → 状态机转换 phase → 返回下一步动作。
+AgentState 是单次 AgentRun 的执行状态机，驱动 ReAct 循环。
+采用事件驱动模式：Runtime 喂入事件 → 状态机转换 phase → 返回下一步动作（AgentAction）。
 
 架构层级：
-    State（会话级持久状态，与 thread_id 绑定）
-      └── TaskState（任务级状态机，单次 AgentRun 生命周期）
+    AgentState（任务级状态机，单次 AgentRun 生命周期）
+      └── tasks: list[Task]（Agent 内部问题拆解的子任务清单）
 
-TaskState 不持有 LLM/Tool 等执行能力——它只决策"下一步该做什么"，
-实际执行由 Runtime 根据返回的 TaskAction 完成。
+AgentState 不持有 LLM/Tool 等执行能力——它只决策"下一步该做什么"，
+实际执行由 Runtime 根据返回的 AgentAction 完成。
 
 内部逻辑（原子操作封装为方法）：
 1. handle_event() — 事件分发入口
@@ -25,18 +25,18 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 from ..agent.agent import LLMResponse
 from ..llm.base import Message
+from .task import Task
 
 
 # ============================================================================
 # 枚举定义
 # ============================================================================
 
-class TaskPhase(Enum):
-    """TaskState 的执行阶段。
+class AgentPhase(Enum):
+    """AgentState 的执行阶段。
 
     状态机沿此枚举进行转换：
         IDLE → THINKING → ACTING → THINKING → ... → RESPONDING → DONE
@@ -72,8 +72,8 @@ class TaskPhase(Enum):
     """终止状态：执行异常"""
 
 
-class TaskAction(Enum):
-    """TaskState 返回给 Runtime 的执行指令。
+class AgentAction(Enum):
+    """AgentState 返回给 Runtime 的执行指令。
 
     每个 action 对应 Runtime 需要执行的具体操作。
     """
@@ -85,17 +85,17 @@ class TaskAction(Enum):
     """执行 LLM 返回的工具调用"""
 
     FINALIZE = "finalize"
-    """结束当前 Task，构建 AgentRun 返回"""
+    """结束当前 AgentRun，构建结果返回"""
 
     HANDOFF_TARGET = "handoff_target"
-    """执行 handoff：停止当前 Task 并将控制权转交目标 Agent"""
+    """执行 handoff：停止当前 AgentRun 并将控制权转交目标 Agent"""
 
     WAIT = "wait"
     """等待状态，无操作（用于跨状态自动转换的中间步骤）"""
 
 
-class TaskStatus(Enum):
-    """Task 的最终结束状态。
+class AgentStatus(Enum):
+    """AgentRun 的最终结束状态。
 
     最终写入 AgentRun.end_status。
     """
@@ -114,9 +114,9 @@ class TaskStatus(Enum):
 
 
 # 终止状态的集合
-_TERMINAL_PHASES: frozenset[TaskPhase] = frozenset({
-    TaskPhase.DONE,
-    TaskPhase.FAILED,
+_TERMINAL_PHASES: frozenset[AgentPhase] = frozenset({
+    AgentPhase.DONE,
+    AgentPhase.FAILED,
 })
 
 
@@ -125,10 +125,10 @@ _TERMINAL_PHASES: frozenset[TaskPhase] = frozenset({
 # ============================================================================
 
 @dataclass
-class TaskStartEvent:
-    """Task 启动事件。
+class AgentStartEvent:
+    """Agent 启动事件。
 
-    Runtime 在创建 TaskState 后发送此事件以启动状态机。
+    Runtime 在创建 AgentState 后发送此事件以启动状态机。
     """
 
     user_message: str
@@ -154,7 +154,7 @@ class ToolsDoneEvent:
 
     字段：
         results: 工具执行结果消息列表（role="tool"）
-        stop_signal: 工具输出中包含停止信号（如 TaskComplete tool）
+        stop_signal: 工具输出中包含停止信号（如 task_complete tool）
         handoff_signal: 工具输出中包含 handoff 信号
         tool_error: 工具执行过程中发生错误
     """
@@ -173,50 +173,50 @@ class ToolsDoneEvent:
 
 
 # 事件联合类型
-TaskEvent = TaskStartEvent | LLMResponseEvent | ToolsDoneEvent
+AgentEvent = AgentStartEvent | LLMResponseEvent | ToolsDoneEvent
 
 
 # ============================================================================
-# TaskState — 状态机主体
+# AgentState — 状态机主体
 # ============================================================================
 
 @dataclass
-class TaskState:
-    """任务级状态机 —— 驱动单次 AgentRun 的 ReAct 循环。
+class AgentState:
+    """Agent 运行时状态机 —— 驱动单次 AgentRun 的 ReAct 循环。
 
-    TaskState 是事件驱动的状态机：
+    AgentState 是事件驱动的状态机：
     1. Runtime 调用 handle_event(event) 喂入事件
-    2. 状态机内部转换 phase 并返回 TaskAction
+    2. 状态机内部转换 phase 并返回 AgentAction
     3. Runtime 根据 action 执行对应操作
     4. 操作结果作为新事件再次喂入
 
-    TaskState **不持有** LLM/Tool 执行能力 —— 它只决策"下一步该做什么"。
+    AgentState **不持有** LLM/Tool 执行能力 —— 它只决策"下一步该做什么"。
 
     安全机制：
     - max_iterations：硬性迭代上限，超出后强制结束
     - tool_loop_detection：检测连续相同工具调用，防止死循环
 
     Args:
-        task_id: Task 唯一标识
+        task_id: AgentRun 唯一标识（对应 AgentRun.run_id）
         thread_id: 所属 Session ID
-        agent_id: 执行此 Task 的 Agent ID
+        agent_id: 执行此 AgentRun 的 Agent ID
         max_iterations: 最大 ReAct 迭代次数（来自 AgentIdentity.max_loop_steps）
     """
 
     # ── 标识 ──
 
     task_id: str
-    """Task 唯一标识（8 位 hex）"""
+    """AgentRun 唯一标识（8 位 hex）"""
 
     thread_id: str
-    """所属 Session ID，用于 State 存取"""
+    """所属 Session ID"""
 
     agent_id: str
-    """执行此 Task 的 Agent ID"""
+    """执行此 AgentRun 的 Agent ID"""
 
     # ── 状态机核心 ──
 
-    phase: TaskPhase = TaskPhase.IDLE
+    phase: AgentPhase = AgentPhase.IDLE
     """当前执行阶段"""
 
     iteration: int = 0
@@ -248,8 +248,8 @@ class TaskState:
 
     # ── 结束状态 ──
 
-    end_status: TaskStatus = TaskStatus.RUNNING
-    """Task 结束状态。只在进入 DONE/FAILED 时写入"""
+    end_status: AgentStatus = AgentStatus.RUNNING
+    """AgentRun 结束状态。只在进入 DONE/FAILED 时写入"""
 
     error_message: str | None = None
     """异常信息。仅在 end_status=FAILED 时非空"""
@@ -259,6 +259,12 @@ class TaskState:
 
     handoff_context: str | None = None
     """Handoff 上下文信息。附加到目标 Agent 的 user_message"""
+
+    # ── 内部任务拆解 ──
+
+    tasks: list[Task] = field(default_factory=list)
+    """Agent 内部问题拆解的子任务清单。由 Agent 通过计划工具（如 todo_write）创建，
+    每个 Task 拥有独立的 TaskProgress 状态。在 AgentRun 结束时可随 AgentState 持久化。"""
 
     # ── 属性 ──
 
@@ -274,13 +280,13 @@ class TaskState:
 
     # ======================== 公开接口 ========================
 
-    def handle_event(self, event: TaskEvent) -> TaskAction:
+    def handle_event(self, event: AgentEvent) -> AgentAction:
         """事件分发入口。
 
         根据事件类型分发到对应的内部原子处理方法。
 
         Args:
-            event: 事件对象（TaskStartEvent / LLMResponseEvent / ToolsDoneEvent）
+            event: 事件对象（AgentStartEvent / LLMResponseEvent / ToolsDoneEvent）
 
         Returns:
             下一步 Runtime 应执行的操作
@@ -288,7 +294,7 @@ class TaskState:
         Raises:
             ValueError: 未知事件类型或非法状态转换
         """
-        if isinstance(event, TaskStartEvent):
+        if isinstance(event, AgentStartEvent):
             return self._handle_start()
         elif isinstance(event, LLMResponseEvent):
             return self._handle_llm_response(event)
@@ -299,7 +305,7 @@ class TaskState:
 
     # ======================== 原子操作：事件处理 ========================
 
-    def _handle_start(self) -> TaskAction:
+    def _handle_start(self) -> AgentAction:
         """处理启动事件：IDLE → THINKING。
 
         原子操作：
@@ -307,14 +313,14 @@ class TaskState:
         2. 进入 THINKING 阶段
 
         Returns:
-            TaskAction.INVOKE_LLM —— 要求 Runtime 调用 LLM
+            AgentAction.INVOKE_LLM —— 要求 Runtime 调用 LLM
         """
-        if self.phase != TaskPhase.IDLE:
+        if self.phase != AgentPhase.IDLE:
             raise ValueError(f"无法从 {self.phase} 响应 start 事件")
         self.iteration = 1
-        return self._transition(TaskPhase.THINKING, TaskAction.INVOKE_LLM)
+        return self._transition(AgentPhase.THINKING, AgentAction.INVOKE_LLM)
 
-    def _handle_llm_response(self, event: LLMResponseEvent) -> TaskAction:
+    def _handle_llm_response(self, event: LLMResponseEvent) -> AgentAction:
         """处理 LLM 响应事件：决定下一阶段。
 
         原子操作：
@@ -332,33 +338,32 @@ class TaskState:
             event: LLM 响应事件
 
         Returns:
-            TaskAction —— INVOKE_LLM / EXECUTE_TOOLS / FINALIZE / WAIT
+            AgentAction —— INVOKE_LLM / EXECUTE_TOOLS / FINALIZE / WAIT
         """
-        if self.phase != TaskPhase.THINKING:
+        if self.phase != AgentPhase.THINKING:
             raise ValueError(f"无法从 {self.phase} 响应 llm_response 事件")
 
         self.current_llm_response = event.response
 
         # 不可恢复错误
         if event.response.finish_reason == "error":
-            self.end_status = TaskStatus.FAILED
+            self.end_status = AgentStatus.FAILED
             self.error_message = "LLM 调用返回 error"
-            return self._transition(TaskPhase.FAILED, TaskAction.FINALIZE)
+            return self._transition(AgentPhase.FAILED, AgentAction.FINALIZE)
 
         # 输出被截断
         if event.response.finish_reason == "length":
-            # v1: 直接转入 RESPONDING（预留 v2 Continue 注入扩展点）
-            return self._transition(TaskPhase.TRUNCATED, TaskAction.WAIT)
+            return self._transition(AgentPhase.TRUNCATED, AgentAction.WAIT)
 
         # 有工具调用 → 进入执行阶段
         if event.response.tool_calls:
-            return self._transition(TaskPhase.ACTING, TaskAction.EXECUTE_TOOLS)
+            return self._transition(AgentPhase.ACTING, AgentAction.EXECUTE_TOOLS)
 
         # 无工具调用 → 正常回复
-        self.end_status = TaskStatus.COMPLETED
-        return self._transition(TaskPhase.RESPONDING, TaskAction.FINALIZE)
+        self.end_status = AgentStatus.COMPLETED
+        return self._transition(AgentPhase.RESPONDING, AgentAction.FINALIZE)
 
-    def _handle_tools_done(self, event: ToolsDoneEvent) -> TaskAction:
+    def _handle_tools_done(self, event: ToolsDoneEvent) -> AgentAction:
         """处理工具执行完成事件：决定下一阶段。
 
         原子操作：
@@ -379,9 +384,9 @@ class TaskState:
             event: 工具执行完成事件
 
         Returns:
-            TaskAction —— INVOKE_LLM / FINALIZE / HANDOFF_TARGET
+            AgentAction —— INVOKE_LLM / FINALIZE / HANDOFF_TARGET
         """
-        if self.phase != TaskPhase.ACTING:
+        if self.phase != AgentPhase.ACTING:
             raise ValueError(f"无法从 {self.phase} 响应 tools_done 事件")
 
         self.current_tool_results = list(event.results)
@@ -391,30 +396,30 @@ class TaskState:
 
         # 优先级 1：工具执行错误
         if event.tool_error:
-            self.end_status = TaskStatus.FAILED
+            self.end_status = AgentStatus.FAILED
             self.error_message = "工具执行错误"
-            return self._transition(TaskPhase.FAILED, TaskAction.FINALIZE)
+            return self._transition(AgentPhase.FAILED, AgentAction.FINALIZE)
 
         # 优先级 2：handoff 信号
         if event.handoff_signal:
-            self.end_status = TaskStatus.HANDOFF
+            self.end_status = AgentStatus.HANDOFF
             self._extract_handoff_info(event)
-            return self._transition(TaskPhase.HANDOFF, TaskAction.HANDOFF_TARGET)
+            return self._transition(AgentPhase.HANDOFF, AgentAction.HANDOFF_TARGET)
 
         # 优先级 3：stop 信号
         if event.stop_signal:
-            self.end_status = TaskStatus.COMPLETED
-            return self._transition(TaskPhase.RESPONDING, TaskAction.FINALIZE)
+            self.end_status = AgentStatus.COMPLETED
+            return self._transition(AgentPhase.RESPONDING, AgentAction.FINALIZE)
 
         # 优先级 4：安全阀检查
         guard_result: tuple[bool, str] = self._check_guards()
         if guard_result[0]:
-            self.end_status = TaskStatus.COMPLETED
-            return self._transition(TaskPhase.RESPONDING, TaskAction.FINALIZE)
+            self.end_status = AgentStatus.COMPLETED
+            return self._transition(AgentPhase.RESPONDING, AgentAction.FINALIZE)
 
         # 优先级 5：正常继续下一轮
         self.iteration += 1
-        return self._transition(TaskPhase.THINKING, TaskAction.INVOKE_LLM)
+        return self._transition(AgentPhase.THINKING, AgentAction.INVOKE_LLM)
 
     # ======================== 原子操作：安全阀 ========================
 
@@ -458,10 +463,8 @@ class TaskState:
         if len(history) < self._TOOL_LOOP_THRESHOLD:
             return False
 
-        # 只检查最近窗口内的记录
         window: list[tuple[str, str]] = history[-self._TOOL_LOOP_WINDOW:]
 
-        # 统计最后连续相同调用的次数
         last_call: tuple[str, str] | None = None
         consecutive: int = 0
 
@@ -491,7 +494,7 @@ class TaskState:
 
     # ======================== 原子操作：辅助方法 ========================
 
-    def _transition(self, new_phase: TaskPhase, action: TaskAction) -> TaskAction:
+    def _transition(self, new_phase: AgentPhase, action: AgentAction) -> AgentAction:
         """执行状态转换。
 
         原子操作：
@@ -510,20 +513,20 @@ class TaskState:
         """
         self.phase = new_phase
 
-        # TRUNCATED → RESPONDING → DONE（v1 直接结束）
-        if new_phase == TaskPhase.TRUNCATED:
-            self.end_status = TaskStatus.COMPLETED
-            self.phase = TaskPhase.DONE
-            return TaskAction.FINALIZE
+        # TRUNCATED → DONE（v1 直接结束）
+        if new_phase == AgentPhase.TRUNCATED:
+            self.end_status = AgentStatus.COMPLETED
+            self.phase = AgentPhase.DONE
+            return AgentAction.FINALIZE
 
         # RESPONDING → DONE（自动终态化）
-        if new_phase == TaskPhase.RESPONDING:
-            self.phase = TaskPhase.DONE
+        if new_phase == AgentPhase.RESPONDING:
+            self.phase = AgentPhase.DONE
             return action
 
         # HANDOFF → DONE（自动终态化）
-        if new_phase == TaskPhase.HANDOFF:
-            self.phase = TaskPhase.DONE
+        if new_phase == AgentPhase.HANDOFF:
+            self.phase = AgentPhase.DONE
             return action
 
         return action
@@ -552,9 +555,8 @@ class TaskState:
         1. 遍历 event.results 查找 handoff 相关字段
         2. 提取 target_agent_id 和 context
 
-        目前 handoff 信息约定从工具结果的 metadata 中读取。
         v1 简单实现：取第一个非空 tool result 的 content 作为 context，
-        handoff_target 由 Runtime 层决定（不在 TaskState 内解析）。
+        handoff_target 由 Runtime 层决定（不在 AgentState 内解析）。
         """
         for msg in event.results:
             if msg.content:
