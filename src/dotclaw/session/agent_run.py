@@ -150,38 +150,50 @@ class AgentRun:
 class AgentRunManager:
     """AgentRun 持久化管理器。
 
-    每个 AgentRun 存储为独立 JSON 文件：{data_dir}/agent_runs/{run_id}.json
+    每个 AgentRun 存储为独立 JSON 文件：{data_dir}/{session_id}/agent_runs/{run_id}.json
     """
 
     def __init__(self, data_dir: str | Path) -> None:
         """初始化。
 
         Args:
-            data_dir: 数据目录路径
+            data_dir: 数据目录路径（Session 基础目录）
         """
         import dotclaw
         module_path: Path = Path(dotclaw.__file__).parent
         project_root: Path = module_path.parent.parent
-        self._data_dir: Path = project_root / data_dir / "agent_runs"
-        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._base_dir: Path = (project_root / data_dir).resolve()
+        self._base_dir.mkdir(parents=True, exist_ok=True)
 
-    def _run_path(self, run_id: str) -> Path:
+    def _run_path(self, session_id: str, run_id: str) -> Path:
         """获取 AgentRun 文件路径。"""
-        return self._data_dir / f"{run_id}.json"
+        run_dir = self._base_dir / session_id / "agent_runs"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir / f"{run_id}.json"
 
-    async def save(self, run: AgentRun) -> None:
-        """保存 AgentRun 到磁盘。"""
+    async def save(self, run: AgentRun, session_id: str) -> None:
+        """保存 AgentRun 到磁盘。
+
+        Args:
+            run: AgentRun 实例
+            session_id: 所属 Session ID
+        """
         import aiofiles
-        path: Path = self._run_path(run.run_id)
+        path: Path = self._run_path(session_id, run.run_id)
         async with aiofiles.open(path, "w", encoding="utf-8") as f:
             await f.write(json.dumps(
                 run.to_dict(), ensure_ascii=False, indent=2
             ))
 
-    async def load(self, run_id: str) -> AgentRun | None:
-        """加载 AgentRun。返回 None 如果不存在。"""
+    async def load(self, run_id: str, session_id: str) -> AgentRun | None:
+        """加载 AgentRun。返回 None 如果不存在。
+
+        Args:
+            run_id: AgentRun ID
+            session_id: 所属 Session ID
+        """
         import aiofiles
-        path: Path = self._run_path(run_id)
+        path: Path = self._run_path(session_id, run_id)
         if not path.exists():
             return None
         try:

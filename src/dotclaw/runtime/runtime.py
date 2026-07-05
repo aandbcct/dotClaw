@@ -284,7 +284,7 @@ class Runtime:
         )
 
         # 持久化 AgentRun
-        await self.run_mgr.save(agent_run)
+        await self.run_mgr.save(agent_run, thread_id)
 
         return agent_run
 

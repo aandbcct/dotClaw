@@ -127,7 +127,7 @@ class Journal:
     def _output_dir(self) -> Path | None:
         """返回本次对话的产出目录。
 
-        格式: {trace_dir}/{session_id}/{date}/{request_id}
+        格式: {trace_dir}/{session_id}/traces/{date}/{request_id}
         None 表示 session_start() 尚未调用。
         """
         if not self._config or not self._session_id or not self._request_id:
@@ -138,6 +138,7 @@ class Journal:
         return (
             Path(self._config.trace_dir)
             / self._session_id
+            / "traces"
             / date_str
             / f"{ts_str}-{self._request_id}"
         )

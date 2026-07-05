@@ -75,7 +75,7 @@ class ResumeManager:
         按 state.json 中 status == "running" 判定。
         如果有多个，取目录名（HHMMSS 前缀）最新的。
         """
-        session_dir = self._trace_root / session_id
+        session_dir = self._trace_root / session_id / "traces"
         if not session_dir.is_dir():
             return None
 

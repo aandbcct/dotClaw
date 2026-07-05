@@ -88,7 +88,7 @@ debug:
   log_file: ./data/dotclaw.log
 
 journal:
-  trace_dir: ./data/traces
+  trace_dir: ./data/sessions
   snapshot_dir: ./data/snapshots
   console: true
   trace: true

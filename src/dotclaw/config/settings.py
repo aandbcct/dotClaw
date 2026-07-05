@@ -199,7 +199,7 @@ class DebugConfig:
 @dataclass
 class JournalConfig:
     """从 config.yaml 加载的 Journal 配置（含默认值）。"""
-    trace_dir: str = "./data/traces"
+    trace_dir: str = "./data/sessions"
     snapshot_dir: str = "./data/snapshots"
     console: bool = True
     trace: bool = True
@@ -544,7 +544,7 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
 
     journal_raw = raw.get("journal", {})
     journal = JournalConfig(
-        trace_dir=journal_raw.get("trace_dir", "./data/traces"),
+        trace_dir=journal_raw.get("trace_dir", "./data/sessions"),
         snapshot_dir=journal_raw.get("snapshot_dir", "./data/snapshots"),
         console=journal_raw.get("console", True),
         trace=journal_raw.get("trace", True),
