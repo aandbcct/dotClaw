@@ -62,7 +62,7 @@ class ResumeManager:
             return None
 
         # 2. 读 trace.jsonl 重建消息
-        trace_path: Path = self._trace_dir / "session" / session_id / "trace.jsonl"
+        trace_path: Path = self._trace_dir / session_id / "trace.jsonl"
         entries: list[dict] = self._load_trace(trace_path)
         if not entries:
             return None

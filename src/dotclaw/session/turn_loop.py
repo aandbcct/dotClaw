@@ -12,10 +12,9 @@ TurnLoop 使用 asyncio.Queue 实现事件驱动模式。
 1. run_forever() — 主事件循环入口
 2. push_trigger() — 向事件队列推送触发事件
 3. _step() — 单次 AgentRun 执行步骤
-4. _assemble_context() — 组装 LLM 上下文消息
-5. _invoke_agent_run() — 创建并执行一次 AgentRun
-6. _handle_tool_result() — 处理工具执行结果并决定下一步
-7. _handle_text_response() — 处理文本回复
+4. _build_system_prompt() — 构建 system prompt（含 Slot 解析）
+5. _build_context_msgs() — 组装 LLM 上下文消息（不记录到 trace）
+6. _invoke_agent_run() — 创建并执行一次 AgentRun
 """
 
 from __future__ import annotations
@@ -79,7 +78,7 @@ class TurnLoop:
     - 等待触发事件（asyncio.Queue）
     - 组装上下文（从 trace.jsonl 读历史消息, 从 StateStore 读进度）
     - 创建 AgentRun，调用 Runtime 原子方法
-    - 路由：文本回复 → 输出并等待；工具调用 → 执行 → 自触发新 AgentRun
+    - 路由：文本回复 ��� 输出并等待；工具调用 → 执行 → 自触发新 AgentRun
     - 挂起时保存 State，等待新触发
 
     Args:
@@ -114,6 +113,7 @@ class TurnLoop:
         self._active: bool = False
         self._current_state: AgentState | None = None
         self._context_messages: list[Message] = []
+        self._run_ids: list[str] = []  # 本次 conversation 中产生的所有 AgentRun ID
 
     # ======================== 公开入口 ========================
 
@@ -208,6 +208,11 @@ class TurnLoop:
         """优雅关闭 TurnLoop。"""
         self._active = False
 
+    @property
+    def run_ids(self) -> list[str]:
+        """本次 conversation 中产生的所有 AgentRun ID。"""
+        return list(self._run_ids)
+
     # ======================== 原子操作：单步执行 ========================
 
     async def _step(
@@ -219,11 +224,11 @@ class TurnLoop:
         """执行一次完整的 AgentRun 步骤。
 
         原子操作：
-        1. 组装 LLM 上下文消息
-        2. 创建 AgentRun 并调用 LLM
-        3. 根据 LLM 响应路由：
-           - 文本回复 → 输出，返回
-           - 工具调用 → 执行工具 → 记录结果 → 自触发新 AgentRun
+        1. 创建 AgentRun（agentrun_start 先于消息记录，确保 agentrun_id 正确）
+        2. 记录触发消息到 trace（user_query 或 tool_results）
+        3. 组装 LLM 上下文
+        4. 调用 LLM
+        5. 路由：文本回复 / 工具调用
 
         Args:
             user_message: 用户消息（TOOL_RESULT 类型时可为空）
@@ -233,28 +238,49 @@ class TurnLoop:
         Returns:
             最终文本回复（如果本轮是文本回复），否则继续循环
         """
-        # 1. 组装上下文
-        context_msgs: list[Message] = await self._assemble_context(
-            user_message=user_message,
-            trigger=trigger,
-            tool_results=tool_results,
-        )
-
-        # 2. 创建并执行 AgentRun
+        # 1. 创建 AgentRun（先于消息记录，确保 trace 中 agentrun_id 正确）
         agentrun_id: str = uuid.uuid4().hex[:8]
+        self._run_ids.append(agentrun_id)
+        run_messages: list[Message] = []  # 本次 AgentRun 产生的消息流转
         self._journal.agentrun_start(agentrun_id, trigger.value)
 
         started_at: str = datetime.now(timezone.utc).isoformat()
         start_time: float = time.time()
 
-        # 3. 调用 LLM
+        # 2. 记录触发消息到 trace（在 agentrun_start 之后，agentrun_id 已正确设置）
+        if trigger == TriggerType.USER_INPUT and user_message:
+            user_msg: Message = Message(role="user", content=user_message)
+            self._journal.record_message(user_msg)
+            self._context_messages.append(user_msg)
+            run_messages.append(user_msg)
+
+        elif trigger == TriggerType.TOOL_RESULT and tool_results is not None:
+            tool_list: list[Message] = (
+                list(tool_results) if isinstance(tool_results, list) else []
+            )
+            for tr in tool_list:
+                self._journal.record_message(tr)
+                self._context_messages.append(tr)
+                run_messages.append(tr)
+
+        # 3. 构建 system prompt（仅记录到 AgentRun.messages，不记录到 trace）
+        system_prompt: str = await self._build_system_prompt(user_message)
+        sys_msg: Message = Message(role="system", content=system_prompt)
+        run_messages.append(sys_msg)
+
+        # 4. 组装 LLM 上下文消息
+        context_msgs: list[Message] = await self._build_context_msgs(
+            user_message=user_message,
+            system_prompt=system_prompt,
+        )
+
+        # 5. 调用 LLM
         try:
             resp: LLMResponse = await self._invoke_agent_run(
                 agentrun_id=agentrun_id,
                 context_msgs=context_msgs,
             )
         except Exception as e:
-            # LLM 调用失败
             duration_ms: int = int((time.time() - start_time) * 1000)
             ended_at: str = datetime.now(timezone.utc).isoformat()
             self._journal.agentrun_end(RunEndStatus.FAILED.value)
@@ -270,20 +296,19 @@ class TurnLoop:
                 started_at=started_at,
                 ended_at=ended_at,
                 error=f"{type(e).__name__}: {e}",
+                messages=run_messages,
             )
             return f"[ERROR] {e}"
 
-        # 4. 路由
+        # 6. 路由
         input_tokens: int = resp.input_tokens
         output_tokens: int = resp.output_tokens
         duration_ms = int((time.time() - start_time) * 1000)
         ended_at = datetime.now(timezone.utc).isoformat()
 
         if resp.tool_calls:
-            # 有工具调用 → 发出 TOOL_WAIT 标记
             self._journal.agentrun_end(RunEndStatus.TOOL_WAIT.value)
 
-            # 记录 assistant 消息（含 tool_calls）
             asst_msg: Message = Message(
                 role="assistant",
                 content=resp.content or "",
@@ -291,8 +316,9 @@ class TurnLoop:
             )
             self._journal.record_message(asst_msg)
             self._context_messages.append(asst_msg)
+            run_messages.append(asst_msg)
 
-            # 保存 AgentRun
+            # 保存当前 AgentRun（含 state_snapshot）
             state_snapshot: dict | None = None
             if self._current_state is not None:
                 state_snapshot = self._current_state.snapshot()
@@ -308,9 +334,10 @@ class TurnLoop:
                 ended_at=ended_at,
                 state_snapshot=state_snapshot,
                 trace_ids=self._collect_trace_ids(),
+                messages=run_messages,
             )
 
-            # 执行工具
+            # 执行工具（并发等待所有工具返回）
             tool_results_list: list[Message] = []
             if self._runtime.tool_executor is not None:
                 tool_results_list = list(await asyncio.gather(*[
@@ -318,32 +345,25 @@ class TurnLoop:
                     for tc in resp.tool_calls
                 ]))
 
-            # 记录工具结果消息
-            for tr in tool_results_list:
-                self._journal.record_message(tr)
-                self._context_messages.append(tr)
-
+            # 工具结果不在此处 record_message——由下一个 AgentRun 的 _step() 记录
             # 自触发下一个 AgentRun
-            await asyncio.get_event_loop().create_task(
-                self._queue.put(TriggerEvent(
-                    trigger_type=TriggerType.TOOL_RESULT,
-                    data=tool_results_list,
-                ))
-            )
+            await self._queue.put(TriggerEvent(
+                trigger_type=TriggerType.TOOL_RESULT,
+                data=tool_results_list,
+            ))
 
             return ""
 
         else:
-            # 文本回复
             self._journal.agentrun_end(RunEndStatus.COMPLETED.value)
 
-            # 记录 assistant 消息
             asst_msg = Message(
                 role="assistant",
                 content=resp.content or "",
             )
             self._journal.record_message(asst_msg)
             self._context_messages.append(asst_msg)
+            run_messages.append(asst_msg)
 
             state_snapshot = None
             if self._current_state is not None:
@@ -362,44 +382,32 @@ class TurnLoop:
                 ended_at=ended_at,
                 state_snapshot=state_snapshot,
                 trace_ids=self._collect_trace_ids(),
+                messages=run_messages,
             )
 
-            # 内容已在 _invoke_agent_run() 中通过 channel.stream() 实时输出
             return resp.content or ""
 
-    # ======================== 原子操作：上下文组装 ========================
+    # ======================== 原子操作：System Prompt 构建 ========================
 
-    async def _assemble_context(
-        self,
-        user_message: str,
-        trigger: TriggerType,
-        tool_results: object = None,
-    ) -> list[Message]:
-        """组装 LLM 调用所需的完整上下文消息。
+    async def _build_system_prompt(self, user_message: str) -> str:
+        """构建 system prompt（含 Slot 解析）。
 
         原子操作：
-        1. 解析 agent 的 tool_definitions 和 system_prompt
+        1. 解析 agent 的 tool_definitions
         2. 构建 SlotContext 并通过 Assembler 生成最终 system_prompt
-        3. 附加上下文历史消息
-        4. 附加工具结果（如果是 TOOL_RESULT 类型触发）
-        5. 裁剪消息以适应 token 预算
+        3. 返回纯文本 system prompt
 
         Args:
             user_message: 用户消息文本
-            trigger: 触发类型
-            tool_results: 工具结果列表
 
         Returns:
-            LLM 输入消息列表
+            system prompt 文本
         """
-        agent_id: str = self._agent.agent_id
-        model: str = self._agent._resolve_model(self._runtime)
         system_prompt: str = self._agent._resolve_system_prompt(self._runtime)
         tool_definitions: list[ToolDefinition] = self._agent._resolve_tool_definitions(
             self._runtime
         )
 
-        # 构建 SlotContext
         from ..agent.slotContext import SlotContext as SCtx
 
         project_root: Path = self._runtime._find_project_root() if hasattr(
@@ -427,28 +435,39 @@ class TurnLoop:
             self._runtime.assembler.on_new_request()
             system_prompt = await self._runtime.assembler.build_system_prompt(slot_ctx)
 
-        # 构建消息
-        system_msg: Message = Message(role="system", content=system_prompt)
+        return system_prompt
 
-        # 裁剪历史
+    # ======================== 原子操作：上下文消息构建 ========================
+
+    async def _build_context_msgs(
+        self,
+        user_message: str,
+        system_prompt: str,
+    ) -> list[Message]:
+        """构建 LLM 调用上下文消息列表（不记录到 trace）。
+
+        原子操作：
+        1. 裁剪历史消息以适应 token 预算
+        2. 返回 system + history + user 的消息列表
+
+        Args:
+            user_message: 用户消息文本
+            system_prompt: 已构建的 system prompt
+
+        Returns:
+            LLM 输入消息列表
+        """
         history_msgs: list[Message] = list(self._context_messages)
-        max_ctx: int = 8000
-        if self._runtime.config is not None:
-            max_ctx = self._runtime.config.agent.max_context_tokens
 
         if user_message:
-            user_msg: Message = Message(role="user", content=user_message)
-            # 记录用户消息
-            if trigger != TriggerType.TOOL_RESULT:
-                self._journal.record_message(user_msg)
-                self._context_messages.append(user_msg)
             return self._runtime._build_messages(
                 user_input=user_message,
                 system_prompt=system_prompt,
                 history=history_msgs,
             )
         else:
-            # TOOL_RESULT 触发：不添加新 user message
+            # TOOL_RESULT 触发：不添加新 user message，system + history
+            system_msg: Message = Message(role="system", content=system_prompt)
             return [system_msg] + history_msgs
 
     # ======================== 原子操作：LLM 调用 ========================
@@ -461,8 +480,9 @@ class TurnLoop:
         """执行一次 LLM 调用（一个 AgentRun）。
 
         原子操作：
-        1. 通过 Runtime._invoke_llm 调用 LLM
-        2. 记录 TRACE_MESSAGE 事件
+        1. 通过 Runtime.llm.chat() 流式调用 LLM
+        2. 实时 stream 内容到 channel
+        3. 返回 LLMResponse
 
         Args:
             agentrun_id: 当前 AgentRun ID
@@ -473,13 +493,11 @@ class TurnLoop:
         """
         from ..agent.agent import LLMResponse as LR
 
-        agent_id: str = self._agent.agent_id
         model: str = self._agent._resolve_model(self._runtime)
         tool_definitions: list[ToolDefinition] = self._agent._resolve_tool_definitions(
             self._runtime
         )
 
-        # 记录 prompt_built
         self._journal.prompt_built(
             message_count=len(context_msgs),
             context_length=sum(len(str(m.content or "")) for m in context_msgs),
@@ -487,7 +505,6 @@ class TurnLoop:
             tool_count=len(tool_definitions),
         )
 
-        # 调用 LLM
         self._journal.llm_call_start(attempt=1)
 
         current_content: str = ""
@@ -576,6 +593,7 @@ class TurnLoop:
         state_snapshot: dict | None = None,
         trace_ids: list[str] | None = None,
         error: str | None = None,
+        messages: list[Message] | None = None,
     ) -> None:
         """持久化单个 AgentRun 记录。
 
@@ -596,6 +614,7 @@ class TurnLoop:
             state_snapshot: 状态快照
             trace_ids: 关联的 trace event IDs
             error: 错误信息
+            messages: 本次 AgentRun 产生的消息列表
         """
         from ..session.agent_run import AgentRun
         ar: AgentRun = AgentRun(
@@ -613,6 +632,7 @@ class TurnLoop:
             error=error,
             started_at=started_at,
             ended_at=ended_at,
+            messages=messages or [],
         )
         await self._runtime.run_mgr.save(ar, self._session_id)
 

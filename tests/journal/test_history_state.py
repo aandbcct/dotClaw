@@ -196,7 +196,7 @@ class TestJournalRecordMessage:
         journal.record_message(Message(role="user", content="hello"))
 
         # 通过 _write_trace_line 写入的 trace.jsonl 文件
-        trace_dir = Path(tmp_path) / "session" / "s-test"
+        trace_dir = Path(tmp_path) / "s-test"
         trace_path = trace_dir / "trace.jsonl"
         assert trace_path.exists()
 
@@ -225,7 +225,7 @@ class TestJournalUpdateState:
         journal._max_loop_steps = 10
         journal._update_state("running")
 
-        state_dir = Path(tmp_path) / "session" / "s-test"
+        state_dir = Path(tmp_path) / "s-test"
         state_path = state_dir / "state.json"
         assert state_path.exists()
 
@@ -250,7 +250,7 @@ class TestJournalUpdateState:
 
         journal._update_state("completed")
 
-        state_path = Path(tmp_path) / "session" / "s-test" / "state.json"
+        state_path = Path(tmp_path) / "s-test" / "state.json"
         data = json.loads(state_path.read_text(encoding="utf-8"))
         assert data["status"] == "completed"
 
@@ -259,7 +259,7 @@ class TestJournalUpdateState:
         _start_session(journal, str(tmp_path), state=False)
         journal._update_state("running")
 
-        state_path = Path(tmp_path) / "session" / "s-test" / "state.json"
+        state_path = Path(tmp_path) / "s-test" / "state.json"
         assert not state_path.exists()
 
     def test_errors_tracked_in_state(self, tmp_path):
@@ -268,7 +268,7 @@ class TestJournalUpdateState:
         journal._errors_list = [{"source": "tool.execute", "message": "timeout"}]
         journal._update_state("error")
 
-        state_path = Path(tmp_path) / "session" / "s-test" / "state.json"
+        state_path = Path(tmp_path) / "s-test" / "state.json"
         data = json.loads(state_path.read_text(encoding="utf-8"))
         assert data["status"] == "error"
         assert len(data["errors"]) == 1
@@ -288,18 +288,16 @@ class TestOutputPath:
 
         out_dir = journal._trace_output_dir()
         assert out_dir is not None
+        assert str(out_dir).endswith("s-test")
         assert "s-test" in str(out_dir)
-        assert "session" in str(out_dir)
 
     def test_output_dir_format(self, tmp_path):
         journal = Journal()
         _start_session(journal, str(tmp_path))
 
         out_dir = journal._trace_output_dir()
-        # 路径: {trace_dir}/session/{session_id}/
-        parts = out_dir.parts
-        assert parts[-1] == "s-test"
-        assert "session" in parts
+        # 路径: {trace_dir}/{session_id}/
+        assert out_dir.name == "s-test"
 
     def test_output_dir_none_before_session_start(self):
         journal = Journal()

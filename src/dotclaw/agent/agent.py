@@ -178,11 +178,14 @@ class Agent:
         """
         from ..session.turn_loop import TurnLoop
         from ..session.agent_run import RunEndStatus
+        import uuid as _uuid
 
         if runtime.journal is None or runtime.state_store is None:
             raise RuntimeError(
                 "Agent.process() requires Runtime with Journal and StateStore injected"
             )
+
+        conversation_id: str = _uuid.uuid4().hex[:8]
 
         # 初始化 Journal 会话
         model: str = self._resolve_model(runtime)
@@ -190,6 +193,7 @@ class Agent:
             session_id=session.id,
             model=model,
             config=runtime.config.journal if runtime.config else None,
+            conversation_id=conversation_id,
         )
 
         # 创建 TurnLoop
@@ -205,11 +209,11 @@ class Agent:
         # 运行事件循环
         final_answer: str = await loop.run_forever(user_message)
 
-        # 成功时追加 Conversation 记录
+        # 成功时追加 Conversation 记录（携带所有 agent_run_ids）
         session.add_conversation(
             user_query=user_message,
             final_answer=final_answer,
-            agent_run_ids=[],  # TurnLoop 管理的 runs 在内部持久化，此处不再追踪
+            agent_run_ids=loop.run_ids,
         )
         await session_mgr.save(session)  # type:ignore[union-attr]
 

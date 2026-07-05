@@ -67,17 +67,27 @@ class TestAgentRun:
         )
         assert run.end_status == RunEndStatus.TOOL_WAIT.value
 
-    def test_final_output_from_state_snapshot(self) -> None:
-        """从 state_snapshot 提取 final_output。"""
-        run = AgentRun(
-            run_id="run-1",
-            state_snapshot={"final_output": "final answer"},
-        )
+    def test_final_output_from_messages(self) -> None:
+        """从 messages 提取最后一条无 tool_calls 的 assistant 消息。"""
+        from dotclaw.llm.base import Message, ToolCall
+        tc: ToolCall = ToolCall(id="tc-1", name="search", arguments="{}")
+        msgs = [
+            Message(role="assistant", content="step1", tool_calls=[tc]),
+            Message(role="tool", content="result1"),
+            Message(role="assistant", content="final answer"),
+        ]
+        run = AgentRun(run_id="run-1", messages=msgs)
         assert run.final_output == "final answer"
 
-    def test_final_output_none_when_no_snapshot(self) -> None:
-        """无 state_snapshot 时返回 None。"""
-        run = AgentRun(run_id="run-1")
+    def test_final_output_none_when_no_text_response(self) -> None:
+        """所有 assistant 都有 tool_calls 时返回 None。"""
+        from dotclaw.llm.base import Message, ToolCall
+        tc: ToolCall = ToolCall(id="tc-1", name="search", arguments="{}")
+        msgs = [
+            Message(role="assistant", content="step1", tool_calls=[tc]),
+            Message(role="tool", content="result1"),
+        ]
+        run = AgentRun(run_id="run-1", messages=msgs)
         assert run.final_output is None
 
     def test_state_snapshot_fields(self) -> None:
@@ -102,6 +112,13 @@ class TestAgentRun:
 
     def test_serialize_deserialize(self) -> None:
         """to_dict / from_dict 往返一致。"""
+        from dotclaw.llm.base import Message, ToolCall
+        tc1: ToolCall = ToolCall(id="tc-1", name="search", arguments='{"q":"x"}')
+        tc2: ToolCall = ToolCall(id="tc-2", name="read", arguments="{}")
+        msgs = [
+            Message(role="assistant", content="hello", tool_calls=[tc1, tc2]),
+            Message(role="tool", content="result", tool_call_id="tc-1"),
+        ]
         snapshot: dict = {
             "task_id": "abc123",
             "phase": "done",
@@ -126,6 +143,7 @@ class TestAgentRun:
             error=None,
             started_at="2026-01-01T00:00:00Z",
             ended_at="2026-01-01T00:00:01Z",
+            messages=msgs,
         )
         data = run.to_dict()
         restored = AgentRun.from_dict(data)
@@ -138,3 +156,8 @@ class TestAgentRun:
         assert restored.trace_ids == trace_ids
         assert restored.trigger == TriggerType.USER_INPUT.value
         assert restored.sequence == 1
+        assert len(restored.messages) == 2
+        assert restored.messages[0].role == "assistant"
+        assert restored.messages[0].tool_calls is not None
+        assert restored.messages[0].tool_calls[0].name == "search"
+        assert restored.messages[1].tool_call_id == "tc-1"

@@ -203,7 +203,7 @@ class StateStore:
         Returns:
             文件路径
         """
-        path: Path = self._data_dir / "session" / session_id / "state.json"
+        path: Path = self._data_dir / session_id / "state.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 

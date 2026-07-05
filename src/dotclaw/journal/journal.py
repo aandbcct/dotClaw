@@ -11,6 +11,7 @@ v2 变更：
 from __future__ import annotations
 
 import time
+import uuid as _uuid
 from typing import Any, TYPE_CHECKING
 from pathlib import Path
 from dotclaw.journal.events import AgentEvent, EventType, TraceMessageRole
@@ -48,6 +49,7 @@ class Journal:
 
     def __init__(self) -> None:
         self._session_id: str | None = None
+        self._conversation_id: str | None = None
         self._agentrun_id: str | None = None
         self._model: str = ""
         self._loop_idx: int = 0
@@ -151,12 +153,23 @@ class Journal:
     def _trace_output_dir(self) -> Path | None:
         """返回 trace.jsonl 所在目录。
 
-        格式: {trace_dir}/session/{session_id}/
+        格式: {trace_dir}/{session_id}/
         None 表示 session_start() 尚未调用。
         """
         if not self._config or not self._session_id:
             return None
-        return Path(self._config.trace_dir) / "session" / self._session_id
+        return Path(self._config.trace_dir) / self._session_id
+
+    def _conversation_dir(self) -> Path | None:
+        """返回 snapshot/report 所在目录。
+
+        格式: {trace_dir}/{session_id}/{conversation_id}/
+        None 表示 session_start() 尚未调用。
+        """
+        base = self._trace_output_dir()
+        if base is None or self._conversation_id is None:
+            return None
+        return base / self._conversation_id
 
     # ═══ 会话 ═══
 
@@ -165,6 +178,7 @@ class Journal:
         session_id: str,
         model: str,
         config: "Any",
+        conversation_id: str = "",
     ) -> None:
         """开始会话。
 
@@ -172,10 +186,12 @@ class Journal:
             session_id: 会话 ID
             model: 模型名
             config: JournalConfig 实例
+            conversation_id: 对话 ID（用于 snapshot/report 子目录）
         """
         from datetime import date as _date
 
         self._session_id = session_id
+        self._conversation_id = conversation_id or _uuid.uuid4().hex[:8]
         self._model = model
         self._loop_idx = -1
         self._config = config
@@ -542,10 +558,10 @@ class Journal:
             return
 
         need_dir = self._config.trace or self._config.snapshot
-        out_dir = self._trace_output_dir() if need_dir else None
+        conv_dir = self._conversation_dir() if need_dir else None
 
-        # 构建并写入 report.json
-        if self._config.trace and out_dir is not None:
+        # 构建并写入 report.json（{sid}/{conversation_id}/）
+        if self._config.trace and conv_dir is not None:
             try:
                 report = _build_report(
                     events=self._events,
@@ -553,7 +569,8 @@ class Journal:
                     request_id=self._agentrun_id or "",
                     model=self._model,
                 )
-                report_path = out_dir / "report.json"
+                conv_dir.mkdir(parents=True, exist_ok=True)
+                report_path = conv_dir / "report.json"
                 report_path.write_text(
                     _json.dumps(report, ensure_ascii=False, indent=2),
                     encoding="utf-8"
@@ -561,8 +578,8 @@ class Journal:
             except Exception as e:
                 self.error("ERROR", "journal.report", f"构建 report.json 失败: {e}")
 
-        # 构建并写入 snapshot.json
-        if self._config.snapshot and out_dir is not None:
+        # 构建并写入 snapshot.json（{sid}/{conversation_id}/）
+        if self._config.snapshot and conv_dir is not None:
             try:
                 from dotclaw.journal.snapshot import SnapshotBuilder
                 from dotclaw.journal.storage import save_snapshot, build_run_meta
@@ -579,7 +596,8 @@ class Journal:
                 for event in self._events:
                     builder.process(event)
                 snapshot = builder.build()
-                save_snapshot(snapshot, str(out_dir), filename="snapshot")
+                conv_dir.mkdir(parents=True, exist_ok=True)
+                save_snapshot(snapshot, str(conv_dir), filename="snapshot")
             except Exception as e:
                 self.error("ERROR", "journal.snapshot", f"构建 snapshot.json 失败: {e}")
 

@@ -17,6 +17,8 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
+from ..llm.base import Message, ToolCall
+
 
 # ============================================================================
 # 枚举定义
@@ -107,6 +109,10 @@ class AgentRun:
     state_snapshot: dict | None = None
     """AgentRun 结束时的 AgentState 快照。用于恢复执行上下文。"""
 
+    messages: list[Message] = field(default_factory=list)
+    """本次 AgentRun 产生的消息流转列表（用于快速查看 run 内信息流转）。
+    详细消息内容仍以 TRACE_MESSAGE 事件存入 trace.jsonl。"""
+
     trace_ids: list[str] = field(default_factory=list)
     """关联的 Trace Event IDs。指向 trace.jsonl 中的具体事件行。"""
 
@@ -157,6 +163,7 @@ class AgentRun:
             "error": self.error,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
+            "messages": _serialize_messages(self.messages),
         }
 
     @classmethod
@@ -178,18 +185,79 @@ class AgentRun:
             error=data.get("error"),
             started_at=data.get("started_at", ""),
             ended_at=data.get("ended_at", ""),
+            messages=_deserialize_messages(data.get("messages", [])),
         )
 
     @property
     def final_output(self) -> str | None:
         """提取最终输出文本。
 
-        不再从 messages 中查找——改为从 state_snapshot 提取。
-        如果 state_snapshot 不存在，返回 None。
+        从 messages 中找最后一条 role="assistant" 且无 tool_calls 的消息。
         """
-        if self.state_snapshot is None:
-            return None
-        return self.state_snapshot.get("final_output")
+        for m in reversed(self.messages):
+            if m.role == "assistant" and not m.tool_calls:
+                return m.content
+        return None
+
+
+# ============================================================================
+# AgentRunManager
+# ============================================================================
+
+
+def _serialize_messages(messages: list[Message]) -> list[dict]:
+    """序列化 Message 列表为 dict 列表。
+
+    system 角色的消息按 \\n 拆行，存为 content_lines 数组以提高可读性。
+    """
+    result: list[dict] = []
+    for m in messages:
+        if m.role == "system":
+            item: dict = {
+                "role": m.role,
+                "content_lines": m.content.split("\n"),
+            }
+        else:
+            item: dict = {"role": m.role, "content": m.content}
+        if m.tool_calls:
+            item["tool_calls"] = [
+                {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                for tc in m.tool_calls
+            ]
+        if m.tool_call_id:
+            item["tool_call_id"] = m.tool_call_id
+        if m.name:
+            item["name"] = m.name
+        result.append(item)
+    return result
+
+
+def _deserialize_messages(data: list[dict]) -> list[Message]:
+    """从 dict 列表反序列化 Message 列表。"""
+    messages: list[Message] = []
+    for d in data:
+        content: str = ""
+        lines: list[str] | None = d.get("content_lines")
+        if lines is not None:
+            content = "\n".join(lines)
+        else:
+            content = d.get("content", "")
+
+        tool_calls_list: list[ToolCall] | None = None
+        raw: list[dict] | None = d.get("tool_calls")
+        if raw:
+            tool_calls_list = [
+                ToolCall(id=tc["id"], name=tc["name"], arguments=tc.get("arguments", "{}"))
+                for tc in raw
+            ]
+        messages.append(Message(
+            role=d.get("role", ""),
+            content=content,
+            tool_calls=tool_calls_list,
+            tool_call_id=d.get("tool_call_id"),
+            name=d.get("name"),
+        ))
+    return messages
 
 
 # ============================================================================
@@ -224,7 +292,7 @@ class AgentRunManager:
         Returns:
             文件路径
         """
-        run_dir = self._base_dir / "session" / session_id / "agent_runs"
+        run_dir = self._base_dir / session_id / "agent_runs"
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir / f"{run_id}.json"
 

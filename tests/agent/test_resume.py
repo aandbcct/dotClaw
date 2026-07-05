@@ -17,7 +17,7 @@ from dotclaw.llm.base import Message, ToolCall
 
 def _write_state(trace_dir: Path, session_id: str, state_data: dict) -> None:
     """在 StateStore 路径写入 state.json。"""
-    state_dir = trace_dir / "session" / session_id
+    state_dir = trace_dir / session_id
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "state.json").write_text(
         json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -25,7 +25,7 @@ def _write_state(trace_dir: Path, session_id: str, state_data: dict) -> None:
 def _write_trace_jsonl(trace_dir: Path, session_id: str,
                        entries: list[dict]) -> Path:
     """写入 trace.jsonl 条目。"""
-    trace_path = trace_dir / "session" / session_id / "trace.jsonl"
+    trace_path = trace_dir / session_id / "trace.jsonl"
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps(e, ensure_ascii=False) for e in entries]
     trace_path.write_text("\n".join(lines), encoding="utf-8")

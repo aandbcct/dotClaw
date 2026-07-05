@@ -147,7 +147,7 @@ class SessionManager:
 
     def _session_path(self, session_id: str) -> Path:
         """获取 Session 文件路径。"""
-        session_dir: Path = self._data_dir / "session" / session_id
+        session_dir: Path = self._data_dir / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir / "session.json"
 
@@ -193,13 +193,10 @@ class SessionManager:
     async def list_all(self) -> list[Session]:
         """列出所有 Session（按更新时间倒序）。"""
         sessions: list[Session] = []
-        sessions_dir: Path = self._data_dir / "session"
-        if not sessions_dir.is_dir():
-            return sessions
-        for session_dir in sessions_dir.iterdir():
-            if not session_dir.is_dir():
+        for d in self._data_dir.iterdir():
+            if not d.is_dir():
                 continue
-            path: Path = session_dir / "session.json"
+            path: Path = d / "session.json"
             if not path.exists():
                 continue
             try:
