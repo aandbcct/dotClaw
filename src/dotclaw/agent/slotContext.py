@@ -118,9 +118,13 @@ class ContextSlot(ABC):
     cache_policy: str
     """缓存策略: "forever" | "session" | "request" """
 
-    def __init__(self) -> None:
+    enabled: bool = True
+    """是否启用此 Slot。False 时 Assembler 跳过，不加载不组装。"""
+
+    def __init__(self, enabled: bool = True) -> None:
         self._cached: str | None = None
         self._cache_valid: bool = False
+        self.enabled = enabled
 
     # ── 子类必须实现 ──
 
@@ -190,6 +194,8 @@ class ContextAssembler:
         """
         parts: list[str] = []
         for slot in self._slots:
+            if not slot.enabled:
+                continue
             try:
                 content = await slot.load(ctx)
                 if content:

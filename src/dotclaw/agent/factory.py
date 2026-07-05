@@ -269,7 +269,7 @@ def _build_assembler():
         UserInfoSlot(),
         MemorySlot(),
         KnowledgeSlot(),
-        ProjectSlot(),
+        ProjectSlot(enabled=False),
     ])
 
 
