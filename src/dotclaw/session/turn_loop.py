@@ -175,7 +175,6 @@ class TurnLoop:
                     )
 
                 elif trigger.trigger_type == TriggerType.RESUME:
-                    # 从 StateStore 恢复状态
                     snapshot: StateSnapshot | None = await self._state_store.load(
                         self._session_id
                     )
@@ -187,11 +186,15 @@ class TurnLoop:
                     )
 
                 else:
-                    # TIMER / APPROVAL_DONE 等（预留）
                     final_response = await self._step(
                         user_message=str(trigger.data),
                         trigger=trigger.trigger_type,
                     )
+
+                # 文本回复 = 完成本轮，退出循环
+                if final_response:
+                    self._active = False
+                # 工具调用 = _step() 推了新 trigger，继续下一轮
 
         except Exception:
             self._active = False
