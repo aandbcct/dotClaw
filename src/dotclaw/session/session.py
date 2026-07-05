@@ -130,7 +130,7 @@ class Session:
 class SessionManager:
     """Session 持久化管理器。
 
-    每个 Session 存储为独立 JSON 文件：{data_dir}/{session_id}.json
+    每个 Session 存储为独立 JSON 文件：{data_dir}/session/{session_id}/session.json
     """
 
     def __init__(self, data_dir: str | Path) -> None:
@@ -147,7 +147,9 @@ class SessionManager:
 
     def _session_path(self, session_id: str) -> Path:
         """获取 Session 文件路径。"""
-        return self._data_dir / f"{session_id}.json"
+        session_dir: Path = self._data_dir / "session" / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        return session_dir / "session.json"
 
     async def create(self, title: str = "新对话", model: str = "",
                      agent_id: str = "") -> Session:
@@ -191,7 +193,15 @@ class SessionManager:
     async def list_all(self) -> list[Session]:
         """列出所有 Session（按更新时间倒序）。"""
         sessions: list[Session] = []
-        for path in self._data_dir.glob("*.json"):
+        sessions_dir: Path = self._data_dir / "session"
+        if not sessions_dir.is_dir():
+            return sessions
+        for session_dir in sessions_dir.iterdir():
+            if not session_dir.is_dir():
+                continue
+            path: Path = session_dir / "session.json"
+            if not path.exists():
+                continue
             try:
                 import aiofiles
                 async with aiofiles.open(path, encoding="utf-8") as f:

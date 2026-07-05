@@ -291,12 +291,16 @@ async def build_agent(
 
     Returns:
         (Agent, Runtime, SessionManager)
+
+    v2: Runtime 注入 Journal + StateStore。
+    TurnLoop 不在工厂创建（由调用方在获知 session_id 后创建）。
     """
     from dotclaw.config import get_config, _find_project_root
     from dotclaw.session.session import SessionManager
     from dotclaw.agent import Agent as AgentCls
     from dotclaw.agent.identity import load_agent_config as load_id
-    from dotclaw.runtime import Runtime
+    from dotclaw.runtime import Runtime, StateStore
+    from dotclaw.journal import Journal
 
     config = get_config()
     project_root = _find_project_root()
@@ -312,6 +316,10 @@ async def build_agent(
     from dotclaw.session.agent_run import AgentRunManager
     run_mgr: AgentRunManager = AgentRunManager(config.session.directory)
     assembler = _build_assembler()
+
+    # ── Journal + StateStore（v2 新增）──
+    journal: Journal = Journal()
+    state_store: StateStore = StateStore(data_dir=config.session.directory)
 
     # ── 可降级组件 ──
     skill_registry = _init_sync("技能", lambda: _build_skills(config, project_root))
@@ -333,7 +341,7 @@ async def build_agent(
     agent_config_dir = project_root / ".dotclaw" / "agentConfig"
     agent_registry.load_all(agent_config_dir)
 
-    # ── Runtime：编排引擎 ──
+    # ── Runtime：执行引擎（v2: 无控制循环，注入 Journal + StateStore）──
     runtime: Runtime = Runtime(
         llm=llm_proxy,
         tool_executor=tool_executor,
@@ -341,6 +349,8 @@ async def build_agent(
         session_mgr=session_mgr,
         run_mgr=run_mgr,
         agent_registry=agent_registry,
+        journal=journal,
+        state_store=state_store,
         channel=channel,
         memory_mgr=memory_mgr,
         skill_registry=skill_registry,
@@ -355,7 +365,10 @@ async def build_agent(
     # ── 组装 Agent ──
     from dotclaw.agent.resume import ResumeManager
 
-    resume_mgr = ResumeManager(trace_root=config.journal.trace_dir)
+    resume_mgr = ResumeManager(
+        state_store=state_store,
+        trace_dir=config.journal.trace_dir,
+    )
 
     agent: AgentCls = AgentCls(
         identity=identity,

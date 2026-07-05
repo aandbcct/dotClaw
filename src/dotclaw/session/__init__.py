@@ -6,9 +6,10 @@
 """
 
 from .session import Session, Conversation, SessionManager
-from .agent_run import AgentRun, AgentRunManager
+from .agent_run import AgentRun, AgentRunManager, RunEndStatus, TriggerType
 
 __all__ = [
     "Session", "Conversation", "SessionManager",
     "AgentRun", "AgentRunManager",
+    "RunEndStatus", "TriggerType",
 ]

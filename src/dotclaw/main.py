@@ -122,10 +122,10 @@ async def _run_cli() -> None:
                 continue
 
             # ── 正常对话 ──
-            run: AgentRun = await agent.process(runtime, current_session, user_input, session_mgr)
+            final_answer: str = await agent.process(runtime, current_session, user_input, session_mgr)
 
-            if run.end_status != "completed":
-                channel.print_error(f"执行异常: {run.error or run.end_status}")
+            if not final_answer:
+                channel.print_error("执行异常：未返回有效回复")
 
             sys.stdout.flush()
 

@@ -1,6 +1,6 @@
-"""Agent Resume 功能测试。
+"""Agent Resume 功能测试（v2 StateStore + trace.jsonl 架构）。
 
-测试 ResumeManager 的 find_interrupted / load_history / reconstruct / resolve。
+测试 ResumeManager 的 get_resume_context() 从 StateStore + trace.jsonl 恢复。
 """
 
 import json
@@ -15,288 +15,220 @@ from dotclaw.llm.base import Message, ToolCall
 # Helpers
 # ═══════════════════════════════════════════════════════════════════
 
-def _write_trace(session_dir: Path, request_subdir: str,
-                 state: dict, history_lines: list[dict]) -> Path:
-    """在测试临时目录下构造一个完整的 trace 目录。"""
-    from datetime import date
-    date_str = date.today().isoformat()
-    trace_dir = session_dir / date_str / request_subdir
-    trace_dir.mkdir(parents=True, exist_ok=True)
+def _write_state(trace_dir: Path, session_id: str, state_data: dict) -> None:
+    """在 StateStore 路径写入 state.json。"""
+    state_dir = trace_dir / "session" / session_id
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "state.json").write_text(
+        json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    (trace_dir / "state.json").write_text(
-        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    if history_lines:
-        (trace_dir / "history.jsonl").write_text(
-            "\n".join(json.dumps(line, ensure_ascii=False) for line in history_lines),
-            encoding="utf-8")
-    return trace_dir
-
-
-# ═══════════════════════════════════════════════════════════════════
-# find_interrupted
-# ═══════════════════════════════════════════════════════════════════
-
-class TestFindInterrupted:
-    """检测中断的 request。"""
-
-    def test_finds_running_state(self, tmp_path):
-        from dotclaw.agent.resume import ResumeManager
-        session_dir = tmp_path / "s-test"
-        _write_trace(session_dir, "123456-req-001",
-                     {"status": "running", "loop_index": 2}, [])
-
-        mgr = ResumeManager(trace_root=str(tmp_path))
-        found = mgr.find_interrupted("s-test")
-        assert found is not None
-        assert "req-001" in str(found)
-
-    def test_ignores_completed(self, tmp_path):
-        from dotclaw.agent.resume import ResumeManager
-        session_dir = tmp_path / "s-test"
-        _write_trace(session_dir, "123456-req-001",
-                     {"status": "completed"}, [])
-
-        mgr = ResumeManager(trace_root=str(tmp_path))
-        found = mgr.find_interrupted("s-test")
-        assert found is None
-
-    def test_picks_latest_if_multiple_running(self, tmp_path):
-        from dotclaw.agent.resume import ResumeManager
-        session_dir = tmp_path / "s-test"
-        _write_trace(session_dir, "123456-req-old",
-                     {"status": "running"}, [])
-        _write_trace(session_dir, "223456-req-new",
-                     {"status": "running"}, [])
-
-        mgr = ResumeManager(trace_root=str(tmp_path))
-        found = mgr.find_interrupted("s-test")
-        assert found is not None
-        assert "req-new" in str(found)
-
-    def test_no_session_returns_none(self, tmp_path):
-        from dotclaw.agent.resume import ResumeManager
-        mgr = ResumeManager(trace_root=str(tmp_path))
-        found = mgr.find_interrupted("nonexistent")
-        assert found is None
+def _write_trace_jsonl(trace_dir: Path, session_id: str,
+                       entries: list[dict]) -> Path:
+    """写入 trace.jsonl 条目。"""
+    trace_path = trace_dir / "session" / session_id / "trace.jsonl"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(e, ensure_ascii=False) for e in entries]
+    trace_path.write_text("\n".join(lines), encoding="utf-8")
+    return trace_path
 
 
 # ═══════════════════════════════════════════════════════════════════
-# load_history
+# get_resume_context
 # ═══════════════════════════════════════════════════════════════════
 
-class TestLoadHistory:
-    """从 history.jsonl 加载条目。"""
+class TestResumeContext:
+    """测试 get_resume_context() 从 StateStore + trace.jsonl 恢复。"""
 
-    def test_loads_all_lines(self, tmp_path):
-        from dotclaw.agent.resume import ResumeManager
-        mgr = ResumeManager()
-
-        p = tmp_path / "h.jsonl"
-        p.write_text('\n'.join([
-            json.dumps({"loop": -1, "step": "user_input", "role": "user", "content": "hi"}),
-            json.dumps({"loop": 0, "step": "llm_response", "role": "assistant", "content": "hello"}),
-        ]), encoding="utf-8")
-
-        entries = mgr.load_history(p)
-        assert len(entries) == 2
-        assert entries[0]["step"] == "user_input"
-
-    def test_empty_file_returns_empty(self, tmp_path):
-        from dotclaw.agent.resume import ResumeManager
-        mgr = ResumeManager()
-
-        p = tmp_path / "empty.jsonl"
-        p.write_text("", encoding="utf-8")
-
-        entries = mgr.load_history(p)
-        assert entries == []
-
-    def test_missing_file_returns_empty(self, tmp_path):
-        from dotclaw.agent.resume import ResumeManager
-        mgr = ResumeManager()
-
-        entries = mgr.load_history(tmp_path / "missing.jsonl")
-        assert entries == []
-
-
-# ═══════════════════════════════════════════════════════════════════
-# reconstruct
-# ═══════════════════════════════════════════════════════════════════
-
-class TestReconstruct:
-    """从 history 条目重建 Message 列表，检测未完成工具。"""
-
-    def test_reconstruct_simple_conversation(self):
-        from dotclaw.agent.resume import ResumeManager
-        mgr = ResumeManager()
-        entries = [
-            {"loop": -1, "step": "user_input", "role": "user", "content": "hi"},
-            {"loop": 0, "step": "llm_response", "role": "assistant",
-             "content": "hello", "tool_calls": None},
-        ]
-
-        messages, incomplete = mgr.reconstruct(entries)
-        assert len(messages) == 2
-        assert messages[0].role == "user"
-        assert messages[0].content == "hi"
-        assert messages[1].role == "assistant"
-        assert messages[1].content == "hello"
-        assert incomplete == []
-
-    def test_reconstruct_with_tool_calls_and_results(self):
-        from dotclaw.agent.resume import ResumeManager
-        mgr = ResumeManager()
-        entries = [
-            {"loop": -1, "step": "user_input", "role": "user", "content": "search"},
-            {"loop": 0, "step": "llm_response", "role": "assistant",
-             "content": "", "tool_calls": [
-                 {"id": "c1", "name": "search", "args": '{"q":"x"}'},
-             ]},
-            {"loop": 0, "step": "tool_result", "role": "tool",
-             "content": "found", "tool_call_id": "c1", "name": "search"},
-            {"loop": 1, "step": "llm_response", "role": "assistant",
-             "content": "result: found", "tool_calls": None},
-        ]
-
-        messages, incomplete = mgr.reconstruct(entries)
-        assert len(messages) == 4
-        assert messages[0].role == "user"
-        assert messages[1].role == "assistant"
-        assert len(messages[1].tool_calls) == 1
-        assert messages[1].tool_calls[0].id == "c1"
-        assert messages[2].role == "tool"
-        assert messages[2].tool_call_id == "c1"
-        assert incomplete == []
-
-    def test_reconstruct_detects_incomplete_tool(self):
-        from dotclaw.agent.resume import ResumeManager
-        mgr = ResumeManager()
-        entries = [
-            {"loop": -1, "step": "user_input", "role": "user", "content": "do all"},
-            {"loop": 0, "step": "llm_response", "role": "assistant",
-             "content": "", "tool_calls": [
-                 {"id": "c1", "name": "search", "args": '{}'},
-                 {"id": "c2", "name": "write", "args": '{}'},
-             ]},
-            {"loop": 0, "step": "tool_result", "role": "tool",
-             "content": "done", "tool_call_id": "c1", "name": "search"},
-            # c2 缺少 tool_result
-        ]
-
-        messages, incomplete = mgr.reconstruct(entries)
-        assert len(messages) == 3  # user + assistant + c1 的结果
-        assert len(incomplete) == 1
-        assert incomplete[0].id == "c2"
-        assert incomplete[0].name == "write"
-
-    def test_reconstruct_all_tools_incomplete(self):
-        from dotclaw.agent.resume import ResumeManager
-        mgr = ResumeManager()
-        entries = [
-            {"loop": -1, "step": "user_input", "role": "user", "content": "do"},
-            {"loop": 0, "step": "llm_response", "role": "assistant",
-             "content": "", "tool_calls": [
-                 {"id": "c1", "name": "search", "args": '{}'},
-             ]},
-            # 没有任何 tool_result
-        ]
-
-        messages, incomplete = mgr.reconstruct(entries)
-        assert len(messages) == 2  # user + assistant
-        assert len(incomplete) == 1
-        assert incomplete[0].id == "c1"
-
-
-# ═══════════════════════════════════════════════════════════════════
-# ResumeManager integration
-# ═══════════════════════════════════════════════════════════════════
-
-class TestResumeManagerIntegration:
-    """端到端 resume 流程。"""
-
-    def test_resume_no_interrupted_request(self, tmp_path):
-        from dotclaw.agent.resume import ResumeManager
-        mgr = ResumeManager(trace_root=str(tmp_path))
-
-        result = mgr.get_resume_context("s-test")
-        assert result is None
-
-    def test_resume_context_contains_messages_and_incomplete(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_no_resume_when_no_state(self, tmp_path):
+        from dotclaw.runtime.state_store import StateStore
         from dotclaw.agent.resume import ResumeManager
 
-        session_dir = tmp_path / "s-test"
-        _write_trace(session_dir, "120000-req-int",
-                     {"status": "running", "loop_index": 0,
-                      "total_input_tokens": 500, "total_output_tokens": 50}, [
-            {"loop": -1, "step": "user_input", "role": "user", "content": "do it"},
-            {"loop": 0, "step": "llm_response", "role": "assistant",
-             "content": "", "tool_calls": [
-                 {"id": "c1", "name": "search", "args": '{}'},
-                 {"id": "c2", "name": "write", "args": '{}'},
-             ]},
-            {"loop": 0, "step": "tool_result", "role": "tool",
-             "content": "found", "tool_call_id": "c1", "name": "search"},
-        ])
+        store = StateStore(data_dir=str(tmp_path))
+        mgr = ResumeManager(state_store=store, trace_dir=str(tmp_path))
 
-        mgr = ResumeManager(trace_root=str(tmp_path))
-        ctx = mgr.get_resume_context("s-test")
-        assert ctx is not None
-        assert len(ctx["messages"]) == 3
-        assert len(ctx["incomplete_tools"]) == 1
-        assert ctx["incomplete_tools"][0].name == "write"
-        assert ctx["request_id"] == "req-int"
-        assert ctx["state"]["loop_index"] == 0
-        assert ctx["state"]["total_input_tokens"] == 500
-
-    def test_resume_context_none_for_completed(self, tmp_path):
-        from dotclaw.agent.resume import ResumeManager
-
-        session_dir = tmp_path / "s-test"
-        _write_trace(session_dir, "120000-req-done",
-                     {"status": "completed"}, [
-            {"loop": -1, "step": "user_input", "role": "user", "content": "done"},
-        ])
-
-        mgr = ResumeManager(trace_root=str(tmp_path))
-        ctx = mgr.get_resume_context("s-test")
+        ctx = await mgr.get_resume_context("s-test")
         assert ctx is None
 
+    @pytest.mark.asyncio
+    async def test_no_resume_when_state_completed(self, tmp_path):
+        from dotclaw.runtime.state_store import StateStore
+        from dotclaw.agent.resume import ResumeManager
 
-# ═══════════════════════════════════════════════════════════════════
-# Journal restore_state
-# ═══════════════════════════════════════════════════════════════════
-
-class TestJournalRestoreState:
-    """Journal.restore_state() 恢复累加器。"""
-
-    def test_restores_loop_idx(self):
-        from dotclaw.journal.journal import Journal
-        journal = Journal()
-        journal._loop_idx = -1
-        journal.restore_state({"loop_index": 3})
-        assert journal._loop_idx == 3
-
-    def test_restores_all_accumulators(self):
-        from dotclaw.journal.journal import Journal
-        journal = Journal()
-        journal.restore_state({
-            "loop_index": 2,
-            "total_input_tokens": 3200,
-            "total_output_tokens": 500,
-            "total_tool_calls": 3,
-            "errors": [{"source": "tool", "message": "timeout"}],
-            "message_count": 8,
+        _write_state(tmp_path, "s-test", {
+            "task_id": "t1", "thread_id": "s-test", "agent_id": "a1",
+            "phase": "done", "iteration": 3, "max_iterations": 10,
+            "end_status": "completed", "tool_calls_total": 2,
         })
-        assert journal._loop_idx == 2
-        assert journal._token_accum["input"] == 3200
-        assert journal._token_accum["output"] == 500
-        assert journal._tool_count == 3
-        assert len(journal._errors_list) == 1
-        assert journal._message_count == 8
 
-    def test_restores_missing_fields_as_defaults(self):
-        from dotclaw.journal.journal import Journal
-        journal = Journal()
-        journal.restore_state({})  # 空 state
-        assert journal._loop_idx == -1
-        assert journal._token_accum["input"] == 0
+        store = StateStore(data_dir=str(tmp_path))
+        mgr = ResumeManager(state_store=store, trace_dir=str(tmp_path))
+
+        ctx = await mgr.get_resume_context("s-test")
+        assert ctx is None
+
+    @pytest.mark.asyncio
+    async def test_resume_when_state_tool_wait(self, tmp_path):
+        from dotclaw.runtime.state_store import StateStore
+        from dotclaw.agent.resume import ResumeManager
+
+        _write_state(tmp_path, "s-test", {
+            "task_id": "t1", "thread_id": "s-test", "agent_id": "a1",
+            "phase": "acting", "iteration": 2, "max_iterations": 10,
+            "end_status": "tool_wait", "tool_calls_total": 2,
+        })
+
+        # 写入 trace.jsonl 消息
+        _write_trace_jsonl(tmp_path, "s-test", [
+            {
+                "ts": 1.0, "t": "00:00:01.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {"role": "user", "content": "query"},
+            },
+            {
+                "ts": 2.0, "t": "00:00:02.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {
+                    "role": "assistant", "content": "thinking",
+                    "tool_calls": [
+                        {"id": "c1", "name": "search", "arguments": '{"q":"x"}'},
+                    ],
+                },
+            },
+        ])
+
+        store = StateStore(data_dir=str(tmp_path))
+        mgr = ResumeManager(state_store=store, trace_dir=str(tmp_path))
+
+        ctx = await mgr.get_resume_context("s-test")
+        assert ctx is not None
+        assert len(ctx["messages"]) == 2
+        assert ctx["messages"][0].role == "user"
+        assert ctx["messages"][1].role == "assistant"
+        assert len(ctx["incomplete_tools"]) == 1
+        assert ctx["incomplete_tools"][0].id == "c1"
+        assert "state" in ctx
+        assert ctx["state"]["end_status"] == "tool_wait"
+
+
+class TestReconstructMessages:
+    """测试 _reconstruct_messages() 消息重建。"""
+
+    def test_reconstruct_complete_conversation(self, tmp_path):
+        from dotclaw.agent.resume import ResumeManager
+
+        entries: list[dict] = [
+            {
+                "ts": 1.0, "t": "00:00:01.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {"role": "user", "content": "hello"},
+            },
+            {
+                "ts": 2.0, "t": "00:00:02.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {"role": "assistant", "content": "hi there"},
+            },
+        ]
+        store = type("FakeStore", (), {})()
+        mgr = ResumeManager(state_store=store, trace_dir=str(tmp_path))
+        msgs, incomplete = mgr._reconstruct_messages(entries)
+
+        assert len(msgs) == 2
+        assert msgs[0].role == "user"
+        assert msgs[0].content == "hello"
+        assert msgs[1].role == "assistant"
+        assert msgs[1].content == "hi there"
+        assert len(incomplete) == 0
+
+    def test_reconstruct_with_incomplete_tool(self, tmp_path):
+        from dotclaw.agent.resume import ResumeManager
+
+        entries: list[dict] = [
+            {
+                "ts": 1.0, "t": "00:00:01.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {"role": "user", "content": "search for x"},
+            },
+            {
+                "ts": 2.0, "t": "00:00:02.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [
+                        {"id": "c1", "name": "search", "arguments": '{"q":"x"}'},
+                        {"id": "c2", "name": "read", "arguments": '{}'},
+                    ],
+                },
+            },
+        ]
+        store = type("FakeStore", (), {})()
+        mgr = ResumeManager(state_store=store, trace_dir=str(tmp_path))
+        msgs, incomplete = mgr._reconstruct_messages(entries)
+
+        assert len(msgs) == 2
+        assert len(incomplete) == 2
+        assert incomplete[0].id == "c1"
+        assert incomplete[1].id == "c2"
+
+    def test_reconstruct_with_partial_tool_result(self, tmp_path):
+        from dotclaw.agent.resume import ResumeManager
+
+        entries: list[dict] = [
+            {
+                "ts": 1.0, "t": "00:00:01.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {"role": "user", "content": "search"},
+            },
+            {
+                "ts": 2.0, "t": "00:00:02.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [
+                        {"id": "c1", "name": "a", "arguments": "{}"},
+                        {"id": "c2", "name": "b", "arguments": "{}"},
+                    ],
+                },
+            },
+            {
+                "ts": 3.0, "t": "00:00:03.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {
+                    "role": "tool", "content": "result-a",
+                    "tool_call_id": "c1", "name": "a",
+                },
+            },
+        ]
+        store = type("FakeStore", (), {})()
+        mgr = ResumeManager(state_store=store, trace_dir=str(tmp_path))
+        msgs, incomplete = mgr._reconstruct_messages(entries)
+
+        # c1 有 tool_result，c2 没有
+        assert len(incomplete) == 1
+        assert incomplete[0].id == "c2"
+
+    def test_skips_non_trace_message_events(self, tmp_path):
+        from dotclaw.agent.resume import ResumeManager
+
+        entries: list[dict] = [
+            {
+                "ts": 1.0, "t": "00:00:01.000", "type": "session.start",
+                "data": {"session_id": "s1"},
+            },
+            {
+                "ts": 2.0, "t": "00:00:02.000", "type": "trace.message",
+                "agentrun_id": "run-001",
+                "data": {"role": "user", "content": "hi"},
+            },
+            {
+                "ts": 3.0, "t": "00:00:03.000", "type": "llm.call_start",
+                "data": {"model": "test"},
+            },
+        ]
+        store = type("FakeStore", (), {})()
+        mgr = ResumeManager(state_store=store, trace_dir=str(tmp_path))
+        msgs, incomplete = mgr._reconstruct_messages(entries)
+
+        # 只应该重建一条 trace.message 事件
+        assert len(msgs) == 1
+        assert msgs[0].content == "hi"

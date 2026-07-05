@@ -571,6 +571,95 @@ class AgentState:
         """
         self._record_tool_calls()
 
+    # ======================== 原子操作：快照/恢复 ========================
+
+    def snapshot(self) -> dict:
+        """生成当前 AgentState 的可序列化快照。
+
+        原子操作：
+        1. 收集所有需要持久化的字段
+        2. 序列化 tasks 为 dict 列表
+        3. 返回 JSON 兼容的 dict
+
+        Returns:
+            可序列化的状态快照字典
+        """
+        tasks_data: list[dict] = []
+        for t in self.tasks:
+            tasks_data.append({
+                "task_id": t.task_id,
+                "description": t.description,
+                "progress": t.progress.value,
+                "parent_task_id": t.parent_task_id,
+                "agent_id": t.agent_id,
+                "agent_run_ids": list(t.agent_run_ids),
+                "result": t.result,
+                "error": t.error,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+            })
+
+        return {
+            "task_id": self.task_id,
+            "thread_id": self.thread_id,
+            "agent_id": self.agent_id,
+            "phase": self.phase.value,
+            "iteration": self.iteration,
+            "max_iterations": self.max_iterations,
+            "end_status": self.end_status.value,
+            "error_message": self.error_message,
+            "handoff_target": self.handoff_target,
+            "handoff_context": self.handoff_context,
+            "tool_calls_total": self.tool_calls_total,
+            "tasks": tasks_data,
+        }
+
+    @classmethod
+    def restore(
+        cls,
+        snapshot_data: dict,
+    ) -> AgentState:
+        """从持久化快照恢复 AgentState。
+
+        原子操作：
+        1. 从 dict 提取基础字段创建 AgentState 实例
+        2. 恢复 phase、iteration、end_status 等运行时状态
+        3. 不恢复 tasks（tasks 由独立 Task 管理）
+
+        Args:
+            snapshot_data: snapshot() 产出的字典
+
+        Returns:
+            恢复的 AgentState 实例
+        """
+        state = cls(
+            task_id=snapshot_data.get("task_id", ""),
+            thread_id=snapshot_data.get("thread_id", ""),
+            agent_id=snapshot_data.get("agent_id", ""),
+            max_iterations=snapshot_data.get("max_iterations", 10),
+        )
+
+        # 恢复运行时状态
+        phase_str: str = snapshot_data.get("phase", AgentPhase.IDLE.value)
+        try:
+            state.phase = AgentPhase(phase_str)
+        except ValueError:
+            state.phase = AgentPhase.IDLE
+
+        state.iteration = snapshot_data.get("iteration", 0)
+
+        end_status_str: str = snapshot_data.get("end_status", AgentStatus.RUNNING.value)
+        try:
+            state.end_status = AgentStatus(end_status_str)
+        except ValueError:
+            state.end_status = AgentStatus.RUNNING
+
+        state.error_message = snapshot_data.get("error_message")
+        state.handoff_target = snapshot_data.get("handoff_target")
+        state.handoff_context = snapshot_data.get("handoff_context")
+
+        return state
+
 
 # ============================================================================
 # 辅助函数

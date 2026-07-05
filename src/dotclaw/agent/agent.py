@@ -156,44 +156,69 @@ class Agent:
         session: SessionType,
         user_message: str,
         session_mgr: object,
-    ) -> AgentRun:
-        """处理一条用户消息（完整流程：执行 + 持久化）。
+    ) -> str:
+        """处理一条用户消息（完整流程：创建 TurnLoop + 执行）。
 
         调度器职责：
-        1. 调用 Runtime.run() 执行
-        2. 成功时追加 Conversation 记录并保存 Session
+        1. 创建 TurnLoop（per-Session 事件循环）
+        2. 启动事件循环处理消息
+        3. 成功时追加 Conversation 记录并保存 Session
+
+        v2: 不再直接调用 runtime.run()，改由 TurnLoop 管理控制循环。
+        AgentRun 由 TurnLoop 内部创建和持久化。
 
         Args:
-            runtime: Runtime 编排引擎
+            runtime: Runtime 执行引擎
             session: 运行时上下文
             user_message: 用户输入文本
             session_mgr: SessionManager 实例
 
         Returns:
-            AgentRun（执行结果，含 end_status）
+            Agent 最终回复文本
         """
-        agent_run: AgentRun = await runtime.run(
-            thread_id=session.id,
-            agent=self,
-            user_message=user_message,
+        from ..session.turn_loop import TurnLoop
+        from ..session.agent_run import RunEndStatus
+
+        if runtime.journal is None or runtime.state_store is None:
+            raise RuntimeError(
+                "Agent.process() requires Runtime with Journal and StateStore injected"
+            )
+
+        # 初始化 Journal 会话
+        model: str = self._resolve_model(runtime)
+        runtime.journal.session_start(
+            session_id=session.id,
+            model=model,
+            config=runtime.config.journal if runtime.config else None,
         )
 
-        if agent_run.end_status == "completed":
-            final: str | None = agent_run.final_output
-            session.add_conversation(
-                user_query=user_message,
-                final_answer=final or "",
-                agent_run_ids=[agent_run.run_id],
-            )
-            await session_mgr.save(session)  # type:ignore[union-attr]
+        # 创建 TurnLoop
+        loop: TurnLoop = TurnLoop(
+            session_id=session.id,
+            agent=self,
+            runtime=runtime,
+            state_store=runtime.state_store,
+            journal=runtime.journal,
+            channel=runtime.channel,
+        )
 
-        return agent_run
+        # 运行事件循环
+        final_answer: str = await loop.run_forever(user_message)
+
+        # 成功时追加 Conversation 记录
+        session.add_conversation(
+            user_query=user_message,
+            final_answer=final_answer,
+            agent_run_ids=[],  # TurnLoop 管理的 runs 在内部持久化，此处不再追踪
+        )
+        await session_mgr.save(session)  # type:ignore[union-attr]
+
+        return final_answer
 
     async def execute(self, runtime: Runtime, task: Task) -> Task:
         """主从式入口 —— 内部创建独立 Session，执行后返回填充完成的 Task。
 
-        输入 task 的 description/context/constraints/input_artifacts 已由父 Agent 填充。
-        执行完毕后填充 task 的 status/final_result/output_artifacts/error/sub_run_id。
+        使用 TurnLoop 执行子 Agent 的任务。
 
         Args:
             runtime: Runtime 编排引擎
@@ -203,8 +228,14 @@ class Agent:
             携带执行结果的 task（就地修改后的同一对象）
         """
         import uuid as _uuid
+        from ..session.turn_loop import TurnLoop
 
-        # 创建独立 Session（与父 Agent 完全隔离）
+        if runtime.journal is None or runtime.state_store is None:
+            raise RuntimeError(
+                "Agent.execute() requires Runtime with Journal and StateStore injected"
+            )
+
+        # 创建独立 Session
         child_session: SessionType = await runtime.session_mgr.create(
             title=f"sub-{self.agent_id}-{_uuid.uuid4().hex[:6]}",
             agent_id=self.agent_id,
@@ -213,24 +244,31 @@ class Agent:
 
         task.mark_working()
 
-        # 组装 user_message
         user_message: str = self._build_task_message(task)
 
-        try:
-            sub_run: AgentRun = await runtime.run(
-                thread_id=child_session.id,
-                agent=self,
-                user_message=user_message,
-            )
+        # 初始化 Journal + 创建 TurnLoop
+        model: str = self._resolve_model(runtime)
+        runtime.journal.session_start(
+            session_id=child_session.id,
+            model=model,
+            config=runtime.config.journal if runtime.config else None,
+        )
 
-            if sub_run.end_status == "completed":
-                task.mark_completed(
-                    final_result=sub_run.final_output or "",
-                    sub_run_id=sub_run.run_id,
-                )
-            else:
-                task.mark_failed(error=sub_run.error or sub_run.end_status)
-                task.sub_run_id = sub_run.run_id
+        loop: TurnLoop = TurnLoop(
+            session_id=child_session.id,
+            agent=self,
+            runtime=runtime.derive(),
+            state_store=runtime.state_store,
+            journal=runtime.journal,
+            channel=runtime.channel,
+        )
+
+        try:
+            final_answer: str = await loop.run_forever(user_message)
+            task.mark_completed(
+                final_result=final_answer,
+                sub_run_id="",
+            )
         except Exception as e:
             task.mark_failed(error=str(e))
 
@@ -248,7 +286,7 @@ class Agent:
         """发送 Task 给目标 Agent，阻塞等待执行完成。
 
         Agent 的一等通信能力。对标 A2A tasks/send。
-        内部完成：路由 → 构造 Task → 创建子Agent → execute → 等待结果。
+        内部完成：路由 → 构造 Task → 创建子 Agent → TurnLoop 执行 → 等待结果。
 
         Args:
             runtime: Runtime 编排引擎
@@ -291,11 +329,11 @@ class Agent:
         # 注册追踪
         self._messaging.send(task, identity)
 
-        # 创建子 Agent（独立 Runtime + Session）
+        # 创建子 Agent + 子 TurnLoop（共享 Runtime 底层能力）
         child_runtime = runtime.derive()
         child_agent: Agent = Agent(identity=identity, runtime=child_runtime)
 
-        # 执行并等待
+        # 使用 execute 确保 TurnLoop 被正确创建
         return await child_agent.execute(child_runtime, task)
 
     @staticmethod

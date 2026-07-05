@@ -1,10 +1,13 @@
 """Journal 事件定义。
 
-16 种标准化事件覆盖 5 个域：
+18 种标准化事件覆盖 5 个域：
 会话 / ReAct 循环 / LLM 调用 / 工具调用 / Skill+记忆+错误
++ Trace Message（消息内容作为 Trace Event 入 trace.jsonl）
++ State Change（状态变更事件）
 """
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 
@@ -26,13 +29,13 @@ class AgentEvent:
 
 
 class EventType:
-    """16 种标准事件类型常量。"""
+    """18 种标准事件类型常量。"""
 
     # ── 会话 ──
     SESSION_START = "session.start"
     SESSION_END = "session.end"
 
-    # ── ReAct 循环 ──
+    # ── ReAct 循环（由 TurnLoop 继承使用） ──
     LOOP_START = "react.loop_start"
     LOOP_END = "react.loop_end"
     EMPTY_ACTION = "react.empty_action"
@@ -59,3 +62,20 @@ class EventType:
 
     # ── 错误 ──
     ERROR = "system.error"
+
+    # ── Trace Message（消息内容作为 Trace Event 入 trace.jsonl）─
+    TRACE_MESSAGE = "trace.message"
+    """对话消息内容事件。包含 role/content/tool_calls/tool_call_id 等完整消息字段。
+    所有流转消息（user/assistant/tool）均以此类型写入 trace.jsonl。"""
+
+    # ── State Change（状态变更事件）─
+    STATE_CHANGE = "state.change"
+    """AgentState 变更事件。包含 phase/end_status 等状态转换信息。"""
+
+
+class TraceMessageRole(Enum):
+    """Trace Message 中的消息角色。"""
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+    SYSTEM = "system"
