@@ -17,7 +17,9 @@ from pathlib import Path
 from dotclaw.journal.events import AgentEvent, EventType, TraceMessageRole
 from dotclaw.config.settings import JournalConfig
 import json as _json
-from datetime import datetime as _dt, timezone as _tz
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+CHINA_TZ = _tz(_td(hours=8))
 
 if TYPE_CHECKING:
     pass
@@ -529,7 +531,7 @@ class Journal:
             "errors": list(self._errors_list),
             "model": self._model,
             "max_loop_steps": self._max_loop_steps,
-            "updated_at": _dt.now(_tz.utc).isoformat(),
+            "updated_at": _dt.now(CHINA_TZ).isoformat(),
         }
         self._state_sink.write(state)
 
@@ -584,7 +586,7 @@ class Journal:
                 from dotclaw.journal.snapshot import SnapshotBuilder
                 from dotclaw.journal.storage import save_snapshot, build_run_meta
 
-                ts = _dt.now(_tz.utc)
+                ts = _dt.now(CHINA_TZ)
                 run_id = f"run_{ts.strftime('%Y%m%d_%H%M%S')}"
 
                 meta = build_run_meta(

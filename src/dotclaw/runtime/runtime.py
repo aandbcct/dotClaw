@@ -17,7 +17,9 @@ import asyncio
 import json as _json
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+CHINA_TZ = timezone(timedelta(hours=8))
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -212,7 +214,7 @@ class Runtime:
         run_messages: list[Message] = []
         self.journal.agentrun_start(agentrun_id, TriggerType.USER_INPUT.value)
 
-        started_at: str = datetime.now(timezone.utc).isoformat()
+        started_at: str = datetime.now(CHINA_TZ).isoformat()
         start_time: float = time.time()
         tokens_in_total: int = 0
         tokens_out_total: int = 0
@@ -294,7 +296,7 @@ class Runtime:
 
         finally:
             duration_ms: int = int((time.time() - start_time) * 1000)
-            ended_at: str = datetime.now(timezone.utc).isoformat()
+            ended_at: str = datetime.now(CHINA_TZ).isoformat()
             self.journal.agentrun_end(end_status.value)
 
             try:
