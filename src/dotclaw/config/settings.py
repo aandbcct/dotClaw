@@ -59,6 +59,7 @@ class AgentConfig:
     system_prompt: str = "你是一个有用、诚实且友好的 AI 助手。"
     max_context_tokens: int = 8000
     keep_recent_messages: int = 10
+    truncated_continue: bool = True   # v2: finish_reason="length" 时自动续跑
     rules: str = ""   # P3 新增：额外行为规则，追加到 system prompt
 
 

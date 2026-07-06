@@ -40,6 +40,9 @@ class RunEndStatus(Enum):
     FAILED = "failed"
     """执行异常"""
 
+    WAITING = "waiting"
+    """挂起等待外部事件（如人工审批）。Resume 时触发新 AgentRun"""
+
 
 class TriggerType(Enum):
     """AgentRun 的触发源类型。"""
