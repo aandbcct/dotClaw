@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 from ..llm.base import Message
 from ..session.agent_run import RunEndStatus, TriggerType
 from .agent_state import (
-    AgentState, AgentPhase, AgentAction, AgentStatus,
+    AgentState, AgentPhase, AgentAction, AgentStatus, AgentEvent,
     AgentStartEvent as ASStartEvent,
     LLMResponseEvent as ASLLMResponseEvent,
     ToolsDoneEvent as ASToolsDoneEvent,
@@ -150,20 +150,21 @@ class Runtime:
         user_message: str,
         *,
         resume_state: AgentState | None = None,
+        resume_event: AgentEvent | None = None,
     ) -> str:
         """执行一次完整的用户消息 → Agent 回复，或从挂起状态恢复。
 
-        内部驱动 AgentState 的 ReAct 循环：
-        IDLE → THINKING → ACTING → THINKING → ... → RESPONDING → DONE
-
-        当 AgentState 进入 WAITING_APPROVAL + WAIT 时，返回 WAIT_SENTINEL。
-        后续通过 resume_state 参数恢复执行。
+        当 AgentState 进入需要外部事件的 WAIT 时返回 WAIT_SENTINEL。
+        后续通过 resume_state + resume_event 恢复执行。
 
         Args:
             session: 当前 Session
             agent: 执行 Agent
             user_message: 用户输入文本（resume 时可为空）
-            resume_state: 要恢复的 AgentState（resume 时必须提供）
+            resume_state: 要恢复的 AgentState
+            resume_event: 恢复时推送的事件。
+                默认 ContinueEvent()（适用于 RETRYING 等自动恢复场景）。
+                对于 WAITING_APPROVAL，传 ApprovalDoneEvent(approved=True/False)。
 
         Returns:
             Agent 最终回复文本，或 WAIT_SENTINEL（挂起等待外部事件）
@@ -194,6 +195,7 @@ class Runtime:
                 context_messages=context_messages,
                 run_ids=run_ids,
                 resume_state=resume_state,
+                resume_event=resume_event,
             )
         except Exception:
             self.journal.finalize()
@@ -213,6 +215,7 @@ class Runtime:
         run_ids: list[str],
         *,
         resume_state: AgentState | None = None,
+        resume_event: AgentEvent | None = None,
     ) -> str:
         """执行一次完整 AgentRun（一次用户一问一答或 resume）。
 
@@ -221,7 +224,8 @@ class Runtime:
 
         Args:
             resume_state: 从挂起状态恢复时传入的 AgentState。
-                非 None 时跳过 StartEvent，直接推 ContinueEvent 恢复。
+            resume_event: 恢复事件。默认 ContinueEvent()。
+                对于 WAITING_APPROVAL，外部应传 ApprovalDoneEvent(approved=True/False)。
         """
         agentrun_id: str = uuid.uuid4().hex[:8]
         run_ids.append(agentrun_id)
@@ -248,7 +252,8 @@ class Runtime:
         # 创建或恢复 AgentState
         if resume_state is not None:
             state: AgentState = resume_state
-            action: AgentAction = state.handle_event(ContinueEvent())
+            event: AgentEvent = resume_event if resume_event is not None else ContinueEvent()
+            action: AgentAction = state.handle_event(event)
         else:
             # 记录 user message
             user_msg: Message = Message(role="user", content=user_message)
@@ -635,9 +640,11 @@ class Runtime:
         duration_ms: int = int((time.time() - start_time) * 1000)
         ended_at: str = datetime.now(CHINA_TZ).isoformat()
 
-        # 持久化 AgentState 快照
+        # 持久化 AgentState 快照（AgentState → StateSnapshot → 写入）
         if self.state_store is not None:
-            await self.state_store.save(state)
+            from .state_store import StateSnapshot
+            snapshot: StateSnapshot = StateSnapshot.from_agent_state(state)
+            await self.state_store.save(session_id, snapshot)
 
         # 写入 WAITING 状态的 AgentRun 记录
         await self._save_agent_run(
