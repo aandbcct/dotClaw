@@ -157,15 +157,7 @@ class Agent:
         user_message: str,
         session_mgr: object,
     ) -> str:
-        """处理一条用户消息（完整流程：创建 TurnLoop + 执行）。
-
-        调度器职责：
-        1. 创建 TurnLoop（per-Session 事件循环）
-        2. 启动事件循环处理消息
-        3. 成功时追加 Conversation 记录并保存 Session
-
-        v2: 不再直接调用 runtime.run()，改由 TurnLoop 管理控制循环。
-        AgentRun 由 TurnLoop 内部创建和持久化。
+        """处理一条用户消息。
 
         Args:
             runtime: Runtime 执行引擎
@@ -176,53 +168,18 @@ class Agent:
         Returns:
             Agent 最终回复文本
         """
-        from ..runtime.turn_loop import TurnLoop
-        from ..session.agent_run import RunEndStatus
-        import uuid as _uuid
-
-        if runtime.journal is None or runtime.state_store is None:
+        if runtime.journal is None:
             raise RuntimeError(
-                "Agent.process() requires Runtime with Journal and StateStore injected"
+                "Agent.process() requires Runtime with Journal injected"
             )
 
-        conversation_id: str = _uuid.uuid4().hex[:8]
+        final_answer: str = await runtime.run(session, self, user_message)
 
-        # 初始化 Journal 会话
-        model: str = self._resolve_model(runtime)
-        runtime.journal.session_start(
-            session_id=session.id,
-            model=model,
-            config=runtime.config.journal if runtime.config else None,
-            conversation_id=conversation_id,
-        )
-
-        # 创建 TurnLoop
-        loop: TurnLoop = TurnLoop(
-            session_id=session.id,
-            agent=self,
-            runtime=runtime,
-            state_store=runtime.state_store,
-            journal=runtime.journal,
-            channel=runtime.channel,
-        )
-
-        # 运行事件循环
-        try:
-            final_answer = await loop.run_forever(user_message)
-        except Exception:
-            if runtime.journal is not None:
-                runtime.journal.finalize()
-            raise
-
-        # Journal 生命周期由调用方管理
-        if runtime.journal is not None:
-            runtime.journal.finalize()
-
-        # 成功时追加 Conversation 记录（携带所有 agent_run_ids）
+        # 持久化对话记录
         session.add_conversation(
             user_query=user_message,
             final_answer=final_answer,
-            agent_run_ids=loop.run_ids,
+            agent_run_ids=[],
         )
         await session_mgr.save(session)  # type:ignore[union-attr]
 
@@ -241,11 +198,10 @@ class Agent:
             携带执行结果的 task（就地修改后的同一对象）
         """
         import uuid as _uuid
-        from ..runtime.turn_loop import TurnLoop
 
-        if runtime.journal is None or runtime.state_store is None:
+        if runtime.journal is None:
             raise RuntimeError(
-                "Agent.execute() requires Runtime with Journal and StateStore injected"
+                "Agent.execute() requires Runtime with Journal injected"
             )
 
         # 创建独立 Session
@@ -258,32 +214,7 @@ class Agent:
         task.mark_working()
 
         user_message: str = self._build_task_message(task)
-
-        # 初始化 Journal + 创建 TurnLoop
-        model: str = self._resolve_model(runtime)
-        runtime.journal.session_start(
-            session_id=child_session.id,
-            model=model,
-            config=runtime.config.journal if runtime.config else None,
-        )
-
-        loop: TurnLoop = TurnLoop(
-            session_id=child_session.id,
-            agent=self,
-            runtime=runtime.derive(),
-            state_store=runtime.state_store,
-            journal=runtime.journal,
-            channel=runtime.channel,
-        )
-
-        try:
-            final_answer: str = await loop.run_forever(user_message)
-        except Exception:
-            if runtime.journal is not None:
-                runtime.journal.finalize()
-            raise
-        if runtime.journal is not None:
-            runtime.journal.finalize()
+        final_answer: str = await runtime.run(child_session, self, user_message)
 
         task.mark_completed(
             final_result=final_answer,

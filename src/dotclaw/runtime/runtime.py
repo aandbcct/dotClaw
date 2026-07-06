@@ -1,23 +1,14 @@
 """Runtime —— Agent 执行引擎。
 
-Runtime 是 dotClaw 的基础设施层，提供原子执行能力：
-- LLM 调用（_invoke_llm）
-- 工具执行（_execute_tools / _execute_single_tool）
-- Handoff 多 Agent 流转
-- 上下文消息构建
+Runtime 是 dotClaw 的执行引擎 + 依赖容器，统一负责：
+- 依赖注入（LLM / Tool / Journal / Config / ...）
+- 执行入口：run(session, agent, user_message) → final_answer
+- 内部 ReAct 循环由 AgentState 状态机驱动
 
-v2 变更：
-- 控制循环移至 TurnLoop
-- Runtime 退化为纯能力提供者（原子方法集）
-- 注入 Journal 用于观测，注入 StateStore 用于持久化
-
-内部逻辑（原子操作封装为方法）：
-1. _invoke_llm() — 调用 LLM，返回 LLMResponse
-2. _execute_tools() — 并发执行工具调用
-3. _execute_single_tool() — 执行单个工具
-4. _build_messages() — 构建 LLM 输入消息
-5. _build_slot_context() — 构建 SlotContext 供 Assembler
-6. _handle_handoff() — 处理 Agent 间流转
+v3 变更：
+- TurnLoop 合并回 Runtime，消除架空抽象层
+- _context_messages / _run_ids 变为 run() 内部局部变量
+- Journal 生命周期由 run() 内部管理
 """
 
 from __future__ import annotations
@@ -25,10 +16,19 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..llm.base import Message
+from ..session.agent_run import RunEndStatus, TriggerType
+from .agent_state import (
+    AgentState, AgentPhase, AgentAction, AgentStatus,
+    AgentStartEvent as ASStartEvent,
+    LLMResponseEvent as ASLLMResponseEvent,
+    ToolsDoneEvent as ASToolsDoneEvent,
+)
 
 if TYPE_CHECKING:
     from ..llm.proxy import LLMProxy
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from ..agent.agent import Agent as AgentType, LLMResponse
     from ..agent.slotContext import ContextAssembler, SlotContext
     from ..channel.base import Channel
-    from ..session.session import SessionManager
+    from ..session.session import Session as SessionType, SessionManager
     from ..session.agent_run import AgentRun, AgentRunManager
     from ..orchestration.registry import AgentRegistry
     from ..journal.journal import Journal
@@ -52,10 +52,11 @@ if TYPE_CHECKING:
 # ============================================================================
 
 class Runtime:
-    """Agent 执行引擎。
+    """Agent 执行引擎 + 依赖容器。
 
-    Runtime 是共享服务，聚合 LLM/Tool/Config 等能力引用。
-    TurnLoop 是控制循环的持有者，Runtime 提供原子执行方法。
+    run(session, agent, user_message) 是一次完整的一问一答入口。
+    内部 ReAct 循环由 AgentState 状态机驱动，所有运行时状态
+    （_context_messages, _run_ids）都是栈上的局部变量。
 
     Args:
         llm: LLM 代理
@@ -134,108 +135,261 @@ class Runtime:
             config=self.config,
         )
 
-    # ======================== 原子操作：SlotContext 构建 ========================
+    # ======================== 公开入口：run() ========================
 
-    def _build_slot_context(
+    async def run(
         self,
-        thread_id: str,
+        session: SessionType,
+        agent: AgentType,
         user_message: str,
-        system_prompt: str,
-        tool_definitions: list[ToolDefinition],
-    ) -> SlotContext:
-        """构建 SlotContext 供 Assembler 使用。
+    ) -> str:
+        """执行一次完整的用户消息 → Agent 回复。
+
+        内部驱动 AgentState 的 ReAct 循环：
+        IDLE → THINKING → ACTING → THINKING → ... → RESPONDING → DONE
+
+        每次调用都是独立的 —— _context_messages 和 _run_ids
+        是栈上的局部变量，同一 Runtime 可安全地并发调用。
 
         Args:
-            thread_id: Session ID
-            user_message: 用户输入
-            system_prompt: system prompt 模板
-            tool_definitions: 工具定义列表
+            session: 当前 Session
+            agent: 执行 Agent
+            user_message: 用户输入文本
 
         Returns:
-            SlotContext 实例
+            Agent 最终回复文本
         """
-        from ..agent.slotContext import SlotContext as SCtx
+        if self.journal is None or self.state_store is None:
+            raise RuntimeError(
+                "Runtime.run() requires Journal and StateStore injected"
+            )
 
-        project_root: Path = _find_project_root()
-        max_ctx_tokens: int = 8000
-        if self.config is not None:
-            max_ctx_tokens = self.config.agent.max_context_tokens
-
-        return SCtx(
-            query=user_message,
-            request_id=_new_hex_id(),
-            session_id=thread_id,
-            project_root=project_root,
-            max_context_tokens=max_ctx_tokens,
-            system_prompt=system_prompt,
-            tool_definitions=tool_definitions,
-            skill_registry=self.skill_registry,
-            memory_manager=self.memory_mgr,
-            agent_registry=self.agent_registry,
-            knowledge_base=None,
-            user_profile=None,
-            journal=self.journal,
+        # Journal 生命周期
+        conversation_id: str = uuid.uuid4().hex[:8]
+        model: str = agent._resolve_model(self)
+        self.journal.session_start(
+            session_id=session.id,
+            model=model,
+            config=self.config.journal if self.config else None,
+            conversation_id=conversation_id,
         )
 
-    # ======================== 原子操作：消息构建 ========================
+        context_messages: list[Message] = []
+        run_ids: list[str] = []
 
-    def _build_messages(
+        try:
+            final_answer = await self._step(
+                session_id=session.id,
+                agent=agent,
+                user_message=user_message,
+                context_messages=context_messages,
+                run_ids=run_ids,
+            )
+        except Exception:
+            self.journal.finalize()
+            raise
+
+        self.journal.finalize()
+        return final_answer
+
+    # ======================== 单次 AgentRun 执行 ========================
+
+    async def _step(
         self,
-        user_input: str,
-        system_prompt: str,
-        history: list[Message],
-    ) -> list[Message]:
-        """构建 LLM 调用消息列表。
+        session_id: str,
+        agent: AgentType,
+        user_message: str,
+        context_messages: list[Message],
+        run_ids: list[str],
+    ) -> str:
+        """执行一次完整 AgentRun（一次用户一问一答）。
 
-        原子操作：
-        1. 创建 system message
-        2. 裁剪历史消息以适应 token 预算
-        3. 追加 user message
-
-        Args:
-            user_input: 用户输入文本
-            system_prompt: system prompt 文本
-            history: 上下文历史消息
-
-        Returns:
-            LLM 输入消息列表
+        AgentState 驱动内部多轮 think-act：
+        IDLE → THINKING → ACTING → THINKING → ... → RESPONDING → DONE
         """
-        from ..agent.message_utils import trim as msg_trim, _msg_tokens
+        agentrun_id: str = uuid.uuid4().hex[:8]
+        run_ids.append(agentrun_id)
+        run_messages: list[Message] = []
+        self.journal.agentrun_start(agentrun_id, TriggerType.USER_INPUT.value)
 
-        system_msg: Message = Message(role="system", content=system_prompt)
-        user_msg: Message = Message(role="user", content=user_input)
+        started_at: str = datetime.now(timezone.utc).isoformat()
+        start_time: float = time.time()
+        tokens_in_total: int = 0
+        tokens_out_total: int = 0
 
-        max_ctx_tokens: int = 8000
-        if self.config is not None:
-            max_ctx_tokens = self.config.agent.max_context_tokens
+        # 记录 user message
+        user_msg: Message = Message(role="user", content=user_message)
+        self.journal.record_message(user_msg)
+        context_messages.append(user_msg)
+        run_messages.append(user_msg)
 
-        budget: int = max_ctx_tokens - _msg_tokens(system_msg) - _msg_tokens(user_msg)
+        # system_prompt 仅记录到 AgentRun.messages
+        system_prompt: str = await self._build_system_prompt(
+            session_id, agent, user_message,
+        )
+        run_messages.append(Message(role="system", content=system_prompt))
 
-        if budget > 0:
-            trimmed_history: list[Message] = msg_trim(list(history), budget)
-        else:
-            trimmed_history = []
+        # 创建 AgentState → StartEvent → INVOKE_LLM
+        state: AgentState = self._create_agent_state(agentrun_id, session_id, agent)
+        action: AgentAction = state.handle_event(ASStartEvent(user_message=user_message))
 
-        return [system_msg] + trimmed_history + [user_msg]
+        final_answer: str = ""
+        end_status: RunEndStatus = RunEndStatus.COMPLETED
 
-    # ======================== 原子操作：工具执行 ========================
+        try:
+            while not state.is_terminal:
+                if action == AgentAction.INVOKE_LLM:
+                    context_msgs: list[Message] = self._build_context_msgs(
+                        system_prompt, context_messages,
+                    )
+                    resp: LLMResponse = await self._invoke_llm(
+                        agent, context_msgs,
+                    )
+                    tokens_in_total += resp.input_tokens
+                    tokens_out_total += resp.output_tokens
+
+                    asst_msg: Message = _build_assistant_message(resp)
+                    self.journal.record_message(asst_msg)
+                    context_messages.append(asst_msg)
+                    run_messages.append(asst_msg)
+
+                    action = state.handle_event(ASLLMResponseEvent(response=resp))
+
+                elif action == AgentAction.EXECUTE_TOOLS:
+                    tool_msgs: list[Message] = await self._execute_tools_for_state(state)
+                    for tm in tool_msgs:
+                        self.journal.record_message(tm)
+                        context_messages.append(tm)
+                        run_messages.append(tm)
+
+                    action = state.handle_event(ASToolsDoneEvent(results=tool_msgs))
+
+                elif action == AgentAction.WAIT:
+                    # Should never reach here in normal flow.
+                    # TRUNCATED auto-transitions to DONE via _transition().
+                    continue
+
+                else:
+                    # FINALIZE / HANDOFF_TARGET / unexpected → exit loop.
+                    # AgentState may have auto-transitioned to DONE during
+                    # handle_event(), making is_terminal=True. We process
+                    # FINALIZE/HANDOFF outside the loop below.
+                    break
+
+            # 处理循环退出后的终态动作
+            if action == AgentAction.FINALIZE:
+                if state.current_llm_response is not None:
+                    final_answer = state.current_llm_response.content or ""
+                end_status = _agent_status_to_run_end(state.end_status)
+            elif action == AgentAction.HANDOFF_TARGET:
+                await self._handle_handoff_for_state(
+                    state, agentrun_id, session_id,
+                )
+                end_status = RunEndStatus.HANDOFF
+
+        except Exception as e:
+            end_status = RunEndStatus.FAILED
+            final_answer = f"[执行异常] {type(e).__name__}: {e}"
+            self.journal.error("ERROR", "runtime.step", f"{type(e).__name__}: {e}")
+
+        finally:
+            duration_ms: int = int((time.time() - start_time) * 1000)
+            ended_at: str = datetime.now(timezone.utc).isoformat()
+            self.journal.agentrun_end(end_status.value)
+
+            try:
+                await self._save_agent_run(
+                    session_id=session_id,
+                    agentrun_id=agentrun_id,
+                    agent_id=agent.agent_id,
+                    end_status=end_status,
+                    tokens_in=tokens_in_total,
+                    tokens_out=tokens_out_total,
+                    duration_ms=duration_ms,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    state_snapshot=state.snapshot(),
+                    trace_ids=self._collect_trace_ids(),
+                    messages=run_messages,
+                )
+            except Exception:
+                pass
+
+        return final_answer
+
+    # ======================== LLM 调用 ========================
+
+    async def _invoke_llm(
+        self,
+        agent: AgentType,
+        context_msgs: list[Message],
+    ) -> LLMResponse:
+        """调用 LLM，返回 LLMResponse。"""
+        from ..agent.agent import LLMResponse as LR
+
+        model: str = agent._resolve_model(self)
+        tool_definitions: list[ToolDefinition] = agent._resolve_tool_definitions(self)
+
+        self.journal.prompt_built(
+            message_count=len(context_msgs),
+            context_length=sum(len(str(m.content or "")) for m in context_msgs),
+            system_prompt="",
+            tool_count=len(tool_definitions),
+        )
+        self.journal.llm_call_start(attempt=1)
+
+        current_content: str = ""
+        tool_calls: list[object] = []
+        finish_reason: str = "stop"
+        input_tokens: int = 0
+        output_tokens: int = 0
+        stream_enabled: bool = (
+            self.config.llm.stream
+            if self.config is not None else False
+        )
+
+        async for chunk in self.llm.chat(
+            messages=context_msgs,
+            tools=tool_definitions if tool_definitions else None,
+            model=model,
+            purpose="chat",
+            stream=stream_enabled,
+        ):
+            if chunk.content:
+                current_content += chunk.content
+                if self.channel is not None:
+                    await self.channel.stream(chunk.content)
+            if chunk.tool_call:
+                tool_calls.append(chunk.tool_call)
+            if chunk.is_final:
+                finish_reason = chunk.finish_reason or "stop"
+                input_tokens = getattr(chunk, "input_tokens", 0)
+                output_tokens = getattr(chunk, "output_tokens", len(current_content))
+                break
+
+        self.journal.llm_response_end(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            tps=(output_tokens / 1.0) if output_tokens > 0 else 0.0,
+            status="success",
+            stop_reason=finish_reason,
+        )
+
+        return LR(
+            content=current_content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+    # ======================== 工具执行 ========================
 
     async def _execute_tools(
         self,
         tool_calls: list[object],
     ) -> list[Message]:
-        """并发执行工具调用列表。
-
-        原子操作：
-        1. 对每个 tool_call 并发执行 _execute_single_tool
-        2. 返回所有 tool result Message 列表
-
-        Args:
-            tool_calls: ToolCall 对象列表
-
-        Returns:
-            role="tool" 的 Message 列表
-        """
+        """并发执行工具调用列表。"""
         if not tool_calls:
             return []
 
@@ -245,19 +399,7 @@ class Runtime:
         ]))
 
     async def _execute_single_tool(self, tc: object) -> Message:
-        """执行单个工具调用。
-
-        原子操作：
-        1. 解析参数
-        2. 通过 tool_executor 执行
-        3. 返回 tool result Message
-
-        Args:
-            tc: ToolCall 对象
-
-        Returns:
-            role="tool" 的 Message
-        """
+        """执行单个工具调用。"""
         name: str = getattr(tc, "name", "")
         tool_id: str = getattr(tc, "id", "")
 
@@ -296,7 +438,36 @@ class Runtime:
             tool_call_id=tool_id,
         )
 
-    # ======================== 原子操作：Handoff 处理 ========================
+    async def _execute_tools_for_state(self, state: AgentState) -> list[Message]:
+        """执行 AgentState 中当前待执行的工具调用。"""
+        llm_resp: LLMResponse | None = state.current_llm_response
+        if llm_resp is None or not llm_resp.tool_calls:
+            return []
+        if self.tool_executor is None:
+            raise RuntimeError("工具执行器未初始化")
+        return await self._execute_tools(list(llm_resp.tool_calls))
+
+    # ======================== Handoff ========================
+
+    async def _handle_handoff_for_state(
+        self,
+        state: AgentState,
+        parent_run_id: str,
+        session_id: str,
+    ) -> None:
+        """执行 handoff：创建子 Agent，通过 derived Runtime.run() 完成流转。"""
+        handoff_target: str = state.handoff_target or _extract_handoff_target(
+            state.current_tool_results,
+        )
+        if not handoff_target:
+            return
+
+        await self._handle_handoff(
+            thread_id=session_id,
+            target_agent_id=handoff_target,
+            context=state.handoff_context or "",
+            parent_run_id=parent_run_id,
+        )
 
     async def _handle_handoff(
         self,
@@ -307,22 +478,7 @@ class Runtime:
     ) -> AgentRun:
         """处理 Agent 间任务流转。
 
-        原子操作：
-        1. 从 agent_registry 查找目标 Agent
-        2. 创建子 Agent + 子 TurnLoop
-        3. 推送触发事件并等待结果
-
-        Args:
-            thread_id: Session ID
-            target_agent_id: 目标 Agent ID
-            context: handoff 上下文
-            parent_run_id: 父 AgentRun ID
-
-        Returns:
-            子 Agent 的 AgentRun
-
-        Raises:
-            RuntimeError: 目标 Agent 不存在
+        创建子 Agent + derived Runtime → 递归调用 run()。
         """
         target_identity = self.agent_registry.get(target_agent_id)
         if target_identity is None:
@@ -336,25 +492,16 @@ class Runtime:
             runtime=self,
         )
 
-        # 创建子 TurnLoop（共享 Runtime + Journal + StateStore）
-        from .turn_loop import TurnLoop
+        if self.journal is None:
+            raise RuntimeError("Handoff 需要 Runtime 注入 Journal")
 
-        if self.journal is None or self.state_store is None:
-            raise RuntimeError("Handoff 需要 Runtime 注入 Journal 和 StateStore")
-
-        child_loop: TurnLoop = TurnLoop(
-            session_id=thread_id,
+        child_runtime: Runtime = self.derive()
+        await child_runtime.run(
+            session=_dummy_session(thread_id),
             agent=child_agent,
-            runtime=self.derive(),
-            state_store=self.state_store,
-            journal=self.journal,
-            channel=self.channel,
+            user_message=context,
         )
 
-        # run_forever 内部推送 USER_INPUT 触发，协程挂起等待子 Agent 完成
-        await child_loop.run_forever(context)
-
-        # 返回占位 AgentRun（子 Agent 的 AgentRun 已在 TurnLoop 中持久化）
         from ..session.agent_run import AgentRun as AR
         return AR(
             run_id="",
@@ -363,18 +510,160 @@ class Runtime:
             end_status="completed",
         )
 
+    # ======================== System Prompt / Context ========================
+
+    async def _build_system_prompt(
+        self,
+        session_id: str,
+        agent: AgentType,
+        user_message: str,
+    ) -> str:
+        """构建 system prompt（含 Slot 解析）。"""
+        system_prompt: str = agent._resolve_system_prompt(self)
+        tool_definitions: list[ToolDefinition] = agent._resolve_tool_definitions(self)
+        from ..agent.slotContext import SlotContext as SCtx
+
+        project_root: Path = _find_project_root()
+
+        slot_ctx: SCtx = SCtx(
+            query=user_message,
+            request_id=uuid.uuid4().hex[:8],
+            session_id=session_id,
+            project_root=project_root,
+            max_context_tokens=(
+                self.config.agent.max_context_tokens
+                if self.config is not None else 8000
+            ),
+            system_prompt=system_prompt,
+            tool_definitions=tool_definitions,
+            skill_registry=self.skill_registry,
+            memory_manager=self.memory_mgr,
+            agent_registry=self.agent_registry,
+            knowledge_base=None,
+            user_profile=None,
+            journal=self.journal,
+        )
+        if self.assembler is not None:
+            self.assembler.on_new_request()
+            system_prompt = await self.assembler.build_system_prompt(slot_ctx)
+        return system_prompt
+
+    def _build_context_msgs(
+        self,
+        system_prompt: str,
+        context_messages: list[Message],
+    ) -> list[Message]:
+        """构建 LLM 上下文消息列表。"""
+        history_msgs: list[Message] = list(context_messages)
+        return [Message(role="system", content=system_prompt)] + history_msgs
+
+    # ======================== AgentState 工厂 ========================
+
+    def _create_agent_state(
+        self,
+        agentrun_id: str,
+        session_id: str,
+        agent: AgentType,
+    ) -> AgentState:
+        """创建 AgentState 实例。"""
+        max_iterations: int = 10
+        if hasattr(agent, '_resolve_max_loop_steps'):
+            max_iterations = agent._resolve_max_loop_steps(self)
+        return AgentState(
+            task_id=agentrun_id,
+            thread_id=session_id,
+            agent_id=agent.agent_id,
+            max_iterations=max_iterations,
+        )
+
+    # ======================== 持久化 ========================
+
+    async def _save_agent_run(
+        self,
+        session_id: str,
+        agentrun_id: str,
+        agent_id: str,
+        end_status: RunEndStatus,
+        tokens_in: int,
+        tokens_out: int,
+        duration_ms: int,
+        started_at: str,
+        ended_at: str,
+        state_snapshot: dict | None = None,
+        trace_ids: list[str] | None = None,
+        messages: list[Message] | None = None,
+    ) -> None:
+        """持久化单个 AgentRun 记录。"""
+        from ..session.agent_run import AgentRun
+        ar: AgentRun = AgentRun(
+            run_id=agentrun_id,
+            agent_id=agent_id,
+            end_status=end_status.value,
+            state_snapshot=state_snapshot,
+            trace_ids=trace_ids or [],
+            trigger=TriggerType.USER_INPUT.value,
+            sequence=self.journal._agentrun_sequence,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            duration_ms=duration_ms,
+            started_at=started_at,
+            ended_at=ended_at,
+            messages=messages or [],
+        )
+        await self.run_mgr.save(ar, session_id)
+
+    def _collect_trace_ids(self) -> list[str]:
+        """收集当前 AgentRun 关联的 trace event IDs。"""
+        return [
+            f"{evt.event_type}:{evt.created_at}"
+            for evt in self.journal._events
+            if evt.data.get("agentrun_id") == self.journal._agentrun_id
+        ]
+
 
 # ============================================================================
 # 辅助函数
 # ============================================================================
 
+def _build_assistant_message(resp: LLMResponse) -> Message:
+    """从 LLMResponse 构建 assistant Message。"""
+    return Message(
+        role="assistant",
+        content=resp.content or "",
+        tool_calls=list(resp.tool_calls) if resp.tool_calls else None,
+    )
+
+
+def _agent_status_to_run_end(agent_status: AgentStatus) -> RunEndStatus:
+    """AgentStatus 到 RunEndStatus 的映射。"""
+    mapping: dict[AgentStatus, RunEndStatus] = {
+        AgentStatus.COMPLETED: RunEndStatus.COMPLETED,
+        AgentStatus.HANDOFF: RunEndStatus.HANDOFF,
+        AgentStatus.FAILED: RunEndStatus.FAILED,
+    }
+    return mapping.get(agent_status, RunEndStatus.COMPLETED)
+
+
+def _extract_handoff_target(tool_results: list[Message]) -> str:
+    """从工具结果中提取 handoff 目标。"""
+    for msg in tool_results:
+        if msg.name == "handoff_to_agent" and msg.content:
+            return msg.content
+    return ""
+
+
+def _dummy_session(session_id: str) -> SessionType:
+    """创建一个最小 Session 占位对象，供 handoff 场景使用。"""
+    from ..session.session import Session
+    return Session(
+        id=session_id,
+        title=f"handoff-{session_id[:6]}",
+        agent_id="__handoff__",
+        model="",
+    )
+
+
 def _find_project_root() -> Path:
     """从 dotClaw 模块位置向上找到项目根目录。"""
     import dotclaw
     return Path(dotclaw.__file__).parent.parent.parent
-
-
-def _new_hex_id() -> str:
-    """生成 8 位 hex ID。"""
-    import uuid
-    return uuid.uuid4().hex[:8]
