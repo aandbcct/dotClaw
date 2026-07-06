@@ -176,7 +176,7 @@ class Agent:
         Returns:
             Agent 最终回复文本
         """
-        from ..session.turn_loop import TurnLoop
+        from ..runtime.turn_loop import TurnLoop
         from ..session.agent_run import RunEndStatus
         import uuid as _uuid
 
@@ -232,7 +232,7 @@ class Agent:
             携带执行结果的 task（就地修改后的同一对象）
         """
         import uuid as _uuid
-        from ..session.turn_loop import TurnLoop
+        from ..runtime.turn_loop import TurnLoop
 
         if runtime.journal is None or runtime.state_store is None:
             raise RuntimeError(

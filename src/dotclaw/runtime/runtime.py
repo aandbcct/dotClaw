@@ -337,7 +337,7 @@ class Runtime:
         )
 
         # 创建子 TurnLoop（共享 Runtime + Journal + StateStore）
-        from ..session.turn_loop import TurnLoop, TriggerEvent as TE
+        from .turn_loop import TurnLoop, TriggerEvent as TE
         from ..session.agent_run import TriggerType
 
         if self.journal is None or self.state_store is None:
