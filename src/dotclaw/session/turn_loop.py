@@ -6,37 +6,46 @@ TurnLoop 是 Session 和 AgentRun 之间的事件循环层：
 - AgentRun：TurnLoop 内的一次原子 LLM 执行
 
 TurnLoop 使用 asyncio.Queue 实现事件驱动模式。
-触发源包括：USER_INPUT / TOOL_RESULT / RESUME / TIMER / APPROVAL_DONE。
+触发源包括：USER_INPUT / TOOL_RESULT / RESUME。
+
+控制中枢：AgentState 状态机。
+TurnLoop 不直接判断 "有 tool_call 就执行工具"，
+而是把事件喂给 AgentState.handle_event()，由状态机返回 AgentAction：
+    INVOKE_LLM → EXECUTE_TOOLS → INVOKE_LLM → ... → FINALIZE / HANDOFF_TARGET
 
 内部逻辑（原子操作封装为方法）：
 1. run_forever() — 主事件循环入口
 2. push_trigger() — 向事件队列推送触发事件
-3. _step() — 单次 AgentRun 执行步骤
+3. _step() — 单次 AgentRun 执行（AgentState 驱动完整 ReAct 循环）
 4. _build_system_prompt() — 构建 system prompt（含 Slot 解析）
-5. _build_context_msgs() — 组装 LLM 上下文消息（不记录到 trace）
-6. _invoke_agent_run() — 创建并执行一次 AgentRun
+5. _build_context_msgs() — 组装 LLM 上下文消息
+6. _invoke_llm() — 调用 LLM 返回 LLMResponse
+7. _save_agent_run() — 持久化 AgentRun 记录
 """
 
 from __future__ import annotations
 
 import asyncio
-import json as _json
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..journal.events import EventType
 from ..llm.base import Message
 from ..session.agent_run import RunEndStatus, TriggerType
+from ..runtime.agent_state import (
+    AgentState, AgentPhase, AgentAction, AgentStatus,
+    AgentStartEvent as ASStartEvent,
+    LLMResponseEvent as ASLLMResponseEvent,
+    ToolsDoneEvent as ASToolsDoneEvent,
+)
 
 if TYPE_CHECKING:
     from ..runtime.runtime import Runtime
     from ..runtime.state_store import StateStore, StateSnapshot
-    from ..runtime.agent_state import AgentState
     from ..agent.agent import Agent as AgentType, LLMResponse
     from ..tools.base import ToolDefinition
     from ..journal.journal import Journal
@@ -49,22 +58,11 @@ if TYPE_CHECKING:
 
 @dataclass
 class TriggerEvent:
-    """TurnLoop 的触发事件。
-
-    字段：
-        trigger_type: 触发源类型（TriggerType 枚举）
-        data: 触发携带的数据（用户消息文本、工具结果列表等）
-        agent_id: 触发源 Agent ID（handoff 场景使用，默认空）
-    """
+    """TurnLoop 的触发事件。"""
 
     trigger_type: TriggerType
-    """触发源类型"""
-
     data: object = None
-    """触发携带的数据"""
-
     agent_id: str = ""
-    """触发源 Agent ID（默认空，用户输入时不指定）"""
 
 
 # ============================================================================
@@ -74,20 +72,7 @@ class TriggerEvent:
 class TurnLoop:
     """Session 级持久事件循环。
 
-    职责：
-    - 等待触发事件（asyncio.Queue）
-    - 组装上下文（从 trace.jsonl 读历史消息, 从 StateStore 读进度）
-    - 创建 AgentRun，调用 Runtime 原子方法
-    - 路由：文本回复 ��� 输出并等待；工具调用 → 执行 → 自触发新 AgentRun
-    - 挂起时保存 State，等待新触发
-
-    Args:
-        session_id: 所属 Session ID
-        agent: 主 Agent 实例（配置+Tools+Runtime）
-        runtime: Runtime 执行引擎
-        state_store: StateStore 持久化实例
-        journal: Journal 观测实例
-        channel: 通信通道（CLI/API）
+    控制流：TurnLoop 等待触发 → AgentState 驱动 → Runtime 执行原子方法。
     """
 
     def __init__(
@@ -106,52 +91,22 @@ class TurnLoop:
         self._journal: Journal = journal
         self._channel: Channel | None = channel
 
-        # 事件队列
         self._queue: asyncio.Queue[TriggerEvent] = asyncio.Queue()
-
-        # 状态
         self._active: bool = False
-        self._current_state: AgentState | None = None
         self._context_messages: list[Message] = []
-        self._run_ids: list[str] = []  # 本次 conversation 中产生的所有 AgentRun ID
+        self._run_ids: list[str] = []
 
     # ======================== 公开入口 ========================
 
     async def push_trigger(self, event: TriggerEvent) -> None:
-        """向事件队列推送触发事件。
-
-        原子操作：
-        1. 校验 TurnLoop 已激活
-        2. 推送到 asyncio.Queue
-
-        Args:
-            event: 触发事件
-        """
         if not self._active:
             return
         await self._queue.put(event)
 
     async def run_forever(self, initial_message: str) -> str:
-        """启动事件循环并处理初始消息。
-
-        主事件循环入口。直到收到终止信号才会退出。
-
-        原子操作：
-        1. 初始化 Journal 会话
-        2. 推送初始 USER_INPUT 触发
-        3. 进入事件循环：等待触发 → 执行 step
-        4. 正常退出时 finalize
-
-        Args:
-            initial_message: 初始用户消息
-
-        Returns:
-            最终回复文本（如果是正常退出）
-        """
         self._active = True
         final_response: str = ""
 
-        # 推送初始消息
         await self._queue.put(TriggerEvent(
             trigger_type=TriggerType.USER_INPUT,
             data=initial_message,
@@ -160,42 +115,15 @@ class TurnLoop:
         try:
             while self._active:
                 trigger: TriggerEvent = await self._queue.get()
-
-                if trigger.trigger_type == TriggerType.USER_INPUT:
-                    final_response = await self._step(
-                        user_message=str(trigger.data),
-                        trigger=TriggerType.USER_INPUT,
-                    )
-
-                elif trigger.trigger_type == TriggerType.TOOL_RESULT:
-                    final_response = await self._step(
-                        user_message="",
-                        trigger=TriggerType.TOOL_RESULT,
-                        tool_results=trigger.data,
-                    )
-
-                elif trigger.trigger_type == TriggerType.RESUME:
-                    snapshot: StateSnapshot | None = await self._state_store.load(
-                        self._session_id
-                    )
-                    if snapshot is not None:
-                        self._current_state = await self._restore_state(snapshot)
-                    final_response = await self._step(
-                        user_message=str(trigger.data),
-                        trigger=TriggerType.RESUME,
-                    )
-
-                else:
-                    final_response = await self._step(
-                        user_message=str(trigger.data),
-                        trigger=trigger.trigger_type,
-                    )
-
-                # 文本回复 = 完成本轮，退出循环
+                final_response = await self._step(
+                    user_message=str(trigger.data) if trigger.data else "",
+                    trigger=trigger.trigger_type,
+                    tool_results=trigger.data
+                        if trigger.trigger_type == TriggerType.TOOL_RESULT
+                        else None,
+                )
                 if final_response:
                     self._active = False
-                # 工具调用 = _step() 推了新 trigger，继续下一轮
-
         except Exception:
             self._active = False
             raise
@@ -205,12 +133,10 @@ class TurnLoop:
         return final_response
 
     async def stop(self) -> None:
-        """优雅关闭 TurnLoop。"""
         self._active = False
 
     @property
     def run_ids(self) -> list[str]:
-        """本次 conversation 中产生的所有 AgentRun ID。"""
         return list(self._run_ids)
 
     # ======================== 原子操作：单步执行 ========================
@@ -221,193 +147,178 @@ class TurnLoop:
         trigger: TriggerType,
         tool_results: object = None,
     ) -> str:
-        """执行一次完整的 AgentRun 步骤。
+        """AgentState 驱动的单次 AgentRun 执行。
 
-        原子操作：
-        1. 创建 AgentRun（agentrun_start 先于消息记录，确保 agentrun_id 正确）
-        2. 记录触发消息到 trace（user_query 或 tool_results）
-        3. 组装 LLM 上下文
-        4. 调用 LLM
-        5. 路由：文本回复 / 工具调用
-
-        Args:
-            user_message: 用户消息（TOOL_RESULT 类型时可为空）
-            trigger: 触发源类型
-            tool_results: 工具执行结果列表（TOOL_RESULT 类型时使用）
-
-        Returns:
-            最终文本回复（如果本轮是文本回复），否则继续循环
+        控制流：
+        1. 创建 AgentRun + agentrun_start
+        2. 记录触发消息到 trace
+        3. 构建 system_prompt（仅 AgentRun.messages）
+        4. AgentState.handle_event(StartEvent) → INVOKE_LLM
+        5. 循环：INVOKE_LLM → LLMResponseEvent → next action
+                 EXECUTE_TOOLS → ToolsDoneEvent → next action
+                 FINALIZE → 构建结果返回
+                 HANDOFF_TARGET → 执行 handoff
+        6. agentrun_end + 持久化 AgentRun
         """
-        # 1. 创建 AgentRun（先于消息记录，确保 trace 中 agentrun_id 正确）
         agentrun_id: str = uuid.uuid4().hex[:8]
         self._run_ids.append(agentrun_id)
-        run_messages: list[Message] = []  # 本次 AgentRun 产生的消息流转
+        run_messages: list[Message] = []
         self._journal.agentrun_start(agentrun_id, trigger.value)
 
         started_at: str = datetime.now(timezone.utc).isoformat()
         start_time: float = time.time()
+        tokens_in_total: int = 0
+        tokens_out_total: int = 0
 
-        # 2. 记录触发消息到 trace（在 agentrun_start 之后，agentrun_id 已正确设置）
+        # 1. 记录触发消息
         if trigger == TriggerType.USER_INPUT and user_message:
             user_msg: Message = Message(role="user", content=user_message)
             self._journal.record_message(user_msg)
             self._context_messages.append(user_msg)
             run_messages.append(user_msg)
-
         elif trigger == TriggerType.TOOL_RESULT and tool_results is not None:
-            tool_list: list[Message] = (
-                list(tool_results) if isinstance(tool_results, list) else []
-            )
+            tool_list: list[Message] = _ensure_list(tool_results)
             for tr in tool_list:
                 self._journal.record_message(tr)
                 self._context_messages.append(tr)
                 run_messages.append(tr)
 
-        # 3. 构建 system prompt（仅记录到 AgentRun.messages，不记录到 trace）
+        # 2. system_prompt（仅 AgentRun.messages，不 trace）
         system_prompt: str = await self._build_system_prompt(user_message)
-        sys_msg: Message = Message(role="system", content=system_prompt)
-        run_messages.append(sys_msg)
+        run_messages.append(Message(role="system", content=system_prompt))
 
-        # 4. 组装 LLM 上下文消息
-        context_msgs: list[Message] = await self._build_context_msgs(
-            user_message=user_message,
-            system_prompt=system_prompt,
+        # 3. 创建 AgentState → 启动
+        max_iterations: int = 10
+        if hasattr(self._agent, '_resolve_max_loop_steps'):
+            max_iterations = self._agent._resolve_max_loop_steps(self._runtime)
+
+        state: AgentState = AgentState(
+            task_id=agentrun_id,
+            thread_id=self._session_id,
+            agent_id=self._agent.agent_id,
+            max_iterations=max_iterations,
         )
+        action: AgentAction = state.handle_event(ASStartEvent(user_message=user_message))
 
-        # 5. 调用 LLM
+        # 4. AgentState 驱动的执行循环
+        final_answer: str = ""
+        end_status_str: str = RunEndStatus.COMPLETED.value
+
         try:
-            resp: LLMResponse = await self._invoke_agent_run(
-                agentrun_id=agentrun_id,
-                context_msgs=context_msgs,
-            )
+            while not state.is_terminal:
+                if action == AgentAction.INVOKE_LLM:
+                    context_msgs: list[Message] = await self._build_context_msgs(
+                        user_message="",
+                        system_prompt=system_prompt,
+                    )
+                    resp: LLMResponse = await self._invoke_llm(
+                        agentrun_id=agentrun_id,
+                        context_msgs=context_msgs,
+                    )
+                    tokens_in_total += resp.input_tokens
+                    tokens_out_total += resp.output_tokens
+
+                    asst_msg: Message = Message(
+                        role="assistant",
+                        content=resp.content or "",
+                        tool_calls=list(resp.tool_calls) if resp.tool_calls else None,
+                    )
+                    self._journal.record_message(asst_msg)
+                    self._context_messages.append(asst_msg)
+                    run_messages.append(asst_msg)
+
+                    action = state.handle_event(ASLLMResponseEvent(response=resp))
+
+                elif action == AgentAction.EXECUTE_TOOLS:
+                    llm_resp: LLMResponse | None = state.current_llm_response
+                    if llm_resp is None or not llm_resp.tool_calls:
+                        action = AgentAction.FINALIZE
+                        continue
+
+                    if self._runtime.tool_executor is None:
+                        raise RuntimeError("工具执行器未初始化")
+
+                    tool_msgs: list[Message] = await self._runtime._execute_tools(
+                        list(llm_resp.tool_calls),
+                    )
+                    for tm in tool_msgs:
+                        self._journal.record_message(tm)
+                        self._context_messages.append(tm)
+                        run_messages.append(tm)
+
+                    done_event: ASToolsDoneEvent = ASToolsDoneEvent(results=tool_msgs)
+                    action = state.handle_event(done_event)
+
+                elif action == AgentAction.FINALIZE:
+                    if state.current_llm_response is not None:
+                        final_answer = state.current_llm_response.content or ""
+                    if state.end_status == AgentStatus.HANDOFF:
+                        end_status_str = RunEndStatus.HANDOFF.value
+                    elif state.end_status == AgentStatus.FAILED:
+                        end_status_str = RunEndStatus.FAILED.value
+                    else:
+                        end_status_str = RunEndStatus.COMPLETED.value
+                    break
+
+                elif action == AgentAction.HANDOFF_TARGET:
+                    handoff_target: str = state.handoff_target or ""
+                    if not handoff_target:
+                        handoff_target = _extract_handoff_target(state.current_tool_results)
+
+                    await self._runtime._handle_handoff(
+                        thread_id=self._session_id,
+                        target_agent_id=handoff_target,
+                        context=state.handoff_context or "",
+                        parent_run_id=agentrun_id,
+                    )
+                    end_status_str = RunEndStatus.HANDOFF.value
+                    break
+
+                elif action == AgentAction.WAIT:
+                    # 跨状态自动转换，不执行实际操作
+                    pass
+
+                else:
+                    break
+
         except Exception as e:
+            end_status_str = RunEndStatus.FAILED.value
+            self._journal.error("ERROR", "turnloop.step", f"{type(e).__name__}: {e}")
+            if not state.is_terminal:
+                state.end_status = AgentStatus.FAILED
+                state.error_message = str(e)
+        finally:
+            # 5. 结束 AgentRun
             duration_ms: int = int((time.time() - start_time) * 1000)
             ended_at: str = datetime.now(timezone.utc).isoformat()
-            self._journal.agentrun_end(RunEndStatus.FAILED.value)
-            self._journal.error("ERROR", "turnloop.llm", f"{type(e).__name__}: {e}")
+            self._journal.agentrun_end(end_status_str)
+
+            state_snapshot: dict | None = state.snapshot() if state is not None else None
             await self._save_agent_run(
                 agentrun_id=agentrun_id,
                 agent_id=self._agent.agent_id,
-                end_status=RunEndStatus.FAILED.value,
+                end_status=end_status_str,
                 trigger=trigger.value,
-                tokens_in=0,
-                tokens_out=0,
-                duration_ms=duration_ms,
-                started_at=started_at,
-                ended_at=ended_at,
-                error=f"{type(e).__name__}: {e}",
-                messages=run_messages,
-            )
-            return f"[ERROR] {e}"
-
-        # 6. 路由
-        input_tokens: int = resp.input_tokens
-        output_tokens: int = resp.output_tokens
-        duration_ms = int((time.time() - start_time) * 1000)
-        ended_at = datetime.now(timezone.utc).isoformat()
-
-        if resp.tool_calls:
-            self._journal.agentrun_end(RunEndStatus.TOOL_WAIT.value)
-
-            asst_msg: Message = Message(
-                role="assistant",
-                content=resp.content or "",
-                tool_calls=list(resp.tool_calls) if resp.tool_calls else None,
-            )
-            self._journal.record_message(asst_msg)
-            self._context_messages.append(asst_msg)
-            run_messages.append(asst_msg)
-
-            # 保存当前 AgentRun（含 state_snapshot）
-            state_snapshot: dict | None = None
-            if self._current_state is not None:
-                state_snapshot = self._current_state.snapshot()
-            await self._save_agent_run(
-                agentrun_id=agentrun_id,
-                agent_id=self._agent.agent_id,
-                end_status=RunEndStatus.TOOL_WAIT.value,
-                trigger=trigger.value,
-                tokens_in=input_tokens,
-                tokens_out=output_tokens,
+                tokens_in=tokens_in_total,
+                tokens_out=tokens_out_total,
                 duration_ms=duration_ms,
                 started_at=started_at,
                 ended_at=ended_at,
                 state_snapshot=state_snapshot,
                 trace_ids=self._collect_trace_ids(),
+                error=state.error_message if state.error_message else None,
                 messages=run_messages,
             )
 
-            # 执行工具（并发等待所有工具返回）
-            tool_results_list: list[Message] = []
-            if self._runtime.tool_executor is not None:
-                tool_results_list = list(await asyncio.gather(*[
-                    self._runtime._execute_single_tool(tc)
-                    for tc in resp.tool_calls
-                ]))
+        return final_answer
 
-            # 工具结果不在此处 record_message——由下一个 AgentRun 的 _step() 记录
-            # 自触发下一个 AgentRun
-            await self._queue.put(TriggerEvent(
-                trigger_type=TriggerType.TOOL_RESULT,
-                data=tool_results_list,
-            ))
-
-            return ""
-
-        else:
-            self._journal.agentrun_end(RunEndStatus.COMPLETED.value)
-
-            asst_msg = Message(
-                role="assistant",
-                content=resp.content or "",
-            )
-            self._journal.record_message(asst_msg)
-            self._context_messages.append(asst_msg)
-            run_messages.append(asst_msg)
-
-            state_snapshot = None
-            if self._current_state is not None:
-                self._current_state.end_status = self._current_state.__class__.end_status
-                state_snapshot = self._current_state.snapshot()
-
-            await self._save_agent_run(
-                agentrun_id=agentrun_id,
-                agent_id=self._agent.agent_id,
-                end_status=RunEndStatus.COMPLETED.value,
-                trigger=trigger.value,
-                tokens_in=input_tokens,
-                tokens_out=output_tokens,
-                duration_ms=duration_ms,
-                started_at=started_at,
-                ended_at=ended_at,
-                state_snapshot=state_snapshot,
-                trace_ids=self._collect_trace_ids(),
-                messages=run_messages,
-            )
-
-            return resp.content or ""
-
-    # ======================== 原子操作：System Prompt 构建 ========================
+    # ======================== 原子操作：System Prompt ========================
 
     async def _build_system_prompt(self, user_message: str) -> str:
-        """构建 system prompt（含 Slot 解析）。
-
-        原子操作：
-        1. 解析 agent 的 tool_definitions
-        2. 构建 SlotContext 并通过 Assembler 生成最终 system_prompt
-        3. 返回纯文本 system prompt
-
-        Args:
-            user_message: 用户消息文本
-
-        Returns:
-            system prompt 文本
-        """
         system_prompt: str = self._agent._resolve_system_prompt(self._runtime)
         tool_definitions: list[ToolDefinition] = self._agent._resolve_tool_definitions(
             self._runtime
         )
-
         from ..agent.slotContext import SlotContext as SCtx
 
         project_root: Path = self._runtime._find_project_root() if hasattr(
@@ -430,35 +341,20 @@ class TurnLoop:
             user_profile=None,
             journal=self._journal,
         )
-
         if self._runtime.assembler is not None:
             self._runtime.assembler.on_new_request()
             system_prompt = await self._runtime.assembler.build_system_prompt(slot_ctx)
 
         return system_prompt
 
-    # ======================== 原子操作：上下文消息构建 ========================
+    # ======================== 原子操作：上下文消息 ========================
 
     async def _build_context_msgs(
         self,
         user_message: str,
         system_prompt: str,
     ) -> list[Message]:
-        """构建 LLM 调用上下文消息列表（不记录到 trace）。
-
-        原子操作：
-        1. 裁剪历史消息以适应 token 预算
-        2. 返回 system + history + user 的消息列表
-
-        Args:
-            user_message: 用户消息文本
-            system_prompt: 已构建的 system prompt
-
-        Returns:
-            LLM 输入消息列表
-        """
         history_msgs: list[Message] = list(self._context_messages)
-
         if user_message:
             return self._runtime._build_messages(
                 user_input=user_message,
@@ -466,31 +362,15 @@ class TurnLoop:
                 history=history_msgs,
             )
         else:
-            # TOOL_RESULT 触发：不添加新 user message，system + history
-            system_msg: Message = Message(role="system", content=system_prompt)
-            return [system_msg] + history_msgs
+            return [Message(role="system", content=system_prompt)] + history_msgs
 
     # ======================== 原子操作：LLM 调用 ========================
 
-    async def _invoke_agent_run(
+    async def _invoke_llm(
         self,
         agentrun_id: str,
         context_msgs: list[Message],
     ) -> LLMResponse:
-        """执行一次 LLM 调用（一个 AgentRun）。
-
-        原子操作：
-        1. 通过 Runtime.llm.chat() 流式调用 LLM
-        2. 实时 stream 内容到 channel
-        3. 返回 LLMResponse
-
-        Args:
-            agentrun_id: 当前 AgentRun ID
-            context_msgs: 组装好的上下文消息
-
-        Returns:
-            LLMResponse
-        """
         from ..agent.agent import LLMResponse as LR
 
         model: str = self._agent._resolve_model(self._runtime)
@@ -504,7 +384,6 @@ class TurnLoop:
             system_prompt="",
             tool_count=len(tool_definitions),
         )
-
         self._journal.llm_call_start(attempt=1)
 
         current_content: str = ""
@@ -512,10 +391,11 @@ class TurnLoop:
         finish_reason: str = "stop"
         input_tokens: int = 0
         output_tokens: int = 0
-
-        stream_enabled: bool = False
-        if self._runtime.config is not None:
-            stream_enabled = self._runtime.config.llm.stream
+        stream_enabled: bool = (
+            self._runtime.config.llm.stream
+            if self._runtime.config is not None
+            else False
+        )
 
         async for chunk in self._runtime.llm.chat(
             messages=context_msgs,
@@ -528,10 +408,8 @@ class TurnLoop:
                 current_content += chunk.content
                 if self._channel is not None:
                     await self._channel.stream(chunk.content)
-
             if chunk.tool_call:
                 tool_calls.append(chunk.tool_call)
-
             if chunk.is_final:
                 finish_reason = chunk.finish_reason or "stop"
                 input_tokens = getattr(chunk, "input_tokens", 0)
@@ -554,30 +432,7 @@ class TurnLoop:
             output_tokens=output_tokens,
         )
 
-    # ======================== 原子操作：状态管理 ========================
-
-    async def _restore_state(self, snapshot: StateSnapshot) -> AgentState:
-        """从持久化快照恢复 AgentState。
-
-        原子操作：
-        1. 创建新 AgentState 实例
-        2. 从 snapshot 恢复运行时字段
-
-        Args:
-            snapshot: StateSnapshot 实例
-
-        Returns:
-            恢复的 AgentState
-        """
-        from ..runtime.agent_state import AgentState as AS
-        state: AS = AS(
-            task_id=snapshot.task_id,
-            thread_id=snapshot.thread_id,
-            agent_id=snapshot.agent_id,
-            max_iterations=snapshot.max_iterations,
-        )
-        snapshot.restore_to(state)
-        return state
+    # ======================== 原子操作：持久化 ========================
 
     async def _save_agent_run(
         self,
@@ -595,27 +450,6 @@ class TurnLoop:
         error: str | None = None,
         messages: list[Message] | None = None,
     ) -> None:
-        """持久化单个 AgentRun 记录。
-
-        原子操作：
-        1. 构建 AgentRun 实例
-        2. 通过 AgentRunManager 保存
-
-        Args:
-            agentrun_id: AgentRun ID
-            agent_id: Agent ID
-            end_status: 结束状态
-            trigger: 触发源
-            tokens_in: 输入 token 数
-            tokens_out: 输出 token 数
-            duration_ms: 耗时
-            started_at: 开始时间
-            ended_at: 结束时间
-            state_snapshot: 状态快照
-            trace_ids: 关联的 trace event IDs
-            error: 错误信息
-            messages: 本次 AgentRun 产生的消息列表
-        """
         from ..session.agent_run import AgentRun
         ar: AgentRun = AgentRun(
             run_id=agentrun_id,
@@ -637,13 +471,25 @@ class TurnLoop:
         await self._runtime.run_mgr.save(ar, self._session_id)
 
     def _collect_trace_ids(self) -> list[str]:
-        """收集当前 agentrun 的 trace event IDs。
-
-        Returns:
-            trace event ID 列表
-        """
         return [
             f"{evt.event_type}:{evt.created_at}"
             for evt in self._journal._events
             if evt.data.get("agentrun_id") == self._journal._agentrun_id
         ]
+
+
+# ============================================================================
+# 辅助函数
+# ============================================================================
+
+def _ensure_list(obj: object) -> list[Message]:
+    if isinstance(obj, list):
+        return obj  # type: ignore[return-value]
+    return []
+
+
+def _extract_handoff_target(tool_results: list[Message]) -> str:
+    for msg in tool_results:
+        if msg.name == "handoff_to_agent" and msg.content:
+            return msg.content
+    return ""
