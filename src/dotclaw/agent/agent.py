@@ -207,7 +207,16 @@ class Agent:
         )
 
         # 运行事件循环
-        final_answer: str = await loop.run_forever(user_message)
+        try:
+            final_answer = await loop.run_forever(user_message)
+        except Exception:
+            if runtime.journal is not None:
+                runtime.journal.finalize()
+            raise
+
+        # Journal 生命周期由调用方管理
+        if runtime.journal is not None:
+            runtime.journal.finalize()
 
         # 成功时追加 Conversation 记录（携带所有 agent_run_ids）
         session.add_conversation(
@@ -269,12 +278,17 @@ class Agent:
 
         try:
             final_answer: str = await loop.run_forever(user_message)
-            task.mark_completed(
-                final_result=final_answer,
-                sub_run_id="",
-            )
-        except Exception as e:
-            task.mark_failed(error=str(e))
+        except Exception:
+            if runtime.journal is not None:
+                runtime.journal.finalize()
+            raise
+        if runtime.journal is not None:
+            runtime.journal.finalize()
+
+        task.mark_completed(
+            final_result=final_answer,
+            sub_run_id="",
+        )
 
         return task
 

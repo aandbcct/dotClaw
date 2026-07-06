@@ -337,8 +337,7 @@ class Runtime:
         )
 
         # 创建子 TurnLoop（共享 Runtime + Journal + StateStore）
-        from .turn_loop import TurnLoop, TriggerEvent as TE
-        from ..session.agent_run import TriggerType
+        from .turn_loop import TurnLoop
 
         if self.journal is None or self.state_store is None:
             raise RuntimeError("Handoff 需要 Runtime 注入 Journal 和 StateStore")
@@ -352,15 +351,7 @@ class Runtime:
             channel=self.channel,
         )
 
-        # 推送 handoff 触发
-        trigger: TE = TE(
-            trigger_type=TriggerType.USER_INPUT,
-            data=context,
-            agent_id=target_agent_id,
-        )
-        await child_loop.push_trigger(trigger)
-
-        # 异步执行（当前版本等待完成）
+        # run_forever 内部推送 USER_INPUT 触发，协程挂起等待子 Agent 完成
         await child_loop.run_forever(context)
 
         # 返回占位 AgentRun（子 Agent 的 AgentRun 已在 TurnLoop 中持久化）

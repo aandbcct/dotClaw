@@ -50,23 +50,6 @@ class TestAgentRun:
         )
         assert run.end_status == RunEndStatus.HANDOFF.value
 
-    def test_interrupted_status(self) -> None:
-        """被中断状态。"""
-        run = AgentRun(
-            run_id="run-int",
-            end_status=RunEndStatus.INTERRUPTED.value,
-            error="user interrupted",
-        )
-        assert run.end_status == RunEndStatus.INTERRUPTED.value
-
-    def test_tool_wait_status(self) -> None:
-        """工具等待状态。"""
-        run = AgentRun(
-            run_id="run-tw",
-            end_status=RunEndStatus.TOOL_WAIT.value,
-        )
-        assert run.end_status == RunEndStatus.TOOL_WAIT.value
-
     def test_final_output_from_messages(self) -> None:
         """从 messages 提取最后一条无 tool_calls 的 assistant 消息。"""
         from dotclaw.llm.base import Message, ToolCall
@@ -104,11 +87,11 @@ class TestAgentRun:
             agent_id="a1",
             state_snapshot=snapshot,
             trace_ids=["trace.message:14:05:30.123", "llm.call_start:14:05:29.000"],
-            trigger=TriggerType.TOOL_RESULT.value,
+            trigger=TriggerType.USER_INPUT.value,
         )
         assert run.state_snapshot == snapshot
         assert run.trace_ids == ["trace.message:14:05:30.123", "llm.call_start:14:05:29.000"]
-        assert run.trigger == TriggerType.TOOL_RESULT.value
+        assert run.trigger == TriggerType.USER_INPUT.value
 
     def test_serialize_deserialize(self) -> None:
         """to_dict / from_dict 往返一致。"""

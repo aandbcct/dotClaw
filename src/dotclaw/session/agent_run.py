@@ -27,39 +27,31 @@ from ..llm.base import Message, ToolCall
 class RunEndStatus(Enum):
     """AgentRun 的结束状态。
 
-    AgentRun 结束后不可恢复，新的事件触发会创建新的 AgentRun。
+    一次 AgentRun = 一次完整的用户一问一答。
+    内部 think-act 循环由 AgentState 状态机驱动，不透出到 RunEndStatus。
     """
 
     COMPLETED = "completed"
-    """正常完成：LLM 返回了文本回复"""
+    """正常完成"""
 
     HANDOFF = "handoff"
-    """任务流转：控制权转交其他 Agent"""
+    """任务流转给子 Agent"""
 
     FAILED = "failed"
-    """执行异常：LLM 调用或工具执行失败"""
-
-    INTERRUPTED = "interrupted"
-    """被中断：用户主动中断或进程崩溃"""
-
-    TOOL_WAIT = "tool_wait"
-    """工具等待：已发出工具调用，等待异步结果返回"""
+    """执行异常"""
 
 
 class TriggerType(Enum):
-    """AgentRun 的触发源类型。
-
-    任何导致当前执行流中断并需要重新唤醒的事件都是触发源。
-    """
+    """AgentRun 的触发源类型。"""
 
     USER_INPUT = "user_input"
     """用户发来新消息"""
 
     TOOL_RESULT = "tool_result"
-    """外部工具执行完毕返回的结果"""
+    """工具执行结果（预留：外部异步工具场景）"""
 
     RESUME = "resume"
-    """从挂起/崩溃状态恢复"""
+    """从挂起状态恢复"""
 
     TIMER = "timer"
     """定时器触发（预留）"""
