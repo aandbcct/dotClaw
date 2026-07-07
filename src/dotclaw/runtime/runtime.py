@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 from ..llm.base import Message
 from ..session.agent_run import RunEndStatus, TriggerType
 from .agent_state import (
-    AgentState, AgentPhase, AgentAction, AgentStatus, AgentEvent,
+    AgentState, AgentPhase, AgentAction, AgentStatus,
     AgentStartEvent as ASStartEvent,
     LLMResponseEvent as ASLLMResponseEvent,
     ToolsDoneEvent as ASToolsDoneEvent,
@@ -140,7 +140,8 @@ class Runtime:
 
     # ======================== 公开入口：run() ========================
 
-    # WAIT/RESUME 哨兵值
+    # WAIT 哨兵值（人工审批等长等待场景，AgentRun 以 WAITING 结束，
+    # 调用方再次 run() 时 Runtime 自动检测并恢复，无需传递额外参数）
     WAIT_SENTINEL: str = "__DOTCLAW_WAIT__"
 
     async def run(
@@ -148,26 +149,23 @@ class Runtime:
         session: SessionType,
         agent: AgentType,
         user_message: str,
-        *,
-        resume_state: AgentState | None = None,
-        resume_event: AgentEvent | None = None,
     ) -> str:
-        """执行一次完整的用户消息 → Agent 回复，或从挂起状态恢复。
+        """执行一次用户消息 → Agent 回复。
 
-        当 AgentState 进入需要外部事件的 WAIT 时返回 WAIT_SENTINEL。
-        后续通过 resume_state + resume_event 恢复执行。
+        Runtime 自动检测 session 下是否有 WAITING 状态的 AgentRun：
+        - 无 → 新建 AgentRun，从 IDLE 开始
+        - 有 → 从 WAITING 恢复，自动重建状态和上下文
+
+        短等待（RETRYING / TRUNCATED / 子Agent）在单次 AgentRun 内自动完成，
+        调用方无感知。只有人工审批等长等待场景返回 WAIT_SENTINEL。
 
         Args:
             session: 当前 Session
             agent: 执行 Agent
-            user_message: 用户输入文本（resume 时可为空）
-            resume_state: 要恢复的 AgentState
-            resume_event: 恢复时推送的事件。
-                默认 ContinueEvent()（适用于 RETRYING 等自动恢复场景）。
-                对于 WAITING_APPROVAL，传 ApprovalDoneEvent(approved=True/False)。
+            user_message: 用户输入文本
 
         Returns:
-            Agent 最终回复文本，或 WAIT_SENTINEL（挂起等待外部事件）
+            Agent 最终回复文本，或 WAIT_SENTINEL（挂起等待外部事件后再次 run()）
         """
         if self.journal is None or self.state_store is None:
             raise RuntimeError(
@@ -187,6 +185,12 @@ class Runtime:
         context_messages: list[Message] = []
         run_ids: list[str] = []
 
+        # 自动检测 WAITING 状态 → 内部 resume
+        waiting_runs: list[object] = await self.run_mgr.list(
+            session.id, end_status="waiting",
+        )
+        waiting_run: object | None = waiting_runs[-1] if waiting_runs else None
+
         try:
             final_answer = await self._step(
                 session_id=session.id,
@@ -194,8 +198,7 @@ class Runtime:
                 user_message=user_message,
                 context_messages=context_messages,
                 run_ids=run_ids,
-                resume_state=resume_state,
-                resume_event=resume_event,
+                waiting_run=waiting_run,
             )
         except Exception:
             self.journal.finalize()
@@ -214,34 +217,22 @@ class Runtime:
         context_messages: list[Message],
         run_ids: list[str],
         *,
-        resume_state: AgentState | None = None,
-        resume_event: AgentEvent | None = None,
+        waiting_run: object | None = None,
     ) -> str:
-        """执行一次完整 AgentRun（一次用户一问一答或 resume）。
+        """执行一次 AgentRun（新建或从 WAITING 恢复）。
 
-        AgentState 驱动内部多轮 think-act：
+        AgentState 驱动内部 think-act 循环：
         IDLE → THINKING → ACTING → THINKING → ... → RESPONDING → DONE
 
+        waiting_run 为 None 时新建 AgentRun，否则从 WAITING AgentRun 恢复。
+        此参数由 run() 内部自动检测填充，调用方无需关心。
+
         Args:
-            resume_state: 从挂起状态恢复时传入的 AgentState。
-            resume_event: 恢复事件。默认 ContinueEvent()。
-                对于 WAITING_APPROVAL，外部应传 ApprovalDoneEvent(approved=True/False)。
+            waiting_run: WAITING 状态的 AgentRun 对象（内部使用，调用方不传）。
         """
         agentrun_id: str = uuid.uuid4().hex[:8]
         run_ids.append(agentrun_id)
         run_messages: list[Message] = []
-
-        # 确定触发类型
-        trigger: TriggerType = (
-            TriggerType.RESUME if resume_state is not None
-            else TriggerType.USER_INPUT
-        )
-        self.journal.agentrun_start(agentrun_id, trigger.value)
-
-        started_at: str = datetime.now(CHINA_TZ).isoformat()
-        start_time: float = time.time()
-        tokens_in_total: int = 0
-        tokens_out_total: int = 0
 
         # system_prompt
         system_prompt: str = await self._build_system_prompt(
@@ -249,20 +240,25 @@ class Runtime:
         )
         run_messages.append(Message(role="system", content=system_prompt))
 
-        # 创建或恢复 AgentState
-        if resume_state is not None:
-            state: AgentState = resume_state
-            event: AgentEvent = resume_event if resume_event is not None else ContinueEvent()
-            action: AgentAction = state.handle_event(event)
+        # ── 分支：resume 或 fresh ──
+        if waiting_run is not None:
+            action, state, trigger = await self._init_resume(
+                waiting_run, agentrun_id, session_id, agent,
+                user_message, context_messages, run_messages,
+            )
         else:
-            # 记录 user message
-            user_msg: Message = Message(role="user", content=user_message)
-            self.journal.record_message(user_msg)
-            context_messages.append(user_msg)
-            run_messages.append(user_msg)
+            action, state = self._init_fresh(
+                agentrun_id, session_id, agent,
+                user_message, context_messages, run_messages,
+            )
+            trigger = TriggerType.USER_INPUT
 
-            state = self._create_agent_state(agentrun_id, session_id, agent)
-            action = state.handle_event(ASStartEvent(user_message=user_message))
+        self.journal.agentrun_start(agentrun_id, trigger.value)
+
+        started_at: str = datetime.now(CHINA_TZ).isoformat()
+        start_time: float = time.time()
+        tokens_in_total: int = 0
+        tokens_out_total: int = 0
 
         final_answer: str = ""
         end_status: RunEndStatus = RunEndStatus.COMPLETED
@@ -299,7 +295,7 @@ class Runtime:
                     ))
 
                 elif action == AgentAction.WAIT:
-                    # TRUNCATED: 注入 "continue" 提示后自动续跑（内部循环）
+                    # TRUNCATED: 注入 "continue" 提示后自动续跑
                     if state.phase == AgentPhase.TRUNCATED:
                         truncated_continue: bool = (
                             self.config.agent.truncated_continue
@@ -316,13 +312,12 @@ class Runtime:
                             run_messages.append(inject_msg)
                         action = state.handle_event(ContinueEvent())
 
-                    # RETRYING: 自动推送 ContinueEvent（Phase 4 实现）
+                    # RETRYING: 自动推送 ContinueEvent
                     elif state.phase == AgentPhase.RETRYING:
                         action = state.handle_event(ContinueEvent())
 
                     else:
-                        # 真正的 WAIT（如 WAITING_APPROVAL）：
-                        # 持久化状态并返回 WAIT_SENTINEL
+                        # WAITING_APPROVAL 等长等待：持久化 + WAIT_SENTINEL
                         await self._save_waiting_state(state, agentrun_id, session_id,
                                                        tokens_in_total, tokens_out_total,
                                                        start_time, started_at, run_messages)
@@ -332,9 +327,7 @@ class Runtime:
                     # FINALIZE / HANDOFF_TARGET / unexpected → exit loop.
                     break
 
-            # 处理循环退出后的终态动作。
-            # 注：RESPONDING/HANDOFF/TRUNCATED → DONE 由 AgentState._auto_chain()
-            # 在 handle_event() 内部自动完成，此处无需再推 ContinueEvent。
+            # 处理循环退出后的终态动作
             if action == AgentAction.FINALIZE:
                 if state.current_llm_response is not None:
                     final_answer = state.current_llm_response.content or ""
@@ -633,6 +626,99 @@ class Runtime:
         """构建 LLM 上下文消息列表。"""
         history_msgs: list[Message] = list(context_messages)
         return [Message(role="system", content=system_prompt)] + history_msgs
+
+    # ======================== 原子操作：AgentState 初始化 ========================
+
+    def _init_fresh(
+        self,
+        agentrun_id: str,
+        session_id: str,
+        agent: AgentType,
+        user_message: str,
+        context_messages: list[Message],
+        run_messages: list[Message],
+    ) -> tuple[AgentAction, AgentState]:
+        """新建 AgentRun：记录 user message + 创建 AgentState + StartEvent。
+
+        Args:
+            agentrun_id: 本次 AgentRun ID
+            session_id: Session ID
+            agent: 执行 Agent
+            user_message: 用户输入
+            context_messages: 上下文消息列表（会追加 user message）
+            run_messages: run 内消息列表（会追加 user message）
+
+        Returns:
+            (action, state): 下一步动作 + 新建的 AgentState
+        """
+        user_msg: Message = Message(role="user", content=user_message)
+        self.journal.record_message(user_msg)
+        context_messages.append(user_msg)
+        run_messages.append(user_msg)
+
+        state: AgentState = self._create_agent_state(agentrun_id, session_id, agent)
+        action: AgentAction = state.handle_event(ASStartEvent(user_message=user_message))
+        return action, state
+
+    async def _init_resume(
+        self,
+        waiting_run: object,
+        agentrun_id: str,
+        session_id: str,
+        agent: AgentType,
+        user_message: str,
+        context_messages: list[Message],
+        run_messages: list[Message],
+    ) -> tuple[AgentAction, AgentState, TriggerType]:
+        """从 WAITING AgentRun 恢复：重建状态 + 恢复上下文 + 推 ContinueEvent。
+
+        原子操作：
+        1. 从 waiting_run.state_snapshot 重建 AgentState
+        2. 从 waiting_run.messages 恢复对话历史（跳过 system）
+        3. 追记 user_message（如果非空）作为审批反馈
+        4. 推 ContinueEvent 恢复状态机执行
+
+        Args:
+            waiting_run: WAITING 状态的 AgentRun 记录
+            agentrun_id: 本次 AgentRun ID
+            session_id: Session ID
+            agent: 执行 Agent
+            user_message: 审批反馈文本（可为空）
+            context_messages: 上下文消息列表（会追加恢复的 messages）
+            run_messages: run 内消息列表（同上）
+
+        Returns:
+            (action, state, trigger): 下一步动作 + 恢复的 AgentState + 触发类型
+        """
+        # 1. 从 state_snapshot 重建 AgentState
+        snapshot_data: dict = getattr(waiting_run, "state_snapshot", {}) or {}
+        state: AgentState = AgentState.restore(snapshot_data)
+        # restore() 不恢复 phase，需手动设置
+        phase_str: str = snapshot_data.get("phase", "")
+        if phase_str:
+            try:
+                state.phase = AgentPhase(phase_str)
+            except ValueError:
+                pass
+
+        # 2. 从 messages 恢复对话历史（跳过 system，由 _build_system_prompt 重建）
+        messages: list[Message] = getattr(waiting_run, "messages", []) or []
+        for msg in messages:
+            if msg.role == "system":
+                continue
+            context_messages.append(msg)
+            run_messages.append(msg)
+
+        # 3. 追记审批反馈（如果用户提供了消息）
+        if user_message:
+            resume_msg: Message = Message(role="user", content=user_message)
+            self.journal.record_message(resume_msg)
+            context_messages.append(resume_msg)
+            run_messages.append(resume_msg)
+
+        # 4. 推 ContinueEvent（WAITING_APPROVAL 等挂起阶段通过此事件恢复）
+        action: AgentAction = state.handle_event(ContinueEvent())
+        return action, state, TriggerType.RESUME
 
     # ======================== WAIT/RESUME ========================
 

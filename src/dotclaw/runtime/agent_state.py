@@ -612,7 +612,14 @@ _TRANSITION_TABLE: list[TransitionRule] = [
         next_phase=AgentPhase.DONE, next_action=AgentAction.HANDOFF_TARGET,
     ),
 
-    # WAITING_APPROVAL: ApprovalDoneEvent 恢复
+    # WAITING_APPROVAL: ContinueEvent 自动恢复（run() 自动检测）
+    TransitionRule(
+        AgentPhase.WAITING_APPROVAL, ContinueEvent,
+        guard=None, side_effect=None,
+        next_phase=AgentPhase.THINKING, next_action=AgentAction.INVOKE_LLM,
+    ),
+
+    # WAITING_APPROVAL: ApprovalDoneEvent 显式恢复（外部审批系统）
     TransitionRule(
         AgentPhase.WAITING_APPROVAL, ApprovalDoneEvent,
         guard=_guard_approved, side_effect=_se_approval_restore,
