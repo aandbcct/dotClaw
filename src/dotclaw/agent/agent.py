@@ -173,13 +173,13 @@ class Agent:
                 "Agent.process() requires Runtime with Journal injected"
             )
 
-        final_answer: str = await runtime.run(session, self, user_message)
+        final_answer, run_ids = await runtime.run(session, self, user_message)
 
         # 持久化对话记录
         session.add_conversation(
             user_query=user_message,
             final_answer=final_answer,
-            agent_run_ids=[],
+            agent_run_ids=list(run_ids),
         )
         await session_mgr.save(session)  # type:ignore[union-attr]
 
@@ -214,11 +214,11 @@ class Agent:
         task.mark_working()
 
         user_message: str = self._build_task_message(task)
-        final_answer: str = await runtime.run(child_session, self, user_message)
+        final_answer, run_ids = await runtime.run(child_session, self, user_message)
 
         task.mark_completed(
             final_result=final_answer,
-            sub_run_id="",
+            sub_run_id=run_ids[0] if run_ids else "",
         )
 
         return task

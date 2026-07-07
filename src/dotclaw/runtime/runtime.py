@@ -149,7 +149,7 @@ class Runtime:
         session: SessionType,
         agent: AgentType,
         user_message: str,
-    ) -> str:
+    ) -> tuple[str, list[str]]:
         """执行一次用户消息 → Agent 回复。
 
         Runtime 自动检测 session 下是否有 WAITING 状态的 AgentRun：
@@ -165,7 +165,7 @@ class Runtime:
             user_message: 用户输入文本
 
         Returns:
-            Agent 最终回复文本，或 WAIT_SENTINEL（挂起等待外部事件后再次 run()）
+            (final_answer, run_ids): 最终回复 + 本次产生的 AgentRun ID 列表
         """
         if self.journal is None or self.state_store is None:
             raise RuntimeError(
@@ -205,7 +205,7 @@ class Runtime:
             raise
 
         self.journal.finalize()
-        return final_answer
+        return final_answer, list(run_ids)
 
     # ======================== 单次 AgentRun 执行 ========================
 
@@ -566,7 +566,7 @@ class Runtime:
             raise RuntimeError("Handoff 需要 Runtime 注入 Journal")
 
         child_runtime: Runtime = self.derive()
-        await child_runtime.run(
+        _, handoff_run_ids = await child_runtime.run(
             session=_dummy_session(thread_id),
             agent=child_agent,
             user_message=context,
@@ -574,7 +574,7 @@ class Runtime:
 
         from ..session.agent_run import AgentRun as AR
         return AR(
-            run_id="",
+            run_id=handoff_run_ids[0] if handoff_run_ids else "",
             agent_id=target_agent_id,
             parent_run_id=parent_run_id,
             end_status="completed",
