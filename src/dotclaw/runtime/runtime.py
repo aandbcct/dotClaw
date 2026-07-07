@@ -287,13 +287,16 @@ class Runtime:
                     action = state.handle_event(ASLLMResponseEvent(response=resp))
 
                 elif action == AgentAction.EXECUTE_TOOLS:
-                    tool_msgs: list[Message] = await self._execute_tools_for_state(state)
+                    tool_msgs, needs_approval = await self._execute_tools_for_state(state)
                     for tm in tool_msgs:
                         self.journal.record_message(tm)
                         context_messages.append(tm)
                         run_messages.append(tm)
 
-                    action = state.handle_event(ASToolsDoneEvent(results=tool_msgs))
+                    action = state.handle_event(ASToolsDoneEvent(
+                        results=tool_msgs,
+                        needs_approval=needs_approval,
+                    ))
 
                 elif action == AgentAction.WAIT:
                     # TRUNCATED: 注入 "continue" 提示后自动续跑（内部循环）
@@ -493,14 +496,33 @@ class Runtime:
             tool_call_id=tool_id,
         )
 
-    async def _execute_tools_for_state(self, state: AgentState) -> list[Message]:
-        """执行 AgentState 中当前待执行的工具调用。"""
+    async def _execute_tools_for_state(
+        self,
+        state: AgentState,
+    ) -> tuple[list[Message], bool]:
+        """执行 AgentState 中当前待执行的工具调用。
+
+        Returns:
+            (tool_msgs, needs_approval): 工具结果列表 + 是否需要审批
+        """
         llm_resp: LLMResponse | None = state.current_llm_response
         if llm_resp is None or not llm_resp.tool_calls:
-            return []
+            return [], False
+
+        # 检查是否有工具命中审批列表
+        approval_commands: list[str] = (
+            self.config.tools.approval_commands
+            if self.config is not None else []
+        )
+        tool_calls: list[object] = list(llm_resp.tool_calls)
+        for tc in tool_calls:
+            name: str = getattr(tc, "name", "")
+            if name in approval_commands:
+                return [], True  # 需要审批，不执行工具
+
         if self.tool_executor is None:
             raise RuntimeError("工具执行器未初始化")
-        return await self._execute_tools(list(llm_resp.tool_calls))
+        return await self._execute_tools(tool_calls), False
 
     # ======================== Handoff ========================
 

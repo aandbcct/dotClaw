@@ -542,13 +542,13 @@ _TRANSITION_TABLE: list[TransitionRule] = [
         next_phase=AgentPhase.FAILED, next_action=AgentAction.FINALIZE,
         priority=10,
     ),
-    # [预留] (priority 15) WAITING_APPROVAL: 工具需要人工审批
-    # TransitionRule(
-    #     AgentPhase.ACTING, ToolsDoneEvent,
-    #     guard=_guard_needs_approval, side_effect=_se_request_approval,
-    #     next_phase=AgentPhase.WAITING_APPROVAL, next_action=AgentAction.WAIT,
-    #     priority=15,
-    # ),
+    # (priority 15) WAITING_APPROVAL: 工具需要人工审批
+    TransitionRule(
+        AgentPhase.ACTING, ToolsDoneEvent,
+        guard=_guard_needs_approval, side_effect=_se_request_approval,
+        next_phase=AgentPhase.WAITING_APPROVAL, next_action=AgentAction.WAIT,
+        priority=15,
+    ),
     TransitionRule(
         AgentPhase.ACTING, ToolsDoneEvent,
         guard=_guard_handoff, side_effect=_se_handoff,
@@ -611,39 +611,20 @@ _TRANSITION_TABLE: list[TransitionRule] = [
         guard=None, side_effect=None,
         next_phase=AgentPhase.DONE, next_action=AgentAction.HANDOFF_TARGET,
     ),
+
+    # WAITING_APPROVAL: ApprovalDoneEvent 恢复
     TransitionRule(
-        AgentPhase.RESPONDING, ContinueEvent,
-        guard=None, side_effect=None,
-        next_phase=AgentPhase.DONE, next_action=AgentAction.FINALIZE,
+        AgentPhase.WAITING_APPROVAL, ApprovalDoneEvent,
+        guard=_guard_approved, side_effect=_se_approval_restore,
+        next_phase=AgentPhase.THINKING, next_action=AgentAction.INVOKE_LLM,
+        priority=10,
     ),
     TransitionRule(
-        AgentPhase.HANDOFF, ContinueEvent,
-        guard=None, side_effect=None,
-        next_phase=AgentPhase.DONE, next_action=AgentAction.HANDOFF_TARGET,
+        AgentPhase.WAITING_APPROVAL, ApprovalDoneEvent,
+        guard=None, side_effect=_se_approval_rejected,
+        next_phase=AgentPhase.RESPONDING, next_action=AgentAction.FINALIZE,
+        priority=20,
     ),
-
-    # ── [预留] Phase 4：RETRYING ──
-    # (implemented above)
-
-    # ── [预留] Phase 4：WAITING_APPROVAL ──
-    # TransitionRule(
-    #     AgentPhase.ACTING, ToolsDoneEvent,
-    #     guard=_guard_needs_approval, side_effect=_se_request_approval,
-    #     next_phase=AgentPhase.WAITING_APPROVAL, next_action=AgentAction.WAIT,
-    #     priority=15,
-    # ),
-    # TransitionRule(
-    #     AgentPhase.WAITING_APPROVAL, ApprovalDoneEvent,
-    #     guard=_guard_approved, side_effect=_se_approval_restore,
-    #     next_phase=AgentPhase.THINKING, next_action=AgentAction.INVOKE_LLM,
-    #     priority=10,
-    # ),
-    # TransitionRule(
-    #     AgentPhase.WAITING_APPROVAL, ApprovalDoneEvent,
-    #     guard=None, side_effect=_se_approval_rejected,
-    #     next_phase=AgentPhase.RESPONDING, next_action=AgentAction.FINALIZE,
-    #     priority=20,
-    # ),
 
     # ── [预留] Phase 5：安全阀 ──
     # TransitionRule(THINKING, LLMResponseEvent,
