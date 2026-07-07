@@ -322,3 +322,41 @@ class AgentRunManager:
             return AgentRun.from_dict(json.loads(data))
         except Exception:
             return None
+
+    async def list(
+        self,
+        session_id: str,
+        *,
+        end_status: str | None = None,
+    ) -> list[AgentRun]:
+        """列出 Session 下的所有 AgentRun 记录。
+
+        Args:
+            session_id: Session ID
+            end_status: 可选过滤器，只返回匹配结束状态的记录
+                如 "waiting"（挂起）、"completed"（完成）、"failed"（失败）
+
+        Returns:
+            AgentRun 列表，按 started_at 升序排列
+        """
+        import aiofiles
+        run_dir: Path = self._base_dir / session_id / "agent_runs"
+        if not run_dir.is_dir():
+            return []
+
+        runs: list[AgentRun] = []
+        for f in sorted(run_dir.glob("*.json")):
+            try:
+                async with aiofiles.open(f, encoding="utf-8") as fp:
+                    data: str = await fp.read()
+                run: AgentRun | None = AgentRun.from_dict(json.loads(data))
+                if run is None:
+                    continue
+                if end_status is not None and run.end_status != end_status:
+                    continue
+                runs.append(run)
+            except Exception:
+                continue
+
+        runs.sort(key=lambda r: r.started_at)
+        return runs

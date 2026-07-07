@@ -69,6 +69,15 @@ class StateSnapshot:
     tool_calls_total: int = 0
     """累计工具调用次数"""
 
+    truncated_count: int = 0
+    """TRUNCATED 续跑次数（防无限续跑）"""
+
+    retry_count: int = 0
+    """工具重试次数（RETRYING 流）"""
+
+    max_tool_retries: int = 2
+    """工具执行最大重试次数"""
+
     tasks: list[dict] = field(default_factory=list)
     """子任务清单（序列化后的 Task 数据）"""
 
@@ -114,6 +123,9 @@ class StateSnapshot:
             handoff_target=as_obj.handoff_target,
             handoff_context=as_obj.handoff_context,
             tool_calls_total=as_obj.tool_calls_total,
+            truncated_count=getattr(as_obj, "truncated_count", 0),
+            retry_count=getattr(as_obj, "retry_count", 0),
+            max_tool_retries=getattr(as_obj, "max_tool_retries", 2),
             tasks=tasks_data,
         )
 
@@ -133,6 +145,12 @@ class StateSnapshot:
         as_obj.error_message = self.error_message  # type: ignore[attr-defined]
         as_obj.handoff_target = self.handoff_target  # type: ignore[attr-defined]
         as_obj.handoff_context = self.handoff_context  # type: ignore[attr-defined]
+        if hasattr(as_obj, "truncated_count"):
+            as_obj.truncated_count = self.truncated_count  # type: ignore[attr-defined]
+        if hasattr(as_obj, "retry_count"):
+            as_obj.retry_count = self.retry_count  # type: ignore[attr-defined]
+        if hasattr(as_obj, "max_tool_retries"):
+            as_obj.max_tool_retries = self.max_tool_retries  # type: ignore[attr-defined]
 
     def to_dict(self) -> dict:
         """序列化为 JSON 兼容的 dict。"""
@@ -148,6 +166,9 @@ class StateSnapshot:
             "handoff_target": self.handoff_target,
             "handoff_context": self.handoff_context,
             "tool_calls_total": self.tool_calls_total,
+            "truncated_count": self.truncated_count,
+            "retry_count": self.retry_count,
+            "max_tool_retries": self.max_tool_retries,
             "tasks": self.tasks,
         }
 
@@ -166,6 +187,9 @@ class StateSnapshot:
             handoff_target=data.get("handoff_target"),
             handoff_context=data.get("handoff_context"),
             tool_calls_total=data.get("tool_calls_total", 0),
+            truncated_count=data.get("truncated_count", 0),
+            retry_count=data.get("retry_count", 0),
+            max_tool_retries=data.get("max_tool_retries", 2),
             tasks=data.get("tasks", []),
         )
 
