@@ -240,9 +240,16 @@ class Runtime:
         )
         run_messages.append(Message(role="system", content=system_prompt))
 
+        # ── 确定触发类型并启动 Journal 追踪 ──
+        trigger: TriggerType = (
+            TriggerType.RESUME if waiting_run is not None
+            else TriggerType.USER_INPUT
+        )
+        self.journal.agentrun_start(agentrun_id, trigger.value)
+
         # ── 分支：resume 或 fresh ──
         if waiting_run is not None:
-            action, state, trigger = await self._init_resume(
+            action, state = await self._init_resume(
                 waiting_run, agentrun_id, session_id, agent,
                 user_message, context_messages, run_messages,
             )
@@ -251,9 +258,6 @@ class Runtime:
                 agentrun_id, session_id, agent,
                 user_message, context_messages, run_messages,
             )
-            trigger = TriggerType.USER_INPUT
-
-        self.journal.agentrun_start(agentrun_id, trigger.value)
 
         started_at: str = datetime.now(CHINA_TZ).isoformat()
         start_time: float = time.time()
@@ -669,7 +673,7 @@ class Runtime:
         user_message: str,
         context_messages: list[Message],
         run_messages: list[Message],
-    ) -> tuple[AgentAction, AgentState, TriggerType]:
+    ) -> tuple[AgentAction, AgentState]:
         """从 WAITING AgentRun 恢复：重建状态 + 恢复上下文 + 推 ContinueEvent。
 
         原子操作：
@@ -688,7 +692,7 @@ class Runtime:
             run_messages: run 内消息列表（同上）
 
         Returns:
-            (action, state, trigger): 下一步动作 + 恢复的 AgentState + 触发类型
+            (action, state): 下一步动作 + 恢复的 AgentState
         """
         # 1. 从 state_snapshot 重建 AgentState
         snapshot_data: dict = getattr(waiting_run, "state_snapshot", {}) or {}
@@ -718,7 +722,7 @@ class Runtime:
 
         # 4. 推 ContinueEvent（WAITING_APPROVAL 等挂起阶段通过此事件恢复）
         action: AgentAction = state.handle_event(ContinueEvent())
-        return action, state, TriggerType.RESUME
+        return action, state
 
     # ======================== WAIT/RESUME ========================
 
