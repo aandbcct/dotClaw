@@ -27,6 +27,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 from dotclaw.channel.cli import CLIChannel
 from dotclaw.agent import Agent, build_agent
 from dotclaw.session import Session, SessionManager, AgentRun
+from dotclaw.runtime import Runtime
 from dotclaw.cli.banner import build_banner, console as rich_console
 
 
@@ -35,8 +36,9 @@ async def _run_cli() -> None:
 
     channel.print_info("组件初始化中...")
     agent: Agent
+    runtime: Runtime
     session_mgr: SessionManager
-    agent, session_mgr = await build_agent(channel=channel)
+    agent, runtime, session_mgr = await build_agent(channel=channel)
 
     if agent.config is not None:
         logging.getLogger().setLevel(agent.config.debug.level)
@@ -108,11 +110,11 @@ async def _run_cli() -> None:
                     else:
                         channel.print_error("Dream: 记忆系统未初始化")
                 elif cmd == "/tools":
-                    _cmd_tools(channel, agent.runtime.tool_executor)
+                    _cmd_tools(channel, runtime.tool_executor)
                 elif cmd == "/mcp":
-                    _cmd_mcp(channel, agent.runtime.mcp_provider)
+                    _cmd_mcp(channel, runtime.mcp_provider)
                 elif cmd == "/skills":
-                    _cmd_skills(channel, agent.runtime.skill_registry)
+                    _cmd_skills(channel, runtime.skill_registry)
                 elif cmd == "/model":
                     channel.print_info(f"当前模型: {agent._resolve_model()}")
                 else:
@@ -120,10 +122,10 @@ async def _run_cli() -> None:
                 continue
 
             # ── 正常对话 ──
-            run: AgentRun = await agent.process(current_session, user_input, session_mgr)
+            final_answer: str = await agent.process(runtime, current_session, user_input, session_mgr)
 
-            if run.end_status != "completed":
-                channel.print_error(f"执行异常: {run.error or run.end_status}")
+            if not final_answer:
+                channel.print_error("执行异常：未返回有效回复")
 
             sys.stdout.flush()
 

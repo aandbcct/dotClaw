@@ -71,10 +71,9 @@ class TestSessionStart:
 
     def test_session_start_pulls_from_context(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
 
         assert journal._session_id == "test-session-001"
-        assert journal._request_id == "req-abcd1234"
         assert journal._model == "deepseek-v4"
         assert journal._loop_idx == -1
         assert len(journal._events) == 1
@@ -82,7 +81,7 @@ class TestSessionStart:
 
     def test_session_start_initializes_loop_idx(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
         assert journal._loop_idx == -1
 
 
@@ -91,7 +90,7 @@ class TestSessionEnd:
 
     def test_session_end_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
         journal.session_end("success")
 
         end_events = [e for e in journal._events if e.event_type == "session.end"]
@@ -104,47 +103,39 @@ class TestSessionEnd:
 # ═══════════════════════════════════════════════════════════════════
 
 
-class TestLoop:
-    """测试 loop_start/loop_end/empty_action 内部自增。"""
+class TestAgentRun:
+    """测试 agentrun_start/agentrun_end。"""
 
-    def test_loop_start_increments_counter(self, fake_context, journal_config):
+    def test_agentrun_start_increments_sequence(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
 
-        journal.loop_start()
-        assert journal._loop_idx == 0
+        journal.agentrun_start("run-001", "user_input")
+        assert journal._agentrun_sequence == 0
 
-        journal.loop_start()
-        assert journal._loop_idx == 1
+        journal.agentrun_start("run-002", "tool_result")
+        assert journal._agentrun_sequence == 1
 
-    def test_loop_start_emits_event(self, fake_context, journal_config):
+    def test_agentrun_start_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
 
         loop_events = [e for e in journal._events if e.event_type == "react.loop_start"]
         assert len(loop_events) == 1
-        assert loop_events[0].data["loop_idx"] == 0
+        assert loop_events[0].data["agentrun_id"] == "run-001"
+        assert loop_events[0].data["trigger"] == "user_input"
+        assert loop_events[0].data["sequence"] == 0
 
-    def test_loop_end_emits_event(self, fake_context, journal_config):
+    def test_agentrun_end_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
-        journal.loop_end("tool_call")
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
+        journal.agentrun_end("completed")
 
         loop_end_events = [e for e in journal._events if e.event_type == "react.loop_end"]
         assert len(loop_end_events) == 1
-        assert loop_end_events[0].data["action"] == "tool_call"
-
-    def test_empty_action_emits_event(self, fake_context, journal_config):
-        journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
-        journal.empty_action()
-
-        empty_events = [e for e in journal._events if e.event_type == "react.empty_action"]
-        assert len(empty_events) == 1
-        assert empty_events[0].data["loop_idx"] == 0
+        assert loop_end_events[0].data["end_status"] == "completed"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -157,20 +148,20 @@ class TestToolCall:
 
     def test_tool_start_emits_event_with_loop_idx(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.tool_start("read_file")
 
         tool_events = [e for e in journal._events if e.event_type == "tool.call_start"]
         assert len(tool_events) == 1
         assert tool_events[0].data["tool_name"] == "read_file"
-        assert tool_events[0].data["loop_idx"] == 0
+        assert tool_events[0].data["agentrun_id"] == "run-001"
         assert tool_events[0].data["attempt"] == 1
 
     def test_tool_end_calculates_duration(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.tool_start("read_file")
         time.sleep(0.01)  # 确保非零耗时
         journal.tool_end("read_file", result_len=738, status="success")
@@ -198,8 +189,8 @@ class TestLLMCall:
 
     def test_llm_call_start_uses_context_model(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.llm_call_start()
 
         call_events = [e for e in journal._events if e.event_type == "llm.call_start"]
@@ -208,8 +199,8 @@ class TestLLMCall:
 
     def test_llm_call_end_emits_call_end_and_response_start(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.llm_call_start()
         time.sleep(0.001)  # 确保非零耗时
         journal.llm_call_end()
@@ -224,8 +215,8 @@ class TestLLMCall:
 
     def test_llm_response_end_calculates_response_duration(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.llm_call_start()
         time.sleep(0.005)
         journal.llm_call_end()
@@ -246,8 +237,8 @@ class TestLLMCall:
 
     def test_prompt_built_records_context_snapshot(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.prompt_built(
             message_count=15, context_length=8000,
             system_prompt="You are a helpful assistant.", skills_injected=["code-review"],
@@ -272,8 +263,8 @@ class TestSkill:
 
     def test_skill_body_loaded_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.skill_body_loaded("code-review")
 
         events = [e for e in journal._events if e.event_type == "skill.body_loaded"]
@@ -282,8 +273,8 @@ class TestSkill:
 
     def test_skill_body_loaded_records_cache(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.skill_body_loaded("code-review", cached=True)
 
         events = [e for e in journal._events if e.event_type == "skill.body_loaded"]
@@ -292,8 +283,8 @@ class TestSkill:
 
     def test_skill_script_exec_emits_with_status(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.skill_script_exec("code-review", "run_tests.sh", "success")
 
         events = [e for e in journal._events if e.event_type == "skill.script_exec"]
@@ -306,8 +297,8 @@ class TestMemory:
 
     def test_memory_retrieval_records_timing_and_hits(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.memory_retrieval("latest design docs", hit_count=3)
 
         events = [e for e in journal._events if e.event_type == "memory.retrieval"]
@@ -318,8 +309,8 @@ class TestMemory:
 
     def test_memory_write_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.memory_write("daily_note", "success")
 
         events = [e for e in journal._events if e.event_type == "memory.write"]
@@ -333,8 +324,8 @@ class TestError:
 
     def test_error_emits_event(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.error("ERROR", "llm.proxy", "Connection timeout")
 
         events = [e for e in journal._events if e.event_type == "system.error"]
@@ -387,19 +378,19 @@ class TestConcurrencySafety:
         j1 = Journal()
         j2 = Journal()
 
-        j1.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        j2.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
+        j1.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        j2.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
 
-        j1.loop_start()
-        j2.loop_start()
-        j2.loop_start()  # j2 多跑一轮
+        j1.agentrun_start("run-j1", "user_input")
+        j2.agentrun_start("run-j2-1", "user_input")
+        j2.agentrun_start("run-j2-2", "tool_result")  # j2 多跑一轮
 
-        j1.loop_end("tool_call")
-        j2.loop_end("tool_call")
+        j1.agentrun_end("completed")
+        j2.agentrun_end("completed")
 
-        # j1 和 j2 的 loop_idx 独立
-        assert j1._loop_idx == 0
-        assert j2._loop_idx == 1
+        # j1 和 j2 的 agentrun_sequence 独立
+        assert j1._agentrun_sequence == 0
+        assert j2._agentrun_sequence == 1
 
         # j1 和 j2 的事件列表独立
         assert len(j1._events) != len(j2._events)
@@ -415,11 +406,11 @@ class TestFinalize:
 
     def test_finalize_clears_events(self, fake_context, journal_config):
         journal = Journal()
-        journal.session_start(session_id=fake_context.session_id, request_id=fake_context.request_id, model=fake_context.model, config=journal_config)
-        journal.loop_start()
+        journal.session_start(session_id=fake_context.session_id, model=fake_context.model, config=journal_config)
+        journal.agentrun_start("run-001", "user_input")
         journal.tool_start("read_file")
         journal.tool_end("read_file", 100, "success")
-        journal.loop_end("tool_call")
+        journal.agentrun_end("completed")
         journal.session_end("success")
 
         event_count_before = len(journal._events)

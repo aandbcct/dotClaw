@@ -30,6 +30,7 @@ agent:
     专注于当前会话，历史会话信息仅用作本次会话的参考，严禁在本次会话中提到与本次会话无关的内容
   max_context_tokens: 8000
   keep_recent_messages: 10
+  truncated_continue: true   # v2: finish_reason="length" 时自动注入 "continue" 继续生成
 
 tools:
   # source 级启停（Phase 5 新增）
@@ -88,7 +89,7 @@ debug:
   log_file: ./data/dotclaw.log
 
 journal:
-  trace_dir: ./data/traces
+  trace_dir: ./data/sessions
   snapshot_dir: ./data/snapshots
   console: true
   trace: true

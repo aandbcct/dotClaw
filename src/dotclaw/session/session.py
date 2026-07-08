@@ -1,11 +1,11 @@
-"""Session —— 持久化对话记录 + 运行时 LLM 上下文。
+"""Session —— 持久化对话记录。
 
 Session 是 dotClaw 的对话隔离单元：一个 Session 文件 = 一段独立对话，
 不同 Session 之间的对话记录互相隔离。
 
 结构：
   持久化字段 → 存 JSON 文件（id/title/conversations/model/...）
-  运行时字段 → 仅内存（history[Message]），不持久化
+  Runtime 在 run() 内部管理当前执行周期的消息历史（all_messages）
 """
 
 from __future__ import annotations
@@ -14,8 +14,6 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-
-from ..llm.base import Message
 
 
 # ============================================================================
@@ -55,13 +53,10 @@ class Conversation:
 
 @dataclass
 class Session:
-    """对话隔离单元 —— 持久化记录 + 运行时上下文。
+    """对话隔离单元 —— 持久化记录。
 
     持久化字段（存磁盘）：
         id / title / agent_id / model / created_at / updated_at / conversations
-
-    运行时字段（仅内存）：
-        history: LLM 上下文 Message 列表（含 tool_calls/tool_result）
     """
 
     # ── 持久化字段 ──
@@ -87,24 +82,11 @@ class Session:
     conversations: list[Conversation] = field(default_factory=list)
     """对话记录列表。每条 = 一次用户请求的完整记录。"""
 
-    # ── 运行时字段（不持久化）──
-
-    history: list[Message] = field(default_factory=list, metadata={"persist": False})
-    """易失性 LLM 上下文。
-
-    跨 AgentRun 共享。包含当前执行周期中产生的 assistant(tool_calls) 和
-    tool_result 消息。_build_messages 将其与 conversations 的文本记录组装为 LLM 输入。
-
-    不同于 conversations（持久化的 user/assistant 文本）：
-    history 包含 ReAct 内部的 tool_call + tool_result，不持久化。
-    """
-
     # ── 序列化 ──
 
     def to_dict(self) -> dict:
-        """序列化为 dict（仅持久化字段，排除 history）。"""
+        """序列化为 dict（仅持久化字段）。"""
         d: dict = asdict(self)
-        del d["history"]
         # 转换 conversations 中的 Conversation 对象
         d["conversations"] = [asdict(c) for c in self.conversations]
         return d
@@ -113,7 +95,6 @@ class Session:
     def from_dict(cls, data: dict) -> Session:
         """从 dict 反序列化。"""
         convs_data: list[dict] = data.pop("conversations", [])
-        data.pop("history", None)  # history 不持久化，忽略
         session: Session = cls(**data)
         session.conversations = [
             Conversation(**c) for c in convs_data
@@ -149,7 +130,7 @@ class Session:
 class SessionManager:
     """Session 持久化管理器。
 
-    每个 Session 存储为独立 JSON 文件：{data_dir}/{session_id}.json
+    每个 Session 存储为独立 JSON 文件：{data_dir}/session/{session_id}/session.json
     """
 
     def __init__(self, data_dir: str | Path) -> None:
@@ -166,7 +147,9 @@ class SessionManager:
 
     def _session_path(self, session_id: str) -> Path:
         """获取 Session 文件路径。"""
-        return self._data_dir / f"{session_id}.json"
+        session_dir: Path = self._data_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        return session_dir / "session.json"
 
     async def create(self, title: str = "新对话", model: str = "",
                      agent_id: str = "") -> Session:
@@ -210,7 +193,12 @@ class SessionManager:
     async def list_all(self) -> list[Session]:
         """列出所有 Session（按更新时间倒序）。"""
         sessions: list[Session] = []
-        for path in self._data_dir.glob("*.json"):
+        for d in self._data_dir.iterdir():
+            if not d.is_dir():
+                continue
+            path: Path = d / "session.json"
+            if not path.exists():
+                continue
             try:
                 import aiofiles
                 async with aiofiles.open(path, encoding="utf-8") as f:
