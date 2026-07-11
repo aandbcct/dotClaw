@@ -25,8 +25,10 @@ if TYPE_CHECKING:
     from ..tools.base import ToolDefinition
     from ..session.session import Session as SessionType
     from ..session.agent_run import AgentRun
-    from ..orchestration.task import Task
+    from ..orchestration.task import Task, TaskResult
     from ..orchestration.messaging import AgentMessaging
+    from ..orchestration.dispatcher import AgentDispatcher
+    from ..orchestration.handle import AgentHandle
     from ..runtime.runtime import Runtime
 
 
@@ -76,6 +78,7 @@ class Agent:
         identity: AgentIdentity,
         runtime: Runtime | None = None,
         messaging: AgentMessaging | None = None,
+        dispatcher: AgentDispatcher | None = None,
         memory_dream: object = None,
         mcp_task: object = None,
         resume_manager: object = None,
@@ -85,7 +88,8 @@ class Agent:
         Args:
             identity: Agent 声明式约束（id/name/allowed_tools/system_prompt/...）
             runtime: Runtime 编排引擎（可选，process() 时也可传入）
-            messaging: Agent 间通信层（可选，无则不启用 send）
+            messaging: Agent 间通信追踪层（可选）
+            dispatcher: Agent 委托调度器（可选，无则不启用 delegation）
             memory_dream: DeepDream 记忆蒸馏实例（可选）
             mcp_task: MCP 后台初始化 task（可选）
             resume_manager: 中断恢复管理器（可选）
@@ -93,6 +97,7 @@ class Agent:
         self._identity: AgentIdentity = identity
         self._runtime: Runtime | None = runtime
         self._messaging: AgentMessaging | None = messaging
+        self._dispatcher: AgentDispatcher | None = dispatcher
         self._memory_dream: object = memory_dream
         self._mcp_task: object = mcp_task
         self._resume_manager: object = resume_manager
@@ -225,65 +230,63 @@ class Agent:
 
     async def send(
         self,
-        runtime: Runtime,
         target_agent_id: str,
         description: str,
         context: str = "",
         constraints: str = "",
         parent_run_id: str = "",
-    ) -> Task:
-        """发送 Task 给目标 Agent，阻塞等待执行完成。
+    ) -> AgentHandle:
+        """异步委托任务给目标 Agent，立即返回运行实例句柄。
 
-        Agent 的一等通信能力。对标 A2A tasks/send。
-        内部完成：路由 → 构造 Task → 创建子 Agent → TurnLoop 执行 → 等待结果。
-
-        Args:
-            runtime: Runtime 编排引擎
-            target_agent_id: 接收方 agent_id
-            description: 任务描述
-            context: 父 Agent 传入的上下文摘要
-            constraints: 约束条件
-            parent_run_id: 父 AgentRun.run_id
-
-        Returns:
-            携带执行结果的 Task
-
-        Raises:
-            RuntimeError: 如果 Agent 未配置 AgentMessaging
+        Agent.send() 是 Dispatcher 的薄 facade。它只暴露父 Agent 发起 delegation
+        所需的必要参数，不在类内直接创建或执行子 Agent。
         """
-        import uuid as _uuid
-        from ..orchestration.task import Task as _Task
-
-        if self._messaging is None:
+        if self._runtime is None:
+            raise RuntimeError(f"Agent '{self.agent_id}' has no runtime configured")
+        if self._dispatcher is None:
             raise RuntimeError(
-                f"Agent '{self.agent_id}' has no messaging configured. "
+                f"Agent '{self.agent_id}' has no dispatcher configured. "
                 "Use factory.build_agent() to create a fully wired agent."
             )
 
-        # 路由
-        identity = self._messaging.route(target_agent_id)
-        if identity is None:
-            return self._build_failed_task(target_agent_id, description, parent_run_id)
+        from ..orchestration.runners.base import SpawnContext
 
-        # 构造 Task
-        task: Task = _Task(
-            task_id=_uuid.uuid4().hex[:12],
-            requester=target_agent_id,
+        spawn_context: SpawnContext = SpawnContext(
+            runtime=self._runtime,
+            requester=self,
+            parent_run_id=parent_run_id,
+        )
+        return await self._dispatcher.spawn(
+            context=spawn_context,
+            target_agent_id=target_agent_id,
             description=description,
-            context=context,
+            task_context=context,
             constraints=constraints,
             parent_run_id=parent_run_id,
         )
 
-        # 注册追踪
-        self._messaging.send(task, identity)
+    async def wait_task(
+        self,
+        task_id: str = "",
+        handle_id: str = "",
+        timeout: float | None = None,
+    ) -> TaskResult:
+        """等待 delegation 任务完成，返回结构化 TaskResult。"""
+        if self._dispatcher is None:
+            raise RuntimeError(f"Agent '{self.agent_id}' has no dispatcher configured")
+        return await self._dispatcher.wait(task_id=task_id, handle_id=handle_id, timeout=timeout)
 
-        # 创建子 Agent + 子 TurnLoop（共享 Runtime 底层能力）
-        child_runtime = runtime.derive()
-        child_agent: Agent = Agent(identity=identity, runtime=child_runtime)
+    async def cancel_task(self, task_id: str = "", handle_id: str = "") -> bool:
+        """取消 delegation 任务。"""
+        if self._dispatcher is None:
+            raise RuntimeError(f"Agent '{self.agent_id}' has no dispatcher configured")
+        return await self._dispatcher.cancel(task_id=task_id, handle_id=handle_id)
 
-        # 使用 execute 确保 TurnLoop 被正确创建
-        return await child_agent.execute(child_runtime, task)
+    def list_delegations(self) -> list[AgentHandle]:
+        """列出当前活跃 delegation 实例。"""
+        if self._dispatcher is None:
+            return []
+        return self._dispatcher.list_handles(active_only=True)
 
     @staticmethod
     def _build_failed_task(target_agent_id: str, description: str, parent_run_id: str) -> Task:
@@ -379,3 +382,11 @@ class Agent:
 
         allowed_set: set[str] = set(allowed)
         return [d for d in all_defs if d.name in allowed_set]
+
+
+
+
+
+
+
+

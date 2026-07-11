@@ -1,29 +1,20 @@
-"""spawn_agent 内置工具 —— 父 Agent 派生子 Agent 执行子任务。
-
-对标 A2A tasks/send：父 Agent 通过 tool_call 委托 Agent.send() 派生子 Agent。
-"""
+"""delegation 内置工具 —— spawn_agent / wait_agent / list_agents。"""
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from dotclaw.tools.handler import BuiltinToolHandler
 
 if TYPE_CHECKING:
     from ...agent.agent import Agent
+    from ...orchestration.handle import AgentHandle
+    from ...orchestration.task import TaskResult
 
 
 def get_spawn_agent_handler(agent: "Agent") -> BuiltinToolHandler:
-    """创建 spawn_agent 工具 Handler。
-
-    通过闭包注入 Agent 实例，handler_fn 直接调用 agent.send()。
-
-    Args:
-        agent: 当前 Agent 实例（发送方）
-
-    Returns:
-        BuiltinToolHandler 实例
-    """
+    """创建 spawn_agent 工具 Handler。"""
 
     async def handle_spawn_agent(
         agent_id: str,
@@ -31,66 +22,126 @@ def get_spawn_agent_handler(agent: "Agent") -> BuiltinToolHandler:
         context: str = "",
         constraints: str = "",
     ) -> str:
-        """派生子 Agent 执行任务，等待完成后返回结果。
-
-        Args:
-            agent_id: 要派生的 Agent 的 agent_id
-            description: 任务描述
-            context: 父 Agent 提供的上下文摘要
-            constraints: 约束条件
-
-        Returns:
-            子 Agent 的最终输出或错误信息
-        """
-        result = await agent.send(
+        """异步提交子 Agent 任务，立即返回本地索引。"""
+        handle: AgentHandle = await agent.send(
             target_agent_id=agent_id,
             description=description,
             context=context,
             constraints=constraints,
         )
-        if result.status.value == "completed":
-            return result.final_result
-        return f"[子Agent执行失败] {result.error or '未知错误'}"
+        payload: dict[str, str] = {
+            "task_id": handle.task_id,
+            "handle_id": handle.handle_id,
+            "target_agent_id": handle.agent_id,
+            "target_kind": handle.task.target_kind.value,
+            "status": handle.task.status.value,
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
     return BuiltinToolHandler(
         name="spawn_agent",
         description=(
-            "派生一个子 Agent 来执行子任务。子 Agent 有独立的上下文和工具白名单，"
-            "不会污染当前 Agent 的对话历史。适合需要隔离上下文的并行子任务。"
-            "根据任务类型选择合适的 agent_id：代码任务用 code-engineer，"
-            "数据分析用 data-analyst，写作/内容用 content-creator，"
-            "专业知识问答用 domain-expert，客服/查询用 customer-service，"
-            "任务规划/多步骤协调用 planner-coordinator。"
-            "没有特别合适的就用 daily-assistant。"
-            "返回子 Agent 的执行结果文本。"
+            "把一个隔离上下文的任务委托给目标 Agent 异步执行。"
+            "提交后立即返回 task_id、handle_id 和 status；"
+            "需要结果时再调用 wait_agent(task_id)。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": (
-                        "要派生的 Agent 的唯一标识（agent_id）。"
-                        "根据任务性质选择对应的 Agent。"
-                        "可选值参考 system prompt 中的可用子 Agent 列表。"
-                    ),
+                    "description": "目标 Agent 的唯一标识。",
                 },
                 "description": {
                     "type": "string",
-                    "description": "子任务的详细描述，子 Agent 将其作为用户输入执行。",
+                    "description": "目标 Agent 要执行的任务描述。",
                 },
                 "context": {
                     "type": "string",
-                    "description": "父 Agent 传递的必要上下文摘要（可选）。",
+                    "description": "父 Agent 传递的必要上下文摘要。",
                 },
                 "constraints": {
                     "type": "string",
-                    "description": "约束条件，如\"仅用内置工具\"、\"不访问网络\"（可选）。",
+                    "description": "约束条件。",
                 },
             },
             "required": ["agent_id", "description"],
         },
         handler_fn=handle_spawn_agent,
         needs_approval=False,
+        timeout=10.0,
+    )
+
+
+def get_wait_agent_handler(agent: "Agent") -> BuiltinToolHandler:
+    """创建 wait_agent 工具 Handler。"""
+
+    async def handle_wait_agent(
+        task_id: str = "",
+        handle_id: str = "",
+        timeout: float | None = None,
+    ) -> str:
+        """等待 delegation 任务完成并返回结构化结果。"""
+        task_result: TaskResult = await agent.wait_task(
+            task_id=task_id,
+            handle_id=handle_id,
+            timeout=timeout,
+        )
+        return json.dumps(task_result.to_dict(), ensure_ascii=False)
+
+    return BuiltinToolHandler(
+        name="wait_agent",
+        description=(
+            "等待 spawn_agent 提交的任务完成，并返回结构化 TaskResult。"
+            "优先传 task_id；handle_id 仅用于调试或底层实例定位。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "spawn_agent 返回的本地 task_id。",
+                },
+                "handle_id": {
+                    "type": "string",
+                    "description": "spawn_agent 返回的 handle_id，可选。",
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": "等待超时秒数，可选。",
+                },
+            },
+        },
+        handler_fn=handle_wait_agent,
+        needs_approval=False,
         timeout=300.0,
+    )
+
+
+def get_list_agents_handler(agent: "Agent") -> BuiltinToolHandler:
+    """创建 list_agents 工具 Handler。"""
+
+    async def handle_list_agents() -> str:
+        """列出当前活跃 delegation 实例。"""
+        handles: list[AgentHandle] = agent.list_delegations()
+        payload: list[dict[str, str]] = [
+            {
+                "task_id": handle.task_id,
+                "handle_id": handle.handle_id,
+                "target_agent_id": handle.agent_id,
+                "target_kind": handle.task.target_kind.value,
+                "status": handle.task.status.value,
+                "description": handle.task.description,
+            }
+            for handle in handles
+        ]
+        return json.dumps(payload, ensure_ascii=False)
+
+    return BuiltinToolHandler(
+        name="list_agents",
+        description="列出当前活跃的 delegation 任务和运行实例。",
+        parameters={"type": "object", "properties": {}},
+        handler_fn=handle_list_agents,
+        needs_approval=False,
+        timeout=5.0,
     )

@@ -1,21 +1,21 @@
-"""编排层 —— 多 Agent 协调、通信、调度。
+"""编排层 —— 多 Agent 协调、通信、调度。"""
 
-agent/ 包负责单 Agent（身份、执行、上下文、生命周期），
-orchestration/ 包负责多 Agent（注册、通信、编排、控制、调度）。
-"""
-
-from .task import Task, TaskStatus
+from .task import Task, TaskStatus, TaskTargetKind, TaskResult
 from .registry import AgentRegistry
 from .messaging import AgentMessaging
-from .handle import AgentHandle, AgentStatus
+from .handle import AgentHandle, AgentStatus, AgentInstanceStatus, RunnerKind
 from .agent_message import AgentMessage, AgentMessageType
 from .instance_manager import AgentInstanceManager
+from .events import DelegationEvent, DelegationEventType
+from .dispatcher import AgentDispatcher
 
 __all__ = [
-    "Task", "TaskStatus",
+    "Task", "TaskStatus", "TaskTargetKind", "TaskResult",
     "AgentRegistry",
     "AgentMessaging",
-    "AgentHandle", "AgentStatus",
+    "AgentHandle", "AgentStatus", "AgentInstanceStatus", "RunnerKind",
     "AgentMessage", "AgentMessageType",
     "AgentInstanceManager",
+    "DelegationEvent", "DelegationEventType",
+    "AgentDispatcher",
 ]

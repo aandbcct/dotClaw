@@ -358,9 +358,16 @@ async def build_agent(
         config=config,
     )
 
-    # ── AgentMessaging：A2A 通信层（纯路由+追踪，不持有 runtime）──
+    # ── Delegation 调度层：route/track + instance index + dispatcher ──
     from dotclaw.orchestration.messaging import AgentMessaging
+    from dotclaw.orchestration.instance_manager import AgentInstanceManager
+    from dotclaw.orchestration.dispatcher import AgentDispatcher
     messaging = AgentMessaging(registry=agent_registry)
+    instance_manager = AgentInstanceManager()
+    dispatcher = AgentDispatcher(
+        messaging=messaging,
+        instance_manager=instance_manager,
+    )
 
     # ── 组装 Agent ──
     from dotclaw.agent.resume import ResumeManager
@@ -374,15 +381,22 @@ async def build_agent(
         identity=identity,
         runtime=runtime,
         messaging=messaging,
+        dispatcher=dispatcher,
         memory_dream=memory_dream,
         mcp_task=mcp_task,
         resume_manager=resume_mgr,
     )
 
-    # ── 注册 spawn_agent 工具 ──
+    # ── 注册 delegation 工具 ──
     if tool_executor is not None:
-        from dotclaw.tools.builtin.spawn_tool import get_spawn_agent_handler
+        from dotclaw.tools.builtin.spawn_tool import (
+            get_spawn_agent_handler,
+            get_wait_agent_handler,
+            get_list_agents_handler,
+        )
         tool_executor.registry.register(get_spawn_agent_handler(agent))
+        tool_executor.registry.register(get_wait_agent_handler(agent))
+        tool_executor.registry.register(get_list_agents_handler(agent))
 
     # ── 注册 kill_agent 工具 ──
     if tool_executor is not None:
@@ -412,3 +426,4 @@ async def build_agent(
 
     logger.info("Agent [%s] 就绪，session: %s", agent.agent_id, current_session.id)
     return agent, runtime, session_mgr
+
