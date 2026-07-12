@@ -58,7 +58,11 @@ class TestAgentMessaging:
         assert len(messaging.list_active()) == 2
 
     def test_cancel_existing_task(self, messaging: AgentMessaging) -> None:
-        """cancel() 成功取消已注册的 Task。"""
+        """cancel() 将已注册 Task 标记为 CANCELLING（deprecated 兼容路径）。
+
+        AgentMessaging.cancel() 已废弃，真实取消应通过 AgentDispatcher。
+        此方法只标记 CANCELLING，不写终态。
+        """
         identity = messaging.route("researcher")
         assert identity is not None
 
@@ -67,7 +71,7 @@ class TestAgentMessaging:
 
         result = messaging.cancel("t2")
         assert result is True
-        assert task.status == TaskStatus.CANCELED
+        assert task.status == TaskStatus.CANCELLING
 
     def test_cancel_nonexistent_returns_false(self, messaging: AgentMessaging) -> None:
         """cancel() 对不存在的 task_id 返回 False。"""

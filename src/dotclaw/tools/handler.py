@@ -65,9 +65,13 @@ class BuiltinToolHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext | None = None,
     ) -> ToolResult:
-        _ = context  # Phase 5: context 暂未在 builtin handler 中使用
+        import inspect
         try:
-            result = await self._handler_fn(**arguments)
+            sig = inspect.signature(self._handler_fn)
+            if "_context" in sig.parameters:
+                result = await self._handler_fn(**arguments, _context=context)
+            else:
+                result = await self._handler_fn(**arguments)
             return ToolResult(output=str(result))
         except Exception as e:
             logger.exception(f"工具 {self._definition.name} 执行出错")

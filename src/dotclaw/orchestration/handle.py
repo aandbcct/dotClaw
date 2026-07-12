@@ -20,13 +20,22 @@ from .task import JsonValue, Task, TaskTargetKind
 
 
 class AgentInstanceStatus(Enum):
-    """Agent 运行实例状态枚举。"""
+    """Agent 运行实例状态枚举。
+
+    idle → running → completed / failed
+    idle → running → cancelling → killed
+
+    CANCELLING 表示取消请求已发出，底层 asyncio.Task 尚未终止。
+    """
 
     IDLE = "idle"
     """实例已创建，等待执行"""
 
     RUNNING = "running"
     """执行中"""
+
+    CANCELLING = "cancelling"
+    """取消请求已发出，等待底层 asyncio.Task 终止"""
 
     COMPLETED = "completed"
     """正常完成"""
@@ -35,10 +44,14 @@ class AgentInstanceStatus(Enum):
     """执行失败"""
 
     KILLED = "killed"
-    """被取消/终止"""
+    """被取消/终止（终态）"""
 
     def is_terminal(self) -> bool:
-        """是否已进入终止状态。"""
+        """是否已进入终止状态。
+
+        CANCELLING 不是终态——底层 coroutine 仍在运行，
+        只有进入 KILLED 后才是终态。
+        """
         return self in (
             AgentInstanceStatus.COMPLETED,
             AgentInstanceStatus.FAILED,
@@ -139,6 +152,11 @@ class AgentHandle:
         self.status = AgentInstanceStatus.RUNNING
         self.updated_at = self._now()
 
+    def _mark_cancelling(self) -> None:
+        """标记取消请求已发出，等待底层 coroutine 终止。"""
+        self.status = AgentInstanceStatus.CANCELLING
+        self.updated_at = self._now()
+
     def _mark_completed(self) -> None:
         self.status = AgentInstanceStatus.COMPLETED
         self.updated_at = self._now()
@@ -162,9 +180,17 @@ class AgentHandle:
         """等待 Agent 实例完成，返回 Task。"""
         return await self.task.result(timeout=timeout)
 
-    def cancel(self) -> None:
-        """取消执行，并同步标记 Task 与实例状态。"""
+    def request_cancel(self) -> None:
+        """请求取消执行——只发出取消请求，不立即写终态。
+
+        本方法由 Dispatcher.cancel() 调用，负责：
+        1. 向底层 asyncio.Task 发出 cancel() 信号
+        2. 将 Handle 和 Task 标记为 CANCELLING
+
+        底层 coroutine 实际终止后，由 Dispatcher._sync_terminal_status()
+        写入终态 KILLED / CANCELED。
+        """
         if self.asyncio_task is not None and not self.asyncio_task.done():
             self.asyncio_task.cancel()
-        self.task.cancel()
-        self._mark_killed()
+        self.task.mark_cancelling()
+        self._mark_cancelling()

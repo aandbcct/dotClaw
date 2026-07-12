@@ -1,27 +1,28 @@
-"""测试 AgentHandle —— Agent 实例的访问令牌。"""
+"""测试 AgentHandle —— Agent 实例的访问令牌。v2: 适配 CANCELLING 两阶段取消。"""
 
 import asyncio
 import uuid
 
 import pytest
 
-from dotclaw.orchestration.handle import AgentHandle, AgentStatus
+from dotclaw.orchestration.handle import AgentHandle, AgentInstanceStatus, AgentStatus
 from dotclaw.orchestration.task import Task, TaskStatus
 
 
-class TestAgentStatus:
-    """AgentStatus 枚举。"""
+class TestAgentInstanceStatus:
+    """AgentInstanceStatus 枚举。"""
 
     def test_all_statuses_defined(self) -> None:
-        values: set[str] = {s.value for s in AgentStatus}
-        assert values == {"idle", "running", "completed", "failed", "killed"}
+        values: set[str] = {s.value for s in AgentInstanceStatus}
+        assert values == {"idle", "running", "cancelling", "completed", "failed", "killed"}
 
     def test_is_terminal(self) -> None:
-        assert AgentStatus.IDLE.is_terminal() is False
-        assert AgentStatus.RUNNING.is_terminal() is False
-        assert AgentStatus.COMPLETED.is_terminal() is True
-        assert AgentStatus.FAILED.is_terminal() is True
-        assert AgentStatus.KILLED.is_terminal() is True
+        assert AgentInstanceStatus.IDLE.is_terminal() is False
+        assert AgentInstanceStatus.RUNNING.is_terminal() is False
+        assert AgentInstanceStatus.CANCELLING.is_terminal() is False  # 不是终态
+        assert AgentInstanceStatus.COMPLETED.is_terminal() is True
+        assert AgentInstanceStatus.FAILED.is_terminal() is True
+        assert AgentInstanceStatus.KILLED.is_terminal() is True
 
 
 class TestAgentHandle:
@@ -46,6 +47,11 @@ class TestAgentHandle:
     def test_mark_running(self, handle: AgentHandle) -> None:
         handle._mark_running()
         assert handle.status == AgentStatus.RUNNING
+
+    def test_mark_cancelling(self, handle: AgentHandle) -> None:
+        handle._mark_running()
+        handle._mark_cancelling()
+        assert handle.status == AgentStatus.CANCELLING
 
     def test_mark_completed_updates_from_task(self, handle: AgentHandle) -> None:
         handle.task.mark_completed(final_result="done")
@@ -80,9 +86,16 @@ class TestAgentHandle:
             await handle.result(timeout=0.01)
 
     @pytest.mark.asyncio
-    async def test_cancel(self, handle: AgentHandle) -> None:
+    async def test_request_cancel_two_phase(self, handle: AgentHandle) -> None:
+        """两阶段取消：request_cancel 进入 CANCELLING，coroutine 终止后进入 KILLED。"""
         handle._mark_running()
-        handle.cancel()
+        handle.request_cancel()
+        # 阶段 1：发出取消请求
+        assert handle.status == AgentStatus.CANCELLING
+        assert handle.task.status == TaskStatus.CANCELLING
+        # 阶段 2：底层 coroutine 终止后
+        handle.task.mark_canceled()
+        handle._mark_killed()
         assert handle.status == AgentStatus.KILLED
         assert handle.task.status == TaskStatus.CANCELED
 

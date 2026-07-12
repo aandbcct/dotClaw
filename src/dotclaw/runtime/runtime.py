@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..llm.base import Message
+from ..journal.journal import Journal
 from ..session.agent_run import RunEndStatus, TriggerType
 from .agent_state import (
     AgentState, AgentPhase, AgentAction, AgentStatus,
@@ -45,7 +46,6 @@ if TYPE_CHECKING:
     from ..session.session import Session as SessionType, SessionManager
     from ..session.agent_run import AgentRun, AgentRunManager
     from ..orchestration.registry import AgentRegistry
-    from ..journal.journal import Journal
     from ..config import Config
     from .state_store import StateStore
 
@@ -106,11 +106,18 @@ class Runtime:
         self.skill_registry: SkillRegistry | None = skill_registry
         self.mcp_provider: object = mcp_provider
         self.config: Config | None = config
+        # per-_step 上下文，由 _step() 在进入时设置，_execute_single_tool() 消费
+        self._current_agent: AgentType | None = None
+        self._current_session_id: str = ""
+        self._current_agentrun_id: str = ""
 
     # ======================== 派生（多 Agent 隔离） ========================
 
     def derive(self, *, channel: Channel | None = None) -> Runtime:
-        """派生 Runtime。共享 llm/skills/registry/journal/state_store，隔离 channel。
+        """派生 Runtime。共享 llm/skills/registry/state_store，隔离 channel 和 journal。
+
+        子 Agent 获得全新 Journal 实例，避免父子并发执行时 trace/session/AgentRun
+        互相覆盖。channel 默认使用 NullChannel，阻止子 Agent 向用户终端输出。
 
         Args:
             channel: 覆盖的 channel
@@ -122,6 +129,8 @@ class Runtime:
             from ..channel.null import NullChannel
             channel = NullChannel()
 
+        child_journal: Journal = Journal()
+
         return Runtime(
             llm=self.llm,
             tool_executor=self.tool_executor,
@@ -129,7 +138,7 @@ class Runtime:
             agent_registry=self.agent_registry,
             session_mgr=self.session_mgr,
             run_mgr=self.run_mgr,
-            journal=self.journal,
+            journal=child_journal,
             state_store=self.state_store,
             channel=channel,
             memory_mgr=self.memory_mgr,
@@ -233,6 +242,11 @@ class Runtime:
         agentrun_id: str = uuid.uuid4().hex[:8]
         run_ids.append(agentrun_id)
         run_messages: list[Message] = []
+
+        # 设置 per-step 上下文（供工具执行时使用）
+        self._current_agent = agent
+        self._current_session_id = session_id
+        self._current_agentrun_id = agentrun_id
 
         # system_prompt
         system_prompt: str = await self._build_system_prompt(
@@ -475,10 +489,23 @@ class Runtime:
                 f"\n🔧 调用工具: {name}({_json.dumps(args, ensure_ascii=False)})"
             )
 
+        from ..tools.base import ToolExecutionContext
+
+        exec_ctx: ToolExecutionContext | None = None
+        if self._current_agent is not None:
+            exec_ctx = ToolExecutionContext(
+                agent=self._current_agent,
+                runtime=self,
+                session_id=self._current_session_id,
+                agentrun_id=self._current_agentrun_id,
+                channel=self.channel,
+            )
+
         result = await self.tool_executor.execute(
             name=name,
             arguments=args,
             channel=self.channel,
+            execution_context=exec_ctx,
         )
 
         if self.channel is not None:

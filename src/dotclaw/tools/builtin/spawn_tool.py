@@ -1,4 +1,9 @@
-"""delegation 内置工具 —— spawn_agent / wait_agent / list_agents。"""
+"""delegation 内置工具 —— spawn_agent / wait_agent / list_agents。
+
+v2: delegation 工具从 ToolExecutionContext 解析当前 Agent、Runtime 和 AgentRun ID，
+不再通过工厂闭包绑定顶层 Agent。子 Agent 调用 spawn_agent 时，
+Task 的 requester 和 parent_run_id 指向当前子 Agent。
+"""
 
 from __future__ import annotations
 
@@ -11,23 +16,53 @@ if TYPE_CHECKING:
     from ...agent.agent import Agent
     from ...orchestration.handle import AgentHandle
     from ...orchestration.task import TaskResult
+    from ...tools.base import ToolExecutionContext
+
+
+def _resolve_agent(agent: "Agent", context: "ToolExecutionContext | None") -> "Agent":
+    """从 context 解析当前 Agent，fallback 到闭包绑定的 agent。
+
+    子 Agent 调用 delegation 工具时，context 中携带的是子 Agent；
+    顶层 Agent 直接调用时（context=None 或未设置），使用工厂注入的 agent。
+    """
+    if context is not None and context.agent is not None:
+        from ...agent.agent import Agent as AgentCls
+        if isinstance(context.agent, AgentCls):
+            return context.agent
+    return agent
+
+
+def _resolve_parent_run_id(context: "ToolExecutionContext | None") -> str:
+    """从 context 解析当前 AgentRun ID。"""
+    if context is not None and context.agentrun_id:
+        return context.agentrun_id
+    return ""
 
 
 def get_spawn_agent_handler(agent: "Agent") -> BuiltinToolHandler:
-    """创建 spawn_agent 工具 Handler。"""
+    """创建 spawn_agent 工具 Handler。
+
+    Args:
+        agent: 工厂注入的 Agent，作为 context 不可用时的 fallback。
+    """
 
     async def handle_spawn_agent(
         agent_id: str,
         description: str,
         context: str = "",
         constraints: str = "",
+        _context: "ToolExecutionContext | None" = None,
     ) -> str:
         """异步提交子 Agent 任务，立即返回本地索引。"""
-        handle: AgentHandle = await agent.send(
+        current_agent: Agent = _resolve_agent(agent, _context)
+        parent_run_id: str = _resolve_parent_run_id(_context)
+
+        handle: AgentHandle = await current_agent.send(
             target_agent_id=agent_id,
             description=description,
             context=context,
             constraints=constraints,
+            parent_run_id=parent_run_id,
         )
         payload: dict[str, str] = {
             "task_id": handle.task_id,
@@ -74,15 +109,21 @@ def get_spawn_agent_handler(agent: "Agent") -> BuiltinToolHandler:
 
 
 def get_wait_agent_handler(agent: "Agent") -> BuiltinToolHandler:
-    """创建 wait_agent 工具 Handler。"""
+    """创建 wait_agent 工具 Handler。
+
+    Args:
+        agent: 工厂注入的 Agent，作为 context 不可用时的 fallback。
+    """
 
     async def handle_wait_agent(
         task_id: str = "",
         handle_id: str = "",
         timeout: float | None = None,
+        _context: "ToolExecutionContext | None" = None,
     ) -> str:
         """等待 delegation 任务完成并返回结构化结果。"""
-        task_result: TaskResult = await agent.wait_task(
+        current_agent: Agent = _resolve_agent(agent, _context)
+        task_result: TaskResult = await current_agent.wait_task(
             task_id=task_id,
             handle_id=handle_id,
             timeout=timeout,
@@ -108,7 +149,7 @@ def get_wait_agent_handler(agent: "Agent") -> BuiltinToolHandler:
                 },
                 "timeout": {
                     "type": "number",
-                    "description": "等待超时秒数，可选。",
+                    "description": "等待超时秒数，可选。超时只停止等待，不取消任务。",
                 },
             },
         },
@@ -119,11 +160,18 @@ def get_wait_agent_handler(agent: "Agent") -> BuiltinToolHandler:
 
 
 def get_list_agents_handler(agent: "Agent") -> BuiltinToolHandler:
-    """创建 list_agents 工具 Handler。"""
+    """创建 list_agents 工具 Handler。
 
-    async def handle_list_agents() -> str:
+    Args:
+        agent: 工厂注入的 Agent，作为 context 不可用时的 fallback。
+    """
+
+    async def handle_list_agents(
+        _context: "ToolExecutionContext | None" = None,
+    ) -> str:
         """列出当前活跃 delegation 实例。"""
-        handles: list[AgentHandle] = agent.list_delegations()
+        current_agent: Agent = _resolve_agent(agent, _context)
+        handles: list[AgentHandle] = current_agent.list_delegations()
         payload: list[dict[str, str]] = [
             {
                 "task_id": handle.task_id,

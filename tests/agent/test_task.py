@@ -13,22 +13,24 @@ class TestTaskStatus:
     """TaskStatus 枚举。"""
 
     def test_all_states_defined(self) -> None:
-        """包含 A2A 定义的全部 5 个状态。"""
+        """包含 A2A 定义的全部 6 个状态（含 cancelling 两阶段取消）。"""
         values: set[str] = {s.value for s in TaskStatus}
-        assert values == {"submitted", "working", "completed", "failed", "canceled"}
+        assert values == {"submitted", "working", "cancelling", "completed", "failed", "canceled"}
 
     def test_string_conversion(self) -> None:
         """从字符串构造枚举。"""
         assert TaskStatus("submitted") == TaskStatus.SUBMITTED
         assert TaskStatus("working") == TaskStatus.WORKING
+        assert TaskStatus("cancelling") == TaskStatus.CANCELLING
         assert TaskStatus("completed") == TaskStatus.COMPLETED
         assert TaskStatus("failed") == TaskStatus.FAILED
         assert TaskStatus("canceled") == TaskStatus.CANCELED
 
     def test_is_terminal(self) -> None:
-        """terminal 状态为 completed/failed/canceled。"""
+        """terminal 状态为 completed/failed/canceled；cancelling 不是终态。"""
         assert TaskStatus.SUBMITTED.is_terminal() is False
         assert TaskStatus.WORKING.is_terminal() is False
+        assert TaskStatus.CANCELLING.is_terminal() is False
         assert TaskStatus.COMPLETED.is_terminal() is True
         assert TaskStatus.FAILED.is_terminal() is True
         assert TaskStatus.CANCELED.is_terminal() is True
@@ -105,6 +107,13 @@ class TestTask:
         t.mark_failed(error="API 调用超时")
         assert t.status == TaskStatus.FAILED
         assert t.error == "API 调用超时"
+
+    def test_mark_canceling(self) -> None:
+        """子 Agent 被请求取消，先进入 CANCELLING 中间状态。"""
+        t = Task(task_id="t6c", requester="p", description="x")
+        t.mark_cancelling()
+        assert t.status == TaskStatus.CANCELLING
+        assert t.is_terminal() is False  # CANCELLING 不是终态
 
     def test_mark_canceled(self) -> None:
         """父 Agent 取消任务，标记 canceled。"""

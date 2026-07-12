@@ -28,7 +28,12 @@ JsonValue: TypeAlias = (
 class TaskStatus(Enum):
     """任务状态枚举。
 
-    对标 A2A TaskState：submitted → working → completed / failed / canceled。
+    对标 A2A TaskState：
+      submitted → working → completed / failed
+      submitted → working → cancelling → canceled
+
+    CANCELLING 表示已请求取消但底层 coroutine 尚未终止，
+    此时调用方可以继续 wait 直到进入CANCELED 终态。
     """
 
     SUBMITTED = "submitted"
@@ -37,6 +42,9 @@ class TaskStatus(Enum):
     WORKING = "working"
     """执行中"""
 
+    CANCELLING = "cancelling"
+    """取消请求已发出，等待底层 coroutine 终止"""
+
     COMPLETED = "completed"
     """正常完成"""
 
@@ -44,10 +52,14 @@ class TaskStatus(Enum):
     """执行失败"""
 
     CANCELED = "canceled"
-    """已被取消"""
+    """已被取消（终态）"""
 
     def is_terminal(self) -> bool:
-        """是否已进入终止状态。"""
+        """是否已进入终止状态。
+
+        CANCELLING 不是终态——底层 coroutine 仍在运行，
+        只有进入 CANCELED 后才是终态。
+        """
         return self in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELED)
 
 
@@ -181,6 +193,12 @@ class Task:
     remote_task_id: str = ""
     """远程任务 ID，仅 target_kind=remote 时使用。"""
 
+    result_consumed: bool = False
+    """wait_agent 是否已消费该结果。"""
+
+    consumed_at: str = ""
+    """结果消费时间。只在 result_consumed=True 时有值。"""
+
     created_at: str = ""
     """创建时间。"""
 
@@ -247,8 +265,21 @@ class Task:
         self.updated_at = self._now()
         self._notify_completion()
 
+    def mark_cancelling(self) -> None:
+        """标记取消请求已发出，等待底层 coroutine 终止。
+
+        kill_agent 工具调用后，Task 先进入 CANCELLING；
+        底层 coroutine 实际终止后由 Dispatcher 写入终态 CANCELED。
+        """
+        self.status = TaskStatus.CANCELLING
+        self.updated_at = self._now()
+
     def mark_canceled(self) -> None:
-        """任务被取消。"""
+        """任务已被取消（终态）。
+
+        仅在底层 coroutine 实际终止后调用。
+        触发 _notify_completion 通知所有 wait 方。
+        """
         self.status = TaskStatus.CANCELED
         self.updated_at = self._now()
         self._notify_completion()
@@ -256,6 +287,17 @@ class Task:
     def is_terminal(self) -> bool:
         """Task 是否已进入终止状态。"""
         return self.status.is_terminal()
+
+    def mark_consumed(self) -> None:
+        """标记结果已由 wait_agent 消费。
+
+        仅在 Task 处于终态时调用。重复消费幂等——不覆盖首次消费时间。
+        """
+        if self.result_consumed:
+            return
+        self.result_consumed = True
+        self.consumed_at = self._now()
+        self.updated_at = self.consumed_at
 
     async def result(self, timeout: float | None = None) -> "Task":
         """等待 Task 完成，返回自身。"""
@@ -287,6 +329,8 @@ class Task:
             "sub_run_id": self.sub_run_id,
             "active_handle_id": self.active_handle_id,
             "remote_task_id": self.remote_task_id,
+            "result_consumed": self.result_consumed,
+            "consumed_at": self.consumed_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -328,6 +372,8 @@ class Task:
         sub_run_value: JsonValue = data.get("sub_run_id", "")
         handle_value: JsonValue = data.get("active_handle_id", "")
         remote_value: JsonValue = data.get("remote_task_id", "")
+        consumed_value: JsonValue = data.get("result_consumed", False)
+        consumed_at_value: JsonValue = data.get("consumed_at", "")
         created_value: JsonValue = data.get("created_at", "")
         updated_value: JsonValue = data.get("updated_at", "")
 
@@ -349,6 +395,8 @@ class Task:
             sub_run_id=sub_run_value if isinstance(sub_run_value, str) else "",
             active_handle_id=handle_value if isinstance(handle_value, str) else "",
             remote_task_id=remote_value if isinstance(remote_value, str) else "",
+            result_consumed=bool(consumed_value),
+            consumed_at=consumed_at_value if isinstance(consumed_at_value, str) else "",
             created_at=created_value if isinstance(created_value, str) else "",
             updated_at=updated_value if isinstance(updated_value, str) else "",
         )

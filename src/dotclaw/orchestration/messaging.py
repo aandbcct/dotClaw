@@ -61,9 +61,21 @@ class AgentMessaging:
     # ── 兼容取消 ──
 
     def cancel(self, task_id: str) -> bool:
-        """兼容旧接口：只标记 Task 取消，不负责真实运行实例取消。"""
+        """已废弃：只标记 Task 为 CANCELLING，不负责真实运行实例取消。
+
+        .. deprecated::
+            真实取消必须通过 AgentDispatcher.cancel() 走两阶段取消流程。
+            直接调用本方法会绕过 handle 取消和事件记录，导致状态不一致。
+        """
+        import warnings
+        warnings.warn(
+            "AgentMessaging.cancel() is deprecated. "
+            "Use AgentDispatcher.cancel() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         task: Task | None = self._active_tasks.get(task_id)
         if task is None:
             return False
-        task.cancel()
+        task.mark_cancelling()
         return True
