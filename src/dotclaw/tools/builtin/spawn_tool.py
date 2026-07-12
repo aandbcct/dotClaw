@@ -1,8 +1,7 @@
 """delegation 内置工具 —— spawn_agent / wait_agent / list_agents。
 
 v2: delegation 工具从 ToolExecutionContext 解析当前 Agent、Runtime 和 AgentRun ID，
-不再通过工厂闭包绑定顶层 Agent。子 Agent 调用 spawn_agent 时，
-Task 的 requester 和 parent_run_id 指向当前子 Agent。
+不再通过工厂闭包绑定顶层 Agent。
 """
 
 from __future__ import annotations
@@ -11,32 +10,13 @@ import json
 from typing import TYPE_CHECKING
 
 from dotclaw.tools.handler import BuiltinToolHandler
+from ._delegation_utils import resolve_agent, resolve_parent_run_id
 
 if TYPE_CHECKING:
     from ...agent.agent import Agent
     from ...orchestration.handle import AgentHandle
     from ...orchestration.task import TaskResult
     from ...tools.base import ToolExecutionContext
-
-
-def _resolve_agent(agent: "Agent", context: "ToolExecutionContext | None") -> "Agent":
-    """从 context 解析当前 Agent，fallback 到闭包绑定的 agent。
-
-    子 Agent 调用 delegation 工具时，context 中携带的是子 Agent；
-    顶层 Agent 直接调用时（context=None 或未设置），使用工厂注入的 agent。
-    """
-    if context is not None and context.agent is not None:
-        from ...agent.agent import Agent as AgentCls
-        if isinstance(context.agent, AgentCls):
-            return context.agent
-    return agent
-
-
-def _resolve_parent_run_id(context: "ToolExecutionContext | None") -> str:
-    """从 context 解析当前 AgentRun ID。"""
-    if context is not None and context.agentrun_id:
-        return context.agentrun_id
-    return ""
 
 
 def get_spawn_agent_handler(agent: "Agent") -> BuiltinToolHandler:
@@ -54,8 +34,8 @@ def get_spawn_agent_handler(agent: "Agent") -> BuiltinToolHandler:
         _context: "ToolExecutionContext | None" = None,
     ) -> str:
         """异步提交子 Agent 任务，立即返回本地索引。"""
-        current_agent: Agent = _resolve_agent(agent, _context)
-        parent_run_id: str = _resolve_parent_run_id(_context)
+        current_agent: Agent = resolve_agent(agent, _context)
+        parent_run_id: str = resolve_parent_run_id(_context)
 
         handle: AgentHandle = await current_agent.send(
             target_agent_id=agent_id,

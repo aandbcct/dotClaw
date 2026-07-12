@@ -8,19 +8,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from dotclaw.tools.handler import BuiltinToolHandler
+from ._delegation_utils import resolve_agent
 
 if TYPE_CHECKING:
     from ...agent.agent import Agent
     from ...tools.base import ToolExecutionContext
-
-
-def _resolve_agent(agent: "Agent", context: "ToolExecutionContext | None") -> "Agent":
-    """从 context 解析当前 Agent，fallback 到闭包绑定的 agent。"""
-    if context is not None and context.agent is not None:
-        from ...agent.agent import Agent as AgentCls
-        if isinstance(context.agent, AgentCls):
-            return context.agent
-    return agent
 
 
 def get_kill_agent_handler(agent: "Agent") -> BuiltinToolHandler:
@@ -43,7 +35,7 @@ def get_kill_agent_handler(agent: "Agent") -> BuiltinToolHandler:
         if not task_id and not handle_id:
             return "错误：必须提供 task_id 或 handle_id"
 
-        current_agent: Agent = _resolve_agent(agent, _context)
+        current_agent: Agent = resolve_agent(agent, _context)
         success: bool = await current_agent.cancel_task(task_id=task_id, handle_id=handle_id)
         target: str = task_id or handle_id
         if success:
