@@ -195,7 +195,11 @@ class ContextAssembler:
         ]
         return ContextAssembler(cloned_slots)
 
-    async def build_system_prompt(self, ctx: SlotContext) -> str:
+    async def build_system_prompt(
+        self,
+        ctx: SlotContext,
+        excluded_slot_names: frozenset[str] = frozenset(),
+    ) -> str:
         """组装所有 Slot 内容为 system_prompt 文本。
 
         Args:
@@ -206,7 +210,7 @@ class ContextAssembler:
         """
         parts: list[str] = []
         for slot in self._slots:
-            if not slot.enabled:
+            if not slot.enabled or slot.name in excluded_slot_names:
                 continue
             try:
                 content = await slot.load(ctx)

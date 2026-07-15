@@ -305,6 +305,27 @@ class Journal:
             "iteration": iteration,
         })
 
+    def task_event(
+        self,
+        event_type: str,
+        task_id: str,
+        endpoint: str,
+        status: str,
+        sequence: int,
+    ) -> None:
+        """记录 Task 生命周期控制面事件。
+
+        仅记录 Task 标识、端点、状态和消息序号；payload 正文始终保留在各自
+        Session 的 tool trace 中，避免观测记录突破 Session 隔离边界。
+        """
+        self._emit(EventType.TASK_LIFECYCLE, {
+            "action": event_type,
+            "task_id": task_id,
+            "endpoint": endpoint,
+            "status": status,
+            "sequence": sequence,
+        })
+
     # ═══ LLM 调用 ═══
 
     def prompt_built(

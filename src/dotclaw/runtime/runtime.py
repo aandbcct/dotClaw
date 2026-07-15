@@ -34,6 +34,10 @@ from .agent_state import (
     ContinueEvent,
 )
 
+
+class DelegationProtocolError(RuntimeError):
+    """source Run 在活动 Task 未终态时试图结束。"""
+
 if TYPE_CHECKING:
     from ..llm.proxy import LLMProxy
     from ..tools.executor import ToolExecutor
@@ -220,9 +224,11 @@ class Runtime:
             self.journal.finalize()
             raise
 
-        await self._ensure_source_task_closed(agent, session.id)
-        self.journal.finalize()
-        return final_answer, list(run_ids)
+        try:
+            await self._ensure_source_task_closed(agent, session.id)
+            return final_answer, list(run_ids)
+        finally:
+            self.journal.finalize()
 
     async def _ensure_source_task_closed(self, agent: AgentType, session_id: str) -> None:
         """阻止 source Session 在活动 Task 存在时提交最终回答。
@@ -235,9 +241,17 @@ class Runtime:
             return
         active_task = await dispatcher.broker.active_task_for_source(session_id)
         if active_task is not None:
-            raise RuntimeError(
+            error: DelegationProtocolError = DelegationProtocolError(
                 f"source Session 仍有活动 Task：{active_task.task_id}；必须 wait_task 或 cancel_task"
             )
+            self.journal.task_event(
+                event_type="protocol_violation",
+                task_id=active_task.task_id,
+                endpoint="source",
+                status=active_task.status.value,
+                sequence=active_task.result_message.sequence if active_task.result_message is not None else 0,
+            )
+            raise error
 
     # ======================== 单次 AgentRun 执行 ========================
 
@@ -679,7 +693,11 @@ class Runtime:
         )
         if self.assembler is not None:
             self.assembler.on_new_request()
-            system_prompt = await self.assembler.build_system_prompt(slot_ctx)
+            excluded_slots: frozenset[str] = (
+                frozenset({"available_agents"})
+                if self.delegation_endpoint == "target" else frozenset()
+            )
+            system_prompt = await self.assembler.build_system_prompt(slot_ctx, excluded_slots)
         return system_prompt
 
     def _resolve_runtime_tools(self, agent: AgentType) -> list[ToolDefinition]:

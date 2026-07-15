@@ -72,6 +72,22 @@ class EventType:
     STATE_CHANGE = "state.change"
     """AgentState 变更事件。包含 phase/end_status 等状态转换信息。"""
 
+    TASK_LIFECYCLE = "task.lifecycle"
+    """Task 控制面生命周期事件，不包含任何跨 Session 的消息正文。"""
+
+
+class TaskEventType(str, Enum):
+    """同进程 delegation 可观测的生命周期动作。"""
+
+    CREATED = "created"
+    TARGET_STARTED = "target_started"
+    MESSAGE_SENT = "message_sent"
+    STATE_CHANGED = "state_changed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    COMPLETED = "completed"
+    PROTOCOL_VIOLATION = "protocol_violation"
+
 
 class TraceMessageRole(Enum):
     """Trace Message 中的消息角色。"""

@@ -10,6 +10,7 @@ import json
 from typing import TYPE_CHECKING
 
 from dotclaw.orchestration.task import Task, TaskEndpoint, TaskMessageType, TaskSpecification
+from dotclaw.journal.events import TaskEventType
 from dotclaw.tools.handler import BuiltinToolHandler
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ def _delegate_handler() -> BuiltinToolHandler:
             expected_deliverables=list(expected_deliverables or []),
         )
         task: Task = await agent.dispatcher.delegate(agent.runtime, agent.agent_id, session_id, run_id, target_agent_id, specification)
+        _record_task_event(agent, TaskEventType.CREATED, task, TaskEndpoint.SOURCE, 0)
         return _task_json(task)
     return BuiltinToolHandler("delegate", "把一项任务委托给目标 Identity，并创建独立 target Session。", {"type": "object", "properties": {"target_agent_id": {"type": "string"}, "title": {"type": "string"}, "objective": {"type": "string"}, "materials": {"type": "array", "items": {"type": "string"}}, "constraints": {"type": "array", "items": {"type": "string"}}, "expected_deliverables": {"type": "array", "items": {"type": "string"}}}, "required": ["target_agent_id", "title", "objective"]}, handle, timeout=10.0)
 
@@ -52,7 +54,10 @@ def _send_message_handler() -> BuiltinToolHandler:
         endpoint: TaskEndpoint = _resolve_endpoint(task, agent.agent_id, session_id)
         kind: TaskMessageType = TaskMessageType(message_type)
         message = await agent.dispatcher.send_message(task_id, endpoint, agent.agent_id, session_id, run_id, kind, payload)
-        return json.dumps({"task_id": task_id, "sequence": message.sequence, "status": (await agent.dispatcher.broker.get_task(task_id)).status.value}, ensure_ascii=False)
+        updated_task: Task = await agent.dispatcher.broker.get_task(task_id)
+        _record_task_event(agent, TaskEventType.MESSAGE_SENT, updated_task, endpoint, message.sequence)
+        _record_task_event(agent, TaskEventType.STATE_CHANGED, updated_task, endpoint, message.sequence)
+        return json.dumps({"task_id": task_id, "sequence": message.sequence, "status": updated_task.status.value}, ensure_ascii=False)
     return BuiltinToolHandler("task_send_message", "向当前 Task 的对端发送受状态机约束的消息。", {"type": "object", "properties": {"task_id": {"type": "string"}, "message_type": {"type": "string", "enum": [item.value for item in TaskMessageType]}, "payload": {"type": "string"}}, "required": ["task_id", "message_type", "payload"]}, handle, timeout=10.0)
 
 
@@ -83,6 +88,8 @@ def _cancel_handler() -> BuiltinToolHandler:
     async def handle(task_id: str, reason: str = "source 已取消任务", _context: "ToolExecutionContext | None" = None) -> str:
         agent, session_id, run_id = _resolve_context(_context)
         task: Task = await agent.dispatcher.cancel_task(task_id, agent.agent_id, session_id, run_id, reason)
+        sequence: int = task.result_message.sequence if task.result_message is not None else 0
+        _record_task_event(agent, TaskEventType.CANCELLED, task, TaskEndpoint.SOURCE, sequence)
         return _task_json(task)
     return BuiltinToolHandler("cancel_task", "取消当前 source Session 创建的活动 Task。", {"type": "object", "properties": {"task_id": {"type": "string"}, "reason": {"type": "string"}}, "required": ["task_id"]}, handle, timeout=10.0)
 
@@ -116,6 +123,24 @@ def _task_json(task: Task) -> str:
 def _message_json(message: "TaskMessage") -> dict[str, str | int]:
     """序列化单条可消费消息。"""
     return {"sequence": message.sequence, "type": message.message_type.value, "payload": message.payload, "sender": message.sender.value}
+
+
+def _record_task_event(
+    agent: "Agent",
+    event_type: TaskEventType,
+    task: Task,
+    endpoint: TaskEndpoint,
+    sequence: int,
+) -> None:
+    """向当前 Session 的 Journal 写入不含消息正文的 Task 事件。"""
+    if agent.runtime is not None and agent.runtime.journal is not None:
+        agent.runtime.journal.task_event(
+            event_type=event_type.value,
+            task_id=task.task_id,
+            endpoint=endpoint.value,
+            status=task.status.value,
+            sequence=sequence,
+        )
 
 
 from dotclaw.orchestration.task import TaskMessage
