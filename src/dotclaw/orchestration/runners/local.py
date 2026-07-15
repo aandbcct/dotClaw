@@ -1,141 +1,56 @@
-"""LocalAgentRunner —— 本机子 Agent 执行器。
+"""本地 target Agent 运行器。
 
-v2: 修复 wait 超时逻辑（超时只停止等待，不取消任务）和 CancelledError 处理
-（转换为结构化 TaskResult，不向上传播）。
+模块作用：在独立 Runtime、Agent 和 Session 中执行 target。运行器只维护本进程
+协程句柄；Task 状态和双向消息仍由 Broker 单一负责。
 """
 
 from __future__ import annotations
 
 import asyncio
-from uuid import uuid4
 
-from ...agent.agent import Agent
-from ..handle import AgentHandle, AgentInstanceStatus, RunnerKind
-from ..task import Task, TaskResult, TaskStatus
-from .base import AgentRunner, SpawnContext
+from ..task import Task, TaskEndpoint, TaskMessageType
 
 
 class LocalAgentRunner:
-    """本机 Agent runner。
+    """启动、追踪并取消同进程 target Runtime。"""
 
-    只负责本地执行细节：派生 Runtime、创建 child Agent、启动 asyncio.Task、
-    非破坏性等待和取消请求。生命周期状态由 AgentDispatcher 统一管理。
-    """
+    def __init__(self) -> None:
+        self._running: dict[str, asyncio.Task[None]] = {}
 
-    async def submit(self, task: Task, context: SpawnContext) -> AgentHandle:
-        """提交本地任务并立即返回运行句柄。"""
-        child_agent: Agent = self._create_child_agent(task, context)
-        handle: AgentHandle = self._create_handle(task)
-        run_task: asyncio.Task[Task] = asyncio.create_task(
-            self._execute_child(child_agent, task, context)
-        )
-        handle.attach_asyncio_task(run_task)
-        handle._mark_running()
-        task.mark_working()
-        return handle
+    def start(self, runtime: "Runtime", dispatcher: "AgentDispatcher", task: Task, session: "Session") -> None:
+        """创建后台协程；source Run 会通过 wait_task 等待其终态。"""
+        execution: asyncio.Task[None] = asyncio.create_task(self._run_target(runtime, dispatcher, task, session))
+        self._running[task.task_id] = execution
+        execution.add_done_callback(lambda _: self._running.pop(task.task_id, None))
 
-    async def wait(
-        self,
-        handle: AgentHandle,
-        timeout: float | None = None,
-    ) -> TaskResult:
-        """等待本地运行实例完成并返回结构化结果。
+    def cancel(self, task_id: str) -> None:
+        """取消仍在运行的 target 协程。"""
+        execution: asyncio.Task[None] | None = self._running.get(task_id)
+        if execution is not None and not execution.done():
+            execution.cancel()
 
-        timeout 只停止等待，不取消底层 asyncio.Task。
-        超时后调用方可以稍后再次 wait。
-        """
+    async def _run_target(self, runtime: "Runtime", dispatcher: "AgentDispatcher", task: Task, session: "Session") -> None:
+        """完整装配 target Agent，并把异常转换成 failed 终态消息。"""
         try:
-            await handle.result(timeout=timeout)
-        except asyncio.TimeoutError:
-            # 超时只停止等待，任务继续运行
-            return TaskResult(
-                summary="任务仍在执行中，尚未完成",
-                content=f"任务 {handle.task_id} 仍在执行中，请稍后再次 wait_agent 获取结果",
-                metadata={
-                    "status": handle.task.status.value,
-                    "task_id": handle.task_id,
-                    "timeout": True,
-                },
-            )
-        return self._build_task_result(handle.task)
-
-    async def cancel(self, handle: AgentHandle) -> bool:
-        """请求取消本地 asyncio.Task（不立即写终态）。
-
-        Returns:
-            True 表示取消请求已发出（或任务已终态），False 表示无法操作。
-        """
-        if handle.status.is_terminal():
-            return False
-        handle.request_cancel()
-        return True
-
-    # ── 内部方法 ──
-
-    def _create_child_agent(self, task: Task, context: SpawnContext) -> Agent:
-        """创建隔离运行的子 Agent。"""
-        target_identity = context.runtime.agent_registry.get(task.target_agent_id)
-        if target_identity is None:
-            raise RuntimeError(f"Agent '{task.target_agent_id}' not found in registry")
-        child_runtime = context.runtime.derive()
-        return Agent(identity=target_identity, runtime=child_runtime)
-
-    def _create_handle(self, task: Task) -> AgentHandle:
-        """创建本地运行实例句柄。"""
-        return AgentHandle(
-            handle_id=uuid4().hex[:12],
-            agent_id=task.target_agent_id,
-            task=task,
-            runner_kind=RunnerKind.LOCAL,
-        )
-
-    async def _execute_child(
-        self,
-        child_agent: Agent,
-        task: Task,
-        context: SpawnContext,
-    ) -> Task:
-        """执行子 Agent，异常映射回 Task 状态。
-
-        CancelledError 不再向上传播——转换为结构化 TaskResult(status=canceled)
-        并标记 Task 为 CANCELED 终态。
-        """
-        try:
-            child_runtime = child_agent.runtime
-            if child_runtime is None:
-                raise RuntimeError("Child agent has no runtime")
-            return await child_agent.execute(child_runtime, task)
+            target_identity = runtime.agent_registry.get(task.target.identity_id)
+            if target_identity is None:
+                raise RuntimeError(f"目标 Identity 不存在：{task.target.identity_id}")
+            from ...agent.agent import Agent
+            target_runtime: Runtime = runtime.derive(delegation_endpoint="target")
+            target_agent: Agent = Agent(identity=target_identity, runtime=target_runtime, dispatcher=dispatcher)
+            result: str = await target_agent.execute_in_session(target_runtime, session, task)
+            await dispatcher.send_message(task.task_id, TaskEndpoint.TARGET, task.target.identity_id, task.target.session_id, "", TaskMessageType.RESULT, result)
         except asyncio.CancelledError:
-            task.mark_canceled()
-            return task
-        except Exception as exc:
-            task.mark_failed(error=f"{type(exc).__name__}: {exc}")
-            return task
+            return
+        except Exception as error:
+            current: Task = await dispatcher.broker.get_task(task.task_id)
+            if not current.status.is_terminal():
+                await dispatcher.send_message(task.task_id, TaskEndpoint.TARGET, task.target.identity_id, task.target.session_id, "", TaskMessageType.FAILED, f"{type(error).__name__}: {error}")
 
-    @staticmethod
-    def _build_task_result(task: Task) -> TaskResult:
-        """从 Task 状态构建结构化 TaskResult。"""
-        if task.task_result is not None:
-            return task.task_result
-        if task.status == TaskStatus.COMPLETED:
-            return TaskResult(
-                summary=task.final_result[:500],
-                content=task.final_result,
-            )
-        if task.status == TaskStatus.FAILED:
-            return TaskResult(
-                summary=task.error[:500],
-                content=task.error,
-                metadata={"status": task.status.value},
-            )
-        if task.status in (TaskStatus.CANCELED, TaskStatus.CANCELLING):
-            return TaskResult(
-                summary="任务已取消",
-                content=f"任务 {task.task_id} 已被取消",
-                metadata={"status": task.status.value},
-            )
-        return TaskResult(
-            summary=task.final_result[:500],
-            content=task.final_result,
-            metadata={"status": task.status.value},
-        )
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...runtime.runtime import Runtime
+    from ...session.session import Session
+    from ..dispatcher import AgentDispatcher

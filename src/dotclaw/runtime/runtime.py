@@ -92,6 +92,7 @@ class Runtime:
         skill_registry: SkillRegistry | None = None,
         mcp_provider: object = None,
         config: Config | None = None,
+        delegation_endpoint: str = "",
     ) -> None:
         self.llm: LLMProxy = llm
         self.tool_executor: ToolExecutor | None = tool_executor
@@ -106,14 +107,16 @@ class Runtime:
         self.skill_registry: SkillRegistry | None = skill_registry
         self.mcp_provider: object = mcp_provider
         self.config: Config | None = config
+        self.delegation_endpoint: str = delegation_endpoint
         # per-_step 上下文，由 _step() 在进入时设置，_execute_single_tool() 消费
         self._current_agent: AgentType | None = None
         self._current_session_id: str = ""
         self._current_agentrun_id: str = ""
+        self._current_allowed_tools: frozenset[str] = frozenset()
 
     # ======================== 派生（多 Agent 隔离） ========================
 
-    def derive(self, *, channel: Channel | None = None) -> Runtime:
+    def derive(self, *, channel: Channel | None = None, delegation_endpoint: str = "") -> Runtime:
         """派生 Runtime。共享 llm/skills/registry/state_store，隔离 channel 和 journal。
 
         子 Agent 获得全新 Journal 实例，避免父子并发执行时 trace/session/AgentRun
@@ -131,10 +134,13 @@ class Runtime:
 
         child_journal: Journal = Journal()
 
+        child_assembler: ContextAssembler | None = (
+            self.assembler.clone() if self.assembler is not None else None
+        )
         return Runtime(
             llm=self.llm,
             tool_executor=self.tool_executor,
-            assembler=self.assembler,
+            assembler=child_assembler,
             agent_registry=self.agent_registry,
             session_mgr=self.session_mgr,
             run_mgr=self.run_mgr,
@@ -145,6 +151,7 @@ class Runtime:
             skill_registry=self.skill_registry,
             mcp_provider=self.mcp_provider,
             config=self.config,
+            delegation_endpoint=delegation_endpoint,
         )
 
     # ======================== 公开入口：run() ========================
@@ -213,8 +220,24 @@ class Runtime:
             self.journal.finalize()
             raise
 
+        await self._ensure_source_task_closed(agent, session.id)
         self.journal.finalize()
         return final_answer, list(run_ids)
+
+    async def _ensure_source_task_closed(self, agent: AgentType, session_id: str) -> None:
+        """阻止 source Session 在活动 Task 存在时提交最终回答。
+
+        MVP 的普通等待由 wait_task 在当前 Run 内完成。若模型绕过等待工具直接
+        结束，本守卫会拒绝提交该回答，确保不会留下后台 delegation。
+        """
+        dispatcher = agent.dispatcher
+        if dispatcher is None:
+            return
+        active_task = await dispatcher.broker.active_task_for_source(session_id)
+        if active_task is not None:
+            raise RuntimeError(
+                f"source Session 仍有活动 Task：{active_task.task_id}；必须 wait_task 或 cancel_task"
+            )
 
     # ======================== 单次 AgentRun 执行 ========================
 
@@ -247,6 +270,9 @@ class Runtime:
         self._current_agent = agent
         self._current_session_id = session_id
         self._current_agentrun_id = agentrun_id
+        self._current_allowed_tools = frozenset(
+            definition.name for definition in self._resolve_runtime_tools(agent)
+        )
 
         # system_prompt
         system_prompt: str = await self._build_system_prompt(
@@ -484,6 +510,13 @@ class Runtime:
                 tool_call_id=tool_id,
             )
 
+        if name not in self._current_allowed_tools:
+            return Message(
+                role="tool",
+                content=f"错误：当前 Identity 无权调用工具 '{name}'",
+                tool_call_id=tool_id,
+            )
+
         if self.channel is not None:
             self.channel.print_info(
                 f"\n🔧 调用工具: {name}({_json.dumps(args, ensure_ascii=False)})"
@@ -621,7 +654,7 @@ class Runtime:
     ) -> str:
         """构建 system prompt（含 Slot 解析）。"""
         system_prompt: str = agent._resolve_system_prompt(self)
-        tool_definitions: list[ToolDefinition] = agent._resolve_tool_definitions(self)
+        tool_definitions: list[ToolDefinition] = self._resolve_runtime_tools(agent)
         from ..agent.slotContext import SlotContext as SCtx
 
         project_root: Path = _find_project_root()
@@ -648,6 +681,14 @@ class Runtime:
             self.assembler.on_new_request()
             system_prompt = await self.assembler.build_system_prompt(slot_ctx)
         return system_prompt
+
+    def _resolve_runtime_tools(self, agent: AgentType) -> list[ToolDefinition]:
+        """按 Identity 与 delegation 角色过滤可见且可执行的工具。"""
+        definitions: list[ToolDefinition] = agent._resolve_tool_definitions(self)
+        if self.delegation_endpoint != "target":
+            return definitions
+        forbidden: frozenset[str] = frozenset({"delegate", "cancel_task"})
+        return [definition for definition in definitions if definition.name not in forbidden]
 
     def _build_context_msgs(
         self,

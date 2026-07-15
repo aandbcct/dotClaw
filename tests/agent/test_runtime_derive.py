@@ -18,7 +18,10 @@ class FakeToolExecutor:
 
 class FakeAssembler:
     """测试用假 Assembler。"""
-    pass
+
+    def clone(self) -> "FakeAssembler":
+        """模拟隔离的 Assembler 克隆。"""
+        return FakeAssembler()
 
 
 class FakeSessionManager:
@@ -79,10 +82,10 @@ class TestRuntimeDerive:
         derived = runtime.derive()
         assert derived.session_mgr is runtime.session_mgr
 
-    def test_derive_shares_assembler(self, runtime: Runtime) -> None:
-        """derive 后 assembler 引用相同。"""
+    def test_derive_clones_assembler(self, runtime: Runtime) -> None:
+        """derive 后 Assembler 必须隔离，避免 Slot 缓存泄漏。"""
         derived = runtime.derive()
-        assert derived.assembler is runtime.assembler
+        assert derived.assembler is not runtime.assembler
 
     def test_derive_shares_memory_mgr(self, runtime: Runtime) -> None:
         """derive 后 memory_mgr 引用相同。"""

@@ -45,7 +45,7 @@ class ToolExecutionContext:
     """工具执行时的运行时上下文。
 
     Runtime 在每次工具调用时创建此上下文并传给 handler。
-    delegation 工具（spawn_agent/wait_agent/kill_agent/list_agents）
+    Task delegation 工具（delegate/task_send_message/wait_task/task_status/cancel_task）
     从此上下文解析当前 Agent、Runtime 和 agentrun_id，
     不再通过工厂闭包捕获顶层 Agent。
     """

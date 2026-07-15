@@ -261,7 +261,7 @@ class AvailableAgentsSlot(ContextSlot):
         lines: list[str] = [
             "## 可用子 Agent",
             "",
-            "你可以使用 spawn_agent 工具派生以下子 Agent 来执行子任务。",
+            "你可以使用 delegate 工具把一个子任务委托给以下目标 Identity。",
             "根据任务性质选择合适的 Agent：",
             "",
         ]
@@ -275,6 +275,6 @@ class AvailableAgentsSlot(ContextSlot):
             "如果没有特别合适的 Agent，使用 **daily-assistant**（通用助手）处理所有类型任务。"
         )
         lines.append(
-            "一次可以并行 spawn 多个子 Agent，每个返回独立结果。"
+            "每个 Session 同时只能有一个活动委托；目标 Agent 不能继续委托。"
         )
         return "\n".join(lines)

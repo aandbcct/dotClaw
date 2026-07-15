@@ -358,16 +358,11 @@ async def build_agent(
         config=config,
     )
 
-    # ── Delegation 调度层：route/track + instance index + dispatcher ──
-    from dotclaw.orchestration.messaging import AgentMessaging
-    from dotclaw.orchestration.instance_manager import AgentInstanceManager
+    # ── Delegation 调度层：内存 Broker + 本地 Dispatcher ──
+    from dotclaw.orchestration.message_broker import TaskMessageBroker
     from dotclaw.orchestration.dispatcher import AgentDispatcher
-    messaging = AgentMessaging(registry=agent_registry)
-    instance_manager = AgentInstanceManager()
-    dispatcher = AgentDispatcher(
-        messaging=messaging,
-        instance_manager=instance_manager,
-    )
+    task_broker: TaskMessageBroker = TaskMessageBroker()
+    dispatcher: AgentDispatcher = AgentDispatcher(broker=task_broker)
 
     # ── 组装 Agent ──
     from dotclaw.agent.resume import ResumeManager
@@ -380,28 +375,17 @@ async def build_agent(
     agent: AgentCls = AgentCls(
         identity=identity,
         runtime=runtime,
-        messaging=messaging,
         dispatcher=dispatcher,
         memory_dream=memory_dream,
         mcp_task=mcp_task,
         resume_manager=resume_mgr,
     )
 
-    # ── 注册 delegation 工具 ──
+    # ── 注册 Task delegation 工具 ──
     if tool_executor is not None:
-        from dotclaw.tools.builtin.spawn_tool import (
-            get_spawn_agent_handler,
-            get_wait_agent_handler,
-            get_list_agents_handler,
-        )
-        tool_executor.registry.register(get_spawn_agent_handler(agent))
-        tool_executor.registry.register(get_wait_agent_handler(agent))
-        tool_executor.registry.register(get_list_agents_handler(agent))
-
-    # ── 注册 kill_agent 工具 ──
-    if tool_executor is not None:
-        from dotclaw.tools.builtin.kill_tool import get_kill_agent_handler
-        tool_executor.registry.register(get_kill_agent_handler(agent))
+        from dotclaw.tools.builtin.task_tool import get_task_handlers
+        for handler in get_task_handlers():
+            tool_executor.registry.register(handler)
 
     # ── 恢复上次 Session ──
     sessions: list = await session_mgr.list_all()

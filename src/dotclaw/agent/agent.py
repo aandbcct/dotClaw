@@ -25,10 +25,8 @@ if TYPE_CHECKING:
     from ..tools.base import ToolDefinition
     from ..session.session import Session as SessionType
     from ..session.agent_run import AgentRun
-    from ..orchestration.task import Task, TaskResult
-    from ..orchestration.messaging import AgentMessaging
+    from ..orchestration.task import Task
     from ..orchestration.dispatcher import AgentDispatcher
-    from ..orchestration.handle import AgentHandle
     from ..runtime.runtime import Runtime
 
 
@@ -77,7 +75,6 @@ class Agent:
         self,
         identity: AgentIdentity,
         runtime: Runtime | None = None,
-        messaging: AgentMessaging | None = None,
         dispatcher: AgentDispatcher | None = None,
         memory_dream: object = None,
         mcp_task: object = None,
@@ -88,7 +85,6 @@ class Agent:
         Args:
             identity: Agent 声明式约束（id/name/allowed_tools/system_prompt/...）
             runtime: Runtime 编排引擎（可选，process() 时也可传入）
-            messaging: Agent 间通信追踪层（可选）
             dispatcher: Agent 委托调度器（可选，无则不启用 delegation）
             memory_dream: DeepDream 记忆蒸馏实例（可选）
             mcp_task: MCP 后台初始化 task（可选）
@@ -96,7 +92,6 @@ class Agent:
         """
         self._identity: AgentIdentity = identity
         self._runtime: Runtime | None = runtime
-        self._messaging: AgentMessaging | None = messaging
         self._dispatcher: AgentDispatcher | None = dispatcher
         self._memory_dream: object = memory_dream
         self._mcp_task: object = mcp_task
@@ -135,6 +130,11 @@ class Agent:
     def memory_dream(self) -> object:
         """DeepDream 记忆蒸馏实例。"""
         return self._memory_dream
+
+    @property
+    def dispatcher(self) -> "AgentDispatcher | None":
+        """返回当前 Agent 装配的 delegation 门面。"""
+        return self._dispatcher
 
     # ======================== 生命周期 ========================
 
@@ -190,135 +190,21 @@ class Agent:
 
         return final_answer
 
-    async def execute(self, runtime: Runtime, task: Task) -> Task:
-        """主从式入口 —— 内部创建独立 Session，执行后返回填充完成的 Task。
+    async def execute_in_session(
+        self,
+        runtime: Runtime,
+        session: SessionType,
+        task: Task,
+    ) -> str:
+        """在 Dispatcher 已创建的独立 target Session 中执行 Task。
 
-        使用 TurnLoop 执行子 Agent 的任务。
-
-        Args:
-            runtime: Runtime 编排引擎
-            task: 父 Agent 创建的任务描述
-
-        Returns:
-            携带执行结果的 task（就地修改后的同一对象）
+        TaskSpecification 只作为首条 user 消息传入，避免材料或任务正文污染
+        target Identity 的 system prompt。
         """
-        import uuid as _uuid
-
         if runtime.journal is None:
-            raise RuntimeError(
-                "Agent.execute() requires Runtime with Journal injected"
-            )
-
-        # 创建独立 Session
-        child_session: SessionType = await runtime.session_mgr.create(
-            title=f"sub-{self.agent_id}-{_uuid.uuid4().hex[:6]}",
-            agent_id=self.agent_id,
-            model=self._resolve_model(runtime),
-        )
-
-        task.mark_working()
-
-        user_message: str = self._build_task_message(task)
-        final_answer, run_ids = await runtime.run(child_session, self, user_message)
-
-        task.mark_completed(
-            final_result=final_answer,
-            sub_run_id=run_ids[0] if run_ids else "",
-        )
-
-        return task
-
-    async def send(
-        self,
-        target_agent_id: str,
-        description: str,
-        context: str = "",
-        constraints: str = "",
-        parent_run_id: str = "",
-    ) -> AgentHandle:
-        """异步委托任务给目标 Agent，立即返回运行实例句柄。
-
-        Agent.send() 是 Dispatcher 的薄 facade。它只暴露父 Agent 发起 delegation
-        所需的必要参数，不在类内直接创建或执行子 Agent。
-        """
-        if self._runtime is None:
-            raise RuntimeError(f"Agent '{self.agent_id}' has no runtime configured")
-        if self._dispatcher is None:
-            raise RuntimeError(
-                f"Agent '{self.agent_id}' has no dispatcher configured. "
-                "Use factory.build_agent() to create a fully wired agent."
-            )
-
-        from ..orchestration.runners.base import SpawnContext
-
-        spawn_context: SpawnContext = SpawnContext(
-            runtime=self._runtime,
-            requester=self,
-            parent_run_id=parent_run_id,
-        )
-        return await self._dispatcher.spawn(
-            context=spawn_context,
-            target_agent_id=target_agent_id,
-            description=description,
-            task_context=context,
-            constraints=constraints,
-            parent_run_id=parent_run_id,
-        )
-
-    async def wait_task(
-        self,
-        task_id: str = "",
-        handle_id: str = "",
-        timeout: float | None = None,
-    ) -> TaskResult:
-        """等待 delegation 任务完成，返回结构化 TaskResult。"""
-        if self._dispatcher is None:
-            raise RuntimeError(f"Agent '{self.agent_id}' has no dispatcher configured")
-        return await self._dispatcher.wait(task_id=task_id, handle_id=handle_id, timeout=timeout)
-
-    async def cancel_task(self, task_id: str = "", handle_id: str = "") -> bool:
-        """取消 delegation 任务。"""
-        if self._dispatcher is None:
-            raise RuntimeError(f"Agent '{self.agent_id}' has no dispatcher configured")
-        return await self._dispatcher.cancel(task_id=task_id, handle_id=handle_id)
-
-    def list_delegations(self) -> list[AgentHandle]:
-        """列出当前活跃 delegation 实例。"""
-        if self._dispatcher is None:
-            return []
-        return self._dispatcher.list_handles(active_only=True)
-
-    @staticmethod
-    def _build_failed_task(target_agent_id: str, description: str, parent_run_id: str) -> Task:
-        """构造一个标记为 failed 的 Task（目标 Agent 不存在时使用）。"""
-        import uuid as _uuid
-        from ..orchestration.task import Task as _Task
-        task: Task = _Task(
-            task_id=_uuid.uuid4().hex[:12],
-            requester=target_agent_id,
-            description=description,
-            parent_run_id=parent_run_id,
-        )
-        task.mark_failed(error=f"Agent '{target_agent_id}' not found in registry")
-        return task
-
-    def _build_task_message(self, task: Task) -> str:
-        """将 Task 输入侧字段组装为子 Agent 的 user_message。
-
-        description / context / constraints / input_artifacts 合并为一条消息。
-        """
-        parts: list[str] = [task.description]
-        if task.context:
-            parts.append(f"\n[上游上下文]\n{task.context}")
-        if task.constraints:
-            parts.append(f"\n[约束]\n{task.constraints}")
-        if task.input_artifacts:
-            refs: str = "\n".join(
-                f"  - {a.name}: {a.uri or a.content[:200]}"
-                for a in task.input_artifacts
-            )
-            parts.append(f"\n[输入产物]\n{refs}")
-        return "\n\n".join(parts)
+            raise RuntimeError("Agent.execute_in_session() 需要 Journal")
+        answer, _ = await runtime.run(session, self, task.specification.render_user_message())
+        return answer
 
     # ======================== 配置解析（桥接方法） ========================
 

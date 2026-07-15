@@ -1,402 +1,126 @@
-"""Task —— Agent 间通信的聚合实体。
+"""同进程 delegation 的领域模型。
 
-对标 A2A Task：是 Agent 间最小的通信单位。
-父 Agent 创建并填充输入侧字段，目标 Agent 执行后填充结构化 TaskResult。
+本模块只定义稳定的数据契约：Task、消息、端点和状态机。消息投递、等待和
+运行调度分别由 ``TaskMessageBroker`` 与 ``AgentDispatcher`` 负责，避免把
+生命周期逻辑混入数据对象。
 """
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import TypeAlias
 
-from ..agent.artifact import Artifact
+
+JsonScalar: TypeAlias = str | int | float | bool | None
+JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 
 
-JsonValue: TypeAlias = (
-    str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
-)
-
-
-# ============================================================================
-# 枚举
-# ============================================================================
-
-
-class TaskStatus(Enum):
-    """任务状态枚举。
-
-    对标 A2A TaskState：
-      submitted → working → completed / failed
-      submitted → working → cancelling → canceled
-
-    CANCELLING 表示已请求取消但底层 coroutine 尚未终止，
-    此时调用方可以继续 wait 直到进入CANCELED 终态。
-    """
+class TaskStatus(str, Enum):
+    """Task 当前状态，表示下一步应由哪一端继续行动。"""
 
     SUBMITTED = "submitted"
-    """已提交，等待执行"""
-
-    WORKING = "working"
-    """执行中"""
-
-    CANCELLING = "cancelling"
-    """取消请求已发出，等待底层 coroutine 终止"""
-
+    RUNNING_TARGET = "running_target"
+    WAITING_SOURCE = "waiting_source"
     COMPLETED = "completed"
-    """正常完成"""
-
     FAILED = "failed"
-    """执行失败"""
-
-    CANCELED = "canceled"
-    """已被取消（终态）"""
+    CANCELLED = "cancelled"
 
     def is_terminal(self) -> bool:
-        """是否已进入终止状态。
-
-        CANCELLING 不是终态——底层 coroutine 仍在运行，
-        只有进入 CANCELED 后才是终态。
-        """
-        return self in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELED)
+        """返回当前状态是否为终态。"""
+        return self in {self.COMPLETED, self.FAILED, self.CANCELLED}
 
 
-class TaskTargetKind(Enum):
-    """任务目标类型。"""
+class TaskEndpoint(str, Enum):
+    """Task 点对点通信的两个固定端点。"""
 
-    LOCAL = "local"
-    """本机 Agent"""
-
-    REMOTE = "remote"
-    """远程 Agent"""
+    SOURCE = "source"
+    TARGET = "target"
 
 
-# ============================================================================
-# TaskResult
-# ============================================================================
+class TaskMessageType(str, Enum):
+    """MVP 支持的 Task 消息类型。"""
+
+    REQUEST = "request"
+    PROGRESS = "progress"
+    QUESTION = "question"
+    REPLY = "reply"
+    CONTEXT_UPDATE = "context_update"
+    RESULT = "result"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
-@dataclass
-class TaskResult:
-    """子 Agent 完成后的结构化结果。
+@dataclass(frozen=True)
+class TaskSpecification:
+    """不可变的委托任务契约，不能保存完整 Session 历史。"""
 
-    summary 用于父 Agent 快速理解，content 保存完整结果，artifacts 保存文件或
-    数据产物引用，metadata 保存 token、耗时、trace 等扩展信息。
-    """
+    title: str
+    objective: str
+    materials: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    expected_deliverables: list[str] = field(default_factory=list)
 
-    summary: str = ""
-    """结果摘要"""
-
-    content: str = ""
-    """完整结果正文"""
-
-    artifacts: list[Artifact] = field(default_factory=list)
-    """输出产物"""
-
-    metadata: dict[str, JsonValue] = field(default_factory=dict)
-    """扩展元数据"""
-
-    def to_dict(self) -> dict[str, JsonValue]:
-        """序列化为 dict。"""
-        return {
-            "summary": self.summary,
-            "content": self.content,
-            "artifacts": [a.to_dict() for a in self.artifacts],
-            "metadata": dict(self.metadata),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, JsonValue]) -> "TaskResult":
-        """从 dict 反序列化。"""
-        raw_artifacts: JsonValue = data.get("artifacts", [])
-        artifact_dicts: list[dict[str, JsonValue]] = []
-        if isinstance(raw_artifacts, list):
-            artifact_dicts = [item for item in raw_artifacts if isinstance(item, dict)]
-
-        raw_metadata: JsonValue = data.get("metadata", {})
-        metadata: dict[str, JsonValue] = (
-            dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
-        )
-
-        summary_value: JsonValue = data.get("summary", "")
-        content_value: JsonValue = data.get("content", "")
-        return cls(
-            summary=summary_value if isinstance(summary_value, str) else "",
-            content=content_value if isinstance(content_value, str) else "",
-            artifacts=[Artifact.from_dict(a) for a in artifact_dicts],
-            metadata=metadata,
-        )
+    def render_user_message(self) -> str:
+        """将任务契约渲染为 target Session 的首条 user 消息。"""
+        sections: list[str] = [f"任务：{self.title}", f"目标：{self.objective}"]
+        if self.materials:
+            sections.append("材料：\n" + "\n".join(f"- {item}" for item in self.materials))
+        if self.constraints:
+            sections.append("约束：\n" + "\n".join(f"- {item}" for item in self.constraints))
+        if self.expected_deliverables:
+            sections.append("预期交付物：\n" + "\n".join(f"- {item}" for item in self.expected_deliverables))
+        return "\n\n".join(sections)
 
 
-# ============================================================================
-# Task
-# ============================================================================
+@dataclass(frozen=True)
+class TaskMessage:
+    """一条不可变的、按 sequence 排序的 Task 通信事实。"""
+
+    task_id: str
+    sequence: int
+    sender: TaskEndpoint
+    recipient: TaskEndpoint
+    sender_session_id: str
+    sender_run_id: str
+    message_type: TaskMessageType
+    payload: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class TaskEndpointBinding:
+    """一个端点可操作 Task 的 Identity 与 Session 绑定。"""
+
+    endpoint: TaskEndpoint
+    identity_id: str
+    session_id: str
 
 
 @dataclass
 class Task:
-    """Agent 间通信的聚合实体。
+    """内存生命周期内的 delegation 聚合。
 
-    Task 是业务委托单元；真实运行实例通过 AgentHandle 追踪。
+    状态和终态结果只由 Broker 修改，调用方必须使用 Broker 的原子操作，防止
+    消息流与状态机出现不一致。
     """
 
     task_id: str
-    """任务唯一标识"""
-
-    requester: str
-    """发起 Agent 的 agent_id（兼容字段）"""
-
-    description: str
-    """任务描述。目标 Agent 将其作为 user_message 执行。"""
-
-    target_agent_id: str = ""
-    """目标 Agent ID"""
-
-    target_kind: TaskTargetKind = TaskTargetKind.LOCAL
-    """目标 Agent 类型"""
-
-    context: str = ""
-    """父 Agent 传入的必要上下文摘要。"""
-
-    constraints: str = ""
-    """约束条件。"""
-
-    input_artifacts: list[Artifact] = field(default_factory=list)
-    """父 Agent 传入的文件/数据引用。"""
-
+    specification: TaskSpecification
+    source: TaskEndpointBinding
+    target: TaskEndpointBinding
     status: TaskStatus = TaskStatus.SUBMITTED
-    """任务状态。"""
-
-    final_result: str = ""
-    """子 Agent 最终输出文本（兼容字段，优先使用 result）。"""
-
-    task_result: TaskResult | None = None
-    """结构化任务结果。"""
-
-    output_artifacts: list[Artifact] = field(default_factory=list)
-    """子 Agent 执行产出的产物列表（兼容字段）。"""
-
+    result_message: TaskMessage | None = None
     error: str = ""
-    """异常信息。"""
+    cancellation_requested: bool = False
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
-    parent_run_id: str = ""
-    """父 Agent 的 AgentRun.run_id。"""
+    def binding_for(self, endpoint: TaskEndpoint) -> TaskEndpointBinding:
+        """返回指定端点的身份与 Session 绑定。"""
+        return self.source if endpoint is TaskEndpoint.SOURCE else self.target
 
-    sub_run_id: str = ""
-    """子 Agent 的 AgentRun.run_id。"""
-
-    active_handle_id: str = ""
-    """当前承接该 Task 的运行实例句柄 ID。"""
-
-    remote_task_id: str = ""
-    """远程任务 ID，仅 target_kind=remote 时使用。"""
-
-    result_consumed: bool = False
-    """wait_agent 是否已消费该结果。"""
-
-    consumed_at: str = ""
-    """结果消费时间。只在 result_consumed=True 时有值。"""
-
-    created_at: str = ""
-    """创建时间。"""
-
-    updated_at: str = ""
-    """最后更新时间。"""
-
-    def __post_init__(self) -> None:
-        """自动填充运行时等待事件。"""
-        if not self.created_at:
-            self.created_at = self._now()
-        object.__setattr__(self, "_completion_event", asyncio.Event())
-        if self.status.is_terminal():
-            self._completion_event.set()
-
-    @property
-    def requester_agent_id(self) -> str:
-        """发起 Agent ID。"""
-        return self.requester
-
-    def _notify_completion(self) -> None:
-        """通知等待者 Task 已完成/失败/取消。"""
-        event: asyncio.Event = getattr(self, "_completion_event")
-        event.set()
-
-    def _now(self) -> str:
-        """返回 UTC ISO 时间。"""
-        return datetime.now(timezone.utc).isoformat()
-
-    def mark_working(self) -> None:
-        """目标 Agent 开始执行。"""
-        self.status = TaskStatus.WORKING
-        self.updated_at = self._now()
-
-    def mark_completed(
-        self,
-        final_result: str,
-        output_artifacts: list[Artifact] | None = None,
-        sub_run_id: str = "",
-        task_result: TaskResult | None = None,
-    ) -> None:
-        """目标 Agent 执行完成。"""
-        self.status = TaskStatus.COMPLETED
-        self.final_result = final_result
-        if output_artifacts is not None:
-            self.output_artifacts = output_artifacts
-        if task_result is not None:
-            self.task_result = task_result
-            self.final_result = task_result.content
-            self.output_artifacts = list(task_result.artifacts)
-        elif self.task_result is None:
-            self.task_result = TaskResult(
-                summary=final_result[:500],
-                content=final_result,
-                artifacts=list(self.output_artifacts),
-            )
-        self.sub_run_id = sub_run_id
-        self.updated_at = self._now()
-        self._notify_completion()
-
-    def mark_failed(self, error: str) -> None:
-        """目标 Agent 执行失败。"""
-        self.status = TaskStatus.FAILED
-        self.error = error
-        self.updated_at = self._now()
-        self._notify_completion()
-
-    def mark_cancelling(self) -> None:
-        """标记取消请求已发出，等待底层 coroutine 终止。
-
-        kill_agent 工具调用后，Task 先进入 CANCELLING；
-        底层 coroutine 实际终止后由 Dispatcher 写入终态 CANCELED。
-        """
-        self.status = TaskStatus.CANCELLING
-        self.updated_at = self._now()
-
-    def mark_canceled(self) -> None:
-        """任务已被取消（终态）。
-
-        仅在底层 coroutine 实际终止后调用。
-        触发 _notify_completion 通知所有 wait 方。
-        """
-        self.status = TaskStatus.CANCELED
-        self.updated_at = self._now()
-        self._notify_completion()
-
-    def is_terminal(self) -> bool:
-        """Task 是否已进入终止状态。"""
-        return self.status.is_terminal()
-
-    def mark_consumed(self) -> None:
-        """标记结果已由 wait_agent 消费。
-
-        仅在 Task 处于终态时调用。重复消费幂等——不覆盖首次消费时间。
-        """
-        if self.result_consumed:
-            return
-        self.result_consumed = True
-        self.consumed_at = self._now()
-        self.updated_at = self.consumed_at
-
-    async def result(self, timeout: float | None = None) -> "Task":
-        """等待 Task 完成，返回自身。"""
-        event: asyncio.Event = getattr(self, "_completion_event")
-        await asyncio.wait_for(event.wait(), timeout=timeout)
-        return self
-
-    def cancel(self) -> None:
-        """取消 Task。"""
-        self.mark_canceled()
-
-    def to_dict(self) -> dict[str, JsonValue]:
-        """序列化为 dict。"""
-        return {
-            "task_id": self.task_id,
-            "requester": self.requester,
-            "target_agent_id": self.target_agent_id,
-            "target_kind": self.target_kind.value,
-            "description": self.description,
-            "context": self.context,
-            "constraints": self.constraints,
-            "input_artifacts": [a.to_dict() for a in self.input_artifacts],
-            "status": self.status.value,
-            "final_result": self.final_result,
-            "task_result": self.task_result.to_dict() if self.task_result is not None else None,
-            "output_artifacts": [a.to_dict() for a in self.output_artifacts],
-            "error": self.error,
-            "parent_run_id": self.parent_run_id,
-            "sub_run_id": self.sub_run_id,
-            "active_handle_id": self.active_handle_id,
-            "remote_task_id": self.remote_task_id,
-            "result_consumed": self.result_consumed,
-            "consumed_at": self.consumed_at,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, JsonValue]) -> "Task":
-        """从 dict 反序列化。"""
-        status_raw: JsonValue = data.get("status", "submitted")
-        target_kind_raw: JsonValue = data.get("target_kind", TaskTargetKind.LOCAL.value)
-        result_raw: JsonValue = data.get("task_result")
-        task_result: TaskResult | None = (
-            TaskResult.from_dict(result_raw)
-            if isinstance(result_raw, dict)
-            else None
-        )
-
-        raw_input_artifacts: JsonValue = data.get("input_artifacts", [])
-        input_artifact_dicts: list[dict[str, JsonValue]] = (
-            [item for item in raw_input_artifacts if isinstance(item, dict)]
-            if isinstance(raw_input_artifacts, list)
-            else []
-        )
-        raw_output_artifacts: JsonValue = data.get("output_artifacts", [])
-        output_artifact_dicts: list[dict[str, JsonValue]] = (
-            [item for item in raw_output_artifacts if isinstance(item, dict)]
-            if isinstance(raw_output_artifacts, list)
-            else []
-        )
-
-        task_id_value: JsonValue = data.get("task_id", "")
-        requester_value: JsonValue = data.get("requester", "")
-        target_value: JsonValue = data.get("target_agent_id", "")
-        description_value: JsonValue = data.get("description", "")
-        context_value: JsonValue = data.get("context", "")
-        constraints_value: JsonValue = data.get("constraints", "")
-        final_value: JsonValue = data.get("final_result", "")
-        error_value: JsonValue = data.get("error", "")
-        parent_run_value: JsonValue = data.get("parent_run_id", "")
-        sub_run_value: JsonValue = data.get("sub_run_id", "")
-        handle_value: JsonValue = data.get("active_handle_id", "")
-        remote_value: JsonValue = data.get("remote_task_id", "")
-        consumed_value: JsonValue = data.get("result_consumed", False)
-        consumed_at_value: JsonValue = data.get("consumed_at", "")
-        created_value: JsonValue = data.get("created_at", "")
-        updated_value: JsonValue = data.get("updated_at", "")
-
-        return cls(
-            task_id=task_id_value if isinstance(task_id_value, str) else "",
-            requester=requester_value if isinstance(requester_value, str) else "",
-            target_agent_id=target_value if isinstance(target_value, str) else "",
-            target_kind=TaskTargetKind(target_kind_raw) if isinstance(target_kind_raw, str) else TaskTargetKind.LOCAL,
-            description=description_value if isinstance(description_value, str) else "",
-            context=context_value if isinstance(context_value, str) else "",
-            constraints=constraints_value if isinstance(constraints_value, str) else "",
-            input_artifacts=[Artifact.from_dict(a) for a in input_artifact_dicts],
-            status=TaskStatus(status_raw) if isinstance(status_raw, str) else TaskStatus.SUBMITTED,
-            final_result=final_value if isinstance(final_value, str) else "",
-            task_result=task_result,
-            output_artifacts=[Artifact.from_dict(a) for a in output_artifact_dicts],
-            error=error_value if isinstance(error_value, str) else "",
-            parent_run_id=parent_run_value if isinstance(parent_run_value, str) else "",
-            sub_run_id=sub_run_value if isinstance(sub_run_value, str) else "",
-            active_handle_id=handle_value if isinstance(handle_value, str) else "",
-            remote_task_id=remote_value if isinstance(remote_value, str) else "",
-            result_consumed=bool(consumed_value),
-            consumed_at=consumed_at_value if isinstance(consumed_at_value, str) else "",
-            created_at=created_value if isinstance(created_value, str) else "",
-            updated_at=updated_value if isinstance(updated_value, str) else "",
-        )
+    def touch(self) -> None:
+        """更新状态投影时间戳，仅供 Broker 内部调用。"""
+        self.updated_at = datetime.now(timezone.utc).isoformat()

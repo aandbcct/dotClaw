@@ -183,6 +183,18 @@ class ContextAssembler:
             if slot.cache_policy == "request":
                 slot.invalidate()
 
+    def clone(self) -> "ContextAssembler":
+        """创建不共享任何 Slot 缓存的同配置 Assembler。
+
+        该操作用于 delegation target Runtime，保证不同 Identity 或 Session 的
+        system prompt、工具描述和 Session 级缓存不会互相污染。
+        """
+        cloned_slots: list[ContextSlot] = [
+            type(slot)(enabled=slot.enabled)
+            for slot in self._slots
+        ]
+        return ContextAssembler(cloned_slots)
+
     async def build_system_prompt(self, ctx: SlotContext) -> str:
         """组装所有 Slot 内容为 system_prompt 文本。
 
