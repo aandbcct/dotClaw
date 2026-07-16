@@ -45,6 +45,26 @@ class ToolExecutor:
         """按名称获取 Handler（转发给 Registry）。"""
         return self._registry.get(name)
 
+    def _build_context(
+        self,
+        timeout: float,
+        execution_context: ToolExecutionContext | None,
+    ) -> ToolExecutionContext:
+        """合并 Runtime 注入的上下文和工具定义超时。"""
+        if execution_context is not None:
+            ctx: ToolExecutionContext = ToolExecutionContext(
+                timeout=timeout,
+                agent=execution_context.agent,
+                runtime=execution_context.runtime,
+                session_id=execution_context.session_id,
+                agentrun_id=execution_context.agentrun_id,
+                task_id=execution_context.task_id,
+                channel=execution_context.channel,
+            )
+        else:
+            ctx = ToolExecutionContext(timeout=timeout)
+        return ctx
+
     def _check_skill(self, tool_name: str, args: dict,
                      journal: Any, status: str) -> None:
         """工具执行后检查是否命中 skill，命中则发射对应 journal 事件。"""
@@ -67,8 +87,19 @@ class ToolExecutor:
         arguments: dict[str, Any],
         channel: Any | None = None,
         journal: Journal | None = None,
+        execution_context: ToolExecutionContext | None = None,
     ) -> ToolResult:
-        """执行工具：查找 Handler → 审批检查 → 超时控制 → 返回 ToolResult"""
+        """执行工具：查找 Handler → 审批检查 → 超时控制 → 返回 ToolResult。
+
+        Args:
+            name: 工具名称
+            arguments: 工具参数
+            channel: 通信 Channel
+            journal: Journal 实例
+            execution_context: Runtime 层注入的运行时上下文
+                              （agent/runtime/session_id/agentrun_id）。
+                              超时由 ToolDefinition.timeout 覆盖。
+        """
         # ── Journal：工具执行开始 ──
         if journal:
             journal.tool_start(name, args=arguments)
@@ -108,8 +139,11 @@ class ToolExecutor:
                 return result
 
         # 超时控制 + 执行
-        timeout = definition.timeout
-        ctx = ToolExecutionContext(timeout=timeout)
+        timeout: float = definition.timeout
+        ctx: ToolExecutionContext = self._build_context(
+            timeout=timeout,
+            execution_context=execution_context,
+        )
 
         try:
             result = await asyncio.wait_for(

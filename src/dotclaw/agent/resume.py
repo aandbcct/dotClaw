@@ -1,7 +1,9 @@
 """ResumeManager —— 中断恢复管理器。
 
-从 Journal trace 目录读取 history.jsonl + state.json，
-重建 Agent._history，检测并返回未完成的工具调用。
+从 StateStore + trace.jsonl 恢复执行上下文。
+1. 从 StateStore 读取上次状态快照
+2. 从 trace.jsonl 读取最近的对话消息
+3. 返回恢复上下文供 TurnLoop 使用
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ..runtime.state_store import StateStore
 from ..llm.base import Message, ToolCall
 
 logger = logging.getLogger("dotclaw.agent.resume")
@@ -20,92 +23,62 @@ class ResumeManager:
     """中断恢复管理器。
 
     负责：
-    1. 扫描 trace 目录，找到 status="running" 的中断 request
-    2. 加载 history.jsonl，重建 Message 列表
-    3. 检测未完成的工具调用（assistant(tool_calls) 后缺少 tool_result）
+    1. 从 StateStore 读取上次 state snapshot（判断是否需要恢复）
+    2. 从 trace.jsonl 读取最近消息，重建 Message 列表
+    3. 检测未完成的工具调用
     """
 
-    def __init__(self, trace_root: str = "./data/traces") -> None:
-        self._trace_root = Path(trace_root)
+    def __init__(self, state_store: StateStore, trace_dir: str | Path) -> None:
+        self._state_store: StateStore = state_store
+        self._trace_dir: Path = Path(trace_dir)
 
     # ═══ 公开 API ═══
 
-    def get_resume_context(self, session_id: str) -> dict | None:
+    async def get_resume_context(self, session_id: str) -> dict | None:
         """获取 session 的恢复上下文。
+
+        恢复流程：
+        1. 读 StateStore → 检查上次 AgentRun 是否是 TOOL_WAIT
+        2. 读 trace.jsonl → 重建消息列表
+        3. 返回恢复上下文
+
+        Args:
+            session_id: Session ID
 
         Returns:
             None 如果无需恢复。
             dict:
                 messages: list[Message]       重建的对话消息
                 incomplete_tools: list[ToolCall] 未完成的工具调用
-                request_id: str               被中断的 request_id
-                state: dict                   旧 state.json 内容（供 journal.restore_state）
+                state: dict                   旧 state snapshot 数据（供 TurnLoop 恢复）
         """
-        path = self.find_interrupted(session_id)
-        if path is None:
+        # 1. 读 StateStore
+        snapshot = await self._state_store.load(session_id)
+        if snapshot is None:
             return None
 
-        entries = self.load_history(path / "history.jsonl")
+        # 不需要恢复的情况：phase 不是 active 状态
+        if snapshot.end_status not in ("tool_wait", "running"):
+            return None
+
+        # 2. 读 trace.jsonl 重建消息
+        trace_path: Path = self._trace_dir / session_id / "trace.jsonl"
+        entries: list[dict] = self._load_trace(trace_path)
         if not entries:
             return None
 
-        messages, incomplete = self.reconstruct(entries)
-        request_id = path.name.split("-", 1)[1] if "-" in path.name else path.name
-
-        state = {}
-        state_path = path / "state.json"
-        if state_path.is_file():
-            try:
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                pass
+        messages, incomplete = self._reconstruct_messages(entries)
 
         return {
             "messages": messages,
             "incomplete_tools": incomplete,
-            "request_id": request_id,
-            "state": state,
+            "state": snapshot.to_dict(),
         }
 
     # ═══ 内部方法 ═══
 
-    def find_interrupted(self, session_id: str) -> Path | None:
-        """找到 session 最近一次被中断的 request 目录。
-
-        按 state.json 中 status == "running" 判定。
-        如果有多个，取目录名（HHMMSS 前缀）最新的。
-        """
-        session_dir = self._trace_root / session_id
-        if not session_dir.is_dir():
-            return None
-
-        # 收集所有 running 的 request 目录
-        running: list[Path] = []
-        for date_dir in sorted(session_dir.iterdir(), reverse=True):
-            if not date_dir.is_dir():
-                continue
-            for req_dir in sorted(date_dir.iterdir(), reverse=True):
-                if not req_dir.is_dir():
-                    continue
-                state_path = req_dir / "state.json"
-                if not state_path.is_file():
-                    continue
-                try:
-                    state = json.loads(state_path.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    continue
-                if state.get("status") == "running":
-                    running.append(req_dir)
-
-        if not running:
-            return None
-
-        # 取最新的
-        running.sort(reverse=True)
-        return running[0]
-
-    def load_history(self, filepath: Path) -> list[dict]:
-        """加载 history.jsonl，返回条目列表。"""
+    def _load_trace(self, filepath: Path) -> list[dict]:
+        """加载 trace.jsonl，返回条目列表。"""
         if not filepath.is_file():
             return []
         entries: list[dict] = []
@@ -115,17 +88,27 @@ class ResumeManager:
                 if not line:
                     continue
                 try:
-                    entries.append(json.loads(line))
+                    item: dict = json.loads(line)
+                    entries.append(item)
                 except json.JSONDecodeError:
                     continue
         except OSError:
             pass
         return entries
 
-    def reconstruct(self, entries: list[dict]) -> tuple[list[Message], list[ToolCall]]:
-        """从 history 条目重建 Message 列表，返回 (messages, incomplete_tools)。
+    def _reconstruct_messages(
+        self, entries: list[dict],
+    ) -> tuple[list[Message], list[ToolCall]]:
+        """从 trace 条目重建 Message 列表。
 
-        用步骤处理器模式，根据 step 字段分发到对应 handler。
+        只提取 type="trace.message" 的事件。
+        返回 (messages, incomplete_tools)。
+
+        Args:
+            entries: trace.jsonl 条目列表
+
+        Returns:
+            (messages, incomplete_tools)
         """
         ctx: dict[str, Any] = {
             "messages": [],
@@ -133,63 +116,51 @@ class ResumeManager:
             "last_tool_calls": [],
         }
 
+        # 只处理 TRACE_MESSAGE 事件
         for entry in entries:
-            step = entry.get("step", "")
-            handler = self._STEP_HANDLERS.get(step)
-            if handler:
-                handler(entry, ctx)
+            entry_type: str = entry.get("type", "")
+            if entry_type != "trace.message":
+                continue
+            data: dict = entry.get("data", {})
+            role: str = data.get("role", "")
 
-        # 计算未完成的工具 = 最后 assistant 的 tool_calls - 已有的 tool_result
+            if role == "user":
+                ctx["messages"].append(Message(
+                    role="user",
+                    content=data.get("content", ""),
+                ))
+            elif role == "assistant":
+                raw_tool_calls = data.get("tool_calls")
+                tool_calls: list[ToolCall] | None = None
+                if raw_tool_calls:
+                    tool_calls = [
+                        ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments=tc.get("arguments", "{}"),
+                        )
+                        for tc in raw_tool_calls
+                    ]
+                    ctx["last_tool_calls"] = tool_calls
+                ctx["messages"].append(Message(
+                    role="assistant",
+                    content=data.get("content", ""),
+                    tool_calls=tool_calls,
+                ))
+            elif role == "tool":
+                call_id: str = data.get("tool_call_id", "")
+                ctx["completed_ids"].add(call_id)
+                ctx["messages"].append(Message(
+                    role="tool",
+                    content=data.get("content", ""),
+                    tool_call_id=call_id,
+                    name=data.get("name"),
+                ))
+
+        # 未完成的工具 = 最后 assistant 的 tool_calls - 已有的 tool_result
         incomplete: list[ToolCall] = []
         for tc in ctx["last_tool_calls"]:
             if tc.id not in ctx["completed_ids"]:
                 incomplete.append(tc)
 
         return ctx["messages"], incomplete
-
-    # ═══ 步骤处理器 ═══
-
-    @staticmethod
-    def _handle_user_input(entry: dict, ctx: dict) -> None:
-        ctx["messages"].append(Message(
-            role="user",
-            content=entry.get("content", ""),
-        ))
-
-    @staticmethod
-    def _handle_llm_response(entry: dict, ctx: dict) -> None:
-        raw_tool_calls = entry.get("tool_calls")
-        tool_calls: list[ToolCall] | None = None
-        if raw_tool_calls:
-            tool_calls = [
-                ToolCall(
-                    id=tc["id"],
-                    name=tc["name"],
-                    arguments=tc.get("args", "{}"),
-                )
-                for tc in raw_tool_calls
-            ]
-            ctx["last_tool_calls"] = tool_calls
-
-        ctx["messages"].append(Message(
-            role="assistant",
-            content=entry.get("content", ""),
-            tool_calls=tool_calls,
-        ))
-
-    @staticmethod
-    def _handle_tool_result(entry: dict, ctx: dict) -> None:
-        call_id = entry.get("tool_call_id", "")
-        ctx["completed_ids"].add(call_id)
-        ctx["messages"].append(Message(
-            role="tool",
-            content=entry.get("content", ""),
-            tool_call_id=call_id,
-            name=entry.get("name"),
-        ))
-
-    _STEP_HANDLERS = {
-        "user_input": _handle_user_input,
-        "llm_response": _handle_llm_response,
-        "tool_result": _handle_tool_result,
-    }

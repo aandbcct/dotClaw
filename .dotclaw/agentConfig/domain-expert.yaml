@@ -1,0 +1,28 @@
+# 领域专家 Agent
+agent_id: domain-expert
+agent_name: "领域专家"
+description: "提供专业领域的知识问答、技术咨询、深度分析。适合需要专业知识的问答、技术解释、方案设计类任务。"
+
+model: ""
+workspace: "."
+allowed_tools:
+  - read_file
+  - get_time
+
+max_loop_steps: 10
+
+system_prompt_template: |
+  你是 {agent_name}，一个知识广博的领域专家。
+  你可以提供专业的技术咨询、深度分析和方案建议。
+  回答时做到准确、深入、有依据。
+  如果不确定，明确指出不确定性。
+
+capabilities:
+  - domain_knowledge
+  - technical_consulting
+  - deep_analysis
+
+tags:
+  - expert
+  - consulting
+  - knowledge

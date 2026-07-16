@@ -258,16 +258,18 @@ def _build_assembler():
         IdentitySlot, ToolsSlot, SkillsSlot,
         WorkspaceSlot, UserInfoSlot,
         MemorySlot, KnowledgeSlot, ProjectSlot,
+        AvailableAgentsSlot,
     )
     return ContextAssembler([
         IdentitySlot(),
         ToolsSlot(),
         SkillsSlot(),
+        AvailableAgentsSlot(),
         WorkspaceSlot(),
         UserInfoSlot(),
         MemorySlot(),
         KnowledgeSlot(),
-        ProjectSlot(),
+        ProjectSlot(enabled=False),
     ])
 
 
@@ -278,8 +280,8 @@ def _build_assembler():
 async def build_agent(
     agent_id: str | None = None,
     channel: Any = None,
-) -> tuple["Agent", "SessionManager"]:
-    """装配一个完全就绪的 Agent 实例。
+) -> tuple[AgentCls, Runtime, SessionManager]:
+    """装配一个完全就绪的 Agent + Runtime + SessionManager。
 
     从 config.yaml + agent YAML + 上次状态重建所有依赖。
 
@@ -288,13 +290,17 @@ async def build_agent(
         channel: 通信通道
 
     Returns:
-        (Agent, SessionManager)
+        (Agent, Runtime, SessionManager)
+
+    v2: Runtime 注入 Journal + StateStore。
+    TurnLoop 不在工厂创建（由调用方在获知 session_id 后创建）。
     """
     from dotclaw.config import get_config, _find_project_root
     from dotclaw.session.session import SessionManager
     from dotclaw.agent import Agent as AgentCls
     from dotclaw.agent.identity import load_agent_config as load_id
-    from dotclaw.agent.runtime import AgentRuntime
+    from dotclaw.runtime import Runtime, StateStore
+    from dotclaw.journal import Journal
 
     config = get_config()
     project_root = _find_project_root()
@@ -311,6 +317,10 @@ async def build_agent(
     run_mgr: AgentRunManager = AgentRunManager(config.session.directory)
     assembler = _build_assembler()
 
+    # ── Journal + StateStore（v2 新增）──
+    journal: Journal = Journal()
+    state_store: StateStore = StateStore(data_dir=config.session.directory)
+
     # ── 可降级组件 ──
     skill_registry = _init_sync("技能", lambda: _build_skills(config, project_root))
     tool_executor = _init_sync("工具", lambda: _build_tools(config, skill_registry))
@@ -325,13 +335,22 @@ async def build_agent(
     # ── AgentIdentity：直接从 YAML 加载 ──
     identity = load_id(agent_id=agent_id)
 
-    # ── AgentRuntime：组装纯能力引用 ──
-    runtime: AgentRuntime = AgentRuntime(
+    # ── AgentRegistry：加载所有 Agent 配置 ──
+    from dotclaw.orchestration.registry import AgentRegistry
+    agent_registry = AgentRegistry()
+    agent_config_dir = project_root / ".dotclaw" / "agentConfig"
+    agent_registry.load_all(agent_config_dir)
+
+    # ── Runtime：执行引擎（v2: 无控制循环，注入 Journal + StateStore）──
+    runtime: Runtime = Runtime(
         llm=llm_proxy,
         tool_executor=tool_executor,
         assembler=assembler,
         session_mgr=session_mgr,
         run_mgr=run_mgr,
+        agent_registry=agent_registry,
+        journal=journal,
+        state_store=state_store,
         channel=channel,
         memory_mgr=memory_mgr,
         skill_registry=skill_registry,
@@ -339,18 +358,34 @@ async def build_agent(
         config=config,
     )
 
+    # ── Delegation 调度层：内存 Broker + 本地 Dispatcher ──
+    from dotclaw.orchestration.message_broker import TaskMessageBroker
+    from dotclaw.orchestration.dispatcher import AgentDispatcher
+    task_broker: TaskMessageBroker = TaskMessageBroker()
+    dispatcher: AgentDispatcher = AgentDispatcher(broker=task_broker)
+
     # ── 组装 Agent ──
     from dotclaw.agent.resume import ResumeManager
 
-    resume_mgr = ResumeManager(trace_root=config.journal.trace_dir)
+    resume_mgr = ResumeManager(
+        state_store=state_store,
+        trace_dir=config.journal.trace_dir,
+    )
 
     agent: AgentCls = AgentCls(
         identity=identity,
         runtime=runtime,
+        dispatcher=dispatcher,
         memory_dream=memory_dream,
         mcp_task=mcp_task,
         resume_manager=resume_mgr,
     )
+
+    # ── 注册 Task delegation 工具 ──
+    if tool_executor is not None:
+        from dotclaw.tools.builtin.task_tool import get_task_handlers
+        for handler in get_task_handlers():
+            tool_executor.registry.register(handler)
 
     # ── 恢复上次 Session ──
     sessions: list = await session_mgr.list_all()
@@ -374,4 +409,5 @@ async def build_agent(
     })
 
     logger.info("Agent [%s] 就绪，session: %s", agent.agent_id, current_session.id)
-    return agent, session_mgr
+    return agent, runtime, session_mgr
+

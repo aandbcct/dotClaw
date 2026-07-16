@@ -1,9 +1,12 @@
 """AgentRun —— 一次原子调用的完整记录。
 
-AgentRun 是 dotClaw 的最小执行单元：一次连续的 LLM 上下文窗口占用周期。
-当需要释放上下文、等待外部输入或切换执行 Agent 时，当前 AgentRun 结束，开启新 AgentRun。
+AgentRun 是 dotClaw 的最小执行单元：一次 LLM 推理-执行的原子步。
+每次 LLM 调用产生一个新的 AgentRun，工具调用后 TurnLoop 创建新 AgentRun 继续。
 
-AgentRun 持久化到 agent_runs/{run_id}.json，支持中断恢复。
+持久化位置：session/{session_id}/agent_runs/{run_id}.json
+
+流转消息不再存储在 AgentRun 中，而是通过 Journal 以 Trace Event 形式写入 trace.jsonl。
+AgentRun 仅持有 state_snapshot + trace_ids + 统计元数据。
 """
 
 from __future__ import annotations
@@ -11,33 +14,83 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
-from ..llm.base import Message
+from ..llm.base import Message, ToolCall
 
+
+# ============================================================================
+# 枚举定义
+# ============================================================================
+
+class RunEndStatus(Enum):
+    """AgentRun 的结束状态。
+
+    一次 AgentRun = 一次完整的用户一问一答。
+    内部 think-act 循环由 AgentState 状态机驱动，不透出到 RunEndStatus。
+    """
+
+    COMPLETED = "completed"
+    """正常完成"""
+
+    HANDOFF = "handoff"
+    """任务流转给子 Agent"""
+
+    FAILED = "failed"
+    """执行异常"""
+
+    WAITING = "waiting"
+    """挂起等待外部事件（如人工审批）。Resume 时触发新 AgentRun"""
+
+
+class TriggerType(Enum):
+    """AgentRun 的触发源类型。"""
+
+    USER_INPUT = "user_input"
+    """用户发来新消息"""
+
+    TOOL_RESULT = "tool_result"
+    """工具执行结果（预留：外部异步工具场景）"""
+
+    RESUME = "resume"
+    """从挂起状态恢复"""
+
+    TIMER = "timer"
+    """定时器触发（预留）"""
+
+    APPROVAL_DONE = "approval_done"
+    """人工审批完成（预留）"""
+
+
+# ============================================================================
+# AgentRun —— 执行记录
+# ============================================================================
 
 @dataclass
 class AgentRun:
-    """一次原子调用的完整记录。
+    """一次原子 LLM 调用的完整记录。
 
     字段：
-        run_id: 本次原子调用的唯一标识
+        run_id: 本次 AgentRun 唯一标识
         agent_id: 执行本次调用的 Agent ID
         parent_run_id: 父 AgentRun ID（子 Agent 场景，无则为 ""）
-        messages: LLM 返回内容 + 工具调用内容的完整记录
-        end_status: 结束状态（completed / handoff / failed）
-        tool_calls: 本次调用的工具调用次数
+        end_status: 结束状态（RunEndStatus 枚举）
+        state_snapshot: AgentRun 结束时的状态快照（dict）
+        trace_ids: 关联的 Trace Event IDs（list[str]）
+        trigger: 触发源类型（TriggerType.value）
+        sequence: 在 Session 中的全局序号
+        tool_calls: 本次 LLM 响应中的工具调用数
         tokens_in: 输入 token 数
         tokens_out: 输出 token 数
-        iterations: ReAct 循环迭代次数
         duration_ms: 执行耗时（毫秒）
-        error: 异常信息（仅在 failed 时非空）
-        started_at: 开始时间
-        ended_at: 结束时间
+        error: 异常信息（仅在 FAILED / INTERRUPTED 时非空）
+        started_at: 开始时间（ISO 8601）
+        ended_at: 结束时间（ISO 8601）
     """
 
     run_id: str
-    """本次原子调用的唯一标识"""
+    """本次 AgentRun 唯一标识"""
 
     agent_id: str = ""
     """执行本次调用的 Agent ID"""
@@ -45,14 +98,27 @@ class AgentRun:
     parent_run_id: str = ""
     """父 AgentRun ID。子 Agent 场景非空，根 AgentRun 为空字符串。"""
 
-    messages: list[Message] = field(default_factory=list)
-    """本次原子调用中 LLM 返回内容 + 工具调用内容的完整记录"""
+    end_status: str = RunEndStatus.COMPLETED.value
+    """结束状态：completed / handoff / failed / interrupted / tool_wait"""
 
-    end_status: str = "completed"
-    """结束状态：completed（正常完成）、handoff（切换 Agent）、failed（异常）"""
+    state_snapshot: dict | None = None
+    """AgentRun 结束时的 AgentState 快照。用于恢复执行上下文。"""
+
+    messages: list[Message] = field(default_factory=list)
+    """本次 AgentRun 产生的消息流转列表（用于快速查看 run 内信息流转）。
+    详细消息内容仍以 TRACE_MESSAGE 事件存入 trace.jsonl。"""
+
+    trace_ids: list[str] = field(default_factory=list)
+    """关联的 Trace Event IDs。指向 trace.jsonl 中的具体事件行。"""
+
+    trigger: str = TriggerType.USER_INPUT.value
+    """触发源类型：user_input / tool_result / resume / timer / approval_done"""
+
+    sequence: int = 0
+    """在所属 Session 中的全局序号（从 0 开始递增）"""
 
     tool_calls: int = 0
-    """本次调用的工具调用次数"""
+    """本次 LLM 响应中的工具调用数（通常 0 或 1 次调用含多个 tool）"""
 
     tokens_in: int = 0
     """输入 token 数"""
@@ -60,14 +126,11 @@ class AgentRun:
     tokens_out: int = 0
     """输出 token 数"""
 
-    iterations: int = 0
-    """ReAct 循环迭代次数"""
-
     duration_ms: int = 0
     """执行耗时（毫秒）"""
 
     error: str | None = None
-    """异常信息（仅在 end_status="failed" 时非空）"""
+    """异常信息（仅在 end_status=failed 或 interrupted 时非空）"""
 
     started_at: str = ""
     """开始时间（ISO 8601）"""
@@ -78,64 +141,53 @@ class AgentRun:
     # ── 序列化 ──
 
     def to_dict(self) -> dict:
-        """序列化为 dict。"""
-        msgs: list[dict] = []
-        for m in self.messages:
-            tc_list: list[dict] | list | None = None
-            if m.tool_calls:
-                try:
-                    tc_list = [
-                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                        for tc in m.tool_calls
-                    ]
-                except AttributeError:
-                    tc_list = list(m.tool_calls)
-            msgs.append({
-                "role": m.role,
-                "content": m.content,
-                "tool_calls": tc_list,
-                "tool_call_id": m.tool_call_id,
-                "name": m.name,
-            })
+        """序列化为 dict。不再包含 messages 字段。"""
         return {
             "run_id": self.run_id,
             "agent_id": self.agent_id,
             "parent_run_id": self.parent_run_id,
-            "messages": msgs,
             "end_status": self.end_status,
+            "state_snapshot": self.state_snapshot,
+            "trace_ids": self.trace_ids,
+            "trigger": self.trigger,
+            "sequence": self.sequence,
             "tool_calls": self.tool_calls,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
-            "iterations": self.iterations,
             "duration_ms": self.duration_ms,
             "error": self.error,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
+            "messages": _serialize_messages(self.messages),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> AgentRun:
         """从 dict 反序列化。"""
-        msgs_data: list[dict] = data.pop("messages", [])
-        run: AgentRun = cls(**{k: v for k, v in data.items() if k != "messages"})
-        run.messages = [
-            Message(
-                role=m.get("role", ""),
-                content=m.get("content", ""),
-                tool_calls=m.get("tool_calls"),
-                tool_call_id=m.get("tool_call_id"),
-                name=m.get("name"),
-            )
-            for m in msgs_data
-        ]
-        return run
+        return cls(
+            run_id=data.get("run_id", ""),
+            agent_id=data.get("agent_id", ""),
+            parent_run_id=data.get("parent_run_id", ""),
+            end_status=data.get("end_status", RunEndStatus.COMPLETED.value),
+            state_snapshot=data.get("state_snapshot"),
+            trace_ids=data.get("trace_ids", []),
+            trigger=data.get("trigger", TriggerType.USER_INPUT.value),
+            sequence=data.get("sequence", 0),
+            tool_calls=data.get("tool_calls", 0),
+            tokens_in=data.get("tokens_in", 0),
+            tokens_out=data.get("tokens_out", 0),
+            duration_ms=data.get("duration_ms", 0),
+            error=data.get("error"),
+            started_at=data.get("started_at", ""),
+            ended_at=data.get("ended_at", ""),
+            messages=_deserialize_messages(data.get("messages", [])),
+        )
 
     @property
     def final_output(self) -> str | None:
         """提取最终输出文本。
 
         从 messages 中找最后一条 role="assistant" 且无 tool_calls 的消息。
-        如果不存在这样的消息（如 handoff），返回 None。
         """
         for m in reversed(self.messages):
             if m.role == "assistant" and not m.tool_calls:
@@ -147,41 +199,121 @@ class AgentRun:
 # AgentRunManager
 # ============================================================================
 
+
+def _serialize_messages(messages: list[Message]) -> list[dict]:
+    """序列化 Message 列表为 dict 列表。
+
+    system 角色的消息按 \\n 拆行，存为 content_lines 数组以提高可读性。
+    """
+    result: list[dict] = []
+    for m in messages:
+        if m.role == "system":
+            item: dict = {
+                "role": m.role,
+                "content_lines": m.content.split("\n"),
+            }
+        else:
+            item: dict = {"role": m.role, "content": m.content}
+        if m.tool_calls:
+            item["tool_calls"] = [
+                {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                for tc in m.tool_calls
+            ]
+        if m.tool_call_id:
+            item["tool_call_id"] = m.tool_call_id
+        if m.name:
+            item["name"] = m.name
+        result.append(item)
+    return result
+
+
+def _deserialize_messages(data: list[dict]) -> list[Message]:
+    """从 dict 列表反序列化 Message 列表。"""
+    messages: list[Message] = []
+    for d in data:
+        content: str = ""
+        lines: list[str] | None = d.get("content_lines")
+        if lines is not None:
+            content = "\n".join(lines)
+        else:
+            content = d.get("content", "")
+
+        tool_calls_list: list[ToolCall] | None = None
+        raw: list[dict] | None = d.get("tool_calls")
+        if raw:
+            tool_calls_list = [
+                ToolCall(id=tc["id"], name=tc["name"], arguments=tc.get("arguments", "{}"))
+                for tc in raw
+            ]
+        messages.append(Message(
+            role=d.get("role", ""),
+            content=content,
+            tool_calls=tool_calls_list,
+            tool_call_id=d.get("tool_call_id"),
+            name=d.get("name"),
+        ))
+    return messages
+
+
+# ============================================================================
+# AgentRunManager
+# ============================================================================
+
 class AgentRunManager:
     """AgentRun 持久化管理器。
 
-    每个 AgentRun 存储为独立 JSON 文件：{data_dir}/agent_runs/{run_id}.json
+    每个 AgentRun 存储为独立 JSON 文件：{data_dir}/session/{session_id}/agent_runs/{run_id}.json
     """
 
     def __init__(self, data_dir: str | Path) -> None:
         """初始化。
 
         Args:
-            data_dir: 数据目录路径
+            data_dir: 数据目录路径（Session 基础目录）
         """
         import dotclaw
         module_path: Path = Path(dotclaw.__file__).parent
         project_root: Path = module_path.parent.parent
-        self._data_dir: Path = project_root / data_dir / "agent_runs"
-        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._base_dir: Path = (project_root / data_dir).resolve()
+        self._base_dir.mkdir(parents=True, exist_ok=True)
 
-    def _run_path(self, run_id: str) -> Path:
-        """获取 AgentRun 文件路径。"""
-        return self._data_dir / f"{run_id}.json"
+    def _run_path(self, session_id: str, run_id: str) -> Path:
+        """获取 AgentRun 文件路径。
 
-    async def save(self, run: AgentRun) -> None:
-        """保存 AgentRun 到磁盘。"""
+        Args:
+            session_id: Session ID
+            run_id: AgentRun ID
+
+        Returns:
+            文件路径
+        """
+        run_dir = self._base_dir / session_id / "agent_runs"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir / f"{run_id}.json"
+
+    async def save(self, run: AgentRun, session_id: str) -> None:
+        """保存 AgentRun 到磁盘。
+
+        Args:
+            run: AgentRun 实例
+            session_id: 所属 Session ID
+        """
         import aiofiles
-        path: Path = self._run_path(run.run_id)
+        path: Path = self._run_path(session_id, run.run_id)
         async with aiofiles.open(path, "w", encoding="utf-8") as f:
             await f.write(json.dumps(
                 run.to_dict(), ensure_ascii=False, indent=2
             ))
 
-    async def load(self, run_id: str) -> AgentRun | None:
-        """加载 AgentRun。返回 None 如果不存在。"""
+    async def load(self, run_id: str, session_id: str) -> AgentRun | None:
+        """加载 AgentRun。返回 None 如果不存在。
+
+        Args:
+            run_id: AgentRun ID
+            session_id: 所属 Session ID
+        """
         import aiofiles
-        path: Path = self._run_path(run_id)
+        path: Path = self._run_path(session_id, run_id)
         if not path.exists():
             return None
         try:
@@ -190,3 +322,41 @@ class AgentRunManager:
             return AgentRun.from_dict(json.loads(data))
         except Exception:
             return None
+
+    async def list(
+        self,
+        session_id: str,
+        *,
+        end_status: str | None = None,
+    ) -> list[AgentRun]:
+        """列出 Session 下的所有 AgentRun 记录。
+
+        Args:
+            session_id: Session ID
+            end_status: 可选过滤器，只返回匹配结束状态的记录
+                如 "waiting"（挂起）、"completed"（完成）、"failed"（失败）
+
+        Returns:
+            AgentRun 列表，按 started_at 升序排列
+        """
+        import aiofiles
+        run_dir: Path = self._base_dir / session_id / "agent_runs"
+        if not run_dir.is_dir():
+            return []
+
+        runs: list[AgentRun] = []
+        for f in sorted(run_dir.glob("*.json")):
+            try:
+                async with aiofiles.open(f, encoding="utf-8") as fp:
+                    data: str = await fp.read()
+                run: AgentRun | None = AgentRun.from_dict(json.loads(data))
+                if run is None:
+                    continue
+                if end_status is not None and run.end_status != end_status:
+                    continue
+                runs.append(run)
+            except Exception:
+                continue
+
+        runs.sort(key=lambda r: r.started_at)
+        return runs

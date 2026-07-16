@@ -56,6 +56,20 @@ class AgentIdentity:
     tags: list[str] = field(default_factory=list)
     """标签，未来用于 Agent 路由。"""
 
+    # ── A2A AgentCard ──
+    capabilities: list[str] = field(default_factory=list)
+    """能力标签。对标 A2A AgentCard.skills。
+    示例：["web_search", "code_generation", "file_ops", "memory_retrieval"]。
+    用于父 Agent 决定 spawn 哪个子 Agent。"""
+
+    input_modes: list[str] = field(default_factory=lambda: ["text"])
+    """支持的输入模式。对标 A2A AgentCard.defaultInputModes。
+    示例：["text", "file", "structured_data"]。"""
+
+    output_modes: list[str] = field(default_factory=lambda: ["text"])
+    """支持的输出模式。对标 A2A AgentCard.defaultOutputModes。
+    示例：["text", "file", "structured_data"]。"""
+
     # ── 方法 ──
 
     def resolve_system_prompt(self) -> str:
@@ -148,4 +162,7 @@ def load_agent_config(
         system_prompt_template=str(raw.get("system_prompt_template", "")),
         description=str(raw.get("description", "")),
         tags=list(raw.get("tags", [])),
+        capabilities=list(raw.get("capabilities", [])),
+        input_modes=list(raw.get("input_modes", ["text"])),
+        output_modes=list(raw.get("output_modes", ["text"])),
     )

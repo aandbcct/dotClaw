@@ -232,3 +232,49 @@ class ProjectSlot(ContextSlot):
         if not contents:
             return None
         return "\n\n".join(contents)
+
+
+# ======================== AvailableAgentsSlot (tier 0) ========================
+
+
+class AvailableAgentsSlot(ContextSlot):
+    """注入可用子 Agent 列表到 system prompt。
+
+    从 AgentRegistry 读取所有已注册的 Agent Identity，
+    以结构化列表形式告知 LLM 可以使用哪些子 Agent。
+    同时告知：没有合适 Agent 时使用默认 daily-assistant。
+    """
+
+    name = "available_agents"
+    tier = TierLevel.STATIC
+    cache_policy = "forever"
+
+    async def _produce(self, ctx: SlotContext) -> str | None:
+        registry = ctx.agent_registry
+        if registry is None:
+            return None
+
+        agents = registry.list_all()
+        if not agents:
+            return None
+
+        lines: list[str] = [
+            "## 可用子 Agent",
+            "",
+            "你可以使用 delegate 工具把一个子任务委托给以下目标 Identity。",
+            "根据任务性质选择合适的 Agent：",
+            "",
+        ]
+        for a in agents:
+            desc: str = a.description or a.agent_name
+            caps: str = ", ".join(a.capabilities) if a.capabilities else "通用"
+            lines.append(f"- **{a.agent_id}** ({a.agent_name}): {desc}。能力：{caps}")
+
+        lines.append("")
+        lines.append(
+            "如果没有特别合适的 Agent，使用 **daily-assistant**（通用助手）处理所有类型任务。"
+        )
+        lines.append(
+            "每个 Session 同时只能有一个活动委托；目标 Agent 不能继续委托。"
+        )
+        return "\n".join(lines)

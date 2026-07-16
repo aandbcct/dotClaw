@@ -59,6 +59,7 @@ class AgentConfig:
     system_prompt: str = "你是一个有用、诚实且友好的 AI 助手。"
     max_context_tokens: int = 8000
     keep_recent_messages: int = 10
+    truncated_continue: bool = True   # v2: finish_reason="length" 时自动续跑
     rules: str = ""   # P3 新增：额外行为规则，追加到 system prompt
 
 
@@ -199,7 +200,7 @@ class DebugConfig:
 @dataclass
 class JournalConfig:
     """从 config.yaml 加载的 Journal 配置（含默认值）。"""
-    trace_dir: str = "./data/traces"
+    trace_dir: str = "./data/sessions"
     snapshot_dir: str = "./data/snapshots"
     console: bool = True
     trace: bool = True
@@ -544,7 +545,7 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
 
     journal_raw = raw.get("journal", {})
     journal = JournalConfig(
-        trace_dir=journal_raw.get("trace_dir", "./data/traces"),
+        trace_dir=journal_raw.get("trace_dir", "./data/sessions"),
         snapshot_dir=journal_raw.get("snapshot_dir", "./data/snapshots"),
         console=journal_raw.get("console", True),
         trace=journal_raw.get("trace", True),

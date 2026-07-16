@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ..journal import Journal
     from ..llm.base import ToolDefinition
     from ..skills.registry import SkillRegistry
+    from ..orchestration.registry import AgentRegistry
 
 logger = logging.getLogger("dotclaw.agent.context_slot")
 
@@ -90,6 +91,9 @@ class SlotContext:
     user_profile: Any = None
     """用户档案（可能为 None）"""
 
+    agent_registry: "AgentRegistry | None" = None
+    """全局 Agent 目录（供 AvailableAgentsSlot 注入可用子 Agent 列表）"""
+
     # ── 观测 ──
     journal: "Journal | None" = None
     """日志观测实例"""
@@ -114,9 +118,13 @@ class ContextSlot(ABC):
     cache_policy: str
     """缓存策略: "forever" | "session" | "request" """
 
-    def __init__(self) -> None:
+    enabled: bool = True
+    """是否启用此 Slot。False 时 Assembler 跳过，不加载不组装。"""
+
+    def __init__(self, enabled: bool = True) -> None:
         self._cached: str | None = None
         self._cache_valid: bool = False
+        self.enabled = enabled
 
     # ── 子类必须实现 ──
 
@@ -175,7 +183,23 @@ class ContextAssembler:
             if slot.cache_policy == "request":
                 slot.invalidate()
 
-    async def build_system_prompt(self, ctx: SlotContext) -> str:
+    def clone(self) -> "ContextAssembler":
+        """创建不共享任何 Slot 缓存的同配置 Assembler。
+
+        该操作用于 delegation target Runtime，保证不同 Identity 或 Session 的
+        system prompt、工具描述和 Session 级缓存不会互相污染。
+        """
+        cloned_slots: list[ContextSlot] = [
+            type(slot)(enabled=slot.enabled)
+            for slot in self._slots
+        ]
+        return ContextAssembler(cloned_slots)
+
+    async def build_system_prompt(
+        self,
+        ctx: SlotContext,
+        excluded_slot_names: frozenset[str] = frozenset(),
+    ) -> str:
         """组装所有 Slot 内容为 system_prompt 文本。
 
         Args:
@@ -186,6 +210,8 @@ class ContextAssembler:
         """
         parts: list[str] = []
         for slot in self._slots:
+            if not slot.enabled or slot.name in excluded_slot_names:
+                continue
             try:
                 content = await slot.load(ctx)
                 if content:
