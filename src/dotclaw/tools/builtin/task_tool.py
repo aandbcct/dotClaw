@@ -48,8 +48,9 @@ def _delegate_handler() -> BuiltinToolHandler:
 
 def _send_message_handler() -> BuiltinToolHandler:
     """创建双端共用的 task_send_message 工具。"""
-    async def handle(task_id: str, message_type: str, payload: str, _context: "ToolExecutionContext | None" = None) -> str:
+    async def handle(task_id: str = "", message_type: str = "", payload: str = "", _context: "ToolExecutionContext | None" = None) -> str:
         agent, session_id, run_id = _resolve_context(_context)
+        task_id = await _resolve_task_id(task_id, agent, session_id, _context)
         task: Task = await agent.dispatcher.broker.get_task(task_id)
         endpoint: TaskEndpoint = _resolve_endpoint(task, agent.agent_id, session_id)
         kind: TaskMessageType = TaskMessageType(message_type)
@@ -58,29 +59,32 @@ def _send_message_handler() -> BuiltinToolHandler:
         _record_task_event(agent, TaskEventType.MESSAGE_SENT, updated_task, endpoint, message.sequence)
         _record_task_event(agent, TaskEventType.STATE_CHANGED, updated_task, endpoint, message.sequence)
         return json.dumps({"task_id": task_id, "sequence": message.sequence, "status": updated_task.status.value}, ensure_ascii=False)
-    return BuiltinToolHandler("task_send_message", "向当前 Task 的对端发送受状态机约束的消息。", {"type": "object", "properties": {"task_id": {"type": "string"}, "message_type": {"type": "string", "enum": [item.value for item in TaskMessageType]}, "payload": {"type": "string"}}, "required": ["task_id", "message_type", "payload"]}, handle, timeout=10.0)
+    return BuiltinToolHandler("task_send_message", "向当前 Task 的对端发送受状态机约束的消息；target 可省略 task_id。", {"type": "object", "properties": {"task_id": {"type": "string"}, "message_type": {"type": "string", "enum": [item.value for item in TaskMessageType]}, "payload": {"type": "string"}}, "required": ["message_type", "payload"]}, handle, timeout=10.0)
 
 
 def _wait_task_handler() -> BuiltinToolHandler:
     """创建等待当前端点入站消息的工具。"""
-    async def handle(task_id: str, timeout: float = 60.0, _context: "ToolExecutionContext | None" = None) -> str:
+    async def handle(task_id: str = "", timeout: float = 60.0, _context: "ToolExecutionContext | None" = None) -> str:
         agent, session_id, _ = _resolve_context(_context)
+        task_id = await _resolve_task_id(task_id, agent, session_id, _context)
         task: Task = await agent.dispatcher.broker.get_task(task_id)
         endpoint: TaskEndpoint = _resolve_endpoint(task, agent.agent_id, session_id)
         result = await agent.dispatcher.wait_task(task_id, endpoint, agent.agent_id, session_id, timeout)
+        _record_terminal_wait_event(agent, result.task, endpoint)
         return json.dumps({"task_id": task_id, "status": result.task.status.value, "timed_out": result.timed_out, "messages": [_message_json(message) for message in result.messages]}, ensure_ascii=False)
-    return BuiltinToolHandler("wait_task", "等待当前端点的新 Task 消息或终态；超时不会取消 Task。", {"type": "object", "properties": {"task_id": {"type": "string"}, "timeout": {"type": "number", "minimum": 0}}, "required": ["task_id"]}, handle, timeout=65.0)
+    return BuiltinToolHandler("wait_task", "等待当前端点的新 Task 消息或终态；target 可省略 task_id。", {"type": "object", "properties": {"task_id": {"type": "string"}, "timeout": {"type": "number", "minimum": 0}}, "required": []}, handle, timeout=65.0)
 
 
 def _status_handler() -> BuiltinToolHandler:
     """创建 Task 状态查询工具。"""
-    async def handle(task_id: str, _context: "ToolExecutionContext | None" = None) -> str:
+    async def handle(task_id: str = "", _context: "ToolExecutionContext | None" = None) -> str:
         agent, session_id, _ = _resolve_context(_context)
+        task_id = await _resolve_task_id(task_id, agent, session_id, _context)
         task: Task = await agent.dispatcher.broker.get_task(task_id)
         endpoint: TaskEndpoint = _resolve_endpoint(task, agent.agent_id, session_id)
         checked: Task = await agent.dispatcher.task_status(task_id, endpoint, agent.agent_id, session_id)
         return _task_json(checked)
-    return BuiltinToolHandler("task_status", "查询当前端点有权访问的 Task 状态。", {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}, handle, timeout=5.0)
+    return BuiltinToolHandler("task_status", "查询当前端点有权访问的 Task 状态；target 可省略 task_id。", {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": []}, handle, timeout=5.0)
 
 
 def _cancel_handler() -> BuiltinToolHandler:
@@ -115,6 +119,22 @@ def _resolve_endpoint(task: Task, agent_id: str, session_id: str) -> TaskEndpoin
     raise PermissionError("当前 Identity 或 Session 不属于该 Task")
 
 
+async def _resolve_task_id(
+    task_id: str,
+    agent: "Agent",
+    session_id: str,
+    context: "ToolExecutionContext | None",
+) -> str:
+    """优先显式参数；两端均可由 Harness 从所属 Session 隐式解析。"""
+    resolved_task_id: str = task_id or (context.task_id if context is not None else "")
+    if resolved_task_id:
+        return resolved_task_id
+    latest_task: Task | None = await agent.dispatcher.broker.latest_task_for_source(session_id)
+    if latest_task is not None:
+        return latest_task.task_id
+    raise ValueError("当前 Session 没有可操作的 Task")
+
+
 def _task_json(task: Task) -> str:
     """序列化不泄露对端内部上下文的状态视图。"""
     return json.dumps({"task_id": task.task_id, "status": task.status.value, "target_session_id": task.target.session_id, "target_identity_id": task.target.identity_id, "error": task.error}, ensure_ascii=False)
@@ -143,4 +163,18 @@ def _record_task_event(
         )
 
 
-from dotclaw.orchestration.task import TaskMessage
+def _record_terminal_wait_event(agent: "Agent", task: Task, endpoint: TaskEndpoint) -> None:
+    """在端点消费终态时写入对应生命周期事件。"""
+    if not task.status.is_terminal():
+        return
+    event_map: dict[TaskStatus, TaskEventType] = {
+        TaskStatus.COMPLETED: TaskEventType.COMPLETED,
+        TaskStatus.FAILED: TaskEventType.FAILED,
+        TaskStatus.CANCELLED: TaskEventType.CANCELLED,
+    }
+    event_type: TaskEventType = event_map[task.status]
+    sequence: int = task.result_message.sequence if task.result_message is not None else 0
+    _record_task_event(agent, event_type, task, endpoint, sequence)
+
+
+from dotclaw.orchestration.task import TaskMessage, TaskStatus

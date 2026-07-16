@@ -38,7 +38,10 @@ class LocalAgentRunner:
             if target_identity is None:
                 raise RuntimeError(f"目标 Identity 不存在：{task.target.identity_id}")
             from ...agent.agent import Agent
-            target_runtime = runtime.derive(delegation_endpoint="target")
+            target_runtime = runtime.derive(
+                delegation_endpoint="target",
+                delegation_task_id=task.task_id,
+            )
             target_agent: Agent = Agent(identity=target_identity, runtime=target_runtime, dispatcher=dispatcher)
             _record_target_event(target_runtime, TaskEventType.TARGET_STARTED, task, 0)
             result: str = await target_agent.execute_in_session(target_runtime, session, task)

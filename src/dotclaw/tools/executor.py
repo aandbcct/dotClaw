@@ -58,6 +58,7 @@ class ToolExecutor:
                 runtime=execution_context.runtime,
                 session_id=execution_context.session_id,
                 agentrun_id=execution_context.agentrun_id,
+                task_id=execution_context.task_id,
                 channel=execution_context.channel,
             )
         else:

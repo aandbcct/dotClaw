@@ -132,3 +132,9 @@ class TestRuntimeDerive:
         """derive 默认保留 config 引用。"""
         derived = runtime.derive()
         assert derived.config is runtime.config
+
+    def test_derive_keeps_hidden_task_harness_metadata(self, runtime: Runtime) -> None:
+        """target 的 Task ID 只经 Harness 上下文传递，不进入提示词。"""
+        derived = runtime.derive(delegation_endpoint="target", delegation_task_id="task-1")
+        assert derived.delegation_endpoint == "target"
+        assert derived.delegation_task_id == "task-1"

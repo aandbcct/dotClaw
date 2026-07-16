@@ -179,6 +179,15 @@ class TaskMessageBroker:
                     return task
         return None
 
+    async def latest_task_for_source(self, session_id: str) -> Task | None:
+        """返回 source Session 最近创建的 Task，含终态，供 Harness 隐式解析。"""
+        async with self._lock:
+            tasks: list[Task] = list(self._tasks.values())
+            for task in reversed(tasks):
+                if task.source.session_id == session_id:
+                    return task
+        return None
+
     async def _validate_access(self, task_id: str, endpoint: TaskEndpoint, identity_id: str, session_id: str) -> None:
         """在锁内校验调用端点。"""
         async with self._lock:

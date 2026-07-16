@@ -97,6 +97,7 @@ class Runtime:
         mcp_provider: object = None,
         config: Config | None = None,
         delegation_endpoint: str = "",
+        delegation_task_id: str = "",
     ) -> None:
         self.llm: LLMProxy = llm
         self.tool_executor: ToolExecutor | None = tool_executor
@@ -112,6 +113,7 @@ class Runtime:
         self.mcp_provider: object = mcp_provider
         self.config: Config | None = config
         self.delegation_endpoint: str = delegation_endpoint
+        self.delegation_task_id: str = delegation_task_id
         # per-_step 上下文，由 _step() 在进入时设置，_execute_single_tool() 消费
         self._current_agent: AgentType | None = None
         self._current_session_id: str = ""
@@ -120,7 +122,7 @@ class Runtime:
 
     # ======================== 派生（多 Agent 隔离） ========================
 
-    def derive(self, *, channel: Channel | None = None, delegation_endpoint: str = "") -> Runtime:
+    def derive(self, *, channel: Channel | None = None, delegation_endpoint: str = "", delegation_task_id: str = "") -> Runtime:
         """派生 Runtime。共享 llm/skills/registry/state_store，隔离 channel 和 journal。
 
         子 Agent 获得全新 Journal 实例，避免父子并发执行时 trace/session/AgentRun
@@ -156,6 +158,7 @@ class Runtime:
             mcp_provider=self.mcp_provider,
             config=self.config,
             delegation_endpoint=delegation_endpoint,
+            delegation_task_id=delegation_task_id,
         )
 
     # ======================== 公开入口：run() ========================
@@ -545,6 +548,7 @@ class Runtime:
                 runtime=self,
                 session_id=self._current_session_id,
                 agentrun_id=self._current_agentrun_id,
+                task_id=self.delegation_task_id,
                 channel=self.channel,
             )
 

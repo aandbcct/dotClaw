@@ -65,5 +65,8 @@ class ToolExecutionContext:
     agentrun_id: str = ""
     """当前 AgentRun ID（父 AgentRun 的 run_id）"""
 
+    task_id: str = ""
+    """Harness 注入的当前 Task ID；仅 target delegation Runtime 使用。"""
+
     channel: object | None = None
     """当前通信 Channel"""
