@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from src.dotclaw.agent.message_utils import trim
+from src.dotclaw.agent.message_utils import clean, trim, validate
 
 
 def _msg(role: str, content: str = "", tool_calls: list | None = None,
@@ -39,6 +39,17 @@ class TestTrim:
 
     def test_empty_list(self) -> None:
         assert trim([], 100) == []
+
+    def test_validate_and_clean_orphan_tool_message(self) -> None:
+        """孤立工具结果应被识别并在清理后移除。"""
+        messages = [
+            _msg("system", "规则"),
+            _msg("tool", "孤立结果", tool_call_id="missing"),
+        ]
+
+        assert validate(messages)
+        cleaned = clean(messages)
+        assert [message.role for message in cleaned] == ["system"]
 
     def test_all_messages_in_pairing_group(self) -> None:
         """BUG 复现：全部消息都在一个配对组中时不应触发 warning"""

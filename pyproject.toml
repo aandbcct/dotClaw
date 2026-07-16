@@ -43,6 +43,7 @@ testpaths = [
     "tests/channel",
     "tests/context",
     "tests/journal",
+    "tests/llm",
     "tests/orchestration",
     "tests/runtime",
     "tests/session",

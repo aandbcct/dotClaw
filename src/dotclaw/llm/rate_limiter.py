@@ -100,10 +100,11 @@ class RateLimiter:
 
             if tokens >= 1.0:
                 tokens -= 1.0
+                # 本次已成功获取令牌，剩余令牌为零也不应等待下一轮补充。
+                wait_time = 0.0
+            else:
+                wait_time = (1.0 - tokens) / refill_rate
             self._buckets[provider] = (tokens, now)
-
-            # 计算需要等待的时间
-            wait_time = (1.0 - tokens) / refill_rate if tokens < 1.0 else 0
 
         if wait_time > 0:
             if timeout is not None and wait_time > timeout:
