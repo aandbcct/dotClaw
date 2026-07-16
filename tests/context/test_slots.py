@@ -22,6 +22,7 @@ from src.dotclaw.agent.slotContextImp import (
     KnowledgeSlot,
     ProjectSlot,
 )
+from src.dotclaw.memory.storage import SearchResult
 
 
 def _make_ctx(**overrides) -> SlotContext:
@@ -153,11 +154,22 @@ class TestMemorySlot:
     async def test_search_result(self) -> None:
         slot = MemorySlot()
         mgr = MagicMock()
-        mgr.search = AsyncMock(return_value="相关记忆: 上次我们讨论了上下文模块")
+        mgr.search = AsyncMock(return_value=[
+            SearchResult(
+                path="memory/context.md",
+                start_line=1,
+                end_line=1,
+                score=0.9,
+                snippet="上次我们讨论了上下文模块",
+                source="memory",
+                title="上下文",
+            )
+        ])
         ctx = _make_ctx(memory_manager=mgr, query="上下文模块")
         result = await slot.load(ctx)
         assert result is not None
         assert "相关记忆" in result
+        assert "上下文模块" in result
 
     @pytest.mark.asyncio
     async def test_tier_is_conditional(self) -> None:
