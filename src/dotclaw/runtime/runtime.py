@@ -379,6 +379,8 @@ class Runtime:
 
                     else:
                         # WAITING_APPROVAL 等长等待：持久化 + WAIT_SENTINEL
+                        # 等待状态已由 _save_waiting_state 写入，finally 中不得再次以完成态覆盖。
+                        end_status = RunEndStatus.WAITING
                         await self._save_waiting_state(state, agentrun_id, session_id,
                                                        tokens_in_total, tokens_out_total,
                                                        start_time, started_at, run_messages)
@@ -409,23 +411,24 @@ class Runtime:
             ended_at: str = datetime.now(CHINA_TZ).isoformat()
             self.journal.agentrun_end(end_status.value)
 
-            try:
-                await self._save_agent_run(
-                    session_id=session_id,
-                    agentrun_id=agentrun_id,
-                    agent_id=agent.agent_id,
-                    end_status=end_status,
-                    tokens_in=tokens_in_total,
-                    tokens_out=tokens_out_total,
-                    duration_ms=duration_ms,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    state_snapshot=state.snapshot(),
-                    trace_ids=self._collect_trace_ids(),
-                    messages=run_messages,
-                )
-            except Exception:
-                pass
+            if end_status != RunEndStatus.WAITING:
+                try:
+                    await self._save_agent_run(
+                        session_id=session_id,
+                        agentrun_id=agentrun_id,
+                        agent_id=agent.agent_id,
+                        end_status=end_status,
+                        tokens_in=tokens_in_total,
+                        tokens_out=tokens_out_total,
+                        duration_ms=duration_ms,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        state_snapshot=state.snapshot(),
+                        trace_ids=self._collect_trace_ids(),
+                        messages=run_messages,
+                    )
+                except Exception:
+                    pass
 
         return final_answer
 
