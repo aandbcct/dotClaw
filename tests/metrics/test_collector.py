@@ -16,6 +16,9 @@ from dotclaw.metrics.collector import MetricsCollector
 from dotclaw.metrics.events import AgentEvent, EventType
 
 
+pytestmark = pytest.mark.legacy
+
+
 class TestCollectorBasic:
     def test_append_single_event(self):
         c = MetricsCollector()

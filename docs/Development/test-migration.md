@@ -15,6 +15,18 @@
 
 这套测试是当前开发的阻断门槛，必须保持全绿。
 
+推荐在项目虚拟环境中执行默认测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
+
+默认命令会排除带有 `legacy` 标记的历史测试。需要核对迁移前的旧行为时，显式指定历史路径并执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -m legacy tests/metrics tests/test_phase4_acceptance.py tests/test_phase7_acceptance.py
+```
+
 ## 历史测试
 
 下列文件暂不进入默认收集，因为它们仍依赖已删除的 `AgentLoop`、`AgentContext`、`AgentResult`、`agent.prompt` 或 `metrics` 命名空间。它们保留在仓库中，仅作为行为迁移参考；禁止通过恢复旧生产模块来让它们通过。
@@ -35,3 +47,6 @@ Phase 2 已完成迁移：模型路由、OpenAI 兼容流、限流、熔断与 P
 Phase 3 已完成迁移：身份声明、不可变上下文、Slot 失败隔离和消息校验/清理均由当前模块测试覆盖。`AgentResult` 与 `PromptBuilder` 已被当前 Runtime 和 ContextAssembler 取代，不保留兼容 API。
 
 迁移一个历史文件时，应先在当前模块目录新增等价测试并验证通过，再删除该历史文件。每次迁移后更新本表。
+
+Runtime 旧生产 API 的调用方、替代方向与删除条件见
+[Runtime 重构迁移清单](runtime/runtime重构迁移清单.md)。

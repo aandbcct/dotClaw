@@ -30,6 +30,9 @@ from dotclaw.metrics.storage import (
 )
 
 
+pytestmark = pytest.mark.legacy
+
+
 def make_snapshot(run_id: str = "test_roundtrip") -> AgentRunSnapshot:
     react = ReactLoopMetrics(
         total_loops=10,

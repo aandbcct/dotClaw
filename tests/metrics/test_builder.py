@@ -9,12 +9,17 @@
 
 import math
 
+import pytest
+
 from dotclaw.metrics.builder import SnapshotBuilder, _p95, _safe_div
 from dotclaw.metrics.events import AgentEvent, EventType
 from dotclaw.metrics.snapshot import (
     AgentRunSnapshot,
     RunMeta,
 )
+
+
+pytestmark = pytest.mark.legacy
 
 
 def make_meta(run_id: str = "test_001") -> RunMeta:
