@@ -21,13 +21,13 @@ from ..context import (
     WorkspaceSlot,
 )
 from ..runtime.adapters import (
-    AgentPolicyPort,
-    FileApprovalRepository,
-    FileCheckpointRepository,
-    FileRunRepository,
-    LLMProxyPort,
+    AgentPolicyResolver,
+    ApprovalRepositoryAdapter,
+    CheckpointRepositoryAdapter,
+    RunRepositoryAdapter,
+    LLMProxyAdapter,
     SessionConversationProjector,
-    ToolExecutorPort,
+    ToolExecutorAdapter,
 )
 from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
@@ -51,7 +51,7 @@ class RuntimeServices:
 
     engine: RuntimeEngine
     coordinator: SessionRunCoordinator
-    run_repository: FileRunRepository
+    run_repository: RunRepositoryAdapter
     """启动阶段用于补偿未决成功提交的本地运行仓储。"""
     tool_executor: ToolExecutor
     mcp_provider: MCPToolProvider | None
@@ -86,8 +86,11 @@ def build_runtime_services(
             agent_registry=agent_registry,
         ),
     )
-    run_repository = FileRunRepository(storage_root, SessionConversationProjector(session_manager))
-    approval_repository = FileApprovalRepository(storage_root)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(
+        storage_root,
+        SessionConversationProjector(session_manager),
+    )
+    approval_repository: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(storage_root)
     dispatcher: AgentDispatcher = AgentDispatcher(TaskMessageBroker())
     delegation_port: RuntimeDelegationAdapter = RuntimeDelegationAdapter(
         session_manager,
@@ -96,11 +99,11 @@ def build_runtime_services(
     )
     engine = RuntimeEngine(
         run_repository=run_repository,
-        checkpoint_repository=FileCheckpointRepository(storage_root),
+        checkpoint_repository=CheckpointRepositoryAdapter(storage_root),
         context_port=context_port,
-        llm_port=LLMProxyPort(llm_proxy),
-        tool_port=ToolExecutorPort(tool_executor),
-        policy_port=AgentPolicyPort(identity, config, tool_executor, project_root, agent_registry),
+        llm_port=LLMProxyAdapter(llm_proxy),
+        tool_port=ToolExecutorAdapter(tool_executor),
+        policy_port=AgentPolicyResolver(identity, config, tool_executor, project_root, agent_registry),
         approval_service=ApprovalService(approval_repository),
         cancellation_service=CancellationService(),
         delegation_port=delegation_port,

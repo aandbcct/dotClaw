@@ -11,9 +11,9 @@ import pytest
 
 from scripts.migrate_agent_run_v1_to_v2 import migrate_agent_run
 from dotclaw.runtime.adapters import (
-    FileApprovalRepository,
-    FileCheckpointRepository,
-    FileRunRepository,
+    ApprovalRepositoryAdapter,
+    CheckpointRepositoryAdapter,
+    RunRepositoryAdapter,
     SessionConversationProjector,
 )
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
@@ -83,9 +83,9 @@ def _completed_event(run: AgentRun, final_message: RunMessage, sequence: int) ->
     )
 
 
-async def test_file_run_repository_preserves_message_event_order(tmp_path: Path) -> None:
+async def test_run_repository_adapter_preserves_message_event_order(tmp_path: Path) -> None:
     """事件只能引用已原子保存的消息，且序号必须连续。"""
-    repository: FileRunRepository = FileRunRepository(tmp_path)
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     run: AgentRun = _build_running_run()
     user_message: RunMessage
     final_message: RunMessage
@@ -122,9 +122,9 @@ async def test_file_run_repository_preserves_message_event_order(tmp_path: Path)
 
 async def test_success_projection_and_checkpoint_are_isolated_by_run(tmp_path: Path) -> None:
     """成功投影、检查点与审批记录分别按职责写入独立容器。"""
-    run_repository: FileRunRepository = FileRunRepository(tmp_path)
-    checkpoint_repository: FileCheckpointRepository = FileCheckpointRepository(tmp_path)
-    approval_repository: FileApprovalRepository = FileApprovalRepository(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    checkpoint_repository: CheckpointRepositoryAdapter = CheckpointRepositoryAdapter(tmp_path)
+    approval_repository: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(tmp_path)
     running_run: AgentRun = _build_running_run()
     user_message: RunMessage
     final_message: RunMessage
@@ -181,7 +181,7 @@ async def test_success_projection_uses_existing_session_and_is_idempotent(tmp_pa
     session: Session = Session(id="session-1")
     await session_manager.save(session)
     projector: SessionConversationProjector = SessionConversationProjector(session_manager)
-    repository: FileRunRepository = FileRunRepository(tmp_path, projector)
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, projector)
     running_run: AgentRun = _build_running_run()
     user_message: RunMessage
     final_message: RunMessage
@@ -231,7 +231,7 @@ class FailingConversationProjector:
 
 async def test_success_commit_uses_run_completion_as_last_visibility_marker(tmp_path: Path) -> None:
     """成功事件或 Conversation 投影失败时，不得暴露已完成但不完整的 AgentRun。"""
-    repository: FileRunRepository = FileRunRepository(tmp_path, FailingConversationProjector())
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, FailingConversationProjector())
     running_run: AgentRun = _build_running_run()
     user_message: RunMessage
     final_message: RunMessage
@@ -261,7 +261,7 @@ async def test_success_commit_uses_run_completion_as_last_visibility_marker(tmp_
     assert pending_run.status is RunStatus.RUNNING
     assert (tmp_path / running_run.session_id / "agent_runs" / running_run.run_id / "success_commit.json").is_file()
 
-    recovered_repository: FileRunRepository = FileRunRepository(tmp_path)
+    recovered_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     await recovered_repository.recover_pending_success_commits()
     recovered_run: AgentRun | None = await recovered_repository.load_run(
         running_run.session_id,
@@ -275,7 +275,7 @@ async def test_success_commit_uses_run_completion_as_last_visibility_marker(tmp_
 
 async def test_checkpoint_rejects_full_prompt_and_tool_result_payloads(tmp_path: Path) -> None:
     """恢复检查点只能保存最小控制数据，不能夹带完整上下文或工具执行结果。"""
-    repository: FileCheckpointRepository = FileCheckpointRepository(tmp_path)
+    repository: CheckpointRepositoryAdapter = CheckpointRepositoryAdapter(tmp_path)
     checkpoint: RunCheckpoint = RunCheckpoint(
         checkpoint_id="checkpoint-guard-1",
         run_id="run-guard-1",
@@ -305,8 +305,8 @@ async def test_migration_converts_legacy_agent_run_sample(tmp_path: Path) -> Non
     legacy_run_path: Path = project_root / "data" / "sessions" / "1a8d087e" / "agent_runs" / "5a6a8ae0.json"
     report = await migrate_agent_run(legacy_run_path, tmp_path, "1a8d087e")
 
-    run_repository: FileRunRepository = FileRunRepository(tmp_path)
-    checkpoint_repository: FileCheckpointRepository = FileCheckpointRepository(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    checkpoint_repository: CheckpointRepositoryAdapter = CheckpointRepositoryAdapter(tmp_path)
     migrated_run: AgentRun | None = await run_repository.load_run("1a8d087e", "5a6a8ae0")
     migrated_messages: tuple[RunMessage, ...] = await run_repository.load_messages("1a8d087e", "5a6a8ae0")
     checkpoint: RunCheckpoint | None = await checkpoint_repository.load("1a8d087e", "5a6a8ae0")

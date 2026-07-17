@@ -1,11 +1,11 @@
-"""LLMProxyPort 对旧流式 LLM 的转换测试。"""
+"""LLMProxyAdapter 对旧流式 LLM 的转换测试。"""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
 from dotclaw.llm.base import ChatChunk, ToolCall as LegacyToolCall
-from dotclaw.runtime.adapters import LLMProxyPort
+from dotclaw.runtime.adapters import LLMProxyAdapter
 from dotclaw.runtime.domain.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.domain.models import AgentPolicySnapshot, ContextBundle, ContextMetadata, MessageRole, RunMessage, RunMessageKind, ToolDefinition
 from dotclaw.runtime.domain.state import AgentState
@@ -29,10 +29,10 @@ class StreamingProxy:
         yield ChatChunk(content="请稍候", is_final=True, input_tokens=12, output_tokens=4)
 
 
-async def test_llm_proxy_port_converts_context_and_aggregates_chunks() -> None:
+async def test_llm_proxy_adapter_converts_context_and_aggregates_chunks() -> None:
     """完整上下文、工具定义、工具调用和 token 统计均转换到 v2 模型。"""
     proxy = StreamingProxy()
-    port = LLMProxyPort(proxy)  # type: ignore[arg-type]
+    port: LLMProxyAdapter = LLMProxyAdapter(proxy)  # type: ignore[arg-type]
     context = ContextBundle(
         messages=(RunMessage("m1", 1, RunMessageKind.LLM_REQUEST, MessageRole.USER, "查天气"),),
         tools=(ToolDefinition("weather", "查询天气", {"type": "object"}),),

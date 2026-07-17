@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
-from dotclaw.runtime.adapters import FileCheckpointRepository, FileRunRepository
+from dotclaw.runtime.adapters import CheckpointRepositoryAdapter, RunRepositoryAdapter
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.models import (
     AgentAction,
@@ -105,8 +105,8 @@ async def migrate_agent_run(
         ),
         error=error,
     )
-    run_repository: FileRunRepository = FileRunRepository(destination_root)
-    checkpoint_repository: FileCheckpointRepository = FileCheckpointRepository(destination_root)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(destination_root)
+    checkpoint_repository: CheckpointRepositoryAdapter = CheckpointRepositoryAdapter(destination_root)
     await run_repository.create_run(run)
     await run_repository.save_messages(session_id, run_id, messages)
 

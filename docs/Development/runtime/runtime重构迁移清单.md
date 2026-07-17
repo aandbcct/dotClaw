@@ -15,7 +15,7 @@ Agent
 
 - `RuntimeEngine` 只依赖 Port，不导入 Journal、Session、旧上下文或 Dispatcher。
 - `orchestration.RuntimeDelegationAdapter` 实现 `DelegationPort`，负责子 Session、子 Run、Task/Broker 回调和取消传播。
-- `FileRunRepository`、`FileCheckpointRepository` 分别保存运行事实和恢复安全点；Journal 不再写入或恢复运行状态。
+- `RunRepositoryAdapter`、`CheckpointRepositoryAdapter` 分别保存运行事实和恢复安全点；Journal 不再写入或恢复运行状态。
 
 ## 已删除模块与替代关系
 

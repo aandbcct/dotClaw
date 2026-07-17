@@ -1,9 +1,9 @@
-"""ToolExecutorPort 的审批隔离与执行映射测试。"""
+"""ToolExecutorAdapter 的审批隔离与执行映射测试。"""
 
 from __future__ import annotations
 
-from dotclaw.runtime.adapters import ToolExecutorPort
-from dotclaw.runtime.adapters import FileApprovalRepository, FileCheckpointRepository, FileRunRepository
+from dotclaw.runtime.adapters import ToolExecutorAdapter
+from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine
@@ -26,7 +26,7 @@ def _execution() -> RunExecutionView:
     return RunExecutionView("run-1", AgentPolicySnapshot("agent", "v1", "model", 3), AgentState(), RunBudget(3), 0, None)
 
 
-async def test_tool_executor_port_requires_approval_without_channel_and_executes_once() -> None:
+async def test_tool_executor_adapter_requires_approval_without_channel_and_executes_once() -> None:
     """审批前不执行工具；同一调用恢复后仅执行一次且不访问 Channel。"""
     executions: list[str] = []
 
@@ -37,7 +37,7 @@ async def test_tool_executor_port_requires_approval_without_channel_and_executes
     registry = ToolRegistry()
     registry.register(BuiltinToolHandler("dangerous", "危险操作", {}, dangerous, needs_approval=True))
     executor = ToolExecutor(registry, ApprovalManager())
-    port = ToolExecutorPort(executor)
+    port: ToolExecutorAdapter = ToolExecutorAdapter(executor)
     invocation = ToolInvocation("run-1", ToolCall("call-1", "dangerous", {}))
 
     waiting = await port.execute(invocation, _execution())
@@ -96,7 +96,7 @@ def _request() -> RunRequest:
     return RunRequest("session", "lease", "agent", user, ConversationSnapshot("session", (), 0))
 
 
-async def test_tool_executor_port_drives_engine_approval_resume_with_same_run_id(tmp_path) -> None:
+async def test_tool_executor_adapter_drives_engine_approval_resume_with_same_run_id(tmp_path) -> None:
     """真实 ToolExecutor bridge 经 Engine 等待、批准恢复且工具只执行一次。"""
     executions: list[str] = []
 
@@ -106,16 +106,16 @@ async def test_tool_executor_port_drives_engine_approval_resume_with_same_run_id
 
     registry = ToolRegistry()
     registry.register(BuiltinToolHandler("dangerous", "危险操作", {}, dangerous, needs_approval=True))
-    bridge = ToolExecutorPort(ToolExecutor(registry, ApprovalManager()))
-    repository = FileRunRepository(tmp_path)
+    bridge: ToolExecutorAdapter = ToolExecutorAdapter(ToolExecutor(registry, ApprovalManager()))
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     engine = RuntimeEngine(
         repository,
-        FileCheckpointRepository(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         EmptyContext(),
         ToolThenFinalLLM("dangerous"),
         bridge,
         FixedPolicy(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
     )
 

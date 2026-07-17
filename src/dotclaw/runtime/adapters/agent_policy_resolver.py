@@ -23,8 +23,8 @@ LEGACY_TASK_TOOL_NAMES: frozenset[str] = frozenset({
 """仅供旧 Runtime / Dispatcher 兼容链使用的跨 Run Task 工具名称。"""
 
 
-class AgentPolicyPort(RunPolicyPort):
-    """将旧 Agent 配置转换为一次 Run 不可变的策略快照。"""
+class AgentPolicyResolver(RunPolicyPort):
+    """将 Agent 配置解析为一次 Run 不可变策略快照的适配器。"""
 
     def __init__(
         self,

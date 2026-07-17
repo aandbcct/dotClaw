@@ -102,18 +102,18 @@ rg "runtime\.run|add_conversation|ApprovalManager|channel=" src tests
 
 新增：
 
-- `src/dotclaw/runtime/adapters/llm_proxy_port.py`
-  - `LLMProxyPort` 实现 `LLMPort`；
+- `src/dotclaw/runtime/adapters/llm_proxy_adapter.py`
+  - `LLMProxyAdapter` 实现 `LLMPort`；
   - `ContextBundle` 转旧 `Message` / 工具定义；
   - `ChatChunk` 聚合为标准 `RunMessage`；
   - 映射工具调用、普通回复、异常、token 统计和 best-effort cancel。
-- `src/dotclaw/runtime/adapters/tool_executor_port.py`
-  - `ToolExecutorPort` 实现 `ToolPort`；
+- `src/dotclaw/runtime/adapters/tool_executor_adapter.py`
+  - `ToolExecutorAdapter` 实现 `ToolPort`；
   - 普通工具结果映射为 v2 `ToolResult`；
   - 需要审批的工具返回 `ToolResultStatus.APPROVAL_REQUIRED`；
   - 审批通过后允许同一 `run_id + call_id` 执行一次。
-- `src/dotclaw/runtime/adapters/agent_policy_port.py`
-  - `AgentPolicyPort` 实现 `RunPolicyPort`；
+- `src/dotclaw/runtime/adapters/agent_policy_resolver.py`
+  - `AgentPolicyResolver` 实现 `RunPolicyPort`；
   - 冻结 identity、模型、最大循环次数、system prompt、工具定义与 token 预算。
 
 修改：
@@ -136,8 +136,8 @@ rg "runtime\.run|add_conversation|ApprovalManager|channel=" src tests
 
 验收：
 
-- `tests/runtime_v2/test_llm_proxy_port.py`；
-- `tests/runtime_v2/test_tool_executor_port.py`；
+- `tests/runtime_v2/test_llm_proxy_adapter.py`；
+- `tests/runtime_v2/test_tool_executor_adapter.py`；
 - 审批工具不访问 Channel；
 - `rg "dotclaw\.llm|dotclaw\.tools" src/dotclaw/runtime/application` 无结果。
 
@@ -149,8 +149,8 @@ rg "runtime\.run|add_conversation|ApprovalManager|channel=" src tests
 
 - `src/dotclaw/bootstrap/runtime_factory.py`
   - 装配 `RuntimeEngine`、`SessionRunCoordinator`；
-  - 装配 `LLMProxyPort`、`ToolExecutorPort`、`AgentPolicyPort`、`SlotContextProvider`；
-  - 装配 `FileRunRepository`、`FileCheckpointRepository`、`FileApprovalRepository`、`SessionConversationProjector`。
+  - 装配 `LLMProxyAdapter`、`ToolExecutorAdapter`、`AgentPolicyResolver`、`SlotContextProvider`；
+  - 装配 `RunRepositoryAdapter`、`CheckpointRepositoryAdapter`、`ApprovalRepositoryAdapter`、`SessionConversationProjector`。
 - `src/dotclaw/runtime/application/request_factory.py`
   - 从 Session 快照创建 `RunRequest`；
   - 生成 `ConversationMessage`、`ConversationSnapshot`、`lease_id`；
@@ -329,9 +329,9 @@ git diff --check
 
 ### 阶段 B：v2 Port bridge
 
-- 已新增 `LLMProxyPort`、`ToolExecutorPort` 与 `AgentPolicyPort`，并由 `runtime/adapters/__init__.py` 导出。
+- 已新增 `LLMProxyAdapter`、`ToolExecutorAdapter` 与 `AgentPolicyResolver`，并由 `runtime/adapters/__init__.py` 导出。
 - `ToolExecutor` 新增无 Channel 副作用的审批查询和已审批执行入口；新 ToolPort 仅返回结构化 `APPROVAL_REQUIRED`，以 `run_id + call_id` 确保批准后的副作用最多执行一次。
-- 已新增 `test_llm_proxy_port.py` 与 `test_tool_executor_port.py`。
+- 已新增 `test_llm_proxy_adapter.py` 与 `test_tool_executor_adapter.py`。
 
 ### 阶段 C：组合根与请求工厂
 

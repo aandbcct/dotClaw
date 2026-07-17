@@ -15,8 +15,8 @@ from ..domain.execution import RunExecutionView
 from ..domain.models import ContextBundle, MessageRole, RunMessage, RunMessageKind, ToolCall
 
 
-class LLMProxyPort(LLMPort):
-    """聚合旧流式响应并转换为 Runtime v2 的完整 RunMessage。"""
+class LLMProxyAdapter(LLMPort):
+    """聚合旧流式响应并转换为 Runtime v2 完整 RunMessage 的适配器。"""
 
     def __init__(self, proxy: LLMProxy) -> None:
         """绑定既有 LLM 代理；模型选择由冻结策略指定。"""

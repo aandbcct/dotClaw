@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from dotclaw.runtime.adapters import FileApprovalRepository, FileCheckpointRepository, FileRunRepository
+from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine
@@ -67,11 +67,11 @@ def _request(session_id: str) -> RunRequest:
 
 def _engine(root: Path) -> RuntimeEngine:
     """使用真实文件仓储和 fake 外部端口构造 Engine。"""
-    run_repository = FileRunRepository(root)
-    approval_repository = FileApprovalRepository(root)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(root)
+    approval_repository: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(root)
     return RuntimeEngine(
         run_repository,
-        FileCheckpointRepository(root),
+        CheckpointRepositoryAdapter(root),
         ContextFake(),
         FinalLLM(),
         ToolFake(),
@@ -89,7 +89,7 @@ async def test_engine_completes_clarification_as_normal_conversation(tmp_path: P
     assert result.status.value == "completed"
     assert result.final_message is not None
     assert result.final_message.content == "请补充信息"
-    run_repository = FileRunRepository(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     conversation = await run_repository.load_conversation("session-1")
     assert conversation[0].content == "请补充信息"
 
@@ -143,15 +143,15 @@ class ApprovalTool(ToolPort):
 
 async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: Path) -> None:
     """审批恢复继续原 run，完整记录审批决议和恢复事件。"""
-    run_repository = FileRunRepository(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     engine = RuntimeEngine(
         run_repository,
-        FileCheckpointRepository(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         ContextFake(),
         ApprovalLLM(),
         ApprovalTool(),
         PolicyPort(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
     )
     waiting = await engine.execute(_request("session-approval"))
@@ -241,13 +241,13 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
     llm: ReActLLM = ReActLLM()
     tool_port: CompletedTool = CompletedTool()
     engine: RuntimeEngine = RuntimeEngine(
-        FileRunRepository(tmp_path),
-        FileCheckpointRepository(tmp_path),
+        RunRepositoryAdapter(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         SlotContextProvider((), ContextDependencies()),
         llm,
         tool_port,
         PolicyPort(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
     )
 
@@ -276,13 +276,13 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
     llm: ReActLLM = ReActLLM()
     approval_tool: ApprovalTool = ApprovalTool()
     engine: RuntimeEngine = RuntimeEngine(
-        FileRunRepository(tmp_path),
-        FileCheckpointRepository(tmp_path),
+        RunRepositoryAdapter(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         SlotContextProvider((), ContextDependencies()),
         llm,
         approval_tool,
         PolicyPort(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
     )
 
@@ -308,15 +308,15 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
 
 async def test_rejected_approval_records_decision_and_cancels_without_conversation(tmp_path: Path) -> None:
     """拒绝审批应记录决议并结束原 Run，不投影 assistant Conversation。"""
-    run_repository = FileRunRepository(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     engine = RuntimeEngine(
         run_repository,
-        FileCheckpointRepository(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         ContextFake(),
         ApprovalLLM(),
         ApprovalTool(),
         PolicyPort(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
     )
 
@@ -337,15 +337,15 @@ async def test_rejected_approval_records_decision_and_cancels_without_conversati
 
 async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) -> None:
     """取消审批等待中的 run 会删除 checkpoint 且不投影 assistant 消息。"""
-    run_repository = FileRunRepository(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     engine = RuntimeEngine(
         run_repository,
-        FileCheckpointRepository(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         ContextFake(),
         ApprovalLLM(),
         ApprovalTool(),
         PolicyPort(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
     )
     waiting = await engine.execute(_request("session-cancel"))
@@ -355,7 +355,7 @@ async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) ->
     assert cancelled is not None
     assert cancelled.status.value == "cancelled"
     assert await run_repository.load_conversation("session-cancel") == ()
-    assert await FileCheckpointRepository(tmp_path).load("session-cancel", waiting.run_id) is None
+    assert await CheckpointRepositoryAdapter(tmp_path).load("session-cancel", waiting.run_id) is None
 
 
 class OrderedEngine:

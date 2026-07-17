@@ -10,8 +10,8 @@ from ..domain.models import ApprovalRecord, ApprovalStatus, JSONMap, JSONValue, 
 from ._file_support import load_json_map, validate_path_segment, write_json_atomic
 
 
-class FileApprovalRepository:
-    """以 approval_id 定位运行并保证审批记录只消费一次。"""
+class ApprovalRepositoryAdapter:
+    """以 approval_id 定位运行并保证审批记录只消费一次的本地仓储适配器。"""
 
     def __init__(self, root_directory: str | Path) -> None:
         """初始化审批记录根目录。"""

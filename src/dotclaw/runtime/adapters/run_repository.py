@@ -55,8 +55,8 @@ class SuccessCommitIntent:
         }
 
 
-class FileRunRepository:
-    """将运行摘要、消息、事件和 Conversation 投影写入本地目录。"""
+class RunRepositoryAdapter:
+    """将运行摘要、消息、事件和 Conversation 投影写入本地目录的仓储适配器。"""
 
     def __init__(
         self,

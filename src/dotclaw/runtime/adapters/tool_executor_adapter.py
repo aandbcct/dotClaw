@@ -11,8 +11,8 @@ from ..domain.execution import RunExecutionView
 from ..domain.models import RunError, RunErrorCode, ToolInvocation, ToolResult, ToolResultStatus
 
 
-class ToolExecutorPort(ToolPort):
-    """以 run_id 与 call_id 隔离审批状态，并只执行获准工具一次。"""
+class ToolExecutorAdapter(ToolPort):
+    """以 run_id 与 call_id 隔离审批状态，并只执行获准工具一次的适配器。"""
 
     def __init__(self, executor: ToolExecutor) -> None:
         """绑定既有工具执行器。"""

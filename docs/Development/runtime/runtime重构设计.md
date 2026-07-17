@@ -73,9 +73,9 @@ src/dotclaw/
 │   │
 │   └── adapters/
 │       ├── context_slots.py        # SlotContextProvider：现有 Slot 的适配实现
-│       ├── file_run_repository.py  # 本地文件版 RunRepository
-│       ├── file_checkpoint.py      # 本地文件版 CheckpointRepository
-│       └── approval_store.py       # 审批记录存储
+│       ├── run_repository.py       # RunRepository 的本地仓储适配器
+│       ├── checkpoint_repository.py # CheckpointRepository 的本地仓储适配器
+│       └── approval_repository.py  # 审批记录仓储适配器
 │
 ├── context/
 │   ├── slots.py                    # ContextSlot、ScopeKey、SlotContext

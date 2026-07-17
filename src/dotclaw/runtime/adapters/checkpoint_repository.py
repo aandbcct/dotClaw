@@ -26,8 +26,8 @@ FORBIDDEN_CHECKPOINT_FIELD_NAMES: frozenset[str] = frozenset(
 """检查点中禁止出现的完整上下文载荷字段名。"""
 
 
-class FileCheckpointRepository:
-    """按 session_id/run_id 保存最新恢复检查点。"""
+class CheckpointRepositoryAdapter:
+    """按 session_id/run_id 保存最新恢复检查点的本地仓储适配器。"""
 
     def __init__(self, root_directory: str | Path) -> None:
         """初始化检查点根目录。"""

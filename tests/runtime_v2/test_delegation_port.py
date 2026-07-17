@@ -12,7 +12,7 @@ from dotclaw.orchestration.message_broker import TaskMessageBroker
 from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.orchestration.runtime_delegation_adapter import RuntimeDelegationAdapter
 from dotclaw.orchestration.task import TaskStatus
-from dotclaw.runtime.adapters import FileApprovalRepository, FileCheckpointRepository, FileRunRepository
+from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine
@@ -218,15 +218,15 @@ def _dispatcher() -> AgentDispatcher:
 async def test_engine_records_delegation_parent_child_events_without_dispatcher(tmp_path: Path) -> None:
     """Engine 只依赖 DelegationPort，并持久化父子运行关系和事件。"""
     delegation = CompletedDelegation()
-    repository = FileRunRepository(tmp_path)
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     engine = RuntimeEngine(
         repository,
-        FileCheckpointRepository(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         MinimalContext(),
         DelegatingLLM(),
         NoToolExecution(),
         FixedPolicy(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         delegation,
     )
@@ -294,17 +294,17 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
     target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent", model="model")
     registry: AgentRegistry = AgentRegistry()
     registry.register(target)
-    repository = FileRunRepository(tmp_path)
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     dispatcher = _dispatcher()
     adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher)
     engine = RuntimeEngine(
         repository,
-        FileCheckpointRepository(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         MinimalContext(),
         ParentChildLLM(),
         NoToolExecution(),
         FixedPolicy(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         adapter,
     )
@@ -334,18 +334,18 @@ async def test_parent_cancellation_propagates_to_real_delegated_child_run(tmp_pa
     target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent", model="model")
     registry: AgentRegistry = AgentRegistry()
     registry.register(target)
-    repository = FileRunRepository(tmp_path)
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     dispatcher = _dispatcher()
     adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher)
     llm = BlockingChildLLM()
     engine = RuntimeEngine(
         repository,
-        FileCheckpointRepository(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         MinimalContext(),
         llm,
         NoToolExecution(),
         FixedPolicy(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         adapter,
     )
@@ -373,15 +373,15 @@ async def test_parent_cancellation_propagates_to_real_delegated_child_run(tmp_pa
 
 async def test_child_run_persists_parent_and_root_relationship(tmp_path: Path) -> None:
     """Engine 必须将 adapter 传入的 parent/root 写入子 AgentRun 摘要。"""
-    repository = FileRunRepository(tmp_path)
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     engine = RuntimeEngine(
         repository,
-        FileCheckpointRepository(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
         MinimalContext(),
         FinalLLM(),
         NoToolExecution(),
         FixedPolicy(),
-        ApprovalService(FileApprovalRepository(tmp_path)),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
     )
     child_request = RunRequest(

@@ -136,9 +136,9 @@ src/dotclaw/runtime/
 ```text
 src/dotclaw/runtime/adapters/
 ├── __init__.py
-├── file_run_repository.py
-├── file_checkpoint_repository.py
-└── file_approval_repository.py
+├── run_repository.py
+├── checkpoint_repository.py
+└── approval_repository.py
 
 scripts/
 └── migrate_agent_run_v1_to_v2.py
@@ -146,9 +146,9 @@ scripts/
 
 | 文件 | 新增内容 |
 |---|---|
-| `file_run_repository.py` | 文件版 `RunRepository`：创建 / 更新 `run.json`，追加 `events.jsonl`，原子更新 `messages.json`，成功时提交 Conversation 投影 |
-| `file_checkpoint_repository.py` | 文件版 `CheckpointRepository`：按 `session_id/run_id` 保存、加载、删除 `checkpoint.json` |
-| `file_approval_repository.py` | `approval_id → run_id` 关联、状态与消费标记 |
+| `run_repository.py` | `RunRepositoryAdapter`：创建 / 更新 `run.json`，追加 `events.jsonl`，原子更新 `messages.json`，成功时提交 Conversation 投影 |
+| `checkpoint_repository.py` | `CheckpointRepositoryAdapter`：按 `session_id/run_id` 保存、加载、删除 `checkpoint.json` |
+| `approval_repository.py` | `ApprovalRepositoryAdapter`：维护 `approval_id → run_id` 关联、状态与消费标记 |
 | `migrate_agent_run_v1_to_v2.py` | 将旧 `AgentRun.messages` 转为 `messages.json`，将 `state_snapshot` 转为 checkpoint，保留旧 `trace_ids` 仅供迁移报告 |
 | `tests/runtime_v2/test_file_repositories.py` | 原子写入、事件序号、消息 / 事件引用完整性、迁移脚本测试 |
 
@@ -158,7 +158,7 @@ scripts/
 |---|---|
 | `src/dotclaw/session/agent_run.py` | `AgentRun` 收缩为摘要：保留 id、归属、状态、时间、统计、错误摘要、引用；移除新写入路径中的 `messages`、`state_snapshot`、`trace_ids` |
 | `src/dotclaw/runtime/state_store.py` | 改为旧格式读取 adapter，内部委托新版 `CheckpointRepository`；新 checkpoint 使用 `run_id` 而不是仅 `session_id` |
-| `src/dotclaw/session/session.py` | 新增“成功投影追加”仓储接口或由 FileRunRepository 协调；失败 / 取消不得写 assistant message |
+| `src/dotclaw/session/session.py` | 新增“成功投影追加”仓储接口或由 RunRepositoryAdapter 协调；失败 / 取消不得写 assistant message |
 
 ### 数据格式与写入顺序
 
@@ -392,7 +392,7 @@ cancel(run_id) → Runtime 标记取消 → 安全点停止 → RUN_CANCELLED
 
 - 已新增 `orchestration/runtime_delegation_adapter.py`。它包装既有 `AgentDispatcher` 的 Task / Broker 业务状态机，为每个 target Identity 创建独立 Session 与子 Run，并通过 `SessionRunCoordinator` 执行；子 Run 的完成和取消会回调投影为既有 Task 终态，父子关系写入 `parent_run_id`、`root_run_id` 和 delegation 事件。
 - `RuntimeEngine` 仅依赖 `DelegationPort`：结构化 `delegate` 调用提交子运行、查询结果并转换为 `DelegationSubmitted`、`DelegationCompleted` 领域事件；Engine 不 import Dispatcher、Journal 或旧 Runtime。
-- `AgentPolicyPort` 可根据 `AgentRegistry` 冻结 target Identity 的子运行策略，保持多 Agent 策略边界。
+- `AgentPolicyResolver` 可根据 `AgentRegistry` 冻结 target Identity 的子运行策略，保持多 Agent 策略边界。
 - Journal 已停止注册 StateSink、写入 `state.json` 和恢复 StateSink 累加器；独立 StateSink 兼容实现已在 Phase 6 物理删除。
 - 已新增 `test_delegation_port.py` 与 `test_no_journal_dependency.py`，覆盖 fake Port 父子事件、真实 Adapter → Dispatcher → Coordinator 子 Run 回调、父取消向子 Run 传播、target Session 请求映射和 Engine 无旧基础设施依赖。
 
