@@ -1,0 +1,327 @@
+"""将 Slot、缓存和冻结运行输入组装为 ContextBundle。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+
+from ..runtime.application.ports import ContextPort
+from ..runtime.domain.execution import RunBudget, RunExecution, RunExecutionView
+from ..runtime.domain.models import (
+    AgentPolicySnapshot,
+    ConversationMessage,
+    ConversationSnapshot,
+    ContextBundle,
+    ContextMetadata,
+    JSONMap,
+    JSONValue,
+    MessageRole,
+    RunMessage,
+    RunMessageKind,
+    RunRequest,
+    ToolDefinition,
+    get_integer,
+    get_string,
+    require_json_map,
+)
+from ..runtime.domain.state import AgentState
+from .ports import ContextDependencies
+from .scoped_cache import ScopedCache, SlotCacheScope
+from .slot_context import ContextProfile, SlotContext
+from .slots import ContextSlot
+
+
+class ContextBudgetPolicy(StrEnum):
+    """超出 token 预算时的上下文处理策略。"""
+
+    TRUNCATE_HISTORY = "truncate_history"
+    REJECT = "reject"
+
+
+class ContextTokenBudgetExceeded(ValueError):
+    """保留必要消息后仍超过 token 预算时抛出的异常。"""
+
+
+@dataclass(frozen=True)
+class LegacyContextInput:
+    """旧 Runtime 调用 ContextPort 所需的最小适配输入。"""
+
+    run_id: str
+    session_id: str
+    agent_id: str
+    identity_version: str
+    model_id: str
+    max_iterations: int
+    user_message: str
+    system_prompt: str
+    tools: tuple[ToolDefinition, ...]
+    project_root: Path
+    max_context_tokens: int
+    excluded_slot_names: frozenset[str] = frozenset()
+
+
+class LegacyContextPortAdapter:
+    """让尚未切换的旧 Runtime 通过 ContextPort 获得 system prompt。"""
+
+    def __init__(self, context_port: ContextPort) -> None:
+        """绑定 Runtime v2 ContextPort。"""
+        self._context_port: ContextPort = context_port
+
+    async def build_system_prompt(self, legacy_input: LegacyContextInput) -> str:
+        """构造临时运行视图，并提取 Bundle 中的 system 消息。"""
+        policy: AgentPolicySnapshot = AgentPolicySnapshot(
+            agent_id=legacy_input.agent_id,
+            identity_version=legacy_input.identity_version,
+            model_id=legacy_input.model_id,
+            max_iterations=legacy_input.max_iterations,
+            policy_data=_legacy_policy_data(legacy_input),
+        )
+        user_message: ConversationMessage = ConversationMessage(
+            message_id=f"legacy-input-{legacy_input.run_id}",
+            role=MessageRole.USER,
+            content=legacy_input.user_message,
+            created_at="",
+        )
+        request: RunRequest = RunRequest(
+            session_id=legacy_input.session_id,
+            lease_id=f"legacy-lease-{legacy_input.run_id}",
+            agent_id=legacy_input.agent_id,
+            user_message=user_message,
+            conversation=ConversationSnapshot(legacy_input.session_id, (), 0),
+        )
+        execution: RunExecution = RunExecution(
+            run_id=legacy_input.run_id,
+            request=request,
+            policy=policy,
+            state=AgentState(),
+            budget=RunBudget(max_iterations=legacy_input.max_iterations),
+        )
+        bundle: ContextBundle = await self._context_port.build(request, execution.view())
+        system_message: RunMessage | None = next(
+            (message for message in bundle.messages if message.role is MessageRole.SYSTEM),
+            None,
+        )
+        if system_message is None:
+            raise RuntimeError("ContextPort 必须返回一条 system 消息")
+        return system_message.content
+
+
+class SlotContextProvider:
+    """ContextPort 实现：按作用域缓存 Slot 产物并生成完整模型上下文。"""
+
+    def __init__(
+        self,
+        slots: tuple[ContextSlot, ...],
+        dependencies: ContextDependencies,
+        cache: ScopedCache | None = None,
+        budget_policy: ContextBudgetPolicy = ContextBudgetPolicy.TRUNCATE_HISTORY,
+    ) -> None:
+        """初始化 Slot 列表、外部内容来源和作用域缓存。"""
+        self._slots: tuple[ContextSlot, ...] = slots
+        self._dependencies: ContextDependencies = dependencies
+        self._cache: ScopedCache = cache if cache is not None else ScopedCache()
+        self._budget_policy: ContextBudgetPolicy = budget_policy
+
+    async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
+        """从冻结请求和执行视图构造实际发送给模型的完整消息。"""
+        profile: ContextProfile = _profile_from_execution(request, execution)
+        context: SlotContext = SlotContext(request, execution, profile, self._dependencies)
+        slot_texts: list[str] = []
+        source_names: list[str] = []
+        failed_slots: list[str] = []
+        slot: ContextSlot
+        for slot in self._slots:
+            if slot.name in profile.excluded_slot_names:
+                continue
+            try:
+                content: str | None = await self._load_slot(slot, context)
+            except Exception:
+                failed_slots.append(slot.name)
+                continue
+            if content:
+                slot_texts.append(content)
+                source_names.append(slot.name)
+        system_content: str = "\n\n".join(slot_texts)
+        messages: tuple[RunMessage, ...] = _build_messages(
+            request,
+            execution,
+            system_content,
+        )
+        budget_result: tuple[tuple[RunMessage, ...], bool] = self._apply_budget(
+            messages,
+            profile.max_context_tokens,
+        )
+        budgeted_messages: tuple[RunMessage, ...]
+        truncated: bool
+        budgeted_messages, truncated = budget_result
+        metadata: ContextMetadata = ContextMetadata(
+            estimated_tokens=_estimate_tokens(budgeted_messages),
+            source_names=tuple(source_names),
+            truncation_applied=truncated,
+            details={
+                "failed_slots": failed_slots,
+                "budget_policy": self._budget_policy.value,
+                "max_context_tokens": profile.max_context_tokens,
+            },
+        )
+        return ContextBundle(messages=budgeted_messages, tools=profile.tools, metadata=metadata)
+
+    async def _load_slot(self, slot: ContextSlot, context: SlotContext) -> str | None:
+        """按槽位声明的作用域读取或生成缓存内容。"""
+        cache_key = self._cache.build_key(
+            slot_name=slot.name,
+            scope=slot.scope,
+            agent_id=context.profile.agent_id,
+            identity_version=context.profile.identity_version,
+            session_id=context.request.session_id,
+            run_id=context.execution.run_id,
+        )
+        if cache_key is None:
+            return await slot.produce(context)
+        lookup = self._cache.get(cache_key)
+        if lookup.found:
+            return lookup.content
+        content: str | None = await slot.produce(context)
+        self._cache.set(cache_key, content)
+        return content
+
+    def _apply_budget(
+        self,
+        messages: tuple[RunMessage, ...],
+        max_context_tokens: int,
+    ) -> tuple[tuple[RunMessage, ...], bool]:
+        """按策略裁剪最旧历史，必要消息无法容纳时明确失败。"""
+        if max_context_tokens <= 0:
+            raise ContextTokenBudgetExceeded("Context token 预算必须为正数")
+        if _estimate_tokens(messages) <= max_context_tokens:
+            return messages, False
+        if self._budget_policy is ContextBudgetPolicy.REJECT:
+            raise ContextTokenBudgetExceeded("Context 超出 token 预算")
+        system_messages: tuple[RunMessage, ...] = tuple(
+            message for message in messages if message.role is MessageRole.SYSTEM
+        )
+        non_system_messages: list[RunMessage] = [
+            message for message in messages if message.role is not MessageRole.SYSTEM
+        ]
+        while len(non_system_messages) > 1:
+            candidate_messages: tuple[RunMessage, ...] = system_messages + tuple(non_system_messages)
+            if _estimate_tokens(candidate_messages) <= max_context_tokens:
+                return _resequenced(candidate_messages), True
+            non_system_messages.pop(0)
+        remaining_messages: tuple[RunMessage, ...] = system_messages + tuple(non_system_messages)
+        if _estimate_tokens(remaining_messages) > max_context_tokens:
+            raise ContextTokenBudgetExceeded("必要 system prompt 与当前用户输入已超出 token 预算")
+        return _resequenced(remaining_messages), True
+
+
+def _legacy_policy_data(legacy_input: LegacyContextInput) -> JSONMap:
+    """将旧 Runtime 的上下文参数转换为冻结策略数据。"""
+    return {
+        "system_prompt": legacy_input.system_prompt,
+        "tools": [tool.to_dict() for tool in legacy_input.tools],
+        "project_root": str(legacy_input.project_root),
+        "max_context_tokens": legacy_input.max_context_tokens,
+        "excluded_slot_names": list(legacy_input.excluded_slot_names),
+    }
+
+
+def _profile_from_execution(request: RunRequest, execution: RunExecutionView) -> ContextProfile:
+    """从 AgentPolicySnapshot 的 JSON 策略解析上下文构建配置。"""
+    policy_data: JSONMap = execution.policy.policy_data
+    raw_tools: JSONValue | None = policy_data.get("tools")
+    tools: list[ToolDefinition] = []
+    if isinstance(raw_tools, list):
+        raw_tool: JSONValue
+        for raw_tool in raw_tools:
+            tool_data: JSONMap = require_json_map(raw_tool)
+            tools.append(ToolDefinition(
+                name=get_string(tool_data, "name"),
+                description=get_string(tool_data, "description"),
+                parameters=_json_map_or_empty(tool_data.get("parameters")),
+            ))
+    raw_excluded: JSONValue | None = policy_data.get("excluded_slot_names")
+    excluded_names: frozenset[str] = frozenset(
+        value for value in raw_excluded if isinstance(value, str)
+    ) if isinstance(raw_excluded, list) else frozenset()
+    project_root: Path = Path(get_string(policy_data, "project_root", ".")).resolve()
+    max_context_tokens: int = get_integer(policy_data, "max_context_tokens", 8000)
+    return ContextProfile(
+        agent_id=request.agent_id,
+        identity_version=execution.policy.identity_version,
+        system_prompt=get_string(policy_data, "system_prompt"),
+        tools=tuple(tools),
+        project_root=project_root,
+        max_context_tokens=max_context_tokens,
+        excluded_slot_names=excluded_names,
+    )
+
+
+def _build_messages(
+    request: RunRequest,
+    execution: RunExecutionView,
+    system_content: str,
+) -> tuple[RunMessage, ...]:
+    """将 system prompt、会话快照和当前输入转换为完整 LLM 请求消息。"""
+    messages: list[RunMessage] = []
+    sequence: int = 1
+    messages.append(_run_message(execution.run_id, sequence, MessageRole.SYSTEM, system_content))
+    sequence += 1
+    conversation_message: ConversationMessage
+    for conversation_message in request.conversation.messages:
+        messages.append(_run_message(
+            execution.run_id,
+            sequence,
+            conversation_message.role,
+            conversation_message.content,
+        ))
+        sequence += 1
+    messages.append(_run_message(
+        execution.run_id,
+        sequence,
+        request.user_message.role,
+        request.user_message.content,
+    ))
+    return tuple(messages)
+
+
+def _run_message(run_id: str, sequence: int, role: MessageRole, content: str) -> RunMessage:
+    """创建一条 ContextPort 输出的实际 LLM 请求消息。"""
+    return RunMessage(
+        message_id=f"context-{run_id}-{sequence}",
+        sequence=sequence,
+        kind=RunMessageKind.LLM_REQUEST,
+        role=role,
+        content=content,
+    )
+
+
+def _estimate_tokens(messages: tuple[RunMessage, ...]) -> int:
+    """使用保守的字符估算计算上下文 token 数。"""
+    character_count: int = sum(len(message.content) for message in messages)
+    return max((character_count + 3) // 4, 1)
+
+
+def _resequenced(messages: tuple[RunMessage, ...]) -> tuple[RunMessage, ...]:
+    """裁剪后重新生成连续消息序号和稳定标识。"""
+    resequenced: list[RunMessage] = []
+    sequence: int
+    message: RunMessage
+    for sequence, message in enumerate(messages, start=1):
+        resequenced.append(RunMessage(
+            message_id=f"context-{message.message_id.rsplit('-', 1)[0]}-{sequence}",
+            sequence=sequence,
+            kind=message.kind,
+            role=message.role,
+            content=message.content,
+            tool_call_id=message.tool_call_id,
+            name=message.name,
+            tool_calls=message.tool_calls,
+            metadata=message.metadata,
+        ))
+    return tuple(resequenced)
+
+
+def _json_map_or_empty(value: JSONValue | None) -> JSONMap:
+    """将 JSON 值收窄为对象，非对象时返回空对象。"""
+    return value if isinstance(value, dict) else {}

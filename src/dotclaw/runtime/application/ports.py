@@ -15,6 +15,7 @@ from ..domain.models import (
     RunCheckpoint,
     RunMessage,
     RunRequest,
+    AgentPolicySnapshot,
     ToolInvocation,
     ToolResult,
 )
@@ -40,6 +41,9 @@ class RunRepository(Protocol):
 
     async def load_run(self, session_id: str, run_id: str) -> AgentRun | None:
         """加载指定运行摘要。"""
+
+    async def find_run(self, run_id: str) -> AgentRun | None:
+        """按运行标识定位摘要，供取消和审批恢复使用。"""
 
     async def save_run(self, run: AgentRun) -> None:
         """原子更新运行摘要。"""
@@ -75,6 +79,13 @@ class ContextPort(Protocol):
 
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """构造完整模型消息、工具定义和上下文元数据。"""
+
+
+class RunPolicyPort(Protocol):
+    """在运行开始前解析并冻结 Agent 执行策略。"""
+
+    async def resolve(self, request: RunRequest) -> AgentPolicySnapshot:
+        """返回本次运行不可变的身份、模型和上下文策略。"""
 
 
 class LLMPort(Protocol):

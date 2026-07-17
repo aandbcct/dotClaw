@@ -1,6 +1,6 @@
 # Runtime 重构迁移清单
 
-> 状态：Phase 1、Phase 2、Phase 3 已完成收口并通过回归验收。本文记录旧 Runtime 相关模块的归属、当前调用方、替代方向与删除条件；后续 Phase 完成时必须同步更新。
+> 状态：Phase 1、Phase 2、Phase 3、Phase 4 的 Runtime v2 执行路径已完成并通过回归验收。旧 CLI/Agent 入口仍将在后续兼容迁移中切换。本文记录旧 Runtime 相关模块的归属、当前调用方、替代方向与删除条件；后续 Phase 完成时必须同步更新。
 > 对应设计：[Runtime 重构设计](runtime重构设计.md)。
 
 ## 使用规则
@@ -13,7 +13,7 @@
 
 | 旧模块 / API | 当前调用方或职责 | 替代模块 | 计划 Phase | 删除条件 |
 | --- | --- | --- | --- | --- |
-| `runtime/runtime.py::Runtime` | `main.py`、`agent/agent.py`、`agent/factory.py`、`orchestration/dispatcher.py`、`orchestration/runners/local.py`；同时编排 LLM、工具、Journal、会话与持久化 | `runtime/application/engine.py::RuntimeEngine` + `SessionRunCoordinator` | 4 | 入口、Agent 与编排均只调用新入口；Runtime 仅保留兼容门面期间的调用方为零后删除 |
+| `runtime/runtime.py::Runtime` | `main.py`、`agent/agent.py`、`agent/factory.py`、`orchestration/dispatcher.py`、`orchestration/runners/local.py`；仍为旧入口兼容实现 | `runtime/application/engine.py::RuntimeEngine` + `SessionRunCoordinator`（Phase 4 已实现） | 4 | 入口、Agent 与编排均只调用新入口；Runtime 仅保留兼容门面期间的调用方为零后删除 |
 | `runtime/runtime.py::Runtime.derive()` | 子 Agent 与 handoff 的运行隔离 | `RunExecution`、作用域化 ContextPort 与 `DelegationPort` | 4–5 | delegation adapter 覆盖父子运行隔离，生产代码不再调用 `derive()` |
 | `runtime/agent_state.py::AgentState` | 旧 Runtime 驱动 ReAct；状态持有 LLM 响应、工具结果与 Task | `runtime/domain/state.py::AgentState`；旧模块显式导出 `V2AgentState` 等迁移别名 | 1 | 新状态机测试覆盖全部转移，旧 Runtime 兼容门面不再依赖旧状态机 |
 | `runtime/task.py` 与 `AgentState.tasks` | 旧状态机内的跨 Run 任务语义 | 本轮不替代；新版 `AgentState` 已无 Task 依赖，delegation 后续仅经 `DelegationPort` 返回 | 1、5 | 保留调用方迁移至 delegation adapter 或明确移除 |
@@ -62,3 +62,7 @@ rg "Runtime|StateStore|ContextAssembler|slotContext|state_sink" src tests docs
 - `SlotContextProvider`：输出完整 `ContextBundle`（消息、工具定义、来源、失败槽位与 token 预算元数据）；Memory 等可选 Slot 失败只降级当前 Context 构造。
 - `LegacyContextPortAdapter`：旧 Runtime 在未切换 RuntimeEngine 前经 ContextPort 生成 system prompt，旧 Assembler 仅作为未注入 ContextPort 时的兼容回退。
 - `tests/runtime_v2/test_context_port.py`：覆盖完整 Bundle、三类缓存隔离、Memory 降级、token 预算及旧 Runtime 过渡适配器。
+- `runtime/application/engine.py`：纯 Port 驱动的 `RuntimeEngine`，将 RunExecution、消息、事件、审批恢复和取消全部限制在 run 局部变量与持久化容器中；不导入 Journal、Session 或旧 Slot。
+- `runtime/application/session_run_coordinator.py`：同 Session FIFO 租约、不同 Session 并行的请求协调器。
+- `runtime/application/approval_service.py`、`cancellation_service.py`：审批记录的唯一消费入口与 run 级取消令牌管理。
+- `tests/runtime_v2/test_runtime_engine.py`：覆盖普通澄清完成、跨 Session 隔离、同 Session FIFO、审批同 run_id 恢复及取消不写 Conversation。

@@ -58,6 +58,10 @@ class FileRunRepository:
         """读取指定运行摘要；文件不存在时返回 None。"""
         return await asyncio.to_thread(self._load_run_sync, session_id, run_id)
 
+    async def find_run(self, run_id: str) -> AgentRun | None:
+        """跨 Session 定位运行摘要，供取消和审批恢复使用。"""
+        return await asyncio.to_thread(self._find_run_sync, run_id)
+
     async def save_run(self, run: AgentRun) -> None:
         """原子更新已存在运行的摘要。"""
         await asyncio.to_thread(self._save_run_sync, run)
@@ -102,6 +106,18 @@ class FileRunRepository:
         if not path.is_file():
             return None
         return _agent_run_from_dict(load_json_map(path))
+
+    def _find_run_sync(self, run_id: str) -> AgentRun | None:
+        """扫描受控运行目录并定位唯一 run.json。"""
+        safe_run_id: str = validate_path_segment(run_id, "run_id")
+        run_paths: tuple[Path, ...] = tuple(self._root_directory.glob(
+            f"*/agent_runs/{safe_run_id}/{RunStorageFileName.RUN.value}"
+        ))
+        if len(run_paths) > 1:
+            raise ValueError(f"运行 {run_id} 在多个 Session 中重复出现")
+        if not run_paths:
+            return None
+        return _agent_run_from_dict(load_json_map(run_paths[0]))
 
     def _save_run_sync(self, run: AgentRun) -> None:
         path: Path = self._run_path(run.session_id, run.run_id)
