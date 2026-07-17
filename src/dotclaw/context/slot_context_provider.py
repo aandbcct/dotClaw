@@ -7,11 +7,9 @@ from enum import StrEnum
 from pathlib import Path
 
 from ..runtime.application.ports import ContextPort
-from ..runtime.domain.execution import RunBudget, RunExecution, RunExecutionView
+from ..runtime.domain.execution import RunExecutionView
 from ..runtime.domain.models import (
-    AgentPolicySnapshot,
     ConversationMessage,
-    ConversationSnapshot,
     ContextBundle,
     ContextMetadata,
     JSONMap,
@@ -25,7 +23,6 @@ from ..runtime.domain.models import (
     get_string,
     require_json_map,
 )
-from ..runtime.domain.state import AgentState
 from .ports import ContextDependencies
 from .scoped_cache import ScopedCache, SlotCacheScope
 from .slot_context import ContextProfile, SlotContext
@@ -41,70 +38,6 @@ class ContextBudgetPolicy(StrEnum):
 
 class ContextTokenBudgetExceeded(ValueError):
     """保留必要消息后仍超过 token 预算时抛出的异常。"""
-
-
-@dataclass(frozen=True)
-class LegacyContextInput:
-    """旧 Runtime 调用 ContextPort 所需的最小适配输入。"""
-
-    run_id: str
-    session_id: str
-    agent_id: str
-    identity_version: str
-    model_id: str
-    max_iterations: int
-    user_message: str
-    system_prompt: str
-    tools: tuple[ToolDefinition, ...]
-    project_root: Path
-    max_context_tokens: int
-    excluded_slot_names: frozenset[str] = frozenset()
-
-
-class LegacyContextPortAdapter:
-    """让尚未切换的旧 Runtime 通过 ContextPort 获得 system prompt。"""
-
-    def __init__(self, context_port: ContextPort) -> None:
-        """绑定 Runtime v2 ContextPort。"""
-        self._context_port: ContextPort = context_port
-
-    async def build_system_prompt(self, legacy_input: LegacyContextInput) -> str:
-        """构造临时运行视图，并提取 Bundle 中的 system 消息。"""
-        policy: AgentPolicySnapshot = AgentPolicySnapshot(
-            agent_id=legacy_input.agent_id,
-            identity_version=legacy_input.identity_version,
-            model_id=legacy_input.model_id,
-            max_iterations=legacy_input.max_iterations,
-            policy_data=_legacy_policy_data(legacy_input),
-        )
-        user_message: ConversationMessage = ConversationMessage(
-            message_id=f"legacy-input-{legacy_input.run_id}",
-            role=MessageRole.USER,
-            content=legacy_input.user_message,
-            created_at="",
-        )
-        request: RunRequest = RunRequest(
-            session_id=legacy_input.session_id,
-            lease_id=f"legacy-lease-{legacy_input.run_id}",
-            agent_id=legacy_input.agent_id,
-            user_message=user_message,
-            conversation=ConversationSnapshot(legacy_input.session_id, (), 0),
-        )
-        execution: RunExecution = RunExecution(
-            run_id=legacy_input.run_id,
-            request=request,
-            policy=policy,
-            state=AgentState(),
-            budget=RunBudget(max_iterations=legacy_input.max_iterations),
-        )
-        bundle: ContextBundle = await self._context_port.build(request, execution.view())
-        system_message: RunMessage | None = next(
-            (message for message in bundle.messages if message.role is MessageRole.SYSTEM),
-            None,
-        )
-        if system_message is None:
-            raise RuntimeError("ContextPort 必须返回一条 system 消息")
-        return system_message.content
 
 
 class SlotContextProvider:
@@ -213,17 +146,6 @@ class SlotContextProvider:
         if _estimate_tokens(remaining_messages) > max_context_tokens:
             raise ContextTokenBudgetExceeded("必要 system prompt 与当前用户输入已超出 token 预算")
         return _resequenced(remaining_messages), True
-
-
-def _legacy_policy_data(legacy_input: LegacyContextInput) -> JSONMap:
-    """将旧 Runtime 的上下文参数转换为冻结策略数据。"""
-    return {
-        "system_prompt": legacy_input.system_prompt,
-        "tools": [tool.to_dict() for tool in legacy_input.tools],
-        "project_root": str(legacy_input.project_root),
-        "max_context_tokens": legacy_input.max_context_tokens,
-        "excluded_slot_names": list(legacy_input.excluded_slot_names),
-    }
 
 
 def _profile_from_execution(request: RunRequest, execution: RunExecutionView) -> ContextProfile:

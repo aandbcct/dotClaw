@@ -1,8 +1,7 @@
 """Journal trace recording 测试。
 
-测试 Journal.record_message() 以 TRACE_MESSAGE 事件写入 trace.jsonl，
-旧 Journal StateSink 覆盖写入 state.json 的历史兼容测试。
-v2：产出路径统一为 session/{session_id}/
+测试 Journal.record_message() 以 TRACE_MESSAGE 事件写入 trace.jsonl。
+Runtime v2 的运行事实和恢复状态由 RunRepository、CheckpointRepository 管理。
 """
 
 import json
@@ -93,49 +92,6 @@ class TestHistorySink:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# StateSink
-# ═══════════════════════════════════════════════════════════════════
-
-class TestStateSink:
-    """StateSink 原子覆盖写入 state.json。"""
-
-    def test_writes_state_file(self, tmp_path):
-        from dotclaw.journal.sinks.state_sink import StateSink
-        sink = StateSink(Path(tmp_path) / "state.json")
-        sink.write({"session_id": "s-test", "status": "running"})
-
-        filepath = Path(tmp_path) / "state.json"
-        assert filepath.exists()
-        data = json.loads(filepath.read_text(encoding="utf-8"))
-        assert data["session_id"] == "s-test"
-
-    def test_overwrite_replaces_content(self, tmp_path):
-        from dotclaw.journal.sinks.state_sink import StateSink
-        filepath = Path(tmp_path) / "state.json"
-        sink = StateSink(filepath)
-        sink.write({"status": "running"})
-        sink.write({"status": "completed"})
-
-        data = json.loads(filepath.read_text(encoding="utf-8"))
-        assert data["status"] == "completed"
-
-    def test_atomic_write_no_temp_leftover(self, tmp_path):
-        from dotclaw.journal.sinks.state_sink import StateSink
-        sink = StateSink(Path(tmp_path) / "state.json")
-        sink.write({"status": "running"})
-
-        tmp_files = list(Path(tmp_path).glob("*.tmp"))
-        assert len(tmp_files) == 0
-
-    def test_missing_parent_dir_is_created(self, tmp_path):
-        from dotclaw.journal.sinks.state_sink import StateSink
-        nested = Path(tmp_path) / "deep" / "nested" / "state.json"
-        sink = StateSink(nested)
-        sink.write({"status": "ok"})
-        assert nested.exists()
-
-
-# ═══════════════════════════════════════════════════════════════════
 # Journal record_message (now as TRACE_MESSAGE in trace.jsonl)
 # ═══════════════════════════════════════════════════════════════════
 
@@ -205,75 +161,6 @@ class TestJournalRecordMessage:
         trace_messages = [e for e in entries if e.get("type") == "trace.message"]
         assert len(trace_messages) == 1
         assert trace_messages[0].get("agentrun_id") == "run-001"
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Journal _update_state
-# ═══════════════════════════════════════════════════════════════════
-
-@pytest.mark.legacy
-class TestJournalUpdateState:
-    """Journal._update_state() 集成测试。"""
-
-    def test_update_state_writes_required_fields(self, tmp_path):
-        journal = Journal()
-        _start_session(journal, str(tmp_path), state=True)
-        journal.agentrun_start("run-001", "user_input")
-
-        journal._token_accum = {"input": 3200, "output": 500}
-        journal._tool_count = 3
-        journal._errors_list = []
-        journal._max_loop_steps = 10
-        journal._update_state("running")
-
-        state_dir = Path(tmp_path) / "s-test"
-        state_path = state_dir / "state.json"
-        assert state_path.exists()
-
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-        assert data["session_id"] == "s-test"
-        assert data["agentrun_id"] == "run-001"
-        assert data["status"] == "running"
-        assert data["total_input_tokens"] == 3200
-        assert data["total_output_tokens"] == 500
-        assert data["total_tool_calls"] == 3
-        assert data["model"] == "test-model"
-        assert data["max_loop_steps"] == 10
-        assert "updated_at" in data
-
-    def test_state_transitions_on_session_end(self, tmp_path):
-        journal = Journal()
-        _start_session(journal, str(tmp_path), state=True)
-        journal._token_accum = {"input": 1000, "output": 200}
-        journal._tool_count = 2
-        journal._errors_list = []
-        journal._max_loop_steps = 5
-
-        journal._update_state("completed")
-
-        state_path = Path(tmp_path) / "s-test" / "state.json"
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-        assert data["status"] == "completed"
-
-    def test_state_disabled_does_not_create_file(self, tmp_path):
-        journal = Journal()
-        _start_session(journal, str(tmp_path), state=False)
-        journal._update_state("running")
-
-        state_path = Path(tmp_path) / "s-test" / "state.json"
-        assert not state_path.exists()
-
-    def test_errors_tracked_in_state(self, tmp_path):
-        journal = Journal()
-        _start_session(journal, str(tmp_path), state=True)
-        journal._errors_list = [{"source": "tool.execute", "message": "timeout"}]
-        journal._update_state("error")
-
-        state_path = Path(tmp_path) / "s-test" / "state.json"
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-        assert data["status"] == "error"
-        assert len(data["errors"]) == 1
-        assert data["errors"][0]["source"] == "tool.execute"
 
 
 # ═══════════════════════════════════════════════════════════════════

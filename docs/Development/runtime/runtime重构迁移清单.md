@@ -1,71 +1,58 @@
 # Runtime 重构迁移清单
 
-> 状态：Phase 1–Phase 5 已完成并通过回归验收。普通 CLI/Agent 入口及 Runtime v2 delegation 已切换到 Port；旧 Runtime 仅保留历史 delegation/handoff 兼容边界，物理删除留待 Phase 6。本文记录旧 Runtime 相关模块的归属、当前调用方、替代方向与删除条件；后续 Phase 完成时必须同步更新。
+> 状态：Phase 1–Phase 6 已完成并通过最终验收。
 > 对应设计：[Runtime 重构设计](runtime重构设计.md)。
 
-## 使用规则
+## 当前唯一运行架构
 
-- 新代码只能依赖 `runtime/domain`、`runtime/application` 定义的边界；旧模块只能由适配器或兼容门面调用。
-- 删除前执行 `rg "旧符号或旧模块" src tests docs`，确认调用方为零或仅剩迁移脚本、历史文档。
-- 历史测试不得通过复活已删除的生产 API 修复；其测试归属见 [测试迁移清单](../test-migration.md)。
-
-## 生产 API 与模块
-
-| 旧模块 / API | 当前调用方或职责 | 替代模块 | 计划 Phase | 删除条件 |
-| --- | --- | --- | --- | --- |
-| `runtime/runtime.py::LegacyRuntimeFacade`（兼容别名 `Runtime`） | 仅旧 `orchestration/runners/local.py`、handoff/delegation 兼容代码和历史测试；`main.py`、普通 Agent、工厂及 Runtime v2 delegation 已迁移 | `runtime/application/engine.py::RuntimeEngine` + `SessionRunCoordinator` + `RuntimeDelegationAdapter` | 4–6 | 历史兼容调用方归零后删除 |
-| `runtime/runtime.py::Runtime.derive()` | 仅旧 target runner / handoff 的历史运行隔离 | `RunExecution`、作用域化 ContextPort 与 `DelegationPort` | 5–6 | Phase 6 清除旧 runner 与 handoff 兼容调用方后删除 |
-| `runtime/agent_state.py::AgentState` | 旧 Runtime 驱动 ReAct；状态持有 LLM 响应、工具结果与 Task | `runtime/domain/state.py::AgentState`；旧模块显式导出 `V2AgentState` 等迁移别名 | 1 | 新状态机测试覆盖全部转移，旧 Runtime 兼容门面不再依赖旧状态机 |
-| `runtime/task.py` 与 `AgentState.tasks` | 仅旧 Runtime delegation 兼容语义 | Runtime v2 通过 `DelegationPort`、`DelegationRequest`、`DelegationResult` 与 RunEvent 表达父子关系 | 5–6 | Phase 6 清除旧 runner / handoff 后删除 |
-| `runtime/state_store.py::StateStore` | `Runtime`、`agent/resume.py`；以 Session ID 保存恢复快照 | `CheckpointRepository`（以 `run_id` 为键；Phase 2 已增加委托入口） | 2 | 新增和恢复运行只使用 CheckpointRepository，旧 `state.json` 仅保留 `save_legacy` / `load_legacy` 兼容路径或迁移脚本 |
-| `session/agent_run.py::AgentRun` 的 `messages`、`state_snapshot`、`trace_ids` | 旧 Runtime 写入，`AgentRunManager` 读取 | `RunMessage`、`Checkpoint`、`RunEvent` 与摘要 AgentRun（Phase 2 文件仓储已新增） | 2 | Runtime v2 新运行不写这些字段；迁移脚本可处理旧样例，旧 Runtime 迁移至新入口后删除兼容读写 |
-| `agent/slotContext.py::SlotContext`、`ContextAssembler` | 旧 Runtime 兼容回退与历史测试；新工厂不再构造或注入 | `context/slot_context.py`、`SlotContextProvider`、`ScopedCache` | 3 | RuntimeEngine 完成切换后移除旧 Runtime 的回退分支；旧 Slot 测试迁移至 `tests/runtime_v2/test_context_port.py` 后删除 |
-| `agent/agent.py::Agent.process()` 的 Session 直接提交 | 已删除；普通消息由 `main.py` 调用迁移后的 Agent 门面 | `SessionRunCoordinator.submit()` 与 RunRepository 成功投影 | 4 | 已满足：Conversation 仅由成功终态的 RunRepository 提交，Agent 不直接写 Session |
-| `journal/journal.py` 的私有状态与 `journal/sinks/state_sink.py` | Journal 已停止注册 StateSink、写 `state.json` 和恢复状态；独立 sink 与历史兼容测试仍存在 | `RunEvent`、RunRepository、CheckpointRepository；Journal 退化为可选渲染器 | 5–6 | Phase 6 确认独立 sink 无调用方后物理删除 |
-| `tools/executor.py` / `tools/approval.py` 的直接交互 | 仅旧 Runtime/delegation 兼容用途；新主路径由 `ToolExecutorPort` 调用无交互入口 | `ToolPort` 返回标准化结果或 `ApprovalRequired` | 4 | 已满足新入口：Channel 只提交有限审批决定，RuntimeEngine 经 ApprovalRepository 恢复 |
-| `agent/factory.py` 的 Runtime 具体装配 | 已移除普通消息的旧 Runtime、Journal、StateStore、旧 AgentRunManager 装配 | `bootstrap/runtime_factory.py` 组合根 | 3–4 | 已满足：新工厂只装配 Ports、RuntimeEngine 与 Coordinator；delegation 留待 Phase 5 |
-
-## 历史测试与文档
-
-| 历史项 | 当前状态 | 替代 / 维护位置 | 删除条件 |
-| --- | --- | --- | --- |
-| `tests/test_phase4_acceptance.py` | 已标记 `legacy`，依赖已删除的 `agent.context` 与旧 prompt provider | `MemoryManager`、MemorySlot 的当前契约测试；后续补 Runtime v2 context 测试 | 对应 Runtime v2 ContextPort 验收覆盖后删除 |
-| `tests/test_phase7_acceptance.py` | 已标记 `legacy`，包含已删除的 `agent.context` / `agent.prompt` 引用 | SkillRegistry、SkillsSlot 的当前模块测试 | Skill 的 Runtime v2 上下文契约覆盖后删除 |
-| `tests/metrics/` | 已标记 `legacy`，依赖已删除的 `dotclaw.metrics` 命名空间 | `tests/journal/` 的事件、历史与存储测试 | Journal 退出 Runtime 事实存储后，替代 RunEvent 测试覆盖指标需求 |
-| 计划中提及的 `tests/test_phase1_acceptance.py`、`tests/test_phase3_acceptance.py` | 当前工作树不存在 | 历史迁移关系记录于 `test-migration.md` | 无需删除；若恢复文件，必须先标记 `legacy` 并登记替代测试 |
-| AgentLoop 相关旧设计图 | 保留作历史背景，不作为当前实现依据 | [开发架构状态](../architecture.md) 与 Runtime 重构设计 | 所有引用迁移为 RuntimeEngine 后按文档治理策略归档或删除 |
-
-## Phase 0 审计命令
-
-```powershell
-# 默认必跑测试
-.\.venv\Scripts\python.exe -m pytest
-
-# Runtime v2 的依赖方向护栏
-.\.venv\Scripts\python.exe -m pytest tests/runtime_v2/test_architecture_contract.py
-
-# 删除前的调用方审计模板
-rg "Runtime|StateStore|ContextAssembler|slotContext|state_sink" src tests docs
+```text
+Agent
+  → SessionRunCoordinator
+  → RuntimeEngine
+  → Context / LLM / Tool / Repository / Delegation Ports
+  → Conversation、AgentRun、RunEvent、RunMessage、Checkpoint
 ```
 
-## Phase 1、Phase 2 与 Phase 3 已交付内容
+- `RuntimeEngine` 只依赖 Port，不导入 Journal、Session、旧上下文或 Dispatcher。
+- `orchestration.RuntimeDelegationAdapter` 实现 `DelegationPort`，负责子 Session、子 Run、Task/Broker 回调和取消传播。
+- `FileRunRepository`、`FileCheckpointRepository` 分别保存运行事实和恢复安全点；Journal 不再写入或恢复运行状态。
 
-- `runtime/domain/`：可 JSON 序列化的请求、结果、消息、运行摘要、事件、检查点、`RunExecution` 与纯 `AgentState`；不导入 LLM、Tool、Session、Task 或仓储实现。
-- `runtime/application/ports.py`：Run、Checkpoint、Context、LLM、Tool、Approval、Delegation 的 Protocol 边界。
-- `runtime/adapters/`：文件版 Run、Checkpoint、Approval 仓储；RunEvent 只允许引用已原子写入的 RunMessage。
-- `runtime/adapters/session_conversation_projector.py`：成功运行通过既有 `SessionManager` 幂等投影为 Conversation；失败、取消、等待审批不会生成 Conversation。
-- `FileCheckpointRepository`：递归拒绝 `prompt`、`messages`、`tool_result` 等完整上下文载荷，检查点只保存恢复所需的最小控制数据。
-- `runtime/agent_state.py`、`session/agent_run.py` 与 `StateStore`：明确旧格式兼容别名或 `*_legacy` 入口，防止 Runtime v2 新代码误用旧持久化模型。
-- `scripts/migrate_agent_run_v1_to_v2.py`：旧 AgentRun 到 v2 容器的可重复迁移脚本；保留源文件，支持显式覆盖迁移目标。
-- `tests/runtime_v2/`：状态机、fake ports、文件原子性、事件引用完整性、旧样例迁移、Session 成功投影、checkpoint 载荷边界及 Phase 1/2 兼容验收测试。
-- `context/`：不含 Journal 的 `SlotContext`、业务 Slot、`SlotContextProvider` 与 `ScopedCache`；缓存按 Agent 身份、Session、Run 分区，避免共享 Runtime 时串用。
-- `SlotContextProvider`：输出完整 `ContextBundle`（消息、工具定义、来源、失败槽位与 token 预算元数据）；Memory 等可选 Slot 失败只降级当前 Context 构造。
-- `LegacyContextPortAdapter`：旧 Runtime 在未切换 RuntimeEngine 前经 ContextPort 生成 system prompt，旧 Assembler 仅作为未注入 ContextPort 时的兼容回退。
-- `tests/runtime_v2/test_context_port.py`：覆盖完整 Bundle、三类缓存隔离、Memory 降级、token 预算及旧 Runtime 过渡适配器。
-- `runtime/application/engine.py`：纯 Port 驱动的 `RuntimeEngine`，将 RunExecution、消息、事件、审批恢复和取消全部限制在 run 局部变量与持久化容器中；审批恢复以原 `run_id` 记录 `APPROVAL_RESOLVED` 与 `RUN_RESUMED`，拒绝审批记录决议后取消；不导入 Journal、Session 或旧 Slot。
-- `runtime/application/session_run_coordinator.py`：同 Session FIFO 租约、不同 Session 并行的请求协调器；审批恢复与取消同样按所属 Session 获取租约。
-- `runtime/application/approval_service.py`、`cancellation_service.py`：审批记录的唯一消费入口与 run 级取消令牌管理。
-- `tests/runtime_v2/test_runtime_engine.py`：覆盖普通澄清完成、跨 Session 隔离、同 Session FIFO、审批同 run_id 恢复、审批拒绝、审批恢复与新消息的租约互斥及取消不写 Conversation。
-- `orchestration/runtime_delegation_adapter.py`：DelegationPort 的 Runtime v2 适配器；包装 `AgentDispatcher` 的 Task / Broker 业务状态机，创建 target Session / 子 Run，回调投影子运行终态并缓存标准化结果，不让 Engine 依赖 Dispatcher 或旧 Runtime。
-- `tests/runtime_v2/test_delegation_port.py`：覆盖 fake DelegationPort 父子 RunEvent、真实 Adapter → Dispatcher → Coordinator 子 Run 回调、父取消向子 Run 传播、target Session 请求映射与 `parent_run_id` / `root_run_id`。
-- `tests/runtime_v2/test_no_journal_dependency.py`：验证 RuntimeEngine 不导入 Journal、Dispatcher 或旧 Runtime。
+## 已删除模块与替代关系
+
+| 已删除内容 | 唯一替代者 | 删除前验证 | 当前状态 |
+| --- | --- | --- | --- |
+| `runtime/runtime.py`、旧 Runtime facade | `RuntimeEngine` + `SessionRunCoordinator` | main、Agent、orchestration 已切换；v2 运行与委派测试通过 | 已删除 |
+| `runtime/state_store.py`、Session 级 `state.json` | `CheckpointRepository` | 审批恢复、取消与 checkpoint 边界测试通过 | 已删除 |
+| `runtime/agent_state.py`、`runtime/task.py` | `runtime/domain/state.py`、`DelegationPort` | 领域状态机和 delegation adapter 测试通过 | 已删除 |
+| `session/agent_run.py`、旧 `messages/state_snapshot/trace_ids` | `runtime/domain/models.py::AgentRun`、RunMessage、RunEvent、Checkpoint | 旧样例迁移和摘要边界测试通过 | 已删除 |
+| `agent/slotContext.py`、`slotContextImp.py` | `context/slot_context.py`、`slots.py`、`SlotContextProvider` | scoped cache、预算与降级测试通过 | 已删除 |
+| `agent/resume.py`、旧 trace 恢复 | `ApprovalService` + `CheckpointRepository` | 同 run_id 审批恢复测试通过 | 已删除 |
+| `orchestration/runners/local.py`、旧 Task 工具 | `RuntimeDelegationAdapter` | 真实 Adapter → Dispatcher → Coordinator 回调及取消测试通过 | 已删除 |
+| `journal/sinks/state_sink.py` | `CheckpointRepository` | 无生产调用方；Journal 禁用时 Engine 测试通过 | 已删除 |
+
+## 数据迁移
+
+旧单文件 AgentRun 通过 `scripts/migrate_agent_run_v1_to_v2.py` 只读迁移到以下布局：
+
+```text
+data/sessions/{session_id}/agent_runs/{run_id}/
+├── run.json
+├── events.jsonl
+├── messages.json
+└── checkpoint.json
+```
+
+迁移脚本保留旧源文件；成功迁移、checkpoint 脱敏和缺失源文件的可行动错误均由 `tests/runtime_v2/test_file_repositories.py` 验证。
+
+## 最终审计命令
+
+```powershell
+# 默认回归
+.\.venv\Scripts\python.exe -m pytest
+
+# Runtime v2 架构和物理删除护栏
+.\.venv\Scripts\python.exe -m pytest tests/runtime_v2/test_architecture_contract.py tests/runtime_v2/test_phase6_finalization.py
+
+# 禁止旧生产模块残留
+rg "runtime\.runtime|runtime\.state_store|runtime\.agent_state|runtime\.task|session\.agent_run|StateSink|ContextAssembler" src/dotclaw
+```

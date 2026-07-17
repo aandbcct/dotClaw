@@ -9,13 +9,11 @@ import pytest
 
 from dotclaw.context import (
     ContextDependencies,
-    LegacyContextPortAdapter,
     SlotCacheScope,
     SlotContext,
     SlotContextProvider,
 )
 from dotclaw.context.slots import ContextSlot, IdentitySlot, MemorySlot, ProjectSlot
-from dotclaw.context.slot_context_provider import LegacyContextInput
 from dotclaw.runtime.domain.execution import RunBudget, RunExecution
 from dotclaw.runtime.domain.models import (
     AgentPolicySnapshot,
@@ -199,29 +197,3 @@ async def test_project_slot_has_read_limit_and_budget_failure_is_explicit(tmp_pa
 
     with pytest.raises(ValueError, match="必要 system prompt"):
         await provider.build(request, constrained_execution.view())
-
-
-async def test_legacy_runtime_adapter_delegates_prompt_building_to_context_port() -> None:
-    """旧 Runtime 过渡适配器只提取 ContextPort 生成的 system 消息。"""
-    provider: SlotContextProvider = SlotContextProvider(
-        slots=(IdentitySlot(),),
-        dependencies=ContextDependencies(),
-    )
-    adapter: LegacyContextPortAdapter = LegacyContextPortAdapter(provider)
-    legacy_input: LegacyContextInput = LegacyContextInput(
-        run_id="legacy-run-1",
-        session_id="legacy-session-1",
-        agent_id="legacy-agent-1",
-        identity_version="legacy-identity-v1",
-        model_id="legacy-model-1",
-        max_iterations=8,
-        user_message="你好",
-        system_prompt="旧 Runtime 也通过 ContextPort 构建提示词。",
-        tools=(),
-        project_root=Path.cwd(),
-        max_context_tokens=100,
-    )
-
-    system_prompt: str = await adapter.build_system_prompt(legacy_input)
-
-    assert system_prompt == legacy_input.system_prompt

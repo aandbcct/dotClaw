@@ -1,6 +1,6 @@
 # Runtime 重构设计
 
-> 状态：已确认设计，待实施  
+> 状态：已完成实施并通过最终验收
 > 范围：Runtime 内核、运行状态、持久化边界、上下文接口与运行控制协议。  
 > 非范围：本阶段不引入跨 Run 的 `Task` 领域模型，不重做 Memory / Skill 业务逻辑，不重做多 Agent 编排语义。
 
@@ -455,17 +455,15 @@ data/sessions/{session_id}/agent_runs/{run_id}/
 
 | 现有模块 | 当前问题 | 重构后的定位 |
 |---|---|---|
-| `runtime/runtime.py` | 同时协调状态、上下文、Journal、持久化、handoff，且保存 `_current_*` 执行状态 | 演进为 `RuntimeEngine`；移除 run 级字段，只依赖 Ports |
-| `runtime/agent_state.py` | 状态机方向正确，但引用 `Message`、`LLMResponse`、`Task` | 保留并下沉为纯 domain state；移除 Task 与外部实现依赖 |
-| `runtime/state_store.py` | 以 Session 为键保存状态，属于执行事务却被视为通用状态 | 演进为按 `run_id` 保存的 `CheckpointRepository` |
-| `session/agent_run.py` | AgentRun 同时包含 snapshot、trace ID、完整 messages | 收缩为 AgentRun 摘要；拆出 RunEvent 与 RunMessage 仓储职责 |
-| `session/session.py` | 当前同时承担会话历史和运行关联 | 保留 Conversation / Session 业务事实；不保存执行过程 |
-| `agent/agent.py` | `process()` 直接保存 Session，且混入执行和委托职责 | 退回身份、策略与委托门面；会话提交由 Runtime Repository 完成 |
-| `agent/slotContext.py` / `slotContextImp.py` | 只生成 system prompt，缓存不按 scope 隔离，含 Journal 依赖 | 保留业务 Slot，适配为 `ContextPort` 内部实现 |
-| `journal/journal.py` | 同时采集事件、保存 trace / state，Runtime 读取私有字段 | 不再作为 Runtime 依赖；可逐步退化为 RunEvent 的可选渲染器 |
-| `journal/sinks/state_sink.py` | 观测链路写入恢复状态，职责反转 | 移除恢复职责；Checkpoint 由 Runtime 明确保存 |
-| `orchestration/*` | Runtime 直接耦合 Dispatcher / InstanceManager 会扩大内核 | 保持现状，通过 `DelegationPort` 适配 |
-| `agent/factory.py` | 负责大量具体组件构造与延迟导入 | 演进为 bootstrap / composition root 的薄包装 |
+| `runtime/runtime.py` | 旧执行循环耦合状态、上下文、Journal 与持久化 | 已删除；由 `RuntimeEngine` 只依赖 Ports 的执行机替代 |
+| `runtime/agent_state.py`、`runtime/task.py` | 旧状态机耦合 Message、Tool 与 Task | 已删除；由纯 `runtime/domain/state.py` 与 `DelegationPort` 替代 |
+| `runtime/state_store.py` | Session 级恢复状态混入执行事务 | 已删除；由 run 级 `CheckpointRepository` 替代 |
+| `session/agent_run.py` | 混合保存消息、快照与 trace 标识 | 已删除；由 AgentRun 摘要、RunMessage、RunEvent、Checkpoint 分离保存 |
+| `session/session.py` | 会话历史与运行关联 | 保留 Conversation / Session 业务事实；不保存执行过程 |
+| `agent/agent.py` | 旧入口混入 Runtime 与直接提交 | 已收敛为 Coordinator 门面；会话提交由 RunRepository 完成 |
+| 旧 `slotContext`、`StateSink`、本地 runner、Task 工具 | 旧兼容或反向依赖路径 | 已删除；由 ContextPort、CheckpointRepository 与 DelegationPort 替代 |
+| `orchestration/*` | 多 Agent 调度实现 | 保持业务实现，通过 `RuntimeDelegationAdapter` 对接 DelegationPort |
+| `agent/factory.py` | 组合根薄包装 | 委托 `bootstrap/runtime_factory.py` 装配 Runtime v2 服务 |
 
 ## 11. 迁移顺序
 

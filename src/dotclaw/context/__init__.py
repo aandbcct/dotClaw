@@ -3,7 +3,7 @@
 from .ports import ContextDependencies, ContextMetadata, ContextPort
 from .scoped_cache import ScopedCache, SlotCacheScope
 from .slot_context import ContextProfile, SlotContext
-from .slot_context_provider import LegacyContextPortAdapter, SlotContextProvider
+from .slot_context_provider import SlotContextProvider
 from .slots import (
     AvailableAgentsSlot,
     IdentitySlot,
@@ -24,7 +24,6 @@ __all__ = [
     "ContextProfile",
     "IdentitySlot",
     "KnowledgeSlot",
-    "LegacyContextPortAdapter",
     "MemorySlot",
     "ProjectSlot",
     "ScopedCache",

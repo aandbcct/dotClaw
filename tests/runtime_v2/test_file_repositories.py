@@ -15,7 +15,6 @@ from dotclaw.runtime.adapters import (
     FileRunRepository,
     SessionConversationProjector,
 )
-from dotclaw.runtime.state_store import StateStore
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.models import (
     AgentAction,
@@ -255,28 +254,9 @@ async def test_migration_converts_legacy_agent_run_sample(tmp_path: Path) -> Non
     assert conversation[0].content == migrated_messages[-1].content
 
 
-async def test_legacy_state_store_delegates_run_scoped_checkpoint(tmp_path: Path) -> None:
-    """旧 StateStore 暴露 run_id 检查点兼容入口而不改变旧 Session 读取。"""
-    state_store: StateStore = StateStore(tmp_path)
-    checkpoint: RunCheckpoint = RunCheckpoint(
-        checkpoint_id="checkpoint-state-store-1",
-        run_id="run-state-store-1",
-        session_id="session-state-store-1",
-        checkpoint_sequence=1,
-        event_sequence=1,
-        message_sequence=1,
-        agent_state={"phase": "waiting_approval"},
-        next_action=AgentAction.WAIT,
-        pending={"kind": "approval"},
-        budget={"max_iterations": 8},
-    )
+async def test_migration_reports_missing_legacy_run_with_actionable_error(tmp_path: Path) -> None:
+    """迁移命令遇到缺失旧文件时必须给出可行动错误信息。"""
+    missing_source: Path = tmp_path / "missing-agent-run.json"
 
-    await state_store.save_checkpoint(checkpoint)
-    loaded_checkpoint: RunCheckpoint | None = await state_store.load_checkpoint(
-        checkpoint.session_id,
-        checkpoint.run_id,
-    )
-
-    assert loaded_checkpoint == checkpoint
-    await state_store.delete_checkpoint(checkpoint.session_id, checkpoint.run_id)
-    assert await state_store.load_checkpoint(checkpoint.session_id, checkpoint.run_id) is None
+    with pytest.raises(FileNotFoundError, match="找不到旧 AgentRun 文件"):
+        await migrate_agent_run(missing_source, tmp_path, "session-1")

@@ -70,12 +70,7 @@ class ToolExecutor:
         if execution_context is not None:
             ctx: ToolExecutionContext = ToolExecutionContext(
                 timeout=timeout,
-                agent=execution_context.agent,
-                runtime=execution_context.runtime,
-                session_id=execution_context.session_id,
                 agentrun_id=execution_context.agentrun_id,
-                task_id=execution_context.task_id,
-                channel=execution_context.channel,
             )
         else:
             ctx = ToolExecutionContext(timeout=timeout)
@@ -113,7 +108,7 @@ class ToolExecutor:
             channel: 通信 Channel
             journal: Journal 实例
             execution_context: Runtime 层注入的运行时上下文
-                              （agent/runtime/session_id/agentrun_id）。
+                              （agentrun_id）。
                               超时由 ToolDefinition.timeout 覆盖。
         """
         # ── Journal：工具执行开始 ──
