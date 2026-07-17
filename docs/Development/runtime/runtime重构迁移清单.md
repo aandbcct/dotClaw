@@ -66,6 +66,6 @@ rg "Runtime|StateStore|ContextAssembler|slotContext|state_sink" src tests docs
 - `runtime/application/session_run_coordinator.py`：同 Session FIFO 租约、不同 Session 并行的请求协调器；审批恢复与取消同样按所属 Session 获取租约。
 - `runtime/application/approval_service.py`、`cancellation_service.py`：审批记录的唯一消费入口与 run 级取消令牌管理。
 - `tests/runtime_v2/test_runtime_engine.py`：覆盖普通澄清完成、跨 Session 隔离、同 Session FIFO、审批同 run_id 恢复、审批拒绝、审批恢复与新消息的租约互斥及取消不写 Conversation。
-- `orchestration/runtime_delegation_adapter.py`：DelegationPort 的 Runtime v2 适配器；创建 target Session / 子 Run，缓存标准化结果，不让 Engine 依赖 Dispatcher 或旧 Runtime。
-- `tests/runtime_v2/test_delegation_port.py`：覆盖 fake DelegationPort 父子 RunEvent、target 子运行请求映射与 `parent_run_id` / `root_run_id`。
+- `orchestration/runtime_delegation_adapter.py`：DelegationPort 的 Runtime v2 适配器；包装 `AgentDispatcher` 的 Task / Broker 业务状态机，创建 target Session / 子 Run，回调投影子运行终态并缓存标准化结果，不让 Engine 依赖 Dispatcher 或旧 Runtime。
+- `tests/runtime_v2/test_delegation_port.py`：覆盖 fake DelegationPort 父子 RunEvent、真实 Adapter → Dispatcher → Coordinator 子 Run 回调、父取消向子 Run 传播、target Session 请求映射与 `parent_run_id` / `root_run_id`。
 - `tests/runtime_v2/test_no_journal_dependency.py`：验证 RuntimeEngine 不导入 Journal、Dispatcher 或旧 Runtime。

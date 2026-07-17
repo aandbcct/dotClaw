@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 from dotclaw.agent.identity import AgentIdentity
+from dotclaw.orchestration.dispatcher import AgentDispatcher
+from dotclaw.orchestration.message_broker import TaskMessageBroker
 from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.orchestration.runtime_delegation_adapter import RuntimeDelegationAdapter
+from dotclaw.orchestration.task import TaskStatus
 from dotclaw.runtime.adapters import FileApprovalRepository, FileCheckpointRepository, FileRunRepository
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.ports import ContextPort, DelegationPort, LLMPort, RunPolicyPort, ToolPort
+from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.domain.execution import RunExecutionView
 from dotclaw.runtime.domain.models import (
     AgentPolicySnapshot,
@@ -110,6 +115,71 @@ class FinalLLM(LLMPort):
         """测试替身没有远程调用需要取消。"""
 
 
+class ParentChildLLM(LLMPort):
+    """按冻结身份返回父委派与子运行终态，验证真实协调器调用链。"""
+
+    def __init__(self) -> None:
+        self._parent_calls: int = 0
+
+    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+        """父运行先委派，子运行和父运行后续调用均返回最终文本。"""
+        if execution.policy.agent_id == "parent-agent" and self._parent_calls == 0:
+            self._parent_calls += 1
+            return RunMessage(
+                "delegate",
+                1,
+                RunMessageKind.LLM_RESPONSE,
+                MessageRole.ASSISTANT,
+                "",
+                tool_calls=(ToolCall("call-delegate", "delegate", {
+                    "target_agent_id": "target-agent",
+                    "title": "子任务",
+                    "objective": "完成调研",
+                }),),
+            )
+        content: str = "子运行完成" if execution.policy.agent_id == "target-agent" else "父运行已整合结果"
+        return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, content)
+
+    async def cancel(self, run_id: str) -> None:
+        """该端到端替身没有可中止的远程调用。"""
+
+
+class BlockingChildLLM(LLMPort):
+    """让子运行停在模型调用中，用于验证父取消向下传播。"""
+
+    def __init__(self) -> None:
+        self.child_started: asyncio.Event = asyncio.Event()
+        self.child_release: asyncio.Event = asyncio.Event()
+        self.parent_run_id: str = ""
+        self.cancelled_run_ids: list[str] = []
+
+    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+        """父运行发起委派，子运行等待取消信号后才返回。"""
+        if execution.policy.agent_id == "parent-agent" and not self.parent_run_id:
+            self.parent_run_id = execution.run_id
+            return RunMessage(
+                "delegate",
+                1,
+                RunMessageKind.LLM_RESPONSE,
+                MessageRole.ASSISTANT,
+                "",
+                tool_calls=(ToolCall("call-delegate", "delegate", {
+                    "target_agent_id": "target-agent",
+                    "title": "可取消子任务",
+                    "objective": "等待取消",
+                }),),
+            )
+        if execution.policy.agent_id == "target-agent":
+            self.child_started.set()
+            await self.child_release.wait()
+        return RunMessage("answer", 1, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, "完成")
+
+    async def cancel(self, run_id: str) -> None:
+        """模拟远程模型收到取消后尽快结束调用。"""
+        self.cancelled_run_ids.append(run_id)
+        self.child_release.set()
+
+
 class CompletedDelegation(DelegationPort):
     """记录父请求并返回已完成子运行的 fake Port。"""
 
@@ -138,6 +208,11 @@ def _request() -> RunRequest:
         ConversationMessage("input", MessageRole.USER, "请委托", ""),
         ConversationSnapshot("parent-session", (), 0),
     )
+
+
+def _dispatcher() -> AgentDispatcher:
+    """为每个适配器测试创建独立的既有 Task 调度业务实现。"""
+    return AgentDispatcher(TaskMessageBroker())
 
 
 async def test_engine_records_delegation_parent_child_events_without_dispatcher(tmp_path: Path) -> None:
@@ -194,13 +269,15 @@ async def test_runtime_delegation_adapter_creates_target_run_with_parent_and_roo
     registry = AgentRegistry()
     registry.register(target)
     coordinator = RecordingCoordinator()
-    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry)
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, _dispatcher())
     adapter.bind_coordinator(coordinator)
     request = DelegationRequest(
         parent_run_id="parent-run",
         root_run_id="root-run",
         target_agent_id=target.agent_id,
         input_message=ConversationMessage("delegation", MessageRole.USER, "执行子任务", ""),
+        source_agent_id="parent-agent",
+        source_session_id="parent-session",
     )
 
     child_run_id: str = await adapter.submit(request)
@@ -210,6 +287,88 @@ async def test_runtime_delegation_adapter_creates_target_run_with_parent_and_roo
     assert coordinator.request.root_run_id == "root-run"
     assert coordinator.request.agent_id == target.agent_id
     assert result == DelegationResult("child-run", RunStatus.COMPLETED, "目标完成")
+
+
+async def test_runtime_delegation_adapter_executes_real_child_run_through_coordinator(tmp_path: Path) -> None:
+    """真实适配器必须经协调器执行子 Run，而非仅使用伪协调器记录请求。"""
+    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent", model="model")
+    registry: AgentRegistry = AgentRegistry()
+    registry.register(target)
+    repository = FileRunRepository(tmp_path)
+    dispatcher = _dispatcher()
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher)
+    engine = RuntimeEngine(
+        repository,
+        FileCheckpointRepository(tmp_path),
+        MinimalContext(),
+        ParentChildLLM(),
+        NoToolExecution(),
+        FixedPolicy(),
+        ApprovalService(FileApprovalRepository(tmp_path)),
+        CancellationService(),
+        adapter,
+    )
+    coordinator = SessionRunCoordinator(engine)
+    adapter.bind_coordinator(coordinator)
+
+    result: RunResult = await coordinator.submit(_request())
+    parent_run = await repository.load_run("parent-session", result.run_id)
+    assert result.status is RunStatus.COMPLETED
+    assert parent_run is not None
+    child_run_files: list[Path] = list(tmp_path.glob("*/agent_runs/*/run.json"))
+    child_runs = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in child_run_files
+        if json.loads(path.read_text(encoding="utf-8"))["run_id"] != result.run_id
+    ]
+    assert len(child_runs) == 1
+    assert child_runs[0]["parent_run_id"] == result.run_id
+    assert child_runs[0]["root_run_id"] == result.run_id
+    task = await dispatcher.broker.latest_task_for_source("parent-session")
+    assert task is not None
+    assert task.status is TaskStatus.COMPLETED
+
+
+async def test_parent_cancellation_propagates_to_real_delegated_child_run(tmp_path: Path) -> None:
+    """父运行取消必须通知子 Run，且父子均以取消终态收口。"""
+    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent", model="model")
+    registry: AgentRegistry = AgentRegistry()
+    registry.register(target)
+    repository = FileRunRepository(tmp_path)
+    dispatcher = _dispatcher()
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher)
+    llm = BlockingChildLLM()
+    engine = RuntimeEngine(
+        repository,
+        FileCheckpointRepository(tmp_path),
+        MinimalContext(),
+        llm,
+        NoToolExecution(),
+        FixedPolicy(),
+        ApprovalService(FileApprovalRepository(tmp_path)),
+        CancellationService(),
+        adapter,
+    )
+    coordinator = SessionRunCoordinator(engine)
+    adapter.bind_coordinator(coordinator)
+
+    parent_task: asyncio.Task[RunResult] = asyncio.create_task(coordinator.submit(_request()))
+    await asyncio.wait_for(llm.child_started.wait(), timeout=1.0)
+    await coordinator.cancel(llm.parent_run_id, "用户取消委派")
+    result: RunResult = await asyncio.wait_for(parent_task, timeout=1.0)
+
+    assert result.status is RunStatus.CANCELLED
+    assert len(llm.cancelled_run_ids) >= 2
+    child_run_files: list[Path] = list(tmp_path.glob("*/agent_runs/*/run.json"))
+    child_statuses: list[str] = [
+        json.loads(path.read_text(encoding="utf-8"))["status"]
+        for path in child_run_files
+        if json.loads(path.read_text(encoding="utf-8"))["run_id"] != result.run_id
+    ]
+    assert child_statuses == [RunStatus.CANCELLED.value]
+    task = await dispatcher.broker.latest_task_for_source("parent-session")
+    assert task is not None
+    assert task.status is TaskStatus.CANCELLED
 
 
 async def test_child_run_persists_parent_and_root_relationship(tmp_path: Path) -> None:

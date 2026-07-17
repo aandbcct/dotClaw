@@ -56,14 +56,13 @@ class SessionRunCoordinator:
             return await self._engine.resolve_approval(approval_id, approved)
 
     async def cancel(self, run_id: str, reason: str) -> None:
-        """在运行所属 Session 的租约内提交取消，避免与恢复或新请求交叉。"""
-        session_id: str | None = await self._engine.get_run_session_id(run_id)
-        if session_id is None:
-            await self._engine.cancel(run_id, reason)
-            return
-        lock: asyncio.Lock = await self._get_lock(session_id)
-        async with lock:
-            await self._engine.cancel(run_id, reason)
+        """立即发送取消信号，避免等待运行自身占用的 Session 租约。
+
+        活动运行只会更新其局部取消令牌；等待审批的运行由 Engine 依据终态检查
+        原子收口。因此取消不能像普通请求一样等待同一把 Session 锁，否则会与
+        正在执行且等待外部结果的 Run 相互等待。
+        """
+        await self._engine.cancel(run_id, reason)
 
     async def _get_lock(self, session_id: str) -> asyncio.Lock:
         """为 Session 创建或返回唯一的异步租约锁。"""

@@ -42,9 +42,6 @@ class AgentDispatcher:
         specification: TaskSpecification,
     ) -> Task:
         """创建 target Session、Task 与运行协程，拒绝第二个活动 Task。"""
-        active_task: Task | None = await self._broker.active_task_for_source(source_session_id)
-        if active_task is not None:
-            raise RuntimeError(f"当前 Session 已有活动 Task：{active_task.task_id}")
         target_identity = runtime.agent_registry.get(target_identity_id)
         if target_identity is None:
             raise KeyError(f"目标 Identity 不存在：{target_identity_id}")
@@ -56,16 +53,65 @@ class AgentDispatcher:
             model=target_identity.resolve_model(runtime.config.llm.default_model) if runtime.config is not None else target_identity.model,
             agent_id=target_identity.agent_id,
         )
+        task: Task = await self.start_v2_delegation(
+            source_identity_id,
+            source_session_id,
+            source_run_id,
+            target_identity_id,
+            target_session.id,
+            specification,
+        )
+        self._runner.start(runtime, self, task, target_session)
+        return task
+
+    async def start_v2_delegation(
+        self,
+        source_identity_id: str,
+        source_session_id: str,
+        source_run_id: str,
+        target_identity_id: str,
+        target_session_id: str,
+        specification: TaskSpecification,
+    ) -> Task:
+        """登记 Runtime v2 子运行对应的 Task，但不启动旧 Runtime runner。
+
+        Task 的消息状态机仍由 Dispatcher/Broker 持有；实际子运行改由
+        RuntimeDelegationAdapter 经 SessionRunCoordinator 执行。
+        """
+        active_task: Task | None = await self._broker.active_task_for_source(source_session_id)
+        if active_task is not None:
+            raise RuntimeError(f"当前 Session 已有活动 Task：{active_task.task_id}")
         task: Task = Task(
             task_id=uuid4().hex,
             specification=specification,
             source=TaskEndpointBinding(TaskEndpoint.SOURCE, source_identity_id, source_session_id),
-            target=TaskEndpointBinding(TaskEndpoint.TARGET, target_identity_id, target_session.id),
+            target=TaskEndpointBinding(TaskEndpoint.TARGET, target_identity_id, target_session_id),
         )
         await self._broker.create_task(task, source_run_id)
-        await self._broker.mark_target_running(task.task_id)
-        self._runner.start(runtime, self, task, target_session)
-        return task
+        return await self._broker.mark_target_running(task.task_id)
+
+    async def finish_v2_delegation(
+        self,
+        task_id: str,
+        target_run_id: str,
+        output: str,
+        succeeded: bool,
+    ) -> Task:
+        """将 v2 子 Run 终态回调投影到既有 Task 状态机。"""
+        task: Task = await self._broker.get_task(task_id)
+        if task.status.is_terminal():
+            return task
+        message_type: TaskMessageType = TaskMessageType.RESULT if succeeded else TaskMessageType.FAILED
+        await self.send_message(
+            task_id,
+            TaskEndpoint.TARGET,
+            task.target.identity_id,
+            task.target.session_id,
+            target_run_id,
+            message_type,
+            output,
+        )
+        return await self._broker.get_task(task_id)
 
     async def send_message(
         self,

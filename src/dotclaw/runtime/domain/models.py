@@ -208,6 +208,8 @@ class RunRequest:
     conversation: ConversationSnapshot
     parent_run_id: str | None = None
     root_run_id: str | None = None
+    run_id: str = ""
+    """调用方可选地预分配的运行标识；普通入口留空由 Engine 生成。"""
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -217,6 +219,9 @@ class RunRequest:
             "agent_id": self.agent_id,
             "user_message": self.user_message.to_dict(),
             "conversation": self.conversation.to_dict(),
+            "parent_run_id": self.parent_run_id,
+            "root_run_id": self.root_run_id,
+            "run_id": self.run_id,
         }
 
 
@@ -433,6 +438,10 @@ class DelegationRequest:
     root_run_id: str
     target_agent_id: str
     input_message: ConversationMessage
+    source_agent_id: str = ""
+    """父运行所属 Agent，仅供 orchestration 校验来源端点。"""
+    source_session_id: str = ""
+    """父运行所属 Session，仅供 orchestration 建立 Task 关联。"""
 
 
 @dataclass(frozen=True)

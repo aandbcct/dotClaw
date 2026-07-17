@@ -39,6 +39,8 @@ from ..tools.executor import ToolExecutor
 from ..skills.registry import SkillRegistry
 from ..memory.manager import MemoryManager
 from ..orchestration.registry import AgentRegistry
+from ..orchestration.dispatcher import AgentDispatcher
+from ..orchestration.message_broker import TaskMessageBroker
 from ..orchestration.runtime_delegation_adapter import RuntimeDelegationAdapter
 from ..mcp.provider import MCPToolProvider
 
@@ -84,9 +86,11 @@ def build_runtime_services(
     )
     run_repository = FileRunRepository(storage_root, SessionConversationProjector(session_manager))
     approval_repository = FileApprovalRepository(storage_root)
+    dispatcher: AgentDispatcher = AgentDispatcher(TaskMessageBroker())
     delegation_port: RuntimeDelegationAdapter = RuntimeDelegationAdapter(
         session_manager,
         agent_registry,
+        dispatcher,
     )
     engine = RuntimeEngine(
         run_repository=run_repository,

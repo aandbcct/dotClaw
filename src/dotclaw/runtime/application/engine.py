@@ -76,7 +76,7 @@ class RuntimeEngine:
     async def execute(self, request: RunRequest) -> RunResult:
         """创建新的 RunExecution，并执行到成功、失败、取消或审批等待。"""
         policy = await self._policy_port.resolve(request)
-        run_id: str = uuid.uuid4().hex
+        run_id: str = request.run_id or uuid.uuid4().hex
         execution: RunExecution = RunExecution(
             run_id=run_id,
             request=request,
@@ -176,6 +176,9 @@ class RuntimeEngine:
         active: bool = self._cancellation_service.request(run_id, reason)
         await self._llm_port.cancel(run_id)
         await self._tool_port.cancel(run_id)
+        child_run_id: str | None = self._cancellation_service.delegated_run_id(run_id)
+        if child_run_id is not None and self._delegation_port is not None:
+            await self._delegation_port.cancel(child_run_id)
         if active:
             return
         run = await self._run_repository.find_run(run_id)
@@ -210,6 +213,8 @@ class RuntimeEngine:
                 delegation_request: DelegationRequest | None = _delegation_request(
                     execution.run_id,
                     run.root_run_id or run.run_id,
+                    run.agent_id,
+                    run.session_id,
                     tool_calls[0],
                 )
                 if delegation_request is not None:
@@ -231,6 +236,14 @@ class RuntimeEngine:
                     tool_result = await self._tool_port.execute(ToolInvocation(execution.run_id, tool_calls[0]), execution.view())
                 except Exception as error:
                     return await self._fail(execution, run, tuple(messages), event_number, f"工具调用失败：{error}", RunErrorCode.TOOL_FAILURE)
+                if execution.cancellation.cancelled:
+                    return await self._finish_cancelled(
+                        execution,
+                        run,
+                        tuple(messages),
+                        event_number,
+                        execution.cancellation.reason,
+                    )
                 sequence += 1
                 run = _with_tool_statistic(run)
                 tool_message = RunMessage(f"tool-{execution.run_id}-{sequence}", sequence, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, tool_result.output, tool_call_id=tool_result.call_id)
@@ -265,6 +278,14 @@ class RuntimeEngine:
                 response = await self._llm_port.complete(context, execution.view())
             except Exception as error:
                 return await self._fail(execution, run, tuple(messages), event_number, f"模型调用失败：{error}", RunErrorCode.LLM_FAILURE)
+            if execution.cancellation.cancelled:
+                return await self._finish_cancelled(
+                    execution,
+                    run,
+                    tuple(messages),
+                    event_number,
+                    execution.cancellation.reason,
+                )
             sequence += 1
             run = _with_llm_statistics(run, response)
             final: bool = not response.tool_calls
@@ -309,6 +330,7 @@ class RuntimeEngine:
             return DelegationDriveResult(error=failed)
         try:
             child_run_id: str = await self._delegation_port.submit(request)
+            self._cancellation_service.register_delegated_run(execution.run_id, child_run_id)
             submitted_transition = execution.state.transition(DelegationSubmitted(child_run_id))
             execution.update_state(submitted_transition.state, submitted_transition.action)
             next_event_sequence: int = await self._event(
@@ -330,6 +352,18 @@ class RuntimeEngine:
                 RunErrorCode.TOOL_FAILURE,
             )
             return DelegationDriveResult(error=failed)
+        finally:
+            if 'child_run_id' in locals():
+                self._cancellation_service.clear_delegated_run(execution.run_id, child_run_id)
+        if execution.cancellation.cancelled:
+            cancelled: RunResult = await self._finish_cancelled(
+                execution,
+                run,
+                tuple(messages),
+                next_event_sequence,
+                execution.cancellation.reason,
+            )
+            return DelegationDriveResult(error=cancelled)
         if child_result is None:
             failed = await self._fail(
                 execution,
@@ -494,6 +528,8 @@ class DelegationDriveResult:
 def _delegation_request(
     parent_run_id: str,
     root_run_id: str,
+    source_agent_id: str,
+    source_session_id: str,
     call: ToolCall,
 ) -> DelegationRequest | None:
     """将模型的 delegate 调用转换为 Runtime 独立的委托请求。"""
@@ -515,4 +551,6 @@ def _delegation_request(
             content=content,
             created_at=utc_now_iso(),
         ),
+        source_agent_id=source_agent_id,
+        source_session_id=source_session_id,
     )
