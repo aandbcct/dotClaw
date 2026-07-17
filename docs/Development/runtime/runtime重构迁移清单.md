@@ -1,6 +1,6 @@
 # Runtime 重构迁移清单
 
-> 状态：Phase 0 基线。本文记录旧 Runtime 相关模块的归属、当前调用方、替代方向与删除条件；后续 Phase 完成时必须同步更新。
+> 状态：Phase 2 已完成。本文记录旧 Runtime 相关模块的归属、当前调用方、替代方向与删除条件；后续 Phase 完成时必须同步更新。
 > 对应设计：[Runtime 重构设计](runtime重构设计.md)。
 
 ## 使用规则
@@ -15,10 +15,10 @@
 | --- | --- | --- | --- | --- |
 | `runtime/runtime.py::Runtime` | `main.py`、`agent/agent.py`、`agent/factory.py`、`orchestration/dispatcher.py`、`orchestration/runners/local.py`；同时编排 LLM、工具、Journal、会话与持久化 | `runtime/application/engine.py::RuntimeEngine` + `SessionRunCoordinator` | 4 | 入口、Agent 与编排均只调用新入口；Runtime 仅保留兼容门面期间的调用方为零后删除 |
 | `runtime/runtime.py::Runtime.derive()` | 子 Agent 与 handoff 的运行隔离 | `RunExecution`、作用域化 ContextPort 与 `DelegationPort` | 4–5 | delegation adapter 覆盖父子运行隔离，生产代码不再调用 `derive()` |
-| `runtime/agent_state.py::AgentState` | 旧 Runtime 驱动 ReAct；状态持有 LLM 响应、工具结果与 Task | `runtime/domain/state.py::AgentState` | 1 | 新状态机测试覆盖全部转移，旧 Runtime 兼容门面不再依赖旧状态机 |
-| `runtime/task.py` 与 `AgentState.tasks` | 旧状态机内的跨 Run 任务语义 | 本轮不替代；delegation 仅经 `DelegationPort` 和 `DelegationCompleted` 事件返回 | 1、5 | 新状态机无 Task 依赖，保留调用方迁移至 delegation adapter 或明确移除 |
-| `runtime/state_store.py::StateStore` | `Runtime`、`agent/resume.py`；以 Session ID 保存恢复快照 | `CheckpointRepository`（以 `run_id` 为键） | 2 | 新增和恢复运行只使用 CheckpointRepository，旧 `state.json` 仅保留只读兼容或迁移脚本 |
-| `session/agent_run.py::AgentRun` 的 `messages`、`state_snapshot`、`trace_ids` | 旧 Runtime 写入，`AgentRunManager` 读取 | `RunMessage`、`Checkpoint`、`RunEvent` 与摘要 AgentRun | 2 | 新 run 不再写这些字段，迁移脚本可处理旧样例，代码无读取方 |
+| `runtime/agent_state.py::AgentState` | 旧 Runtime 驱动 ReAct；状态持有 LLM 响应、工具结果与 Task | `runtime/domain/state.py::AgentState`（Phase 1 已新增） | 1 | 新状态机测试覆盖全部转移，旧 Runtime 兼容门面不再依赖旧状态机 |
+| `runtime/task.py` 与 `AgentState.tasks` | 旧状态机内的跨 Run 任务语义 | 本轮不替代；新版 `AgentState` 已无 Task 依赖，delegation 后续仅经 `DelegationPort` 返回 | 1、5 | 保留调用方迁移至 delegation adapter 或明确移除 |
+| `runtime/state_store.py::StateStore` | `Runtime`、`agent/resume.py`；以 Session ID 保存恢复快照 | `CheckpointRepository`（以 `run_id` 为键；Phase 2 已增加委托入口） | 2 | 新增和恢复运行只使用 CheckpointRepository，旧 `state.json` 仅保留只读兼容或迁移脚本 |
+| `session/agent_run.py::AgentRun` 的 `messages`、`state_snapshot`、`trace_ids` | 旧 Runtime 写入，`AgentRunManager` 读取 | `RunMessage`、`Checkpoint`、`RunEvent` 与摘要 AgentRun（Phase 2 文件仓储已新增） | 2 | 新 run 不再写这些字段，迁移脚本可处理旧样例，代码无读取方 |
 | `agent/slotContext.py::SlotContext`、`ContextAssembler` | `Runtime._build_system_prompt()`、`agent/factory.py`；含 Journal 与单值缓存 | `ContextPort`、`SlotContextProvider`、ScopedCache | 3 | Runtime 只消费 ContextBundle，所有 Slot 缓存按 agent/session/run 隔离，Slot 无 Journal 字段 |
 | `agent/agent.py::Agent.process()` 的 Session 直接提交 | `main.py` 通过 Agent 处理用户消息并直接保存 Conversation | `SessionRunCoordinator.submit()` 与 RunRepository 成功投影 | 4 | Conversation 仅由成功终态的 RunRepository 提交，Agent 不直接写 Session |
 | `journal/journal.py` 的私有状态与 `journal/sinks/state_sink.py` | 旧 Runtime 读取 `_events`、`_agentrun_id`、`_agentrun_sequence`，并经 Journal 间接保存状态 | `RunEvent`、RunRepository、CheckpointRepository；Journal 退化为可选渲染器 | 2、5 | RuntimeEngine 无 Journal import 或私有字段读取；恢复集成测试不依赖 StateSink |
@@ -47,3 +47,11 @@
 # 删除前的调用方审计模板
 rg "Runtime|StateStore|ContextAssembler|slotContext|state_sink" src tests docs
 ```
+
+## Phase 1 与 Phase 2 已交付内容
+
+- `runtime/domain/`：可 JSON 序列化的请求、结果、消息、运行摘要、事件、检查点、`RunExecution` 与纯 `AgentState`；不导入 LLM、Tool、Session、Task 或仓储实现。
+- `runtime/application/ports.py`：Run、Checkpoint、Context、LLM、Tool、Approval、Delegation 的 Protocol 边界。
+- `runtime/adapters/`：文件版 Run、Checkpoint、Approval 仓储；RunEvent 只允许引用已原子写入的 RunMessage。
+- `scripts/migrate_agent_run_v1_to_v2.py`：旧 AgentRun 到 v2 容器的可重复迁移脚本；保留源文件，支持显式覆盖迁移目标。
+- `tests/runtime_v2/`：状态机、fake ports、文件原子性、事件引用完整性、旧样例迁移和 StateStore 委托测试。

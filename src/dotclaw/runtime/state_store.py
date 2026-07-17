@@ -19,6 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .adapters.file_checkpoint_repository import FileCheckpointRepository
+from .domain.models import RunCheckpoint
+
 if TYPE_CHECKING:
     from .agent_state import AgentPhase, AgentStatus
 
@@ -211,6 +214,22 @@ class StateStore:
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir: Path = Path(data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._checkpoint_repository: FileCheckpointRepository = FileCheckpointRepository(self._data_dir)
+
+    async def save_checkpoint(self, checkpoint: RunCheckpoint) -> None:
+        """委托 v2 CheckpointRepository 按 run_id 保存恢复点。
+
+        旧 save() 保持 Session 级兼容写入，RuntimeEngine 后续只能调用本方法。
+        """
+        await self._checkpoint_repository.save(checkpoint)
+
+    async def load_checkpoint(self, session_id: str, run_id: str) -> RunCheckpoint | None:
+        """委托 v2 CheckpointRepository 读取指定运行恢复点。"""
+        return await self._checkpoint_repository.load(session_id, run_id)
+
+    async def delete_checkpoint(self, session_id: str, run_id: str) -> None:
+        """委托 v2 CheckpointRepository 删除指定运行恢复点。"""
+        await self._checkpoint_repository.delete(session_id, run_id)
 
     # ======================== 原子操作：路径计算 ========================
 

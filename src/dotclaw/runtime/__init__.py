@@ -19,6 +19,8 @@ from .agent_state import AgentPhase, AgentState, AgentEvent, AgentAction, AgentS
 from .task import Task, TaskProgress
 from .runtime import Runtime
 from .state_store import StateStore, StateSnapshot
+from .domain.models import AgentRun as RuntimeAgentRun, RunRequest, RunResult, RunStatus
+from .domain.state import AgentState as RuntimeV2AgentState
 
 __all__ = [
     "Runtime",
@@ -34,4 +36,9 @@ __all__ = [
     "TaskProgress",
     "StateStore",
     "StateSnapshot",
+    "RunRequest",
+    "RunResult",
+    "RunStatus",
+    "RuntimeAgentRun",
+    "RuntimeV2AgentState",
 ]
