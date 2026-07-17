@@ -3,23 +3,40 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Protocol
 
 from ..domain.models import RunRequest, RunResult
 
 
-class RuntimeExecutionPort:
+class RuntimeExecutionPort(Protocol):
     """协调器依赖的最小执行接口。"""
 
     async def execute(self, request: RunRequest) -> RunResult:
         """执行已获得 Session 租约的请求。"""
 
 
+class RuntimeControlPort(RuntimeExecutionPort, Protocol):
+    """由协调器串行化的审批恢复和取消控制接口。"""
+
+    async def get_approval_session_id(self, approval_id: str) -> str | None:
+        """定位待处理审批所属的 Session。"""
+
+    async def resolve_approval(self, approval_id: str, approved: bool) -> RunResult:
+        """恢复指定审批关联的运行。"""
+
+    async def get_run_session_id(self, run_id: str) -> str | None:
+        """定位运行所属的 Session。"""
+
+    async def cancel(self, run_id: str, reason: str) -> None:
+        """取消指定运行。"""
+
+
 class SessionRunCoordinator:
     """同一 Session FIFO、不同 Session 可并行的轻量租约协调器。"""
 
-    def __init__(self, engine: RuntimeExecutionPort) -> None:
+    def __init__(self, engine: RuntimeControlPort) -> None:
         """绑定纯运行执行入口。"""
-        self._engine: RuntimeExecutionPort = engine
+        self._engine: RuntimeControlPort = engine
         self._locks: dict[str, asyncio.Lock] = {}
         self._locks_guard: asyncio.Lock = asyncio.Lock()
 
@@ -28,6 +45,25 @@ class SessionRunCoordinator:
         lock: asyncio.Lock = await self._get_lock(request.session_id)
         async with lock:
             return await self._engine.execute(request)
+
+    async def resolve_approval(self, approval_id: str, approved: bool) -> RunResult:
+        """在审批所属 Session 的租约内恢复原运行。"""
+        session_id: str | None = await self._engine.get_approval_session_id(approval_id)
+        if session_id is None:
+            return await self._engine.resolve_approval(approval_id, approved)
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        async with lock:
+            return await self._engine.resolve_approval(approval_id, approved)
+
+    async def cancel(self, run_id: str, reason: str) -> None:
+        """在运行所属 Session 的租约内提交取消，避免与恢复或新请求交叉。"""
+        session_id: str | None = await self._engine.get_run_session_id(run_id)
+        if session_id is None:
+            await self._engine.cancel(run_id, reason)
+            return
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        async with lock:
+            await self._engine.cancel(run_id, reason)
 
     async def _get_lock(self, session_id: str) -> asyncio.Lock:
         """为 Session 创建或返回唯一的异步租约锁。"""

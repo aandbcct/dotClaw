@@ -27,6 +27,13 @@ class ApprovalService:
         await self._repository.create(record)
         return record
 
+    async def find_pending(self, approval_id: str) -> ApprovalRecord | None:
+        """读取待处理审批记录，仅用于协调器定位对应 Session 租约。"""
+        record: ApprovalRecord | None = await self._repository.load(approval_id)
+        if record is None or record.status is not ApprovalStatus.PENDING:
+            return None
+        return record
+
     async def consume(self, approval_id: str) -> ApprovalRecord | None:
         """原子消费审批记录，防止重复恢复同一 Run。"""
         return await self._repository.consume(approval_id)

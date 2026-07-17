@@ -45,7 +45,7 @@ async def test_agent_process_submits_to_coordinator_and_projector_writes_convers
         agent_registry=AgentRegistry(),
         mcp_provider=None,
     )
-    agent = Agent(identity, coordinator=services.coordinator, runtime_engine=services.engine, config=config)
+    agent = Agent(identity, coordinator=services.coordinator, config=config)
     session = await session_manager.create(agent_id=identity.agent_id)
 
     answer = await agent.process(session, "你好")

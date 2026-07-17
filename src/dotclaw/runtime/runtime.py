@@ -19,6 +19,7 @@ import hashlib
 import json as _json
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 CHINA_TZ = timezone(timedelta(hours=8))
@@ -39,6 +40,16 @@ from .agent_state import (
 
 class DelegationProtocolError(RuntimeError):
     """source Run 在活动 Task 未终态时试图结束。"""
+
+
+@dataclass(frozen=True)
+class LegacyRunContext:
+    """旧 delegation 兼容循环的一次调用上下文，不得保存到 Runtime 实例。"""
+
+    agent: AgentType
+    session_id: str
+    agentrun_id: str
+    allowed_tools: frozenset[str]
 
 if TYPE_CHECKING:
     from ..llm.proxy import LLMProxy
@@ -122,12 +133,6 @@ class LegacyRuntimeFacade:
         self.config: Config | None = config
         self.delegation_endpoint: str = delegation_endpoint
         self.delegation_task_id: str = delegation_task_id
-        # per-_step 上下文，由 _step() 在进入时设置，_execute_single_tool() 消费
-        self._current_agent: AgentType | None = None
-        self._current_session_id: str = ""
-        self._current_agentrun_id: str = ""
-        self._current_allowed_tools: frozenset[str] = frozenset()
-
     # ======================== 派生（多 Agent 隔离） ========================
 
     def derive(self, *, channel: Channel | None = None, delegation_endpoint: str = "", delegation_task_id: str = "") -> LegacyRuntimeFacade:
@@ -313,12 +318,13 @@ class LegacyRuntimeFacade:
         run_ids.append(agentrun_id)
         run_messages: list[Message] = []
 
-        # 设置 per-step 上下文（供工具执行时使用）
-        self._current_agent = agent
-        self._current_session_id = session_id
-        self._current_agentrun_id = agentrun_id
-        self._current_allowed_tools = frozenset(
-            definition.name for definition in self._resolve_runtime_tools(agent)
+        run_context: LegacyRunContext = LegacyRunContext(
+            agent=agent,
+            session_id=session_id,
+            agentrun_id=agentrun_id,
+            allowed_tools=frozenset(
+                definition.name for definition in self._resolve_runtime_tools(agent)
+            ),
         )
 
         # system_prompt
@@ -374,7 +380,10 @@ class LegacyRuntimeFacade:
                     action = state.handle_event(ASLLMResponseEvent(response=resp))
 
                 elif action == AgentAction.EXECUTE_TOOLS:
-                    tool_msgs, needs_approval = await self._execute_tools_for_state(state)
+                    tool_msgs, needs_approval = await self._execute_tools_for_state(
+                        state,
+                        run_context,
+                    )
                     for tm in tool_msgs:
                         self.journal.record_message(tm)
                         context_messages.append(tm)
@@ -533,17 +542,22 @@ class LegacyRuntimeFacade:
     async def _execute_tools(
         self,
         tool_calls: list[object],
+        run_context: LegacyRunContext,
     ) -> list[Message]:
         """并发执行工具调用列表。"""
         if not tool_calls:
             return []
 
         return list(await asyncio.gather(*[
-            self._execute_single_tool(tc)
+            self._execute_single_tool(tc, run_context)
             for tc in tool_calls
         ]))
 
-    async def _execute_single_tool(self, tc: object) -> Message:
+    async def _execute_single_tool(
+        self,
+        tc: object,
+        run_context: LegacyRunContext,
+    ) -> Message:
         """执行单个工具调用。"""
         name: str = getattr(tc, "name", "")
         tool_id: str = getattr(tc, "id", "")
@@ -560,7 +574,7 @@ class LegacyRuntimeFacade:
                 tool_call_id=tool_id,
             )
 
-        if name not in self._current_allowed_tools:
+        if name not in run_context.allowed_tools:
             return Message(
                 role="tool",
                 content=f"错误：当前 Identity 无权调用工具 '{name}'",
@@ -574,16 +588,14 @@ class LegacyRuntimeFacade:
 
         from ..tools.base import ToolExecutionContext
 
-        exec_ctx: ToolExecutionContext | None = None
-        if self._current_agent is not None:
-            exec_ctx = ToolExecutionContext(
-                agent=self._current_agent,
-                runtime=self,
-                session_id=self._current_session_id,
-                agentrun_id=self._current_agentrun_id,
-                task_id=self.delegation_task_id,
-                channel=self.channel,
-            )
+        exec_ctx: ToolExecutionContext = ToolExecutionContext(
+            agent=run_context.agent,
+            runtime=self,
+            session_id=run_context.session_id,
+            agentrun_id=run_context.agentrun_id,
+            task_id=self.delegation_task_id,
+            channel=self.channel,
+        )
 
         result = await self.tool_executor.execute(
             name=name,
@@ -607,6 +619,7 @@ class LegacyRuntimeFacade:
     async def _execute_tools_for_state(
         self,
         state: AgentState,
+        run_context: LegacyRunContext,
     ) -> tuple[list[Message], bool]:
         """执行 AgentState 中当前待执行的工具调用。
 
@@ -630,7 +643,7 @@ class LegacyRuntimeFacade:
 
         if self.tool_executor is None:
             raise RuntimeError("工具执行器未初始化")
-        return await self._execute_tools(tool_calls), False
+        return await self._execute_tools(tool_calls, run_context), False
 
     # ======================== Handoff ========================
 

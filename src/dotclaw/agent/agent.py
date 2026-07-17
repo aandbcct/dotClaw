@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .identity import AgentIdentity
+from ..mcp.provider import MCPToolProvider
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -28,12 +29,13 @@ if TYPE_CHECKING:
     from ..orchestration.task import Task
     from ..orchestration.dispatcher import AgentDispatcher
     from ..runtime import Runtime
-    from ..runtime.application.engine import RuntimeEngine
     from ..runtime.application.session_run_coordinator import SessionRunCoordinator
     from ..runtime.domain.models import RunResult
     from ..tools.executor import ToolExecutor
-    from ..mcp.provider import MCPToolProvider
     from ..skills.registry import SkillRegistry
+    from ..memory.dream import DeepDream
+    from .resume import ResumeManager
+    from ..llm.base import ToolCall as LegacyToolCall
 
 
 # ============================================================================
@@ -51,7 +53,7 @@ class LLMResponse:
     content: str = ""
     """LLM 返回的文本内容"""
 
-    tool_calls: list = field(default_factory=list)
+    tool_calls: list[LegacyToolCall] = field(default_factory=list)
     """LLM 返回的工具调用列表（ToolCall 对象）"""
 
     finish_reason: str = "stop"
@@ -82,15 +84,14 @@ class Agent:
         identity: AgentIdentity,
         runtime: Runtime | None = None,
         coordinator: SessionRunCoordinator | None = None,
-        runtime_engine: RuntimeEngine | None = None,
         config: Config | None = None,
         tool_executor: ToolExecutor | None = None,
         mcp_provider: MCPToolProvider | None = None,
         skill_registry: SkillRegistry | None = None,
         dispatcher: AgentDispatcher | None = None,
-        memory_dream: object = None,
-        mcp_task: object = None,
-        resume_manager: object = None,
+        memory_dream: DeepDream | None = None,
+        mcp_task: asyncio.Task[None] | None = None,
+        resume_manager: ResumeManager | None = None,
     ) -> None:
         """构造 Agent。
 
@@ -105,16 +106,15 @@ class Agent:
         self._identity: AgentIdentity = identity
         self._runtime: Runtime | None = runtime
         self._coordinator: SessionRunCoordinator | None = coordinator
-        self._runtime_engine: RuntimeEngine | None = runtime_engine
         self._config: Config | None = config
         self._tool_executor: ToolExecutor | None = tool_executor
         self._mcp_provider: MCPToolProvider | None = mcp_provider
         self._skill_registry: SkillRegistry | None = skill_registry
         self._last_run_result: RunResult | None = None
         self._dispatcher: AgentDispatcher | None = dispatcher
-        self._memory_dream: object = memory_dream
-        self._mcp_task: object = mcp_task
-        self._resume_manager: object = resume_manager
+        self._memory_dream: DeepDream | None = memory_dream
+        self._mcp_task: asyncio.Task[None] | None = mcp_task
+        self._resume_manager: ResumeManager | None = resume_manager
 
     # ======================== 只读属性 ========================
 
@@ -148,11 +148,6 @@ class Agent:
         return None
 
     @property
-    def runtime_engine(self) -> "RuntimeEngine | None":
-        """普通消息入口使用的 Runtime v2 Engine。"""
-        return self._runtime_engine
-
-    @property
     def last_run_result(self) -> "RunResult | None":
         """最近一次普通消息执行结果，供 CLI 处理审批或取消。"""
         return self._last_run_result
@@ -173,7 +168,7 @@ class Agent:
         return self._skill_registry
 
     @property
-    def memory_dream(self) -> object:
+    def memory_dream(self) -> DeepDream | None:
         """DeepDream 记忆蒸馏实例。"""
         return self._memory_dream
 
@@ -187,19 +182,19 @@ class Agent:
     async def shutdown(self) -> None:
         """关闭 Agent 持有的所有运行时资源（MCP、后台 task 等）。"""
         if self._mcp_task is not None:
-            task = self._mcp_task
-            if hasattr(task, 'done') and not task.done():  # type: ignore[union-attr]
-                task.cancel()  # type: ignore[union-attr]
+            task: asyncio.Task[None] = self._mcp_task
+            if not task.done():
+                task.cancel()
                 try:
-                    await task  # type: ignore[union-attr]
+                    await task
                 except (asyncio.CancelledError, Exception):
                     pass
         if self._runtime is not None:
             mcp = self._runtime.mcp_provider
-            if mcp is not None and hasattr(mcp, 'shutdown'):
-                await mcp.shutdown()  # type: ignore[union-attr]
-        elif self._mcp_provider is not None and hasattr(self._mcp_provider, "shutdown"):
-            await self._mcp_provider.shutdown()  # type: ignore[union-attr]
+            if isinstance(mcp, MCPToolProvider):
+                await mcp.shutdown()
+        elif self._mcp_provider is not None:
+            await self._mcp_provider.shutdown()
 
     # ======================== 公开 API ========================
 
@@ -233,9 +228,9 @@ class Agent:
 
     async def resolve_approval(self, approval_id: str, approved: bool) -> str:
         """提交有限审批决定，并返回恢复运行的标准结果文本。"""
-        if self._runtime_engine is None:
-            raise RuntimeError("Agent.resolve_approval() 需要注入 RuntimeEngine")
-        result = await self._runtime_engine.resolve_approval(approval_id, approved)
+        if self._coordinator is None:
+            raise RuntimeError("Agent.resolve_approval() 需要注入 SessionRunCoordinator")
+        result = await self._coordinator.resolve_approval(approval_id, approved)
         self._last_run_result = result
         if result.final_message is not None:
             return result.final_message.content
@@ -246,10 +241,10 @@ class Agent:
         return f"执行未完成：{result.status.value}"
 
     async def cancel_run(self, run_id: str, reason: str) -> None:
-        """将取消请求转交 RuntimeEngine，不读写运行内部状态。"""
-        if self._runtime_engine is None:
-            raise RuntimeError("Agent.cancel_run() 需要注入 RuntimeEngine")
-        await self._runtime_engine.cancel(run_id, reason)
+        """将取消请求转交协调器，不读写运行内部状态。"""
+        if self._coordinator is None:
+            raise RuntimeError("Agent.cancel_run() 需要注入 SessionRunCoordinator")
+        await self._coordinator.cancel(run_id, reason)
 
     async def execute_in_session(
         self,

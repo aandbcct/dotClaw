@@ -343,14 +343,17 @@ git diff --check
 
 - `Agent.process()` 只构造冻结 RunRequest 并调用 `SessionRunCoordinator.submit()`；成功 Conversation 仅由 `RunRepository.commit_success()` 的投影器写入。
 - CLI 已迁移为调用 `Agent.process()`；审批只提交 `approval_id + approved`，取消只提交 `run_id + reason`。
+- 审批恢复和取消同样经 `SessionRunCoordinator` 获取所属 Session 的租约，避免与同 Session 新消息并发执行。
+- 审批恢复会以原 `run_id` 追加 `APPROVAL_RESOLVED`、`RUN_RESUMED` 事件；审批拒绝追加决议事件后以 `RUN_CANCELLED` 结束，均不投影 Conversation。
 
 ### 阶段 F：旧 Runtime 兼容收缩
 
 - `runtime/runtime.py` 已明确为 `LegacyRuntimeFacade`。注入 Coordinator 时其普通 `run()` 转发 Runtime v2；未迁移的 delegation/handoff 与历史测试仍可使用旧兼容循环。
+- 旧兼容循环的 Agent、Session、AgentRun 与工具白名单已收敛为单次调用的 `LegacyRunContext`，不再保存在 `LegacyRuntimeFacade` 的实例字段中。
 - 新公开 API 已以 `RuntimeEngine`、`SessionRunCoordinator` 和 Ports 为主；`Runtime` 保留为兼容别名。
 
 ### 验证证据
 
-- `python -m pytest tests/runtime_v2 -q`：32 passed。
-- `python -m pytest -q`：223 passed。
+- `python -m pytest tests/runtime_v2 -q`：34 passed。
+- `python -m pytest -q`：226 passed。
 - `git diff --check`：通过。

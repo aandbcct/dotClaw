@@ -124,13 +124,43 @@ class RuntimeEngine:
             message_cursor=checkpoint.message_sequence,
         )
         pending_calls: tuple[ToolCall, ...] = _calls_from_checkpoint(checkpoint)
+        event_sequence: int = await self._event(
+            run,
+            checkpoint.event_sequence,
+            RunEventType.APPROVAL_RESOLVED,
+            (),
+            "审批已通过" if approved else "审批已拒绝",
+        )
         self._cancellation_service.register(run.run_id, execution.cancellation)
         try:
             if not approved:
-                return await self._finish_cancelled(execution, run, messages, checkpoint.event_sequence, "审批被拒绝")
-            return await self._drive(execution, run, messages, pending_calls, checkpoint.event_sequence)
+                return await self._finish_cancelled(execution, run, messages, event_sequence, "审批被拒绝")
+            resumed_run: AgentRun = replace(
+                run,
+                status=RunStatus.RUNNING,
+                resume_count=run.resume_count + 1,
+            )
+            await self._run_repository.save_run(resumed_run)
+            event_sequence = await self._event(
+                resumed_run,
+                event_sequence,
+                RunEventType.RUN_RESUMED,
+                (),
+                "审批通过后恢复运行",
+            )
+            return await self._drive(execution, resumed_run, messages, pending_calls, event_sequence)
         finally:
             self._cancellation_service.unregister(run.run_id)
+
+    async def get_approval_session_id(self, approval_id: str) -> str | None:
+        """返回待处理审批所属 Session，供协调器获取同一把租约锁。"""
+        record = await self._approval_service.find_pending(approval_id)
+        return record.session_id if record is not None else None
+
+    async def get_run_session_id(self, run_id: str) -> str | None:
+        """返回运行所属 Session，供取消操作遵守单 Session 串行约束。"""
+        run: AgentRun | None = await self._run_repository.find_run(run_id)
+        return run.session_id if run is not None else None
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """请求活动 run 停止；等待中的 run 立即持久化为取消终态。"""
@@ -228,10 +258,25 @@ class RuntimeEngine:
         """原子保存运行完整消息。"""
         await self._run_repository.save_messages(run.session_id, run.run_id, tuple(messages))
 
-    async def _event(self, run: AgentRun, sequence: int, event_type: RunEventType, message_ids: tuple[str, ...]) -> int:
+    async def _event(
+        self,
+        run: AgentRun,
+        sequence: int,
+        event_type: RunEventType,
+        message_ids: tuple[str, ...],
+        summary: str = "",
+    ) -> int:
         """追加引用已保存消息的事件并返回下一序号。"""
         next_sequence: int = sequence + 1
-        await self._run_repository.append_event(run.session_id, RunEvent(run.run_id, next_sequence, event_type, utc_now_iso(), message_ids))
+        event: RunEvent = RunEvent(
+            run.run_id,
+            next_sequence,
+            event_type,
+            utc_now_iso(),
+            message_ids,
+            summary,
+        )
+        await self._run_repository.append_event(run.session_id, event)
         return next_sequence
 
     async def _finish_cancelled(self, execution: RunExecution, run: AgentRun, messages: tuple[RunMessage, ...], event_sequence: int, reason: str) -> RunResult:

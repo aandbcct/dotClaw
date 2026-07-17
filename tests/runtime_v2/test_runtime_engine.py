@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from dotclaw.runtime.adapters import FileApprovalRepository, FileCheckpointRepository, FileRunRepository
@@ -14,7 +15,7 @@ from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordi
 from dotclaw.runtime.domain.execution import RunExecutionView
 from dotclaw.runtime.domain.models import (
     AgentPolicySnapshot, ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot,
-    MessageRole, RunMessage, RunMessageKind, RunRequest, ToolCall, ToolInvocation, ToolResult, ToolResultStatus,
+    MessageRole, RunMessage, RunMessageKind, RunRequest, RunResult, RunStatus, ToolCall, ToolInvocation, ToolResult, ToolResultStatus,
 )
 
 
@@ -140,7 +141,7 @@ class ApprovalTool(ToolPort):
 
 
 async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: Path) -> None:
-    """审批恢复继续原 run，消息与事件序号不重置。"""
+    """审批恢复继续原 run，完整记录审批决议和恢复事件。"""
     run_repository = FileRunRepository(tmp_path)
     engine = RuntimeEngine(
         run_repository,
@@ -159,7 +160,41 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
     assert completed.status.value == "completed"
     assert completed.run_id == waiting.run_id
     events_path: Path = tmp_path / "session-approval" / "agent_runs" / waiting.run_id / "events.jsonl"
-    assert len(events_path.read_text(encoding="utf-8").splitlines()) >= 6
+    event_types: list[str] = [
+        json.loads(line)["event_type"]
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert event_types.index("approval_resolved") < event_types.index("run_resumed")
+    assert event_types.index("run_resumed") < event_types.index("run_completed")
+
+
+async def test_rejected_approval_records_decision_and_cancels_without_conversation(tmp_path: Path) -> None:
+    """拒绝审批应记录决议并结束原 Run，不投影 assistant Conversation。"""
+    run_repository = FileRunRepository(tmp_path)
+    engine = RuntimeEngine(
+        run_repository,
+        FileCheckpointRepository(tmp_path),
+        ContextFake(),
+        ApprovalLLM(),
+        ApprovalTool(),
+        PolicyPort(),
+        ApprovalService(FileApprovalRepository(tmp_path)),
+        CancellationService(),
+    )
+
+    waiting: RunResult = await engine.execute(_request("session-rejected"))
+    rejected: RunResult = await engine.resolve_approval("approval-1", approved=False)
+    events_path: Path = tmp_path / "session-rejected" / "agent_runs" / waiting.run_id / "events.jsonl"
+    event_types: list[str] = [
+        json.loads(line)["event_type"]
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert rejected.status is RunStatus.CANCELLED
+    assert rejected.run_id == waiting.run_id
+    assert "approval_resolved" in event_types
+    assert "run_cancelled" in event_types
+    assert await run_repository.load_conversation("session-rejected") == ()
 
 
 async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) -> None:
@@ -192,12 +227,11 @@ class OrderedEngine:
         self.started: list[str] = []
         self.release: asyncio.Event = asyncio.Event()
 
-    async def execute(self, request: RunRequest):
+    async def execute(self, request: RunRequest) -> RunResult:
         """记录请求顺序；首条请求等待以制造竞争窗口。"""
         self.started.append(request.lease_id)
         if request.lease_id == "lease-fifo-1":
             await self.release.wait()
-        from dotclaw.runtime.domain.models import RunResult, RunStatus
         return RunResult(request.lease_id, RunStatus.COMPLETED)
 
 
@@ -216,3 +250,53 @@ async def test_session_coordinator_serializes_same_session_fifo() -> None:
     engine.release.set()
     await asyncio.gather(first_task, second_task)
     assert engine.started == ["lease-fifo-1", "lease-fifo-2"]
+
+
+class ControlOrderedEngine:
+    """模拟审批恢复期间的 Session 控制入口，验证协调器复用租约。"""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.approval_entered: asyncio.Event = asyncio.Event()
+        self.release_approval: asyncio.Event = asyncio.Event()
+
+    async def execute(self, request: RunRequest) -> RunResult:
+        """记录普通请求何时真正获得执行机会。"""
+        self.started.append(f"submit:{request.lease_id}")
+        return RunResult(request.lease_id, RunStatus.COMPLETED)
+
+    async def get_approval_session_id(self, approval_id: str) -> str | None:
+        """将测试审批固定映射到同一 Session。"""
+        return "session-control" if approval_id == "approval-control" else None
+
+    async def resolve_approval(self, approval_id: str, approved: bool) -> RunResult:
+        """阻塞审批恢复，制造与普通消息竞争同一租约的窗口。"""
+        self.started.append(f"approval:{approval_id}")
+        self.approval_entered.set()
+        await self.release_approval.wait()
+        return RunResult("run-control", RunStatus.COMPLETED)
+
+    async def get_run_session_id(self, run_id: str) -> str | None:
+        """测试不触发取消路径。"""
+        return None
+
+    async def cancel(self, run_id: str, reason: str) -> None:
+        """测试替身不需要取消行为。"""
+
+
+async def test_session_coordinator_serializes_approval_resume_with_new_message() -> None:
+    """审批恢复与新消息必须竞争同一 Session 租约，避免并发执行。"""
+    engine = ControlOrderedEngine()
+    coordinator = SessionRunCoordinator(engine)
+    approval_task: asyncio.Task[RunResult] = asyncio.create_task(
+        coordinator.resolve_approval("approval-control", True),
+    )
+    await engine.approval_entered.wait()
+    request: RunRequest = _request("session-control")
+    submit_task: asyncio.Task[RunResult] = asyncio.create_task(coordinator.submit(request))
+    await asyncio.sleep(0)
+
+    assert engine.started == ["approval:approval-control"]
+    engine.release_approval.set()
+    await asyncio.gather(approval_task, submit_task)
+    assert engine.started == ["approval:approval-control", f"submit:{request.lease_id}"]

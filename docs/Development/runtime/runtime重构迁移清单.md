@@ -62,7 +62,7 @@ rg "Runtime|StateStore|ContextAssembler|slotContext|state_sink" src tests docs
 - `SlotContextProvider`：输出完整 `ContextBundle`（消息、工具定义、来源、失败槽位与 token 预算元数据）；Memory 等可选 Slot 失败只降级当前 Context 构造。
 - `LegacyContextPortAdapter`：旧 Runtime 在未切换 RuntimeEngine 前经 ContextPort 生成 system prompt，旧 Assembler 仅作为未注入 ContextPort 时的兼容回退。
 - `tests/runtime_v2/test_context_port.py`：覆盖完整 Bundle、三类缓存隔离、Memory 降级、token 预算及旧 Runtime 过渡适配器。
-- `runtime/application/engine.py`：纯 Port 驱动的 `RuntimeEngine`，将 RunExecution、消息、事件、审批恢复和取消全部限制在 run 局部变量与持久化容器中；不导入 Journal、Session 或旧 Slot。
-- `runtime/application/session_run_coordinator.py`：同 Session FIFO 租约、不同 Session 并行的请求协调器。
+- `runtime/application/engine.py`：纯 Port 驱动的 `RuntimeEngine`，将 RunExecution、消息、事件、审批恢复和取消全部限制在 run 局部变量与持久化容器中；审批恢复以原 `run_id` 记录 `APPROVAL_RESOLVED` 与 `RUN_RESUMED`，拒绝审批记录决议后取消；不导入 Journal、Session 或旧 Slot。
+- `runtime/application/session_run_coordinator.py`：同 Session FIFO 租约、不同 Session 并行的请求协调器；审批恢复与取消同样按所属 Session 获取租约。
 - `runtime/application/approval_service.py`、`cancellation_service.py`：审批记录的唯一消费入口与 run 级取消令牌管理。
-- `tests/runtime_v2/test_runtime_engine.py`：覆盖普通澄清完成、跨 Session 隔离、同 Session FIFO、审批同 run_id 恢复及取消不写 Conversation。
+- `tests/runtime_v2/test_runtime_engine.py`：覆盖普通澄清完成、跨 Session 隔离、同 Session FIFO、审批同 run_id 恢复、审批拒绝、审批恢复与新消息的租约互斥及取消不写 Conversation。

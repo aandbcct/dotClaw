@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ...agent.identity import AgentIdentity
 from ...config.settings import Config
+from ...tools.base import ToolDefinition as LegacyToolDefinition
 from ...tools.executor import ToolExecutor
 from ..application.ports import RunPolicyPort
 from ..domain.models import AgentPolicySnapshot, RunRequest, ToolDefinition
@@ -44,12 +45,12 @@ class AgentPolicyPort(RunPolicyPort):
             },
         )
 
-    def _allowed_definitions(self) -> list:
+    def _allowed_definitions(self) -> list[LegacyToolDefinition]:
         """按 Agent 白名单过滤既有工具定义。"""
-        definitions = self._executor.get_definitions()
+        definitions: list[LegacyToolDefinition] = self._executor.get_definitions()
         if not self._identity.allowed_tools:
             return definitions
-        allowed = set(self._identity.allowed_tools)
+        allowed: set[str] = set(self._identity.allowed_tools)
         return [definition for definition in definitions if definition.name in allowed]
 
 

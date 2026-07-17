@@ -21,6 +21,7 @@ class RunEventType(StrEnum):
     CHECKPOINT_SAVED = "checkpoint_saved"
     WAITING_APPROVAL = "waiting_approval"
     APPROVAL_RESOLVED = "approval_resolved"
+    RUN_RESUMED = "run_resumed"
     DELEGATION_SUBMITTED = "delegation_submitted"
     DELEGATION_COMPLETED = "delegation_completed"
     RUN_COMPLETED = "run_completed"

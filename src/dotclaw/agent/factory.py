@@ -13,13 +13,17 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
 
 if TYPE_CHECKING:
+    from dotclaw.channel.base import Channel
     from dotclaw.context.ports import AgentDirectoryPort, MemorySearchPort, SkillRegistryPort
     from dotclaw.runtime.application.ports import ContextPort
 
 logger = logging.getLogger("dotclaw.factory")
+
+ComponentType = TypeVar("ComponentType")
+"""初始化辅助函数返回的具体组件类型。"""
 
 
 # ============================================================================
@@ -30,7 +34,11 @@ CRITICAL = "critical"
 DEGRADE = "degrade"
 
 
-def _init_sync(name: str, fn, on_fail: str = DEGRADE) -> Any:
+def _init_sync(
+    name: str,
+    fn: Callable[[], ComponentType],
+    on_fail: str = DEGRADE,
+) -> ComponentType | None:
     """同步初始化一个组件，失败时按策略处理。"""
     try:
         return fn()
@@ -41,7 +49,11 @@ def _init_sync(name: str, fn, on_fail: str = DEGRADE) -> Any:
         return None
 
 
-async def _init_async(name: str, coro, on_fail: str = DEGRADE) -> Any:
+async def _init_async(
+    name: str,
+    coro: Awaitable[ComponentType],
+    on_fail: str = DEGRADE,
+) -> ComponentType | None:
     """异步初始化一个组件，失败时按策略处理。"""
     try:
         return await coro
@@ -299,7 +311,7 @@ def _build_context_port(
 
 async def build_agent(
     agent_id: str | None = None,
-    channel: Any = None,
+    channel: Channel | None = None,
 ) -> tuple[AgentCls, RuntimeServices, SessionManager]:
     """装配一个完全就绪的 Agent + Runtime v2 服务 + SessionManager。
 
@@ -364,7 +376,6 @@ async def build_agent(
     agent: AgentCls = AgentCls(
         identity=identity,
         coordinator=runtime_services.coordinator,
-        runtime_engine=runtime_services.engine,
         config=config,
         tool_executor=tool_executor,
         mcp_provider=mcp_provider,

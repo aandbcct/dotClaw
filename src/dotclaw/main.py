@@ -29,6 +29,11 @@ from dotclaw.agent import Agent, build_agent
 from dotclaw.session import Session, SessionManager
 from dotclaw.bootstrap import RuntimeServices
 from dotclaw.cli.banner import build_banner, console as rich_console
+from dotclaw.mcp.provider import MCPToolProvider
+from dotclaw.memory.dream import DeepDream
+from dotclaw.skills.registry import SkillRegistry
+from dotclaw.tools.base import ToolDefinition, ToolSource
+from dotclaw.tools.executor import ToolExecutor
 
 
 async def _run_cli() -> None:
@@ -168,50 +173,51 @@ async def _cmd_list(channel: CLIChannel, mgr: SessionManager, cur: Session) -> N
         channel.print_info(f"  [{s.id}] {s.title} ({s.updated_at[:10]}){mark}")
 
 
-def _cmd_tools(channel: CLIChannel, tool_executor: object) -> None:
-    from dotclaw.tools.base import ToolSource
+def _cmd_tools(channel: CLIChannel, tool_executor: ToolExecutor | None) -> None:
+    """展示既有工具注册表，不参与运行控制或审批决策。"""
     if tool_executor is None:
         channel.print_info("(没有注册任何工具)")
         return
-    definitions = tool_executor.get_definitions()  # type: ignore[union-attr]
+    definitions: list[ToolDefinition] = tool_executor.get_definitions()
     if not definitions:
         channel.print_info("(没有注册任何工具)")
         return
     total: int = len(definitions)
     channel.print_info(f"可用工具 ({total} 个):")
-    builtin = [d for d in definitions if d.source == ToolSource.BUILTIN]
-    mcp_tools = [d for d in definitions if d.source == ToolSource.MCP]
+    builtin: list[ToolDefinition] = [definition for definition in definitions if definition.source is ToolSource.BUILTIN]
+    mcp_tools: list[ToolDefinition] = [definition for definition in definitions if definition.source is ToolSource.MCP]
     if builtin:
         channel.print_info(f"  内置工具 ({len(builtin)} 个):")
-        for d in builtin:
-            handler = tool_executor.get_handler(d.name)  # type: ignore[union-attr]
+        for definition in builtin:
+            handler = tool_executor.get_handler(definition.name)
             mark: str = " [需审批]" if handler and handler.definition().needs_approval else ""
-            channel.print_info(f"    {d.name}{mark}: {d.description}")
+            channel.print_info(f"    {definition.name}{mark}: {definition.description}")
     if mcp_tools:
-        by_server: dict[str, list] = {}
-        for d in mcp_tools:
-            server: str = d.metadata.get("server", "unknown")
-            by_server.setdefault(server, []).append(d)
+        by_server: dict[str, list[ToolDefinition]] = {}
+        for definition in mcp_tools:
+            server: str = str(definition.metadata.get("server", "unknown"))
+            by_server.setdefault(server, []).append(definition)
         channel.print_info(f"  MCP 工具 ({len(mcp_tools)} 个):")
         for server, tools in by_server.items():
             channel.print_info(f"    [{server}]")
-            for d in tools:
-                handler = tool_executor.get_handler(d.name)  # type: ignore[union-attr]
+            for definition in tools:
+                handler = tool_executor.get_handler(definition.name)
                 mark = " [需审批]" if handler and handler.definition().needs_approval else ""
-                channel.print_info(f"      {d.name}{mark}: {d.description}")
+                channel.print_info(f"      {definition.name}{mark}: {definition.description}")
 
 
-def _cmd_mcp(channel: CLIChannel, mcp_provider: object) -> None:
+def _cmd_mcp(channel: CLIChannel, mcp_provider: MCPToolProvider | None) -> None:
+    """展示 MCP 服务状态，不访问 Runtime 内部状态。"""
     if mcp_provider is None:
         channel.print_info("MCP 未启用")
         return
     from dotclaw.mcp import McpClientState
-    states = mcp_provider.get_server_states()  # type: ignore[union-attr]
+    states = mcp_provider.get_server_states()
     if not states:
         channel.print_info("(未配置 MCP server)")
         return
     channel.print_info("MCP servers:")
-    state_labels: dict = {
+    state_labels: dict[McpClientState, str] = {
         McpClientState.STARTING: "⏳",
         McpClientState.CONNECTED: "✅",
         McpClientState.CRASHED: "💥",
@@ -224,11 +230,12 @@ def _cmd_mcp(channel: CLIChannel, mcp_provider: object) -> None:
         channel.print_info(f"  {icon} [{name}] {st.value}{msg}")
 
 
-def _cmd_skills(channel: CLIChannel, skill_registry: object) -> None:
+def _cmd_skills(channel: CLIChannel, skill_registry: SkillRegistry | None) -> None:
+    """展示已注册 Skill，不参与运行控制。"""
     if skill_registry is None:
         channel.print_info("Skill 系统未启用")
         return
-    metas = skill_registry.list_all()  # type: ignore[union-attr]
+    metas = skill_registry.list_all()
     if not metas:
         channel.print_info("(没有加载任何 Skill)")
         return
@@ -238,9 +245,10 @@ def _cmd_skills(channel: CLIChannel, skill_registry: object) -> None:
         channel.print_info(f"  {meta.name}: {desc_line}")
 
 
-async def _cmd_dream_async(channel: CLIChannel, dream: object) -> None:
+async def _cmd_dream_async(channel: CLIChannel, dream: DeepDream) -> None:
+    """执行已初始化的记忆蒸馏任务。"""
     try:
-        result = await dream.run()  # type: ignore[union-attr]
+        result = await dream.run()
         channel.print_info(f"Dream: {result}")
     except Exception as e:
         channel.print_error(f"Dream 失败: {e}")

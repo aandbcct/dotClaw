@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 
+from ...llm.base import ChatChunk
 from ...llm.base import Message as LegacyMessage
 from ...llm.base import ToolCall as LegacyToolCall
 from ...llm.base import ToolDefinition as LegacyToolDefinition
@@ -41,7 +42,7 @@ class LLMProxyPort(LLMPort):
         tool_calls: list[ToolCall] = []
         input_tokens: int = 0
         output_tokens: int = 0
-        response: AsyncIterator = self._proxy.chat(
+        response: AsyncIterator[ChatChunk] = self._proxy.chat(
             messages=messages,
             tools=tools or None,
             model=execution.policy.model_id or None,
