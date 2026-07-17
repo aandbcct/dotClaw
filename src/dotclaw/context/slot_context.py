@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..runtime.domain.execution import RunExecutionView
+from dotclaw.runtime.application.execution import RunExecutionView
 from ..runtime.domain.models import RunRequest, ToolDefinition
 from .ports import ContextDependencies
 

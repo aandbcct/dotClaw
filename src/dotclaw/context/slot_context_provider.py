@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from ..runtime.application.ports import ContextPort
-from ..runtime.domain.execution import RunExecutionView
+from dotclaw.runtime.application.execution import RunExecutionView
 from ..runtime.domain.models import (
     ConversationMessage,
     ContextBundle,
@@ -24,7 +22,7 @@ from ..runtime.domain.models import (
     require_json_map,
 )
 from .ports import ContextDependencies
-from .scoped_cache import ScopedCache, SlotCacheScope
+from .scoped_cache import ScopedCache
 from .slot_context import ContextProfile, SlotContext
 from .slots import ContextSlot
 

@@ -7,7 +7,7 @@ import uuid
 from ...tools.base import ToolExecutionContext
 from ...tools.executor import ToolExecutor
 from ..application.ports import ToolPort
-from ..domain.execution import RunExecutionView
+from dotclaw.runtime.application.execution import RunExecutionView
 from ..domain.models import RunError, RunErrorCode, ToolInvocation, ToolResult, ToolResultStatus
 
 

@@ -11,7 +11,7 @@ from ...llm.base import ToolCall as LegacyToolCall
 from ...llm.base import ToolDefinition as LegacyToolDefinition
 from ...llm.proxy import LLMProxy
 from ..application.ports import LLMPort
-from ..domain.execution import RunExecutionView
+from dotclaw.runtime.application.execution import RunExecutionView
 from ..domain.models import ContextBundle, MessageRole, RunMessage, RunMessageKind, ToolCall
 
 

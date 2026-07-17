@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..domain.execution import CancellationToken
+from dotclaw.runtime.application.execution import CancellationToken
 
 
 class CancellationService:

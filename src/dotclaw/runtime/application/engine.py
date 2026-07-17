@@ -17,7 +17,7 @@ from ..domain.events import (
     ToolCompleted,
     ToolCompletionKind,
 )
-from ..domain.execution import RunBudget, RunExecution
+from dotclaw.runtime.application.execution import RunBudget, RunExecution
 from ..domain.models import (
     AgentRun,
     ConversationMessage,

@@ -14,7 +14,7 @@ from dotclaw.context import (
     SlotContextProvider,
 )
 from dotclaw.context.slots import ContextSlot, IdentitySlot, MemorySlot, ProjectSlot
-from dotclaw.runtime.domain.execution import RunBudget, RunExecution
+from dotclaw.runtime.application.execution import RunBudget, RunExecution
 from dotclaw.runtime.domain.models import (
     AgentPolicySnapshot,
     ConversationMessage,

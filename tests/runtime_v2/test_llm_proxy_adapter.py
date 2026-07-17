@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 
 from dotclaw.llm.base import ChatChunk, ToolCall as LegacyToolCall
 from dotclaw.runtime.adapters import LLMProxyAdapter
-from dotclaw.runtime.domain.execution import RunBudget, RunExecutionView
+from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.domain.models import AgentPolicySnapshot, ContextBundle, ContextMetadata, MessageRole, RunMessage, RunMessageKind, ToolDefinition
 from dotclaw.runtime.domain.state import AgentState
 

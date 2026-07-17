@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from ..domain.events import RunEvent
-from ..domain.execution import RunExecutionView
+from dotclaw.runtime.application.execution import RunExecutionView
 from ..domain.models import (
     AgentRun,
     ApprovalRecord,
