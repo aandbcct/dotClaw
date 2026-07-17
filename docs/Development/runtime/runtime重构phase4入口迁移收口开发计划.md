@@ -1,6 +1,6 @@
 # Runtime 重构 Phase 4：入口迁移收口前置开发计划
 
-> 状态：待开发。
+> 状态：已完成（2026-07-17）。
 >
 > 本文是 [Runtime 重构开发计划](runtime重构开发计划.md) 中 Phase 4 的入口迁移收口子计划，供后续开发人员执行。
 > 目标是以最小桥接方式跑通 Runtime v2 主路径，不进行无关的大规模模块重写；delegation、旧 Journal 完整退出和旧 Runtime 物理删除属于 Phase 5、Phase 6。
@@ -319,3 +319,38 @@ git diff --check
 - [runtime重构迁移清单.md](runtime重构迁移清单.md)；
 - 本文对应阶段状态、剩余调用方与删除条件；
 - 新增 adapter、入口迁移和删除项的测试证据。
+
+## 8. 实施结果（2026-07-17）
+
+### 阶段 A：入口迁移基线
+
+- 已新增 `tests/runtime_v2/test_entry_migration_contract.py`，覆盖 Agent 普通消息经 Coordinator 提交、Agent 不直接写 Session，以及新入口不引用旧 Runtime 主路径。
+- 已新增 `tests/runtime_v2/test_cli_submission_contract.py`，约束 CLI 只通过 Agent 门面提交普通消息、审批决定与取消请求。
+
+### 阶段 B：v2 Port bridge
+
+- 已新增 `LLMProxyPort`、`ToolExecutorPort` 与 `AgentPolicyPort`，并由 `runtime/adapters/__init__.py` 导出。
+- `ToolExecutor` 新增无 Channel 副作用的审批查询和已审批执行入口；新 ToolPort 仅返回结构化 `APPROVAL_REQUIRED`，以 `run_id + call_id` 确保批准后的副作用最多执行一次。
+- 已新增 `test_llm_proxy_port.py` 与 `test_tool_executor_port.py`。
+
+### 阶段 C：组合根与请求工厂
+
+- 已新增 `bootstrap/runtime_factory.py`，装配 `RuntimeEngine`、`SessionRunCoordinator`、文件仓储、SessionConversationProjector、ContextPort 与三类 bridge。
+- 已新增 `runtime/application/request_factory.py`，只依赖 Session 的只读快照协议，不向 Engine 传递可变 Session。
+- `agent/factory.py` 不再为普通消息装配旧 Runtime、Journal、StateStore 或旧 AgentRunManager。
+
+### 阶段 D–E：Agent 与 CLI 入口
+
+- `Agent.process()` 只构造冻结 RunRequest 并调用 `SessionRunCoordinator.submit()`；成功 Conversation 仅由 `RunRepository.commit_success()` 的投影器写入。
+- CLI 已迁移为调用 `Agent.process()`；审批只提交 `approval_id + approved`，取消只提交 `run_id + reason`。
+
+### 阶段 F：旧 Runtime 兼容收缩
+
+- `runtime/runtime.py` 已明确为 `LegacyRuntimeFacade`。注入 Coordinator 时其普通 `run()` 转发 Runtime v2；未迁移的 delegation/handoff 与历史测试仍可使用旧兼容循环。
+- 新公开 API 已以 `RuntimeEngine`、`SessionRunCoordinator` 和 Ports 为主；`Runtime` 保留为兼容别名。
+
+### 验证证据
+
+- `python -m pytest tests/runtime_v2 -q`：32 passed。
+- `python -m pytest -q`：223 passed。
+- `git diff --check`：通过。

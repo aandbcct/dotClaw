@@ -239,6 +239,7 @@ class RunResult:
     status: RunStatus
     final_message: ConversationMessage | None = None
     error: RunError | None = None
+    approval_id: str | None = None
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -247,6 +248,7 @@ class RunResult:
             "status": self.status.value,
             "final_message": None if self.final_message is None else self.final_message.to_dict(),
             "error": None if self.error is None else self.error.to_dict(),
+            "approval_id": self.approval_id,
         }
 
 

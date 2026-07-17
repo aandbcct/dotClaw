@@ -28,6 +28,7 @@ from ..domain.models import (
     RunMessageKind,
     RunRequest,
     RunResult,
+    RunStatistics,
     RunStatus,
     ToolCall,
     ToolInvocation,
@@ -167,11 +168,18 @@ class RuntimeEngine:
                 pending_calls = ()
                 if not tool_calls:
                     return await self._fail(execution, run, tuple(messages), event_number, "缺少待执行工具调用")
-                tool_result = await self._tool_port.execute(ToolInvocation(execution.run_id, tool_calls[0]), execution.view())
+                try:
+                    tool_result = await self._tool_port.execute(ToolInvocation(execution.run_id, tool_calls[0]), execution.view())
+                except Exception as error:
+                    return await self._fail(execution, run, tuple(messages), event_number, f"工具调用失败：{error}", RunErrorCode.TOOL_FAILURE)
                 sequence += 1
+                run = _with_tool_statistic(run)
                 tool_message = RunMessage(f"tool-{execution.run_id}-{sequence}", sequence, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, tool_result.output, tool_call_id=tool_result.call_id)
                 messages.append(tool_message)
                 await self._save_messages(run, messages)
+                if tool_result.status is ToolResultStatus.FAILED:
+                    error = tool_result.error.message if tool_result.error is not None else tool_result.output or "工具执行失败"
+                    return await self._fail(execution, run, tuple(messages), event_number, error, RunErrorCode.TOOL_FAILURE)
                 if tool_result.status is ToolResultStatus.APPROVAL_REQUIRED:
                     record = await self._approval_service.create(run.run_id, run.session_id, tool_result.approval_id)
                     transition = execution.state.transition(ToolCompleted(ToolCompletionKind.APPROVAL_REQUIRED, (tool_message.message_id,), record.approval_id))
@@ -181,7 +189,7 @@ class RuntimeEngine:
                     waiting_run = replace(run, status=RunStatus.WAITING_APPROVAL, latest_checkpoint_id=checkpoint.checkpoint_id)
                     await self._run_repository.save_run(waiting_run)
                     await self._event(run, event_number, RunEventType.WAITING_APPROVAL, (tool_message.message_id,))
-                    return RunResult(run.run_id, RunStatus.WAITING_APPROVAL)
+                    return RunResult(run.run_id, RunStatus.WAITING_APPROVAL, approval_id=record.approval_id)
                 transition = execution.state.transition(ToolCompleted(ToolCompletionKind.COMPLETED, (tool_message.message_id,)))
                 execution.update_state(transition.state, transition.action)
                 continue
@@ -194,8 +202,12 @@ class RuntimeEngine:
                 context_message_ids.append(persisted_context_message.message_id)
             await self._save_messages(run, messages)
             event_number = await self._event(run, event_number, RunEventType.CONTEXT_BUILT, tuple(context_message_ids))
-            response = await self._llm_port.complete(context, execution.view())
+            try:
+                response = await self._llm_port.complete(context, execution.view())
+            except Exception as error:
+                return await self._fail(execution, run, tuple(messages), event_number, f"模型调用失败：{error}", RunErrorCode.LLM_FAILURE)
             sequence += 1
+            run = _with_llm_statistics(run, response)
             final: bool = not response.tool_calls
             response_message = replace(response, message_id=f"response-{execution.run_id}-{sequence}", sequence=sequence, kind=RunMessageKind.FINAL_RESPONSE if final else RunMessageKind.LLM_RESPONSE)
             messages.append(response_message)
@@ -230,9 +242,17 @@ class RuntimeEngine:
         await self._event(run, event_sequence, RunEventType.RUN_CANCELLED, ())
         return RunResult(run.run_id, RunStatus.CANCELLED, error=cancelled.error)
 
-    async def _fail(self, execution: RunExecution, run: AgentRun, messages: tuple[RunMessage, ...], event_sequence: int, message: str) -> RunResult:
+    async def _fail(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        messages: tuple[RunMessage, ...],
+        event_sequence: int,
+        message: str,
+        code: RunErrorCode = RunErrorCode.INVALID_STATE,
+    ) -> RunResult:
         """持久化失败终态且不投影 Conversation。"""
-        error = RunError(RunErrorCode.INVALID_STATE, message)
+        error = RunError(code, message)
         failed = replace(run, status=RunStatus.FAILED, ended_at=utc_now_iso(), error=error)
         await self._run_repository.save_run(failed)
         await self._event(run, event_sequence, RunEventType.RUN_FAILED, ())
@@ -256,3 +276,31 @@ def _calls_from_checkpoint(checkpoint: RunCheckpoint) -> tuple[ToolCall, ...]:
     if not isinstance(call_id, str) or not isinstance(call_name, str) or not isinstance(arguments, dict):
         return ()
     return (ToolCall(call_id, call_name, arguments),)
+
+
+def _with_llm_statistics(run: AgentRun, response: RunMessage) -> AgentRun:
+    """从标准化响应元数据累加模型调用与 token 统计。"""
+    raw_input = response.metadata.get("input_tokens", 0)
+    raw_output = response.metadata.get("output_tokens", 0)
+    input_tokens = raw_input if isinstance(raw_input, int) and not isinstance(raw_input, bool) else 0
+    output_tokens = raw_output if isinstance(raw_output, int) and not isinstance(raw_output, bool) else 0
+    statistics = run.statistics
+    return replace(run, statistics=RunStatistics(
+        duration_ms=statistics.duration_ms,
+        llm_call_count=statistics.llm_call_count + 1,
+        tool_call_count=statistics.tool_call_count,
+        tokens_in=statistics.tokens_in + input_tokens,
+        tokens_out=statistics.tokens_out + output_tokens,
+    ))
+
+
+def _with_tool_statistic(run: AgentRun) -> AgentRun:
+    """累加工具调用次数，保持其他运行统计不变。"""
+    statistics = run.statistics
+    return replace(run, statistics=RunStatistics(
+        duration_ms=statistics.duration_ms,
+        llm_call_count=statistics.llm_call_count,
+        tool_call_count=statistics.tool_call_count + 1,
+        tokens_in=statistics.tokens_in,
+        tokens_out=statistics.tokens_out,
+    ))

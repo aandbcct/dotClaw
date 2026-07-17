@@ -1,6 +1,7 @@
-"""Runtime —— Agent 执行引擎。
+"""LegacyRuntimeFacade —— delegation 兼容门面。
 
-Runtime 是 dotClaw 的执行引擎 + 依赖容器，统一负责：
+普通消息应经 SessionRunCoordinator 转发到 Runtime v2；本文件的旧 ReAct
+循环仅保留给尚未迁移的 delegation、handoff 与历史兼容测试。
 - 依赖注入（LLM / Tool / Journal / Config / ...）
 - 执行入口：run(session, agent, user_message) → final_answer
 - 内部 ReAct 循环由 AgentState 状态机驱动
@@ -54,14 +55,15 @@ if TYPE_CHECKING:
     from ..config import Config
     from .application.ports import ContextPort
     from .state_store import StateStore
+    from .application.session_run_coordinator import SessionRunCoordinator
 
 
 # ============================================================================
 # Runtime —— 执行引擎
 # ============================================================================
 
-class Runtime:
-    """Agent 执行引擎 + 依赖容器。
+class LegacyRuntimeFacade:
+    """仅保留 delegation 兼容边界的旧 Runtime 门面。
 
     run(session, agent, user_message) 是一次完整的一问一答入口。
     内部 ReAct 循环由 AgentState 状态机驱动，所有运行时状态
@@ -101,11 +103,13 @@ class Runtime:
         delegation_endpoint: str = "",
         delegation_task_id: str = "",
         context_port: ContextPort | None = None,
+        coordinator: SessionRunCoordinator | None = None,
     ) -> None:
         self.llm: LLMProxy = llm
         self.tool_executor: ToolExecutor | None = tool_executor
         self.assembler: ContextAssembler | None = assembler
         self.context_port: ContextPort | None = context_port
+        self._coordinator: SessionRunCoordinator | None = coordinator
         self.agent_registry: AgentRegistry = agent_registry
         self.session_mgr: SessionManager = session_mgr
         self.run_mgr: AgentRunManager = run_mgr
@@ -126,7 +130,7 @@ class Runtime:
 
     # ======================== 派生（多 Agent 隔离） ========================
 
-    def derive(self, *, channel: Channel | None = None, delegation_endpoint: str = "", delegation_task_id: str = "") -> Runtime:
+    def derive(self, *, channel: Channel | None = None, delegation_endpoint: str = "", delegation_task_id: str = "") -> LegacyRuntimeFacade:
         """派生 Runtime。共享 llm/skills/registry/state_store，隔离 channel 和 journal。
 
         子 Agent 获得全新 Journal 实例，避免父子并发执行时 trace/session/AgentRun
@@ -147,7 +151,7 @@ class Runtime:
         child_assembler: ContextAssembler | None = (
             self.assembler.clone() if self.assembler is not None else None
         )
-        return Runtime(
+        return LegacyRuntimeFacade(
             llm=self.llm,
             tool_executor=self.tool_executor,
             assembler=child_assembler,
@@ -164,6 +168,7 @@ class Runtime:
             delegation_endpoint=delegation_endpoint,
             delegation_task_id=delegation_task_id,
             context_port=self.context_port,
+            coordinator=None,
         )
 
     # ======================== 公开入口：run() ========================
@@ -195,6 +200,8 @@ class Runtime:
         Returns:
             (final_answer, run_ids): 最终回复 + 本次产生的 AgentRun ID 列表
         """
+        if self._coordinator is not None:
+            return await self._submit_v2(session, agent, user_message)
         if self.journal is None or self.state_store is None:
             raise RuntimeError(
                 "Runtime.run() requires Journal and StateStore injected"
@@ -237,6 +244,24 @@ class Runtime:
             return final_answer, list(run_ids)
         finally:
             self.journal.finalize()
+
+    async def _submit_v2(
+        self,
+        session: SessionType,
+        agent: AgentType,
+        user_message: str,
+    ) -> tuple[str, list[str]]:
+        """普通入口通过注入的 Coordinator 转发到 Runtime v2。"""
+        from .application.request_factory import create_run_request
+        request = create_run_request(session, agent.agent_id, user_message)
+        result = await self._coordinator.submit(request)
+        if result.final_message is not None:
+            return result.final_message.content, [result.run_id]
+        if result.error is not None:
+            return f"执行失败：{result.error.message}", [result.run_id]
+        if result.status.value == "waiting_approval":
+            return self.WAIT_SENTINEL, [result.run_id]
+        return f"执行未完成：{result.status.value}", [result.run_id]
 
     async def _ensure_source_task_closed(self, agent: AgentType, session_id: str) -> None:
         """阻止 source Session 在活动 Task 存在时提交最终回答。
@@ -1021,3 +1046,7 @@ def _find_project_root() -> Path:
     """从 dotClaw 模块位置向上找到项目根目录。"""
     import dotclaw
     return Path(dotclaw.__file__).parent.parent.parent
+
+
+Runtime = LegacyRuntimeFacade
+"""历史导入名称；新普通入口应使用 RuntimeEngine 与 SessionRunCoordinator。"""

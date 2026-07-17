@@ -27,7 +27,13 @@ if TYPE_CHECKING:
     from ..session.agent_run import AgentRun
     from ..orchestration.task import Task
     from ..orchestration.dispatcher import AgentDispatcher
-    from ..runtime.runtime import Runtime
+    from ..runtime import Runtime
+    from ..runtime.application.engine import RuntimeEngine
+    from ..runtime.application.session_run_coordinator import SessionRunCoordinator
+    from ..runtime.domain.models import RunResult
+    from ..tools.executor import ToolExecutor
+    from ..mcp.provider import MCPToolProvider
+    from ..skills.registry import SkillRegistry
 
 
 # ============================================================================
@@ -75,6 +81,12 @@ class Agent:
         self,
         identity: AgentIdentity,
         runtime: Runtime | None = None,
+        coordinator: SessionRunCoordinator | None = None,
+        runtime_engine: RuntimeEngine | None = None,
+        config: Config | None = None,
+        tool_executor: ToolExecutor | None = None,
+        mcp_provider: MCPToolProvider | None = None,
+        skill_registry: SkillRegistry | None = None,
         dispatcher: AgentDispatcher | None = None,
         memory_dream: object = None,
         mcp_task: object = None,
@@ -92,6 +104,13 @@ class Agent:
         """
         self._identity: AgentIdentity = identity
         self._runtime: Runtime | None = runtime
+        self._coordinator: SessionRunCoordinator | None = coordinator
+        self._runtime_engine: RuntimeEngine | None = runtime_engine
+        self._config: Config | None = config
+        self._tool_executor: ToolExecutor | None = tool_executor
+        self._mcp_provider: MCPToolProvider | None = mcp_provider
+        self._skill_registry: SkillRegistry | None = skill_registry
+        self._last_run_result: RunResult | None = None
         self._dispatcher: AgentDispatcher | None = dispatcher
         self._memory_dream: object = memory_dream
         self._mcp_task: object = mcp_task
@@ -122,9 +141,36 @@ class Agent:
     @property
     def config(self) -> Config | None:
         """全局配置（从 Runtime 获取）。"""
+        if self._config is not None:
+            return self._config
         if self._runtime is not None:
             return self._runtime.config
         return None
+
+    @property
+    def runtime_engine(self) -> "RuntimeEngine | None":
+        """普通消息入口使用的 Runtime v2 Engine。"""
+        return self._runtime_engine
+
+    @property
+    def last_run_result(self) -> "RunResult | None":
+        """最近一次普通消息执行结果，供 CLI 处理审批或取消。"""
+        return self._last_run_result
+
+    @property
+    def tool_executor(self) -> "ToolExecutor | None":
+        """仅供 CLI 展示工具清单的既有执行器。"""
+        return self._tool_executor
+
+    @property
+    def mcp_provider(self) -> "MCPToolProvider | None":
+        """仅供 CLI 展示 MCP 状态的提供者。"""
+        return self._mcp_provider
+
+    @property
+    def skill_registry(self) -> "SkillRegistry | None":
+        """仅供 CLI 展示 Skill 的注册表。"""
+        return self._skill_registry
 
     @property
     def memory_dream(self) -> object:
@@ -152,43 +198,58 @@ class Agent:
             mcp = self._runtime.mcp_provider
             if mcp is not None and hasattr(mcp, 'shutdown'):
                 await mcp.shutdown()  # type: ignore[union-attr]
+        elif self._mcp_provider is not None and hasattr(self._mcp_provider, "shutdown"):
+            await self._mcp_provider.shutdown()  # type: ignore[union-attr]
 
     # ======================== 公开 API ========================
 
     async def process(
         self,
-        runtime: Runtime,
         session: SessionType,
         user_message: str,
-        session_mgr: object,
     ) -> str:
         """处理一条用户消息。
 
         Args:
-            runtime: Runtime 执行引擎
             session: 运行时上下文
             user_message: 用户输入文本
-            session_mgr: SessionManager 实例
 
         Returns:
             Agent 最终回复文本
         """
-        if runtime.journal is None:
-            raise RuntimeError(
-                "Agent.process() requires Runtime with Journal injected"
-            )
+        if self._coordinator is None:
+            raise RuntimeError("Agent.process() 需要注入 SessionRunCoordinator")
+        from ..runtime.application.request_factory import create_run_request
+        request = create_run_request(session, self.agent_id, user_message)
+        result = await self._coordinator.submit(request)
+        self._last_run_result = result
+        if result.final_message is not None:
+            return result.final_message.content
+        if result.error is not None:
+            return f"执行失败：{result.error.message}"
+        if result.status.value == "waiting_approval":
+            return f"运行等待审批：{result.run_id}"
+        return f"执行未完成：{result.status.value}"
 
-        final_answer, run_ids = await runtime.run(session, self, user_message)
+    async def resolve_approval(self, approval_id: str, approved: bool) -> str:
+        """提交有限审批决定，并返回恢复运行的标准结果文本。"""
+        if self._runtime_engine is None:
+            raise RuntimeError("Agent.resolve_approval() 需要注入 RuntimeEngine")
+        result = await self._runtime_engine.resolve_approval(approval_id, approved)
+        self._last_run_result = result
+        if result.final_message is not None:
+            return result.final_message.content
+        if result.error is not None:
+            return f"执行失败：{result.error.message}"
+        if result.status.value == "waiting_approval":
+            return f"运行等待审批：{result.run_id}"
+        return f"执行未完成：{result.status.value}"
 
-        # 持久化对话记录
-        session.add_conversation(
-            user_query=user_message,
-            final_answer=final_answer,
-            agent_run_ids=list(run_ids),
-        )
-        await session_mgr.save(session)  # type:ignore[union-attr]
-
-        return final_answer
+    async def cancel_run(self, run_id: str, reason: str) -> None:
+        """将取消请求转交 RuntimeEngine，不读写运行内部状态。"""
+        if self._runtime_engine is None:
+            raise RuntimeError("Agent.cancel_run() 需要注入 RuntimeEngine")
+        await self._runtime_engine.cancel(run_id, reason)
 
     async def execute_in_session(
         self,
@@ -203,7 +264,8 @@ class Agent:
         """
         if runtime.journal is None:
             raise RuntimeError("Agent.execute_in_session() 需要 Journal")
-        answer, _ = await runtime.run(session, self, task.specification.render_user_message())
+        legacy_run = getattr(runtime, "run")
+        answer, _ = await legacy_run(session, self, task.specification.render_user_message())
         return answer
 
     # ======================== 配置解析（桥接方法） ========================

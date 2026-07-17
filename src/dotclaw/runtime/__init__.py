@@ -32,15 +32,20 @@ from .agent_state import (
     V2AgentState,
 )
 from .task import Task, TaskProgress
-from .runtime import Runtime
+from .runtime import LegacyRuntimeFacade, Runtime
 from .state_store import StateStore, StateSnapshot
 from .domain.models import AgentRun as RuntimeAgentRun, RunRequest, RunResult, RunStatus
+from .application.engine import RuntimeEngine
+from .application.session_run_coordinator import SessionRunCoordinator
 
 RuntimeV2AgentState = V2AgentState
 """Runtime v2 纯领域状态机的向后兼容公开名称。"""
 
 __all__ = [
     "Runtime",
+    "LegacyRuntimeFacade",
+    "RuntimeEngine",
+    "SessionRunCoordinator",
     "AgentPhase",
     "AgentState",
     "AgentEvent",

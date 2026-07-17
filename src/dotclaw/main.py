@@ -26,8 +26,8 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from dotclaw.channel.cli import CLIChannel
 from dotclaw.agent import Agent, build_agent
-from dotclaw.session import Session, SessionManager, AgentRun
-from dotclaw.runtime import Runtime
+from dotclaw.session import Session, SessionManager
+from dotclaw.bootstrap import RuntimeServices
 from dotclaw.cli.banner import build_banner, console as rich_console
 
 
@@ -36,9 +36,9 @@ async def _run_cli() -> None:
 
     channel.print_info("组件初始化中...")
     agent: Agent
-    runtime: Runtime
+    runtime_services: RuntimeServices
     session_mgr: SessionManager
-    agent, runtime, session_mgr = await build_agent(channel=channel)
+    agent, runtime_services, session_mgr = await build_agent(channel=channel)
 
     if agent.config is not None:
         logging.getLogger().setLevel(agent.config.debug.level)
@@ -109,12 +109,18 @@ async def _run_cli() -> None:
                         await _cmd_dream_async(channel, dream)
                     else:
                         channel.print_error("Dream: 记忆系统未初始化")
+                elif cmd == "/cancel":
+                    if args:
+                        await agent.cancel_run(args, "用户通过 CLI 取消")
+                        channel.print_info(f"已提交取消请求: {args}")
+                    else:
+                        channel.print_error("用法: /cancel <run_id>")
                 elif cmd == "/tools":
-                    _cmd_tools(channel, runtime.tool_executor)
+                    _cmd_tools(channel, agent.tool_executor)
                 elif cmd == "/mcp":
-                    _cmd_mcp(channel, runtime.mcp_provider)
+                    _cmd_mcp(channel, agent.mcp_provider)
                 elif cmd == "/skills":
-                    _cmd_skills(channel, runtime.skill_registry)
+                    _cmd_skills(channel, agent.skill_registry)
                 elif cmd == "/model":
                     channel.print_info(f"当前模型: {agent._resolve_model()}")
                 else:
@@ -122,7 +128,8 @@ async def _run_cli() -> None:
                 continue
 
             # ── 正常对话 ──
-            final_answer: str = await agent.process(runtime, current_session, user_input, session_mgr)
+            final_answer: str = await agent.process(current_session, user_input)
+            final_answer = await _resolve_pending_approvals(channel, agent, final_answer)
 
             if not final_answer:
                 channel.print_error("执行异常：未返回有效回复")
@@ -146,6 +153,7 @@ dotClaw 命令:
   /mcp             查看 MCP servers 状态
   /skills          列出已加载技能
   /dream           触发记忆蒸馏
+  /cancel <run_id>  取消指定运行
   /model           查看当前模型
   /help            显示帮助
   /quit            退出
@@ -236,6 +244,19 @@ async def _cmd_dream_async(channel: CLIChannel, dream: object) -> None:
         channel.print_info(f"Dream: {result}")
     except Exception as e:
         channel.print_error(f"Dream 失败: {e}")
+
+
+async def _resolve_pending_approvals(channel: CLIChannel, agent: Agent, current_text: str) -> str:
+    """展示有限审批选项，并只向 Engine 提交 approval_id 与决定。"""
+    answer: str = current_text
+    while agent.last_run_result is not None and agent.last_run_result.status.value == "waiting_approval":
+        approval_id = agent.last_run_result.approval_id
+        if not approval_id:
+            return "执行失败：等待审批运行缺少 approval_id"
+        decision = await channel.ask_user("⚠️ 工具需要审批，确认执行？(y/n): ")
+        approved = decision.strip().lower() in ("y", "yes")
+        answer = await agent.resolve_approval(approval_id, approved)
+    return answer
 
 
 def main() -> None:

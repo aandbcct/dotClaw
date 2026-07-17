@@ -300,8 +300,8 @@ def _build_context_port(
 async def build_agent(
     agent_id: str | None = None,
     channel: Any = None,
-) -> tuple[AgentCls, Runtime, SessionManager]:
-    """装配一个完全就绪的 Agent + Runtime + SessionManager。
+) -> tuple[AgentCls, RuntimeServices, SessionManager]:
+    """装配一个完全就绪的 Agent + Runtime v2 服务 + SessionManager。
 
     从 config.yaml + agent YAML + 上次状态重建所有依赖。
 
@@ -312,34 +312,23 @@ async def build_agent(
     Returns:
         (Agent, Runtime, SessionManager)
 
-    v2: Runtime 注入 Journal + StateStore。
-    TurnLoop 不在工厂创建（由调用方在获知 session_id 后创建）。
+    普通消息路径只装配 RuntimeEngine 与 SessionRunCoordinator。
     """
     from dotclaw.config import get_config, _find_project_root
     from dotclaw.session.session import SessionManager
     from dotclaw.agent import Agent as AgentCls
     from dotclaw.agent.identity import load_agent_config as load_id
-    from dotclaw.runtime import Runtime, StateStore
-    from dotclaw.journal import Journal
+    from dotclaw.bootstrap.runtime_factory import RuntimeServices, build_runtime_services
 
     config = get_config()
     project_root = _find_project_root()
 
-    # ── 加载上次状态 ──
-    state = _load_state(project_root)
     if agent_id is None:
-        agent_id = state.get("last_agent_id", "default")
+        agent_id = "default"
 
     # ── 关键组件 ──
     llm_proxy = _build_llm(config, project_root)
     session_mgr: SessionManager = SessionManager(config.session.directory)
-    from dotclaw.session.agent_run import AgentRunManager
-    run_mgr: AgentRunManager = AgentRunManager(config.session.directory)
-
-    # ── Journal + StateStore（v2 新增）──
-    journal: Journal = Journal()
-    state_store: StateStore = StateStore(data_dir=config.session.directory)
-
     # ── 可降级组件 ──
     skill_registry = _init_sync("技能", lambda: _build_skills(config, project_root))
     tool_executor = _init_sync("工具", lambda: _build_tools(config, skill_registry))
@@ -359,76 +348,30 @@ async def build_agent(
     agent_registry = AgentRegistry()
     agent_config_dir = project_root / ".dotclaw" / "agentConfig"
     agent_registry.load_all(agent_config_dir)
-    context_port = _build_context_port(skill_registry, memory_mgr, agent_registry)
-
-    # ── Runtime：执行引擎（v2: 无控制循环，注入 Journal + StateStore）──
-    runtime: Runtime = Runtime(
-        llm=llm_proxy,
-        tool_executor=tool_executor,
-        assembler=None,
-        session_mgr=session_mgr,
-        run_mgr=run_mgr,
-        agent_registry=agent_registry,
-        journal=journal,
-        state_store=state_store,
-        channel=channel,
-        memory_mgr=memory_mgr,
-        skill_registry=skill_registry,
-        mcp_provider=mcp_provider,
+    runtime_services = build_runtime_services(
         config=config,
-        context_port=context_port,
-    )
-
-    # ── Delegation 调度层：内存 Broker + 本地 Dispatcher ──
-    from dotclaw.orchestration.message_broker import TaskMessageBroker
-    from dotclaw.orchestration.dispatcher import AgentDispatcher
-    task_broker: TaskMessageBroker = TaskMessageBroker()
-    dispatcher: AgentDispatcher = AgentDispatcher(broker=task_broker)
-
-    # ── 组装 Agent ──
-    from dotclaw.agent.resume import ResumeManager
-
-    resume_mgr = ResumeManager(
-        state_store=state_store,
-        trace_dir=config.journal.trace_dir,
+        project_root=project_root,
+        identity=identity,
+        llm_proxy=llm_proxy,
+        tool_executor=tool_executor,
+        session_manager=session_mgr,
+        skill_registry=skill_registry,
+        memory_manager=memory_mgr,
+        agent_registry=agent_registry,
+        mcp_provider=mcp_provider,
     )
 
     agent: AgentCls = AgentCls(
         identity=identity,
-        runtime=runtime,
-        dispatcher=dispatcher,
+        coordinator=runtime_services.coordinator,
+        runtime_engine=runtime_services.engine,
+        config=config,
+        tool_executor=tool_executor,
+        mcp_provider=mcp_provider,
+        skill_registry=skill_registry,
         memory_dream=memory_dream,
         mcp_task=mcp_task,
-        resume_manager=resume_mgr,
     )
-
-    # ── 注册 Task delegation 工具 ──
-    if tool_executor is not None:
-        from dotclaw.tools.builtin.task_tool import get_task_handlers
-        for handler in get_task_handlers():
-            tool_executor.registry.register(handler)
-
-    # ── 恢复上次 Session ──
-    sessions: list = await session_mgr.list_all()
-    last_sid: str | None = state.get("last_session_id")
-    if last_sid:
-        for s in sessions:
-            if s.id == last_sid:
-                current_session = s
-                break
-        else:
-            current_session = None
-    else:
-        current_session = None
-
-    if current_session is None:
-        current_session = sessions[0] if sessions else await session_mgr.create("主对话")
-
-    _save_state(project_root, {
-        "last_agent_id": agent.agent_id,
-        "last_session_id": current_session.id,
-    })
-
-    logger.info("Agent [%s] 就绪，session: %s", agent.agent_id, current_session.id)
-    return agent, runtime, session_mgr
+    logger.info("Agent [%s] 的 Runtime v2 服务已就绪", agent.agent_id)
+    return agent, runtime_services, session_mgr
 
