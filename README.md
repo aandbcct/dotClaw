@@ -2,9 +2,9 @@
 
 # 🐾 dotClaw
 
-**面向长程任务的轻量级 Agent Runtime 框架**
+**以声明式 Agent、可恢复 Runtime 和可插拔基础设施构建的轻量级 Agent Harness框架**
 
-声明式 Agent · Run 级状态机 · Session 隔离 · Port 驱动 · 可审计持久化 · 安全审批 · 多 Agent 委派
+声明式角色 · 模型路由容错 · 工具与 MCP · 上下文与记忆 · 可恢复执行 · 运行观测 · 多 Agent 协作
 
 [![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -12,40 +12,134 @@
 
 </div>
 
+---
+
 ## dotClaw 是什么
 
-dotClaw 是一个以 **Runtime** 为核心的 Python Agent 框架。它关注的不只是“让模型调用工具”，还关注一次 Agent 执行在工具失败、审批等待、进程重启、多会话并发时，是否仍然能保持状态隔离、结果可追溯和提交一致。
+dotClaw 是一个面向 AI Agent 应用开发的 Python 框架。它既提供 Agent 的角色声明、模型与工具接入、上下文和记忆构建，也提供把一次请求可靠地运行、暂停、恢复、审计和委派出去的执行底座。
 
-它将一次用户输入视为一次独立的 `AgentRun`：运行中的上下文、状态机、取消令牌与消息证据都归属于该 Run，而不是挂在全局 Runtime 或 Agent 实例上。
+项目把 Agent 系统拆成两类关注点：
+
+- **能力平面**回答“Agent 能做什么、此刻应该看到什么”：声明式角色、模型路由、工具与 MCP、Skills、Memory、Workspace；
+- **执行平面**回答“这次请求如何可靠地完成”：Session、Runtime v2、运行仓储、审批、取消与多 Agent 委派。
+
+Runtime v2 是 dotClaw 的关键执行底座，而不是项目的全部。它将每条用户输入处理为独立 `AgentRun`，让运行中的上下文、状态机、取消令牌与消息证据都归属于该 Run，而不是挂在全局 Runtime 或 Agent 实例上。
 
 ```mermaid
-flowchart LR
-    Client["CLI / Channel / Web"] --> Agent["Agent\n声明式身份门面"]
-    Agent --> Coordinator["SessionRunCoordinator\n同 Session 串行"]
-    Coordinator --> Engine["RuntimeEngine\n共享、业务无状态的执行机"]
-    Engine --> Execution["RunExecution\n单次运行的内存事务"]
-    Execution --> State["AgentState\n纯状态机"]
-    Engine --> Ports["Context / LLM / Tool / Repository / Delegation Ports"]
-    Ports --> Facts["Conversation / AgentRun / RunEvent / RunMessage / Checkpoint"]
-    Ports --> Integrations["LLM / MCP / Tools / Memory / Session / orchestration"]
+flowchart TB
+    User["用户 / CLI / Web Channel"] --> Agent["Agent\n声明式身份门面"]
+    Config["config.yaml + Agent YAML"] --> Agent
+
+    subgraph Capability["能力平面：Agent 可以做什么"]
+        Identity["AgentIdentity\n角色、模型、工具约束"]
+        Router["LLM\nRouter / Proxy / 熔断 / 限流"]
+        Tools["Tools + MCP\nRegistry / Executor / Handler"]
+        Context["Context\nSlots / Budget / Scoped Cache"]
+        Knowledge["Memory / Skills / Workspace\n项目与知识来源"]
+        Identity --> Context
+        Knowledge --> Context
+    end
+
+    subgraph Execution["执行平面：一次请求如何可靠完成"]
+        Session["Session\n会话语义历史"]
+        Coordinator["SessionRunCoordinator\n同 Session 串行"]
+        Engine["RuntimeEngine\n共享、业务无状态"]
+        Run["RunExecution + AgentState\n局部事务与状态机"]
+        Facts["Run Storage\nConversation / AgentRun / Event / Message / Checkpoint"]
+        Coordinator --> Engine --> Run
+        Engine --> Facts
+    end
+
+    Agent --> Session
+    Agent --> Coordinator
+    Engine --> Context
+    Engine --> Router
+    Engine --> Tools
+    Engine --> Delegation["DelegationPort"]
+    Delegation --> Orchestration["orchestration\nDispatcher / Broker / 子 Agent"]
+    Router --> Provider["多模型 Provider"]
+    Tools --> External["内置工具 / MCP Server"]
+    Journal["Journal\n可选观测与诊断"] -. "不作为恢复事实源" .-> Facts
 ```
 
 ## 核心亮点
 
-| 能力 | 设计 | 解决的问题 |
+| 领域 | 设计 | 工程价值 |
 |---|---|---|
+| 声明式角色 | `AgentIdentity` + YAML Agent 配置 | 角色、模型偏好、工具约束与执行基础设施解耦 |
+| 模型调用韧性 | `ModelRouter` + `LLMProxy` + 限流/熔断/降级 | 将模型选择与失败编排从 Agent 逻辑中移出 |
+| 工具与 MCP | Registry / Executor / Handler 三层，统一适配 MCP | 工具定义、执行边界和具体业务逻辑可独立扩展 |
+| 上下文工程 | Slots、作用域缓存、token budget、降级元数据 | 将 Identity、Memory、Skills、项目上下文按边界组合为模型输入 |
+| 记忆与技能 | Memory、Knowledge、Skill Registry 作为 Context 来源 | 不让 Runtime 直接耦合检索和提示词细节 |
+| 会话与执行分离 | Conversation 与 AgentRun / RunMessage / RunEvent 分容器 | 对话语义保持干净，执行细节可审计、可排障 |
 | Run 级隔离 | 每个请求创建独立 `RunExecution` | 多个 Session 可并行，不会共享“当前 Agent / 当前消息 / 当前状态” |
-| 会话顺序 | `SessionRunCoordinator` 对同一 Session 串行化 | Conversation 不需要并发合并，历史顺序稳定 |
-| 纯状态机 | `AgentState` 只处理“事件 → 新状态 + 下一动作” | 状态规则可独立测试，不耦合 LLM、工具、文件或 Session |
-| Port 驱动 | Runtime 仅依赖 `ContextPort`、`LLMPort`、`ToolPort`、Repository 等协议 | 可替换存储、模型、工具平台与多 Agent 编排，不污染执行内核 |
-| 五类持久化容器 | Conversation、AgentRun、RunEvent、RunMessage、Checkpoint 各自只回答一个问题 | 避免把消息、trace、快照、会话语义混成一份不可维护的大 JSON |
-| 可恢复成功提交 | `success_commit.json` 记录临时提交意图，并在启动/读取时幂等补偿 | 防止“Run 已完成但 Conversation 没有最终回答”的半提交状态 |
-| 安全审批恢复 | `approval_id → run_id`，Checkpoint + RunMessage 在同一 `run_id` 上恢复 | 审批不会新建第二个 Run，也不会由 UI 随意指定恢复目标 |
-| 完整 ReAct 证据 | 保存实际 LLM 请求、响应、工具调用与工具结果 | 排障可回放；工具结果会进入下一次模型上下文，不会丢失 |
-| 上下文降级保护 | Slot 作用域缓存、单 Slot 失败隔离、token 预算裁剪 | Memory / Knowledge 等非关键来源失败时，运行仍有机会继续 |
-| 多 Agent 解耦 | `RuntimeDelegationAdapter` 封装既有 Dispatcher/Broker | Runtime 只处理“提交、结果、取消”，不重新耦合编排细节 |
+| 可恢复提交 | `success_commit.json` 记录临时提交意图并幂等补偿 | 防止 Run 已完成但 Conversation 缺少最终回答的半提交状态 |
+| 安全控制协议 | `approval_id → run_id`、checkpoint、run 级取消 | 审批在原 Run 恢复；有副作用工具不盲目重放 |
+| 多 Agent 解耦 | `RuntimeDelegationAdapter` 封装 Dispatcher/Broker | Runtime 只处理提交、结果和取消，不重新耦合编排细节 |
 
-## Runtime 架构
+## 模块版图：从角色到外部能力
+
+### 声明式 Agent 与会话
+
+`Agent` 是轻量门面：它持有不可变的 `AgentIdentity`，从当前 Session 构造冻结请求，再将普通消息、审批结果和取消请求交给协调器。角色配置不持有运行时对象，因此同一套执行基础设施可以服务多个不同 Agent 身份。
+
+```mermaid
+flowchart LR
+    YAML[".dotclaw/agentConfig/*.yaml"] --> Identity["AgentIdentity\n纯配置与约束"]
+    Identity --> Agent["Agent 门面"]
+    Session["Session\nConversation 历史"] --> Request["冻结 RunRequest"]
+    Agent --> Request
+    Request --> Runtime["Runtime v2"]
+```
+
+### 模型、工具、上下文与知识
+
+| 模块 | 当前职责 | 与执行内核的关系 |
+|---|---|---|
+| `llm/` | 模型选择、限流、熔断、重试和跨模型降级 | 经 `LLMPort` 返回标准化模型响应 |
+| `tools/` | 工具注册、审批判定、超时和 Handler 执行 | 经 `ToolPort` 暴露调用能力 |
+| `mcp/` | MCP Server 连接与工具适配 | 作为 ToolExecutor 的工具来源 |
+| `context/` | Slot 组装、缓存、token 预算和降级 | 实现 `ContextPort`，产出完整 `ContextBundle` |
+| `memory/` / `skills/` | 检索、技能目录、项目/知识补充 | 作为 Context Slot 的依赖，不侵入状态机 |
+| `journal/` | 可选 trace、报告和调试观测 | 不承担 checkpoint 或 Runtime 恢复事实 |
+| `orchestration/` | AgentRegistry、Dispatcher、Broker 等编排语义 | 经 `DelegationPort` 被 Runtime 使用 |
+
+这种模块化使“换一个模型提供商”“增加一个 MCP 工具”“新增一个记忆来源”和“替换运行存储”成为局部接入工作，而不是重写 Agent 主流程。
+
+### 一条请求如何穿过系统
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant A as Agent / Channel
+    participant S as Session
+    participant R as Runtime v2
+    participant C as Context
+    participant L as LLM 路由与模型
+    participant T as 工具 / MCP
+    participant P as 持久化
+
+    U->>A: 用户消息
+    A->>S: 读取对话语义历史
+    A->>R: RunRequest（冻结快照）
+    R->>C: 构造 ContextBundle
+    C-->>R: messages + tools + metadata
+    R->>L: 模型调用
+    L-->>R: 最终回答或 ToolCall
+    alt ToolCall
+        R->>T: 统一工具执行 / 审批检查
+        T-->>R: ToolResult 或 ApprovalRequired
+        R->>P: 保存消息、事件、必要 checkpoint
+        R->>L: 携带工具结果继续推理
+    else 最终回答
+        R->>P: 原子化成功提交与 Conversation 投影
+    end
+    R-->>A: RunResult
+    A-->>U: 最终回答、等待审批或错误结果
+```
+
+## Runtime：可靠执行底座
 
 ### 分层与依赖边界
 
@@ -82,12 +176,12 @@ flowchart TB
     Adapter --> Existing["Session / LLM / Tool / MCP / Memory / orchestration"]
 ```
 
-- `domain`：只放稳定的运行事实、领域事件、状态枚举与状态机规则；不依赖外部技术实现。
-- `application`：只放一次执行如何创建、循环、恢复、取消和提交；不直接调用具体 SDK，也不读写具体文件。
-- `adapters`：将文件仓储、LLMProxy、ToolExecutor、SessionManager、既有编排系统翻译为 Application Port。
-- `bootstrap/runtime_factory.py`：负责 Runtime v2 的装配；Runtime 内核与具体基础设施在此建立依赖关系。
+- `domain`：稳定运行事实、领域事件、状态枚举与状态机规则；不依赖外部技术实现。
+- `application`：一次执行如何创建、循环、恢复、取消和提交；不直接调用具体 SDK，也不读写具体文件。
+- `adapters`：将文件仓储、LLMProxy、ToolExecutor、SessionManager 和既有编排系统翻译为 Application Port。
+- `bootstrap/runtime_factory.py`：Runtime v2 组合根，负责将具体能力装配进抽象执行内核。
 
-### 执行生命周期
+### 状态机与运行控制
 
 ```mermaid
 stateDiagram-v2
@@ -112,9 +206,9 @@ stateDiagram-v2
     CANCELLED --> [*]
 ```
 
-普通用户消息总是创建新 Run。若模型要求补充信息，它会作为一次正常的最终回答写入 Conversation；下一条用户消息再创建新 Run，由冻结的会话历史提供语义连续性。只有审批等结构化控制事件会恢复已有 Run。
+普通用户消息总是创建新 Run。模型若需要补充信息，会正常生成澄清回复并完成当前 Run；下一条消息再由 Conversation 提供语义连续性。只有审批等结构化控制事件会恢复已有 Run。
 
-## 运行事实与持久化
+## 运行事实、恢复与观测
 
 ```mermaid
 flowchart TB
@@ -139,24 +233,19 @@ data/sessions/{session_id}/
     └── success_commit.json      # 成功提交未完成时的临时补偿意图
 ```
 
-写入遵循一个重要不变量：**先原子保存 `messages.json`，再追加引用消息 ID 的 `RunEvent`**。这样每个已持久化事件都能找到它引用的完整消息。
+这里有三个重要的工程约束：
 
-### 成功、失败、取消的区别
+1. **消息先于事件落盘**：先原子保存 `messages.json`，再追加引用消息 ID 的 `RunEvent`；任一已持久化事件都可追溯到完整消息。
+2. **成功提交可补偿**：`RUN_COMPLETED`、Conversation 投影和 `run.json=COMPLETED` 通过 `success_commit.json` 组成可恢复提交协议。启动、读取 Run、查找 Run 或读取 Conversation 时都会补偿未决意图。
+3. **只从安全边界恢复**：Checkpoint 保存状态、游标、预算和 pending 控制引用，不复制完整 prompt 或工具结果。正在执行且有副作用的工具不会被 Runtime 盲目重放。
 
-| 运行结果 | Conversation | AgentRun / RunEvent | Checkpoint |
-|---|---|---|---|
-| 成功 | 写入用户输入与最终 assistant 回复 | `COMPLETED` + `RUN_COMPLETED` | 删除 |
-| 失败 | 不写 assistant 回复 | `FAILED` + 错误摘要 + `RUN_FAILED` | 不作为恢复入口 |
-| 取消 | 不写 assistant 回复 | `CANCELLED` + `RUN_CANCELLED` | 删除 |
-| 等待审批 | 不写 assistant 回复 | `WAITING_APPROVAL` + 等待事件 | 保存，用于同 Run 恢复 |
+成功才写入 Conversation；失败、取消和等待审批只保存运行事实。`Journal` 可以提供诊断和观测，但不再作为 Runtime 的状态恢复来源。
 
-成功提交需要同时完成 `RUN_COMPLETED`、Conversation 投影和 `run.json=COMPLETED`。本地文件仓储通过临时 `success_commit.json` 把这三步变成可补偿的提交协议：任一步中断后，启动、读取 Run、查找 Run 或读取 Conversation 都会尝试幂等补齐，而不会长期暴露半成功状态。
+## 上下文、审批与多 Agent 的关键细节
 
-## 上下文、工具与多 Agent
+### Context Slot：隔离、降级与预算
 
-### Context Slot
-
-`SlotContextProvider` 是 `ContextPort` 的实现。Runtime 只拿到最终 `ContextBundle`，不参与 system prompt、Memory、Skill、工具定义或历史裁剪的拼装。
+`SlotContextProvider` 是 `ContextPort` 的实现。Runtime 只消费最终 `ContextBundle`，不参与 system prompt、Memory、Skill、工具定义或历史裁剪的拼装。
 
 | Scope | 缓存键 | 适合内容 |
 |---|---|---|
@@ -165,9 +254,9 @@ data/sessions/{session_id}/
 | `CONDITIONAL` | `run_id` | 单 Run 条件内容 |
 | `DYNAMIC` | 不缓存 | 即时 Memory、环境状态 |
 
-每次 LLM 调用的完整 messages 会保存为 `RunMessage`。在工具返回或审批恢复后，之前的 assistant tool call 与 tool result 会被重新加入模型上下文，保持 ReAct 过程连续。
+单个 Slot 失败会记录在 Context 元数据中，其他 Slot 仍可继续；上下文超出预算时裁剪最旧历史，必要内容仍放不下时明确失败。模型先前的 tool call 和 tool result 会作为 RunMessage 重新进入下一轮上下文，保持 ReAct 证据连续。
 
-### 工具审批与取消
+### 工具审批、取消与委派
 
 ```mermaid
 sequenceDiagram
@@ -188,18 +277,43 @@ sequenceDiagram
     R->>R: 在原 run_id 继续或取消
 ```
 
-取消是 run 级控制信号：Engine 向 LLMPort、ToolPort 发送 best-effort 取消，并在安全点收口终态。对正在执行且有副作用的工具，dotClaw 不会根据 checkpoint 盲目重放；应由工具提供幂等键、状态查询或人工确认。
+- 取消是 run 级控制信号：Engine 向 LLMPort、ToolPort 发出 best-effort 取消，并在安全点收口终态；
+- `RuntimeDelegationAdapter` 将 Dispatcher、Broker 和子 Session 封装成 `DelegationPort`，父子关系通过 `parent_run_id`、`root_run_id` 和事件表达；
+- 父 Run 取消时，取消信号可以沿 DelegationPort 传播到当前子 Run。
 
-### 多 Agent 委派
+## 项目结构
 
-多 Agent 不进入 Runtime 内核。`RuntimeDelegationAdapter` 将既有 `orchestration` 的 Dispatcher、Broker 和子 Session 封装为 `DelegationPort`；Engine 只看到“提交子 Run、读取结果、取消子 Run”。父子关系以 `parent_run_id`、`root_run_id` 与 RunEvent 保存。
+```text
+dotClaw/
+├── src/dotclaw/
+│   ├── agent/           # AgentIdentity、Agent 门面、工厂
+│   ├── runtime/         # Runtime v2：domain / application / adapters
+│   ├── context/         # Slot 上下文、作用域缓存、token 预算
+│   ├── llm/             # ModelRouter、LLMProxy、熔断与限流
+│   ├── tools/           # Registry、Executor、Handler、审批与工具定义
+│   ├── mcp/             # MCP 提供者与工具适配
+│   ├── memory/          # 记忆检索、存储与蒸馏
+│   ├── skills/          # Skill 扫描、注册与解析
+│   ├── session/         # Session 与 Conversation 语义存储
+│   ├── orchestration/   # AgentRegistry、Dispatcher、Broker、委派适配
+│   ├── journal/         # 可选诊断、报告与观测数据
+│   ├── channel/         # CLI 等交互通道
+│   ├── config/          # YAML 配置与环境变量展开
+│   ├── bootstrap/       # Runtime v2 组合根
+│   └── scheduler/       # 调度能力
+├── .dotclaw/agentConfig/# Agent 角色 YAML 定义
+├── config.yaml          # 全局配置
+├── model_router_config.yaml
+├── scripts/             # 迁移等维护脚本
+└── tests/
+```
 
 ## 快速开始
 
 ### 环境要求
 
 - Python 3.13+
-- 已配置模型访问所需的 `config.yaml`
+- 已配置模型访问所需的环境变量与 `config.yaml`
 
 ### 安装与启动
 
@@ -208,53 +322,39 @@ pip install -e .
 python -m dotclaw
 ```
 
-也可以安装命令行入口：
+也可以使用安装后的命令：
 
 ```bash
 dotclaw
 ```
 
-Agent 身份与角色配置位于 `.dotclaw/agentConfig/*.yaml`；全局配置位于 `config.yaml`。CLI 支持 `/new`、`/list`、`/switch`、`/tools`、`/mcp`、`/skills`、`/cancel <run_id>`、`/model` 等命令。
-
-## 可靠性与扩展边界
-
-当前 Runtime v2 已提供运行隔离、成功提交补偿、审批恢复、消息/事件审计、上下文降级和 Port 解耦。这是可靠单进程运行与可演进架构的基础。
-
-但当前 Session 租约是进程内 `asyncio.Lock`，运行仓储是本地文件；它**不是多节点分布式高可用实现**。如果要扩展到多实例部署，应在 Port 边界替换为：
-
-```text
-分布式 Session 租约  → Redis / 数据库锁 + fencing token
-高可用运行仓储        → PostgreSQL / 对象存储 Adapter
-后台长任务            → 队列、Worker、心跳与 lease 续租
-可观测平台            → 订阅 RunEvent 构建 Trace / OpenTelemetry 投影
-```
-
-这些演进不应让 `RuntimeEngine` 重新直接依赖数据库、队列、SessionManager 或监控 SDK。
+`.dotclaw/agentConfig/*.yaml` 用于定义 Agent 身份；`config.yaml` 和 `model_router_config.yaml` 用于配置会话、模型和路由策略。CLI 支持 `/new`、`/list`、`/switch`、`/tools`、`/mcp`、`/skills`、`/cancel <run_id>`、`/model` 等命令。
 
 ## 验证
 
 ```powershell
-# 默认运行当前架构测试（自动跳过 legacy 测试）
+# 默认运行当前架构测试；自动跳过 legacy 测试
 .\.venv\Scripts\python.exe -m pytest
 
 # Runtime v2 架构边界与物理删除护栏
 .\.venv\Scripts\python.exe -m pytest tests/runtime_v2/test_architecture_contract.py tests/runtime_v2/test_phase6_finalization.py
 ```
 
+## 可靠性与演进边界
+
+当前 Runtime v2 已提供运行隔离、成功提交补偿、审批恢复、消息/事件审计、上下文降级和 Port 解耦。这是可靠单进程运行与可演进架构的基础。
+
+当前 Session 租约是进程内 `asyncio.Lock`，运行仓储是本地文件；它**不是多节点分布式高可用实现**。后续可在既有 Port 边界替换为分布式 Session 租约、PostgreSQL/对象存储、后台 Worker、OpenTelemetry 投影等能力，而无需让 `RuntimeEngine` 直接依赖数据库、队列或监控 SDK。
+
 ## 文档导航
 
-- [Runtime 模块总体说明](docs/wiki/Runtime%20模块总体说明.md)：当前实现的分层、流程、状态机、持久化、可靠性与排障说明
-- [Runtime 重构设计](docs/Development/runtime/runtime重构设计.md)：重构决策、容器边界和不变量
-- [Runtime 重构开发计划](docs/Development/runtime/runtime重构开发计划.md)：实施阶段与验收标准
-- [Runtime 重构迁移清单](docs/Development/runtime/runtime重构迁移清单.md)：旧模块替代关系、删除与数据迁移
-- [运行时执行机讨论](docs/wiki/runtime执行机.md)：早期 Runtime 定位讨论
+- [Runtime 模块总体说明](docs/wiki/Runtime%20模块总体说明.md)：Runtime v2 的分层、状态机、提交协议、可靠性与排障
 
-## 当前明确不包含的能力
 
-- 跨多个 Run 的 `Task` 领域模型；
-- 分布式 Session 租约、跨进程队列与远程 Worker；
-- 自动恢复正在执行的外部副作用工具；
-- 将 Trace 作为另一份持久化事实源；
-- RunMessage 去重、对象存储、细粒度权限和生命周期治理。
+---
 
-这些需求可以沿现有 Domain、Application、Port 和 Adapter 边界逐步扩展，而不需要重新引入一个持有全部状态的巨型 Runtime。
+<div align="center">
+
+**🐾 dotClaw · 用工程化边界组织 Agent 能力与可靠执行**
+
+</div>
