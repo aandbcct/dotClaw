@@ -14,6 +14,7 @@ v3 变更：
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json as _json
 import time
 import uuid
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     from ..session.agent_run import AgentRun, AgentRunManager
     from ..orchestration.registry import AgentRegistry
     from ..config import Config
+    from .application.ports import ContextPort
     from .state_store import StateStore
 
 
@@ -98,10 +100,12 @@ class Runtime:
         config: Config | None = None,
         delegation_endpoint: str = "",
         delegation_task_id: str = "",
+        context_port: ContextPort | None = None,
     ) -> None:
         self.llm: LLMProxy = llm
         self.tool_executor: ToolExecutor | None = tool_executor
         self.assembler: ContextAssembler | None = assembler
+        self.context_port: ContextPort | None = context_port
         self.agent_registry: AgentRegistry = agent_registry
         self.session_mgr: SessionManager = session_mgr
         self.run_mgr: AgentRunManager = run_mgr
@@ -159,6 +163,7 @@ class Runtime:
             config=self.config,
             delegation_endpoint=delegation_endpoint,
             delegation_task_id=delegation_task_id,
+            context_port=self.context_port,
         )
 
     # ======================== 公开入口：run() ========================
@@ -293,7 +298,7 @@ class Runtime:
 
         # system_prompt
         system_prompt: str = await self._build_system_prompt(
-            session_id, agent, user_message or "",
+            session_id, agent, user_message or "", agentrun_id,
         )
         run_messages.append(Message(role="system", content=system_prompt))
 
@@ -672,10 +677,51 @@ class Runtime:
         session_id: str,
         agent: AgentType,
         user_message: str,
+        agentrun_id: str = "",
     ) -> str:
-        """构建 system prompt（含 Slot 解析）。"""
+        """通过 ContextPort 或旧 Assembler 构建 system prompt。"""
         system_prompt: str = agent._resolve_system_prompt(self)
         tool_definitions: list[ToolDefinition] = self._resolve_runtime_tools(agent)
+        excluded_slots: frozenset[str] = (
+            frozenset({"available_agents"})
+            if self.delegation_endpoint == "target" else frozenset()
+        )
+        if self.context_port is not None:
+            from ..context.slot_context_provider import LegacyContextInput, LegacyContextPortAdapter
+            from .domain.models import ToolDefinition as ContextToolDefinition
+
+            context_tools: tuple[ContextToolDefinition, ...] = tuple(
+                ContextToolDefinition(
+                    name=definition.name,
+                    description=definition.description,
+                    parameters=definition.parameters,
+                )
+                for definition in tool_definitions
+            )
+            identity_material: str = "\n".join(
+                [agent.agent_id, system_prompt, *(definition.name for definition in tool_definitions)]
+            )
+            identity_version: str = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()[:16]
+            legacy_input: LegacyContextInput = LegacyContextInput(
+                run_id=agentrun_id or uuid.uuid4().hex[:8],
+                session_id=session_id,
+                agent_id=agent.agent_id,
+                identity_version=identity_version,
+                model_id=agent._resolve_model(self),
+                max_iterations=agent.identity.max_loop_steps,
+                user_message=user_message,
+                system_prompt=system_prompt,
+                tools=context_tools,
+                project_root=_find_project_root(),
+                max_context_tokens=(
+                    self.config.agent.max_context_tokens
+                    if self.config is not None else 8000
+                ),
+                excluded_slot_names=excluded_slots,
+            )
+            adapter: LegacyContextPortAdapter = LegacyContextPortAdapter(self.context_port)
+            return await adapter.build_system_prompt(legacy_input)
+
         from ..agent.slotContext import SlotContext as SCtx
 
         project_root: Path = _find_project_root()
@@ -700,10 +746,6 @@ class Runtime:
         )
         if self.assembler is not None:
             self.assembler.on_new_request()
-            excluded_slots: frozenset[str] = (
-                frozenset({"available_agents"})
-                if self.delegation_endpoint == "target" else frozenset()
-            )
             system_prompt = await self.assembler.build_system_prompt(slot_ctx, excluded_slots)
         return system_prompt
 

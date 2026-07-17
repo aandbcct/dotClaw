@@ -13,7 +13,11 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from dotclaw.context.ports import AgentDirectoryPort, MemorySearchPort, SkillRegistryPort
+    from dotclaw.runtime.application.ports import ContextPort
 
 logger = logging.getLogger("dotclaw.factory")
 
@@ -251,27 +255,43 @@ def _build_mcp(config, tool_registry):
     return _init()
 
 
-def _build_assembler():
-    """构建 ContextAssembler。"""
-    from dotclaw.agent.slotContext import ContextAssembler
-    from dotclaw.agent.slotContextImp import (
-        IdentitySlot, ToolsSlot, SkillsSlot,
-        WorkspaceSlot, UserInfoSlot,
-        MemorySlot, KnowledgeSlot, ProjectSlot,
+def _build_context_port(
+    skill_registry: SkillRegistryPort | None,
+    memory_manager: MemorySearchPort | None,
+    agent_registry: AgentDirectoryPort,
+) -> ContextPort:
+    """构建 Runtime v2 ContextPort 与作用域缓存。"""
+    from dotclaw.context import (
         AvailableAgentsSlot,
+        ContextDependencies,
+        IdentitySlot,
+        KnowledgeSlot,
+        MemorySlot,
+        ProjectSlot,
+        SkillsSlot,
+        SlotContextProvider,
+        ToolsSlot,
+        UserInfoSlot,
+        WorkspaceSlot,
     )
-    return ContextAssembler([
-        IdentitySlot(),
-        ToolsSlot(),
-        SkillsSlot(),
-        AvailableAgentsSlot(),
-        WorkspaceSlot(),
-        UserInfoSlot(),
-        MemorySlot(),
-        KnowledgeSlot(),
-        ProjectSlot(enabled=False),
-    ])
-
+    return SlotContextProvider(
+        slots=(
+            IdentitySlot(),
+            ToolsSlot(),
+            SkillsSlot(),
+            AvailableAgentsSlot(),
+            WorkspaceSlot(),
+            UserInfoSlot(),
+            MemorySlot(),
+            KnowledgeSlot(),
+            ProjectSlot(),
+        ),
+        dependencies=ContextDependencies(
+            skill_registry=skill_registry,
+            memory_manager=memory_manager,
+            agent_registry=agent_registry,
+        ),
+    )
 
 # ============================================================================
 # 主工厂函数
@@ -315,7 +335,6 @@ async def build_agent(
     session_mgr: SessionManager = SessionManager(config.session.directory)
     from dotclaw.session.agent_run import AgentRunManager
     run_mgr: AgentRunManager = AgentRunManager(config.session.directory)
-    assembler = _build_assembler()
 
     # ── Journal + StateStore（v2 新增）──
     journal: Journal = Journal()
@@ -340,12 +359,13 @@ async def build_agent(
     agent_registry = AgentRegistry()
     agent_config_dir = project_root / ".dotclaw" / "agentConfig"
     agent_registry.load_all(agent_config_dir)
+    context_port = _build_context_port(skill_registry, memory_mgr, agent_registry)
 
     # ── Runtime：执行引擎（v2: 无控制循环，注入 Journal + StateStore）──
     runtime: Runtime = Runtime(
         llm=llm_proxy,
         tool_executor=tool_executor,
-        assembler=assembler,
+        assembler=None,
         session_mgr=session_mgr,
         run_mgr=run_mgr,
         agent_registry=agent_registry,
@@ -356,6 +376,7 @@ async def build_agent(
         skill_registry=skill_registry,
         mcp_provider=mcp_provider,
         config=config,
+        context_port=context_port,
     )
 
     # ── Delegation 调度层：内存 Broker + 本地 Dispatcher ──

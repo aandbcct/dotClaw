@@ -77,6 +77,7 @@ class RunExecution:
         """生成提供给 Port 的只读执行视图。"""
         return RunExecutionView(
             run_id=self.run_id,
+            policy=self.policy,
             state=self.state,
             budget=self.budget,
             message_cursor=self.message_cursor,
@@ -109,6 +110,8 @@ class RunExecutionView:
     """暴露给 Port 的执行期只读信息。"""
 
     run_id: str
+    policy: AgentPolicySnapshot
+    """本次运行冻结的 Agent 身份与上下文策略。"""
     state: AgentState
     budget: RunBudget
     message_cursor: int
