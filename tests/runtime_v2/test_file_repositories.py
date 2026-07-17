@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -251,9 +252,25 @@ async def test_success_commit_uses_run_completion_as_last_visibility_marker(tmp_
             _completed_event(completed_run, final_message, 1),
         )
 
-    persisted_run: AgentRun | None = await repository.load_run(running_run.session_id, running_run.run_id)
-    assert persisted_run is not None
-    assert persisted_run.status is RunStatus.RUNNING
+    pending_run: AgentRun | None = await asyncio.to_thread(
+        repository._load_run_sync,
+        running_run.session_id,
+        running_run.run_id,
+    )
+    assert pending_run is not None
+    assert pending_run.status is RunStatus.RUNNING
+    assert (tmp_path / running_run.session_id / "agent_runs" / running_run.run_id / "success_commit.json").is_file()
+
+    recovered_repository: FileRunRepository = FileRunRepository(tmp_path)
+    await recovered_repository.recover_pending_success_commits()
+    recovered_run: AgentRun | None = await recovered_repository.load_run(
+        running_run.session_id,
+        running_run.run_id,
+    )
+    assert recovered_run is not None
+    assert recovered_run.status is RunStatus.COMPLETED
+    assert (await recovered_repository.load_conversation(running_run.session_id))[0].content == final_message.content
+    assert not (tmp_path / running_run.session_id / "agent_runs" / running_run.run_id / "success_commit.json").exists()
 
 
 async def test_checkpoint_rejects_full_prompt_and_tool_result_payloads(tmp_path: Path) -> None:

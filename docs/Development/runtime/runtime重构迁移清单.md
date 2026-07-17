@@ -39,7 +39,8 @@ data/sessions/{session_id}/agent_runs/{run_id}/
 ├── run.json
 ├── events.jsonl
 ├── messages.json
-└── checkpoint.json
+├── checkpoint.json
+└── success_commit.json # 仅在成功事务未完成时存在，恢复后自动删除
 ```
 
 迁移脚本保留旧源文件；成功迁移、checkpoint 脱敏和缺失源文件的可行动错误均由 `tests/runtime_v2/test_file_repositories.py` 验证。

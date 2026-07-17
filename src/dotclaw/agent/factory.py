@@ -372,6 +372,7 @@ async def build_agent(
         agent_registry=agent_registry,
         mcp_provider=mcp_provider,
     )
+    await runtime_services.run_repository.recover_pending_success_commits()
 
     agent: AgentCls = AgentCls(
         identity=identity,

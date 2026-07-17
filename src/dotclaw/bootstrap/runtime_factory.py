@@ -51,6 +51,8 @@ class RuntimeServices:
 
     engine: RuntimeEngine
     coordinator: SessionRunCoordinator
+    run_repository: FileRunRepository
+    """启动阶段用于补偿未决成功提交的本地运行仓储。"""
     tool_executor: ToolExecutor
     mcp_provider: MCPToolProvider | None
     skill_registry: SkillRegistry | None
@@ -108,6 +110,7 @@ def build_runtime_services(
     return RuntimeServices(
         engine=engine,
         coordinator=coordinator,
+        run_repository=run_repository,
         tool_executor=tool_executor,
         mcp_provider=mcp_provider,
         skill_registry=skill_registry,

@@ -169,7 +169,8 @@ data/sessions/{session_id}/agent_runs/{run_id}/
 ├── run.json
 ├── events.jsonl
 ├── messages.json
-└── checkpoint.json
+├── checkpoint.json
+└── success_commit.json # 仅在成功提交中断时保留，补偿完成后删除
 ```
 
 每个外部边界的写入顺序：
@@ -178,6 +179,8 @@ data/sessions/{session_id}/agent_runs/{run_id}/
 2. 追加引用消息 ID 的 `RunEvent`；
 3. 若为安全边界，保存 `checkpoint.json`；
 4. 若为终态，提交 `run.json`，成功时同时提交 Conversation 最终回复。
+   文件型实现须先原子写入成功提交意图；RunEvent、Conversation 与 `run.json=COMPLETED`
+   未同时完成时，启动和仓储读取必须幂等补偿该意图，完成后删除意图文件。
 
 ### 废弃与删除条件
 

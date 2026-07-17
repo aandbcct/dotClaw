@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..application.ports import ConversationProjectionPort
@@ -38,6 +39,22 @@ from ._file_support import (
 )
 
 
+@dataclass(frozen=True)
+class SuccessCommitIntent:
+    """文件型成功提交的可恢复意图；完成后必须删除，不能成为业务事实源。"""
+
+    run: AgentRun
+    completed_event: RunEvent
+
+    def to_dict(self) -> JSONMap:
+        """转换为可原子保存的事务意图记录。"""
+        return {
+            "version": StorageFormatVersion.INITIAL,
+            "run": self.run.to_dict(),
+            "completed_event": self.completed_event.to_dict(),
+        }
+
+
 class FileRunRepository:
     """将运行摘要、消息、事件和 Conversation 投影写入本地目录。"""
 
@@ -56,10 +73,12 @@ class FileRunRepository:
 
     async def load_run(self, session_id: str, run_id: str) -> AgentRun | None:
         """读取指定运行摘要；文件不存在时返回 None。"""
+        await self._recover_success_commit(session_id, run_id)
         return await asyncio.to_thread(self._load_run_sync, session_id, run_id)
 
     async def find_run(self, run_id: str) -> AgentRun | None:
         """跨 Session 定位运行摘要，供取消和审批恢复使用。"""
+        await self.recover_pending_success_commits()
         return await asyncio.to_thread(self._find_run_sync, run_id)
 
     async def save_run(self, run: AgentRun) -> None:
@@ -84,23 +103,27 @@ class FileRunRepository:
         final_message: RunMessage,
         completed_event: RunEvent,
     ) -> None:
-        """以 run.json 成功终态为最后提交标记，统一提交成功事实和 Conversation。"""
-        user_message: RunMessage = await asyncio.to_thread(
-            self._validate_success_and_get_input_sync,
-            run,
-            final_message,
-        )
+        """创建可恢复事务意图，并在完成全部成功事实后清理该意图。"""
+        await asyncio.to_thread(self._validate_success_and_get_input_sync, run, final_message)
         await asyncio.to_thread(self._validate_completed_event_sync, run, final_message, completed_event)
-        await asyncio.to_thread(self._ensure_event_sync, run.session_id, completed_event)
-        if self._conversation_projector is not None:
-            await self._conversation_projector.project_success(run, user_message, final_message)
-        else:
-            await asyncio.to_thread(self._append_standalone_conversation_sync, run, final_message)
-        await asyncio.to_thread(self._save_run_sync, run)
+        intent: SuccessCommitIntent = SuccessCommitIntent(run, completed_event)
+        await asyncio.to_thread(self._prepare_success_commit_sync, intent)
+        await self._recover_success_commit(run.session_id, run.run_id)
 
     async def load_conversation(self, session_id: str) -> tuple[ConversationMessage, ...]:
         """读取该仓储维护的成功 Conversation 投影。"""
+        await self._recover_session_success_commits(session_id)
         return await asyncio.to_thread(self._load_conversation_sync, session_id)
+
+    async def recover_pending_success_commits(self) -> None:
+        """扫描全部未决成功提交，并幂等补齐其 RunEvent、Conversation 与 AgentRun。"""
+        pending_commit_locations: tuple[tuple[str, str], ...] = await asyncio.to_thread(
+            self._find_pending_success_commit_locations_sync,
+        )
+        session_id: str
+        run_id: str
+        for session_id, run_id in pending_commit_locations:
+            await self._recover_success_commit(session_id, run_id)
 
     def _create_run_sync(self, run: AgentRun) -> None:
         path: Path = self._run_path(run.session_id, run.run_id)
@@ -141,6 +164,100 @@ class FileRunRepository:
             "messages": [message.to_dict() for message in messages],
         }
         write_json_atomic(path, payload)
+
+    async def _recover_session_success_commits(self, session_id: str) -> None:
+        """补偿指定 Session 下的所有未决成功提交，避免读取到互相矛盾的事实。"""
+        pending_run_ids: tuple[str, ...] = await asyncio.to_thread(
+            self._find_session_pending_success_commit_run_ids_sync,
+            session_id,
+        )
+        run_id: str
+        for run_id in pending_run_ids:
+            await self._recover_success_commit(session_id, run_id)
+
+    async def _recover_success_commit(self, session_id: str, run_id: str) -> None:
+        """以事务意图为准幂等补齐成功提交；只有三类事实齐备后才删除意图文件。"""
+        intent: SuccessCommitIntent | None = await asyncio.to_thread(
+            self._load_success_commit_intent_sync,
+            session_id,
+            run_id,
+        )
+        if intent is None:
+            return
+        final_message: RunMessage = await asyncio.to_thread(self._load_final_message_sync, intent.run)
+        user_message: RunMessage = await asyncio.to_thread(
+            self._validate_success_and_get_input_sync,
+            intent.run,
+            final_message,
+        )
+        await asyncio.to_thread(self._ensure_event_sync, intent.run.session_id, intent.completed_event)
+        if self._conversation_projector is not None:
+            await self._conversation_projector.project_success(intent.run, user_message, final_message)
+        else:
+            await asyncio.to_thread(self._append_standalone_conversation_sync, intent.run, final_message)
+        await asyncio.to_thread(self._save_run_sync, intent.run)
+        await asyncio.to_thread(self._delete_success_commit_intent_sync, session_id, run_id)
+
+    def _prepare_success_commit_sync(self, intent: SuccessCommitIntent) -> None:
+        """原子创建或校验既有成功提交意图，保证重试不会覆盖另一笔提交。"""
+        path: Path = self._success_commit_path(intent.run.session_id, intent.run.run_id)
+        if path.is_file():
+            existing_intent: SuccessCommitIntent = _success_commit_intent_from_dict(load_json_map(path))
+            if existing_intent != intent:
+                raise ValueError("运行已存在内容不同的未决成功提交")
+            return
+        write_json_atomic(path, intent.to_dict())
+
+    def _load_success_commit_intent_sync(
+        self,
+        session_id: str,
+        run_id: str,
+    ) -> SuccessCommitIntent | None:
+        """读取指定 Run 的未决成功提交意图；不存在时表示无需补偿。"""
+        path: Path = self._success_commit_path(session_id, run_id)
+        if not path.is_file():
+            return None
+        return _success_commit_intent_from_dict(load_json_map(path))
+
+    def _delete_success_commit_intent_sync(self, session_id: str, run_id: str) -> None:
+        """删除全部事实已落盘的事务意图；删除失败时下次恢复会安全重试。"""
+        path: Path = self._success_commit_path(session_id, run_id)
+        if path.is_file():
+            path.unlink()
+
+    def _find_pending_success_commit_locations_sync(self) -> tuple[tuple[str, str], ...]:
+        """扫描受控运行目录中的全部事务意图位置。"""
+        intent_paths: tuple[Path, ...] = tuple(self._root_directory.glob(
+            f"*/agent_runs/*/{RunStorageFileName.SUCCESS_COMMIT.value}",
+        ))
+        locations: list[tuple[str, str]] = []
+        intent_path: Path
+        for intent_path in intent_paths:
+            run_id: str = intent_path.parent.name
+            session_id: str = intent_path.parent.parent.parent.name
+            locations.append((session_id, run_id))
+        return tuple(locations)
+
+    def _find_session_pending_success_commit_run_ids_sync(self, session_id: str) -> tuple[str, ...]:
+        """定位指定 Session 内全部未决提交，供 Conversation 读取前补偿。"""
+        safe_session_id: str = validate_path_segment(session_id, "session_id")
+        intent_paths: tuple[Path, ...] = tuple((
+            self._root_directory / safe_session_id / "agent_runs"
+        ).glob(f"*/{RunStorageFileName.SUCCESS_COMMIT.value}"))
+        return tuple(intent_path.parent.name for intent_path in intent_paths)
+
+    def _load_final_message_sync(self, run: AgentRun) -> RunMessage:
+        """从 RunMessage 唯一事实源读取成功提交引用的最终 assistant 消息。"""
+        if run.final_message_id is None:
+            raise ValueError("成功提交意图缺少最终消息标识")
+        messages: tuple[RunMessage, ...] = self._load_messages_sync(run.session_id, run.run_id)
+        final_message: RunMessage | None = next(
+            (message for message in messages if message.message_id == run.final_message_id),
+            None,
+        )
+        if final_message is None:
+            raise ValueError("成功提交意图引用的最终消息不存在")
+        return final_message
 
     def _load_messages_sync(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
@@ -299,6 +416,10 @@ class FileRunRepository:
         safe_session_id: str = validate_path_segment(session_id, "session_id")
         return self._root_directory / safe_session_id / SessionStorageFileName.CONVERSATION.value
 
+    def _success_commit_path(self, session_id: str, run_id: str) -> Path:
+        """返回单个 Run 的临时成功提交意图文件路径。"""
+        return self._run_path(session_id, run_id).with_name(RunStorageFileName.SUCCESS_COMMIT.value)
+
     def _validate_messages(self, messages: tuple[RunMessage, ...]) -> None:
         message_ids: set[str] = set()
         expected_sequence: int = 1
@@ -348,6 +469,35 @@ def _agent_run_from_dict(data: JSONMap) -> AgentRun:
             tokens_out=get_integer(statistics_data, "tokens_out"),
         ),
         error=error,
+    )
+
+
+def _success_commit_intent_from_dict(data: JSONMap) -> SuccessCommitIntent:
+    """将临时成功提交意图反序列化为严格领域模型。"""
+    raw_run: JSONValue | None = data.get("run")
+    raw_completed_event: JSONValue | None = data.get("completed_event")
+    if raw_run is None or raw_completed_event is None:
+        raise ValueError("成功提交意图缺少 run 或 completed_event")
+    return SuccessCommitIntent(
+        run=_agent_run_from_dict(require_json_map(raw_run)),
+        completed_event=_run_event_from_dict(require_json_map(raw_completed_event)),
+    )
+
+
+def _run_event_from_dict(data: JSONMap) -> RunEvent:
+    """将 events.jsonl 或事务意图中的审计事件反序列化为领域事件。"""
+    raw_message_ids: JSONValue | None = data.get("message_ids")
+    message_ids: tuple[str, ...] = tuple(
+        value for value in raw_message_ids if isinstance(value, str)
+    ) if isinstance(raw_message_ids, list) else ()
+    return RunEvent(
+        run_id=get_string(data, "run_id"),
+        sequence=get_integer(data, "sequence"),
+        event_type=RunEventType(get_string(data, "event_type")),
+        occurred_at=get_string(data, "occurred_at"),
+        message_ids=message_ids,
+        summary=get_string(data, "summary"),
+        data=_json_map_or_empty(data.get("data")),
     )
 
 

@@ -24,6 +24,8 @@ class RunStorageFileName(StrEnum):
     EVENTS = "events.jsonl"
     MESSAGES = "messages.json"
     CHECKPOINT = "checkpoint.json"
+    SUCCESS_COMMIT = "success_commit.json"
+    """成功提交期间临时存在的可恢复事务意图记录。"""
 
 
 class SessionStorageFileName(StrEnum):

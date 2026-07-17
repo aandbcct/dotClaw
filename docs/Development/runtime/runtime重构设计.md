@@ -408,7 +408,8 @@ data/sessions/{session_id}/agent_runs/{run_id}/
 ├── run.json            # AgentRun 摘要
 ├── events.jsonl        # RunEvent，追加写
 ├── messages.json       # RunMessage，完整执行消息
-└── checkpoint.json     # 最新安全恢复点
+├── checkpoint.json     # 最新安全恢复点
+└── success_commit.json # 仅在成功提交未完成时存在的可恢复事务意图
 ```
 
 未来替换为 SQLite、PostgreSQL 或对象存储时，应仅替换 Repository Adapter，不改变 Runtime 域模型和 Port。
@@ -428,6 +429,7 @@ data/sessions/{session_id}/agent_runs/{run_id}/
       AgentRun = COMPLETED
       Conversation 追加最终 assistant message
       RunEvent += RUN_COMPLETED
+      （文件存储先写 success_commit.json；启动或读取时补偿未决意图）
   → 删除过期 Checkpoint
   → 释放 Session 租约
 ```
