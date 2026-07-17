@@ -20,6 +20,18 @@ from ..domain.models import (
 )
 
 
+class ConversationProjectionPort(Protocol):
+    """将成功运行投影到既有 Session Conversation 的协议。"""
+
+    async def project_success(
+        self,
+        run: AgentRun,
+        user_message: RunMessage,
+        final_message: RunMessage,
+    ) -> None:
+        """仅在运行成功后追加一条可见对话记录。"""
+
+
 class RunRepository(Protocol):
     """保存运行摘要、消息、事件与成功会话投影的协议。"""
 

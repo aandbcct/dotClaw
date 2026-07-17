@@ -849,7 +849,7 @@ class Runtime:
         if self.state_store is not None:
             from .state_store import StateSnapshot
             snapshot: StateSnapshot = StateSnapshot.from_agent_state(state)
-            await self.state_store.save(session_id, snapshot)
+            await self.state_store.save_legacy(session_id, snapshot)
 
         # 写入 WAITING 状态的 AgentRun 记录
         await self._save_agent_run(
@@ -920,6 +920,8 @@ class Runtime:
             ended_at=ended_at,
             messages=messages or [],
         )
+        # 当前 Runtime 仍是旧兼容执行器，保持其旧持久化契约；Runtime v2
+        # 只会经 FileRunRepository 写入分离的运行容器。
         await self.run_mgr.save(ar, session_id)
 
     def _collect_trace_ids(self) -> list[str]:

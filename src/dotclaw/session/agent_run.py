@@ -1,12 +1,13 @@
-"""AgentRun —— 一次原子调用的完整记录。
+"""旧 AgentRun 持久化格式的兼容读写模块。
 
 AgentRun 是 dotClaw 的最小执行单元：一次 LLM 推理-执行的原子步。
 每次 LLM 调用产生一个新的 AgentRun，工具调用后 TurnLoop 创建新 AgentRun 继续。
 
 持久化位置：session/{session_id}/agent_runs/{run_id}.json
 
-流转消息不再存储在 AgentRun 中，而是通过 Journal 以 Trace Event 形式写入 trace.jsonl。
-AgentRun 仅持有 state_snapshot + trace_ids + 统计元数据。
+该格式含 ``messages``、``state_snapshot`` 与 ``trace_ids``，仅供旧 Runtime
+和历史文件迁移读取。Runtime v2 新运行必须使用 ``runtime.domain.AgentRun``、
+``RunMessage``、``RunEvent`` 与 ``RunCheckpoint`` 分离写入。
 """
 
 from __future__ import annotations
@@ -292,7 +293,14 @@ class AgentRunManager:
         return run_dir / f"{run_id}.json"
 
     async def save(self, run: AgentRun, session_id: str) -> None:
-        """保存 AgentRun 到磁盘。
+        """兼容旧调用方保存旧格式 AgentRun。
+
+        新 Runtime v2 禁止调用本方法，应使用 RunRepository 的分离容器写入。
+        """
+        await self.save_legacy(run, session_id)
+
+    async def save_legacy(self, run: AgentRun, session_id: str) -> None:
+        """保存仅供旧 Runtime 使用的历史 AgentRun 格式。
 
         Args:
             run: AgentRun 实例
@@ -360,3 +368,11 @@ class AgentRunManager:
 
         runs.sort(key=lambda r: r.started_at)
         return runs
+
+
+# Runtime v2 使用独立领域模型；以下名称明确保留旧文件格式的兼容边界。
+LegacyAgentRun = AgentRun
+"""历史 AgentRun 文件模型的兼容别名。"""
+
+LegacyAgentRunManager = AgentRunManager
+"""历史 AgentRun 文件管理器的兼容别名。"""

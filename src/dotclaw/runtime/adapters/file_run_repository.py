@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 
+from ..application.ports import ConversationProjectionPort
 from ..domain.events import RunEvent
 from ..domain.models import (
     AgentPolicySnapshot,
@@ -40,9 +41,14 @@ from ._file_support import (
 class FileRunRepository:
     """将运行摘要、消息、事件和 Conversation 投影写入本地目录。"""
 
-    def __init__(self, root_directory: str | Path) -> None:
-        """初始化仓储根目录，不绑定旧 SessionManager。"""
+    def __init__(
+        self,
+        root_directory: str | Path,
+        conversation_projector: ConversationProjectionPort | None = None,
+    ) -> None:
+        """初始化仓储根目录和可选的既有 Session 投影器。"""
         self._root_directory: Path = Path(root_directory).resolve()
+        self._conversation_projector: ConversationProjectionPort | None = conversation_projector
 
     async def create_run(self, run: AgentRun) -> None:
         """创建新的 run.json，禁止意外覆盖既有运行。"""
@@ -70,7 +76,16 @@ class FileRunRepository:
 
     async def commit_success(self, run: AgentRun, final_message: RunMessage) -> None:
         """写入完成摘要并投影最终 assistant 消息到 Conversation。"""
-        await asyncio.to_thread(self._commit_success_sync, run, final_message)
+        user_message: RunMessage = await asyncio.to_thread(
+            self._validate_success_and_get_input_sync,
+            run,
+            final_message,
+        )
+        await asyncio.to_thread(self._save_run_sync, run)
+        if self._conversation_projector is not None:
+            await self._conversation_projector.project_success(run, user_message, final_message)
+            return
+        await asyncio.to_thread(self._append_standalone_conversation_sync, run, final_message)
 
     async def load_conversation(self, session_id: str) -> tuple[ConversationMessage, ...]:
         """读取该仓储维护的成功 Conversation 投影。"""
@@ -140,14 +155,33 @@ class FileRunRepository:
             event_file.flush()
             os.fsync(event_file.fileno())
 
-    def _commit_success_sync(self, run: AgentRun, final_message: RunMessage) -> None:
+    def _validate_success_and_get_input_sync(self, run: AgentRun, final_message: RunMessage) -> RunMessage:
+        """校验成功提交条件，并定位已持久化的用户输入消息。"""
         if run.status is not RunStatus.COMPLETED:
             raise ValueError("只有已完成的运行才能提交 Conversation 投影")
         if final_message.role is not MessageRole.ASSISTANT:
             raise ValueError("最终 Conversation 投影必须是 assistant 消息")
         if final_message.message_id != run.final_message_id:
             raise ValueError("最终消息必须与 AgentRun 摘要引用一致")
-        self._save_run_sync(run)
+        messages: tuple[RunMessage, ...] = self._load_messages_sync(run.session_id, run.run_id)
+        input_message: RunMessage | None = next(
+            (message for message in messages if message.message_id == run.input_message_id),
+            None,
+        )
+        if input_message is None:
+            raise ValueError("成功运行必须引用已保存的用户输入消息")
+        if input_message.kind is not RunMessageKind.USER_INPUT or input_message.role is not MessageRole.USER:
+            raise ValueError("运行输入消息必须是 user_input 类型的用户消息")
+        stored_final_message: RunMessage | None = next(
+            (message for message in messages if message.message_id == final_message.message_id),
+            None,
+        )
+        if stored_final_message != final_message:
+            raise ValueError("最终消息必须先以完整 RunMessage 保存后才能提交成功投影")
+        return input_message
+
+    def _append_standalone_conversation_sync(self, run: AgentRun, final_message: RunMessage) -> None:
+        """在未注入 Session 投影器时保留独立 Conversation 兼容容器。"""
         conversation_message: ConversationMessage = ConversationMessage(
             message_id=final_message.message_id,
             role=MessageRole.ASSISTANT,

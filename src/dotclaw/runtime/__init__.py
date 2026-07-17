@@ -15,12 +15,29 @@ Runtime 是 dotClaw 的执行引擎 + 依赖容器，提供：
       └── Task（内部问题拆解）→ Agent 的计划-执行子任务
 """
 
-from .agent_state import AgentPhase, AgentState, AgentEvent, AgentAction, AgentStatus, AgentStartEvent, LLMResponseEvent, ToolsDoneEvent
+from .agent_state import (
+    AgentAction,
+    AgentEvent,
+    AgentPhase,
+    AgentStartEvent,
+    AgentState,
+    AgentStatus,
+    LLMResponseEvent,
+    LegacyAgentAction,
+    LegacyAgentPhase,
+    LegacyAgentState,
+    ToolsDoneEvent,
+    V2AgentAction,
+    V2AgentPhase,
+    V2AgentState,
+)
 from .task import Task, TaskProgress
 from .runtime import Runtime
 from .state_store import StateStore, StateSnapshot
 from .domain.models import AgentRun as RuntimeAgentRun, RunRequest, RunResult, RunStatus
-from .domain.state import AgentState as RuntimeV2AgentState
+
+RuntimeV2AgentState = V2AgentState
+"""Runtime v2 纯领域状态机的向后兼容公开名称。"""
 
 __all__ = [
     "Runtime",
@@ -41,4 +58,10 @@ __all__ = [
     "RunStatus",
     "RuntimeAgentRun",
     "RuntimeV2AgentState",
+    "V2AgentAction",
+    "V2AgentPhase",
+    "V2AgentState",
+    "LegacyAgentAction",
+    "LegacyAgentPhase",
+    "LegacyAgentState",
 ]

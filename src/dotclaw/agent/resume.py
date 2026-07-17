@@ -53,7 +53,7 @@ class ResumeManager:
                 state: dict                   旧 state snapshot 数据（供 TurnLoop 恢复）
         """
         # 1. 读 StateStore
-        snapshot = await self._state_store.load(session_id)
+        snapshot = await self._state_store.load_legacy(session_id)
         if snapshot is None:
             return None
 

@@ -17,13 +17,10 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from .adapters.file_checkpoint_repository import FileCheckpointRepository
-from .domain.models import RunCheckpoint
-
-if TYPE_CHECKING:
-    from .agent_state import AgentPhase, AgentStatus
+from .agent_state import AgentState, AgentStatus
+from .domain.models import JSONMap, JSONValue, RunCheckpoint, get_integer, get_string, require_json_map
 
 logger = logging.getLogger("dotclaw.runtime.state_store")
 
@@ -81,11 +78,11 @@ class StateSnapshot:
     max_tool_retries: int = 2
     """工具执行最大重试次数"""
 
-    tasks: list[dict] = field(default_factory=list)
+    tasks: list[JSONMap] = field(default_factory=list)
     """子任务清单（序列化后的 Task 数据）"""
 
     @classmethod
-    def from_agent_state(cls, state: object) -> StateSnapshot:
+    def from_agent_state(cls, state: AgentState) -> StateSnapshot:
         """从 AgentState 实例构建快照。
 
         Args:
@@ -94,45 +91,40 @@ class StateSnapshot:
         Returns:
             StateSnapshot 实例
         """
-        from .agent_state import AgentState
-        from .task import Task
-
-        as_obj: AgentState = state  # type: ignore[assignment]
-
-        tasks_data: list[dict] = []
-        for t in as_obj.tasks:
+        tasks_data: list[JSONMap] = []
+        for task in state.tasks:
             tasks_data.append({
-                "task_id": t.task_id,
-                "description": t.description,
-                "progress": t.progress.value,
-                "parent_task_id": t.parent_task_id,
-                "agent_id": t.agent_id,
-                "agent_run_ids": list(t.agent_run_ids),
-                "result": t.result,
-                "error": t.error,
-                "created_at": t.created_at,
-                "updated_at": t.updated_at,
+                "task_id": task.task_id,
+                "description": task.description,
+                "progress": task.progress.value,
+                "parent_task_id": task.parent_task_id,
+                "agent_id": task.agent_id,
+                "agent_run_ids": list(task.agent_run_ids),
+                "result": task.result,
+                "error": task.error,
+                "created_at": task.created_at,
+                "updated_at": task.updated_at,
             })
 
         return cls(
-            task_id=as_obj.task_id,
-            thread_id=as_obj.thread_id,
-            agent_id=as_obj.agent_id,
-            phase=as_obj.phase.value,
-            iteration=as_obj.iteration,
-            max_iterations=as_obj.max_iterations,
-            end_status=as_obj.end_status.value,
-            error_message=as_obj.error_message,
-            handoff_target=as_obj.handoff_target,
-            handoff_context=as_obj.handoff_context,
-            tool_calls_total=as_obj.tool_calls_total,
-            truncated_count=getattr(as_obj, "truncated_count", 0),
-            retry_count=getattr(as_obj, "retry_count", 0),
-            max_tool_retries=getattr(as_obj, "max_tool_retries", 2),
+            task_id=state.task_id,
+            thread_id=state.thread_id,
+            agent_id=state.agent_id,
+            phase=state.phase.value,
+            iteration=state.iteration,
+            max_iterations=state.max_iterations,
+            end_status=state.end_status.value,
+            error_message=state.error_message,
+            handoff_target=state.handoff_target,
+            handoff_context=state.handoff_context,
+            tool_calls_total=state.tool_calls_total,
+            truncated_count=state.truncated_count,
+            retry_count=state.retry_count,
+            max_tool_retries=state.max_tool_retries,
             tasks=tasks_data,
         )
 
-    def restore_to(self, state: object) -> None:
+    def restore_to(self, state: AgentState) -> None:
         """将快照数据恢复到 AgentState 实例。
 
         只恢复 base fields，不恢复 tasks（tasks 由独立 Task 管理）。
@@ -140,22 +132,16 @@ class StateSnapshot:
         Args:
             state: AgentState 实例
         """
-        from .agent_state import AgentPhase, AgentStatus
+        state.iteration = self.iteration
+        state.end_status = AgentStatus(self.end_status)
+        state.error_message = self.error_message
+        state.handoff_target = self.handoff_target
+        state.handoff_context = self.handoff_context
+        state.truncated_count = self.truncated_count
+        state.retry_count = self.retry_count
+        state.max_tool_retries = self.max_tool_retries
 
-        as_obj: object = state
-        as_obj.iteration = self.iteration  # type: ignore[attr-defined]
-        as_obj.end_status = AgentStatus(self.end_status)  # type: ignore[attr-defined]
-        as_obj.error_message = self.error_message  # type: ignore[attr-defined]
-        as_obj.handoff_target = self.handoff_target  # type: ignore[attr-defined]
-        as_obj.handoff_context = self.handoff_context  # type: ignore[attr-defined]
-        if hasattr(as_obj, "truncated_count"):
-            as_obj.truncated_count = self.truncated_count  # type: ignore[attr-defined]
-        if hasattr(as_obj, "retry_count"):
-            as_obj.retry_count = self.retry_count  # type: ignore[attr-defined]
-        if hasattr(as_obj, "max_tool_retries"):
-            as_obj.max_tool_retries = self.max_tool_retries  # type: ignore[attr-defined]
-
-    def to_dict(self) -> dict:
+    def to_dict(self) -> JSONMap:
         """序列化为 JSON 兼容的 dict。"""
         return {
             "task_id": self.task_id,
@@ -176,24 +162,30 @@ class StateSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> StateSnapshot:
+    def from_dict(cls, data: JSONMap) -> StateSnapshot:
         """从 dict 反序列化。"""
+        raw_tasks: JSONValue | None = data.get("tasks")
+        tasks: list[JSONMap] = []
+        if isinstance(raw_tasks, list):
+            raw_task: JSONValue
+            for raw_task in raw_tasks:
+                tasks.append(require_json_map(raw_task))
         return cls(
-            task_id=data.get("task_id", ""),
-            thread_id=data.get("thread_id", ""),
-            agent_id=data.get("agent_id", ""),
-            phase=data.get("phase", "idle"),
-            iteration=data.get("iteration", 0),
-            max_iterations=data.get("max_iterations", 10),
-            end_status=data.get("end_status", "running"),
-            error_message=data.get("error_message"),
-            handoff_target=data.get("handoff_target"),
-            handoff_context=data.get("handoff_context"),
-            tool_calls_total=data.get("tool_calls_total", 0),
-            truncated_count=data.get("truncated_count", 0),
-            retry_count=data.get("retry_count", 0),
-            max_tool_retries=data.get("max_tool_retries", 2),
-            tasks=data.get("tasks", []),
+            task_id=get_string(data, "task_id"),
+            thread_id=get_string(data, "thread_id"),
+            agent_id=get_string(data, "agent_id"),
+            phase=get_string(data, "phase", "idle"),
+            iteration=get_integer(data, "iteration"),
+            max_iterations=get_integer(data, "max_iterations", 10),
+            end_status=get_string(data, "end_status", "running"),
+            error_message=_optional_string(data.get("error_message")),
+            handoff_target=_optional_string(data.get("handoff_target")),
+            handoff_context=_optional_string(data.get("handoff_context")),
+            tool_calls_total=get_integer(data, "tool_calls_total"),
+            truncated_count=get_integer(data, "truncated_count"),
+            retry_count=get_integer(data, "retry_count"),
+            max_tool_retries=get_integer(data, "max_tool_retries", 2),
+            tasks=tasks,
         )
 
 
@@ -253,7 +245,15 @@ class StateStore:
     # ======================== 原子操作：保存 ========================
 
     async def save(self, session_id: str, snapshot: StateSnapshot) -> None:
-        """保存状态快照到磁盘（原子写入）。
+        """兼容旧调用方保存 Session 级状态快照。
+
+        Runtime v2 新写入必须使用 save_checkpoint()；本方法仅为旧 Runtime
+        保留，并委托给显式命名的 save_legacy()。
+        """
+        await self.save_legacy(session_id, snapshot)
+
+    async def save_legacy(self, session_id: str, snapshot: StateSnapshot) -> None:
+        """保存旧 Runtime 使用的 Session 级状态快照（原子写入）。
 
         原子操作：
         1. 序列化 StateSnapshot 为 JSON
@@ -264,7 +264,6 @@ class StateStore:
             session_id: Session ID
             snapshot: 状态快照
         """
-        import aiofiles
         import tempfile
         import os as _os
 
@@ -290,7 +289,11 @@ class StateStore:
     # ======================== 原子操作：加载 ========================
 
     async def load(self, session_id: str) -> StateSnapshot | None:
-        """加载状态快照。
+        """兼容旧调用方加载 Session 级状态快照。"""
+        return await self.load_legacy(session_id)
+
+    async def load_legacy(self, session_id: str) -> StateSnapshot | None:
+        """加载旧 Runtime 使用的 Session 级状态快照。
 
         原子操作：
         1. 读取 state.json 文件
@@ -311,7 +314,8 @@ class StateStore:
         try:
             async with aiofiles.open(target, encoding="utf-8") as f:
                 data: str = await f.read()
-            return StateSnapshot.from_dict(json.loads(data))
+            raw_data: JSONValue = json.loads(data)
+            return StateSnapshot.from_dict(require_json_map(raw_data))
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"Failed to load state for session '{session_id}': {e}")
             return None
@@ -319,7 +323,11 @@ class StateStore:
     # ======================== 原子操作：删除 ========================
 
     async def delete(self, session_id: str) -> None:
-        """删除状态快照文件。
+        """兼容旧调用方删除 Session 级状态快照。"""
+        await self.delete_legacy(session_id)
+
+    async def delete_legacy(self, session_id: str) -> None:
+        """删除旧 Runtime 使用的状态快照文件。
 
         原子操作：
         1. 查找 state.json 文件
@@ -334,3 +342,8 @@ class StateStore:
                 target.unlink()
             except OSError as e:
                 logger.warning(f"Failed to delete state for session '{session_id}': {e}")
+
+
+def _optional_string(value: JSONValue | None) -> str | None:
+    """将可选 JSON 值收窄为字符串或 None。"""
+    return value if isinstance(value, str) else None

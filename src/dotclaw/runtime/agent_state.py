@@ -1,4 +1,4 @@
-"""AgentState —— Agent 运行时状态机。
+"""旧 Runtime 的 AgentState 兼容状态机。
 
 AgentState 是单次 AgentRun 的执行状态机，驱动 ReAct 循环。
 采用事件驱动模式：Runtime 喂入事件 → 状态机转换 phase → 返回下一步动作（AgentAction）。
@@ -9,7 +9,13 @@ v4 变更（TransitionTable 重构）：
 - 瞬态 Phase 的自动推进由内部 _auto_chain() 处理，外部行为不变
 - 新增/修改状态转换只需在 TRANSITION_TABLE 中加一行
 
-架构层级：
+兼容边界：
+    本模块仅服务仍在运行的旧 Runtime。Runtime v2 的新代码必须使用
+    ``runtime.domain.state`` 中不依赖 LLM、工具或 Task 的纯领域状态机。
+    文件末尾提供 ``V2AgentState``、``V2AgentPhase`` 与 ``V2AgentAction``
+    作为迁移期重导出，避免新旧状态机被误混用。
+
+旧架构层级：
     AgentState（任务级状态机，单次 AgentRun 生命周期）
       └── tasks: list[Task]（Agent 内部问题拆解的子任务清单）
 
@@ -32,6 +38,9 @@ from typing import Callable
 
 from ..agent.agent import LLMResponse
 from ..llm.base import Message
+from .domain.models import AgentAction as V2AgentAction
+from .domain.state import AgentPhase as V2AgentPhase
+from .domain.state import AgentState as V2AgentState
 from .task import Task
 
 
@@ -1049,3 +1058,17 @@ def _event_name(event_type: type) -> str:
         ContinueEvent: "continue",
     }
     return mapping.get(event_type, event_type.__name__)
+
+
+# ============================================================================
+# Runtime v2 迁移期兼容导出
+# ============================================================================
+
+LegacyAgentAction = AgentAction
+"""旧 Runtime 动作枚举的兼容别名。"""
+
+LegacyAgentPhase = AgentPhase
+"""旧 Runtime 阶段枚举的兼容别名。"""
+
+LegacyAgentState = AgentState
+"""旧 Runtime 状态机的兼容别名。"""
