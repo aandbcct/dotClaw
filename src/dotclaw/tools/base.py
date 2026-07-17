@@ -1,4 +1,4 @@
-"""工具基础类型定义（Phase 5 重构）"""
+"""工具基础类型定义。"""
 
 from __future__ import annotations
 
@@ -42,31 +42,10 @@ class ToolResult:
 
 @dataclass
 class ToolExecutionContext:
-    """工具执行时的运行时上下文。
-
-    Runtime 在每次工具调用时创建此上下文并传给 handler。
-    Task delegation 工具（delegate/task_send_message/wait_task/task_status/cancel_task）
-    从此上下文解析当前 Agent、Runtime 和 agentrun_id，
-    不再通过工厂闭包捕获顶层 Agent。
-    """
+    """工具执行时的最小运行上下文。"""
 
     timeout: float = 60.0
     """执行超时，来自 ToolDefinition.timeout"""
 
-    agent: object | None = None
-    """当前执行的 Agent 实例"""
-
-    runtime: object | None = None
-    """当前 Runtime 实例"""
-
-    session_id: str = ""
-    """当前 Session ID"""
-
     agentrun_id: str = ""
-    """当前 AgentRun ID（父 AgentRun 的 run_id）"""
-
-    task_id: str = ""
-    """Harness 注入的当前 Task ID；仅 target delegation Runtime 使用。"""
-
-    channel: object | None = None
-    """当前通信 Channel"""
+    """当前 Run 标识，用于工具审计与审批关联。"""

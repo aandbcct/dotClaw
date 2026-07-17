@@ -1,11 +1,11 @@
-"""Agent 模块"""
+"""Agent 模块。"""
 
-from .agent import Agent, LLMResponse
+from .agent import Agent
 from .identity import AgentIdentity, load_agent_config
 from .factory import build_agent
 
 __all__ = [
-    "Agent", "LLMResponse",
+    "Agent",
     "AgentIdentity",
     "build_agent", "load_agent_config",
 ]

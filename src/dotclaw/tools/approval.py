@@ -33,6 +33,10 @@ class ApprovalManager:
         """从 config.yaml 加载需要审批的命令列表"""
         self._approval_commands = set(commands)
 
+    def requires_approval(self, tool_name: str) -> bool:
+        """返回工具是否需要交互审批，不触发 Channel 副作用。"""
+        return self._enabled and tool_name in self._approval_commands
+
     async def check(
         self,
         tool_name: str,
@@ -47,10 +51,7 @@ class ApprovalManager:
         2. tool_name 在 _approval_commands 中 -> 需要审批
         3. 否则放行
         """
-        if not self._enabled:
-            return True
-
-        if tool_name not in self._approval_commands:
+        if not self.requires_approval(tool_name):
             return True
 
         if channel is None:

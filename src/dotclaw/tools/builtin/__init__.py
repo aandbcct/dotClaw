@@ -1,4 +1,4 @@
-"""内置工具子包（Phase 5 新增）— 统一注册入口"""
+"""内置工具子包的统一注册入口。"""
 
 from __future__ import annotations
 

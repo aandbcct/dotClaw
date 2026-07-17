@@ -35,9 +35,8 @@ build-backend = "hatchling.build"
 packages = ["src/dotclaw"]
 
 [tool.pytest.ini_options]
-# 默认只收集已迁移到当前 Runtime 架构的测试。
-# 根目录下的 Phase 1/3/4/7 与 metrics 测试保留为历史迁移资料，
-# 在完成等价测试迁移前不应阻断当前架构的开发。
+# 默认只收集当前架构和 Runtime v2 的测试。
+# 历史测试使用 legacy 标记隔离；执行迁移验证时可显式传入 -m legacy。
 testpaths = [
     "tests/agent",
     "tests/channel",
@@ -46,6 +45,12 @@ testpaths = [
     "tests/llm",
     "tests/orchestration",
     "tests/runtime",
+    "tests/runtime_v2",
     "tests/session",
 ]
 asyncio_mode = "auto"
+pythonpath = ["src"]
+addopts = "-m 'not legacy'"
+markers = [
+    "legacy: 依赖已废弃接口、仅用于迁移对照的历史测试。",
+]

@@ -14,6 +14,9 @@ from dotclaw.metrics.snapshot import (
 )
 
 
+pytestmark = pytest.mark.legacy
+
+
 class TestAgentEvent:
     def test_construction(self):
         e = AgentEvent(

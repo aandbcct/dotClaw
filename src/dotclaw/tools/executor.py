@@ -45,6 +45,22 @@ class ToolExecutor:
         """按名称获取 Handler（转发给 Registry）。"""
         return self._registry.get(name)
 
+    def requires_approval(self, name: str) -> bool:
+        """查询工具审批需求，不访问 Channel 或执行工具。"""
+        handler = self._registry.get(name)
+        if handler is None:
+            return False
+        return handler.definition().needs_approval or self._approval.requires_approval(name)
+
+    async def execute_approved(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        """在 Runtime 已完成结构化审批后执行工具，不触发旧交互流程。"""
+        return await self._execute_handler(name, arguments, None, execution_context)
+
     def _build_context(
         self,
         timeout: float,
@@ -54,12 +70,7 @@ class ToolExecutor:
         if execution_context is not None:
             ctx: ToolExecutionContext = ToolExecutionContext(
                 timeout=timeout,
-                agent=execution_context.agent,
-                runtime=execution_context.runtime,
-                session_id=execution_context.session_id,
                 agentrun_id=execution_context.agentrun_id,
-                task_id=execution_context.task_id,
-                channel=execution_context.channel,
             )
         else:
             ctx = ToolExecutionContext(timeout=timeout)
@@ -97,7 +108,7 @@ class ToolExecutor:
             channel: 通信 Channel
             journal: Journal 实例
             execution_context: Runtime 层注入的运行时上下文
-                              （agent/runtime/session_id/agentrun_id）。
+                              （agentrun_id）。
                               超时由 ToolDefinition.timeout 覆盖。
         """
         # ── Journal：工具执行开始 ──
@@ -105,22 +116,13 @@ class ToolExecutor:
             journal.tool_start(name, args=arguments)
 
         handler = self._registry.get(name)
-        if not handler:
-            result = ToolResult(
-                output=f"错误：未找到工具 '{name}'",
-                is_error=True,
-                error_code="TOOL_NOT_FOUND",
-                error_type="not_found",
-            )
-            if journal:
-                journal.tool_end(name, result_len=len(result.output),
-                                 status="error", error_type=result.error_type)
-            return result
+        if handler is None:
+            return self._missing_tool_result(name, journal)
 
         definition = handler.definition()
         # todo 将安全模块独立出去，包括workspace限制、鉴权、工具审批、
         # 审批检查
-        if definition.needs_approval:
+        if self.requires_approval(name):
             approved = await self._approval.check(
                 tool_name=name,
                 arguments=arguments,
@@ -137,6 +139,21 @@ class ToolExecutor:
                     journal.tool_end(name, result_len=len(result.output),
                                      status="error", error_type=result.error_type)
                 return result
+
+        return await self._execute_handler(name, arguments, journal, execution_context)
+
+    async def _execute_handler(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        journal: Journal | None,
+        execution_context: ToolExecutionContext | None,
+    ) -> ToolResult:
+        """执行已通过审批的工具，并保留旧 Journal 可观测行为。"""
+        handler = self._registry.get(name)
+        if handler is None:
+            return self._missing_tool_result(name, journal)
+        definition = handler.definition()
 
         # 超时控制 + 执行
         timeout: float = definition.timeout
@@ -180,3 +197,15 @@ class ToolExecutor:
                 journal.tool_end(name, result_len=len(result.output),
                                  status="error", error_type="executor")
             return result
+
+    def _missing_tool_result(self, name: str, journal: Journal | None) -> ToolResult:
+        """构造未注册工具的统一错误结果。"""
+        result = ToolResult(
+            output=f"错误：未找到工具 '{name}'",
+            is_error=True,
+            error_code="TOOL_NOT_FOUND",
+            error_type="not_found",
+        )
+        if journal:
+            journal.tool_end(name, result_len=len(result.output), status="error", error_type=result.error_type)
+        return result

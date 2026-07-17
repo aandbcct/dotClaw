@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import numpy as np
+import pytest
 
 from dotclaw.memory.storage import MemoryStorage, MemoryChunk, SearchResult
 from dotclaw.memory.chunker import TextChunker, TextChunk as ChunkerChunk
@@ -21,6 +22,9 @@ from dotclaw.memory.embedding import EmbeddingCache
 from dotclaw.memory.manager import MemoryManager
 from dotclaw.agent.context import AgentContext
 from dotclaw.agent.prompt.providers import MemoryProvider
+
+
+pytestmark = pytest.mark.legacy
 
 
 # ============================================================
