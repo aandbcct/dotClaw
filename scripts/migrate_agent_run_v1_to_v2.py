@@ -125,7 +125,8 @@ async def migrate_agent_run(
 
     if run.status is RunStatus.COMPLETED and final_message_id is not None:
         final_message: RunMessage = _find_message(messages, final_message_id)
-        await run_repository.commit_success(run, final_message)
+        completed_event: RunEvent = _find_completed_event(events)
+        await run_repository.commit_success(run, final_message, completed_event)
 
     legacy_trace_ids: JSONValue | None = source_data.get("trace_ids")
     trace_id_count: int = len(legacy_trace_ids) if isinstance(legacy_trace_ids, list) else 0
@@ -290,6 +291,15 @@ def _find_message(messages: tuple[RunMessage, ...], message_id: str) -> RunMessa
         if message.message_id == message_id:
             return message
     raise ValueError(f"找不到最终消息：{message_id}")
+
+
+def _find_completed_event(events: tuple[RunEvent, ...]) -> RunEvent:
+    """返回迁移阶段已持久化的唯一 RUN_COMPLETED 事件。"""
+    event: RunEvent
+    for event in events:
+        if event.event_type is RunEventType.RUN_COMPLETED:
+            return event
+    raise ValueError("已完成旧运行缺少 RUN_COMPLETED 迁移事件")
 
 
 def _legacy_max_iterations(source_data: JSONMap) -> int:

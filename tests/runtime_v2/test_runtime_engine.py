@@ -17,6 +17,7 @@ from dotclaw.runtime.domain.models import (
     AgentPolicySnapshot, ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot,
     MessageRole, RunMessage, RunMessageKind, RunRequest, RunResult, RunStatus, ToolCall, ToolInvocation, ToolResult, ToolResultStatus,
 )
+from dotclaw.context import ContextDependencies, SlotContextProvider
 
 
 class PolicyPort(RunPolicyPort):
@@ -166,6 +167,143 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
     ]
     assert event_types.index("approval_resolved") < event_types.index("run_resumed")
     assert event_types.index("run_resumed") < event_types.index("run_completed")
+
+
+class ReActLLM(LLMPort):
+    """记录两轮模型上下文，以验证工具证据能够进入下一轮 ReAct 请求。"""
+
+    def __init__(self) -> None:
+        """初始化模型调用记录。"""
+        self.contexts: list[ContextBundle] = []
+
+    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+        """首轮请求两个工具，次轮在断言上下文完整后返回最终回答。"""
+        self.contexts.append(context)
+        if len(self.contexts) == 1:
+            return RunMessage(
+                "tool-requests",
+                1,
+                RunMessageKind.LLM_RESPONSE,
+                MessageRole.ASSISTANT,
+                "我将查询两个来源。",
+                tool_calls=(
+                    ToolCall("call-1", "lookup", {"source": "first"}),
+                    ToolCall("call-2", "lookup", {"source": "second"}),
+                ),
+            )
+        return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "两个来源均已查询。")
+
+    async def cancel(self, run_id: str) -> None:
+        """测试替身无需远程取消。"""
+
+
+class CompletedTool(ToolPort):
+    """记录所有工具调用并返回对应的确定性结果。"""
+
+    def __init__(self) -> None:
+        """初始化调用记录。"""
+        self.calls: list[ToolInvocation] = []
+
+    async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        """保存调用顺序并返回调用标识对应的结果。"""
+        self.calls.append(invocation)
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=f"结果-{invocation.call.call_id}")
+
+    async def cancel(self, run_id: str) -> None:
+        """测试替身无需远程取消。"""
+
+
+def _request_with_history(session_id: str) -> RunRequest:
+    """构造含既有 Conversation 的请求，用于审批恢复上下文回放测试。"""
+    history: ConversationMessage = ConversationMessage(
+        "history-1",
+        MessageRole.ASSISTANT,
+        "这是之前的回答。",
+        "2026-07-16T00:00:00+00:00",
+    )
+    user: ConversationMessage = ConversationMessage(
+        "user-1",
+        MessageRole.USER,
+        "请查询资料。",
+        "2026-07-17T00:00:00+00:00",
+    )
+    return RunRequest(
+        session_id,
+        f"lease-{session_id}",
+        "agent-1",
+        user,
+        ConversationSnapshot(session_id, (history,), 1),
+    )
+
+
+async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_round(tmp_path: Path) -> None:
+    """首轮的 assistant 工具调用及全部 tool result 必须进入第二轮模型上下文。"""
+    llm: ReActLLM = ReActLLM()
+    tool_port: CompletedTool = CompletedTool()
+    engine: RuntimeEngine = RuntimeEngine(
+        FileRunRepository(tmp_path),
+        FileCheckpointRepository(tmp_path),
+        SlotContextProvider((), ContextDependencies()),
+        llm,
+        tool_port,
+        PolicyPort(),
+        ApprovalService(FileApprovalRepository(tmp_path)),
+        CancellationService(),
+    )
+
+    result: RunResult = await engine.execute(_request_with_history("session-react"))
+
+    assert result.status is RunStatus.COMPLETED
+    assert [invocation.call.call_id for invocation in tool_port.calls] == ["call-1", "call-2"]
+    second_context: ContextBundle = llm.contexts[1]
+    assert [message.content for message in second_context.messages] == [
+        "",
+        "这是之前的回答。",
+        "请查询资料。",
+        "我将查询两个来源。",
+        "结果-call-1",
+        "结果-call-2",
+    ]
+    assert second_context.messages[3].tool_calls == (
+        ToolCall("call-1", "lookup", {"source": "first"}),
+        ToolCall("call-2", "lookup", {"source": "second"}),
+    )
+    assert [message.tool_call_id for message in second_context.messages[4:]] == ["call-1", "call-2"]
+
+
+async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path: Path) -> None:
+    """审批批准后应保留首轮 Conversation、assistant 工具调用和工具执行结果。"""
+    llm: ReActLLM = ReActLLM()
+    approval_tool: ApprovalTool = ApprovalTool()
+    engine: RuntimeEngine = RuntimeEngine(
+        FileRunRepository(tmp_path),
+        FileCheckpointRepository(tmp_path),
+        SlotContextProvider((), ContextDependencies()),
+        llm,
+        approval_tool,
+        PolicyPort(),
+        ApprovalService(FileApprovalRepository(tmp_path)),
+        CancellationService(),
+    )
+
+    waiting: RunResult = await engine.execute(_request_with_history("session-approval-context"))
+    completed: RunResult = await engine.resolve_approval(waiting.approval_id or "", approved=True)
+
+    assert completed.status is RunStatus.COMPLETED
+    second_context: ContextBundle = llm.contexts[1]
+    assert [message.content for message in second_context.messages] == [
+        "",
+        "这是之前的回答。",
+        "请查询资料。",
+        "我将查询两个来源。",
+        "",
+        "已执行",
+        "已执行",
+    ]
+    assert second_context.messages[3].tool_calls == (
+        ToolCall("call-1", "lookup", {"source": "first"}),
+        ToolCall("call-2", "lookup", {"source": "second"}),
+    )
 
 
 async def test_rejected_approval_records_decision_and_cancels_without_conversation(tmp_path: Path) -> None:

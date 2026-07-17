@@ -184,7 +184,7 @@ def _build_messages(
     execution: RunExecutionView,
     system_content: str,
 ) -> tuple[RunMessage, ...]:
-    """将 system prompt、会话快照和当前输入转换为完整 LLM 请求消息。"""
+    """将会话快照、当前输入及本 Run 的 ReAct 证据转换为完整 LLM 请求消息。"""
     messages: list[RunMessage] = []
     sequence: int = 1
     messages.append(_run_message(execution.run_id, sequence, MessageRole.SYSTEM, system_content))
@@ -204,6 +204,26 @@ def _build_messages(
         request.user_message.role,
         request.user_message.content,
     ))
+    sequence += 1
+    run_message: RunMessage
+    for run_message in execution.run_messages:
+        if run_message.kind not in {
+            RunMessageKind.LLM_RESPONSE,
+            RunMessageKind.TOOL_RESULT,
+        }:
+            continue
+        messages.append(RunMessage(
+            message_id=f"context-{execution.run_id}-{sequence}",
+            sequence=sequence,
+            kind=run_message.kind,
+            role=run_message.role,
+            content=run_message.content,
+            tool_call_id=run_message.tool_call_id,
+            name=run_message.name,
+            tool_calls=run_message.tool_calls,
+            metadata=run_message.metadata,
+        ))
+        sequence += 1
     return tuple(messages)
 
 

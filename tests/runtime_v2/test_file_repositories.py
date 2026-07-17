@@ -71,6 +71,17 @@ def _build_messages() -> tuple[RunMessage, RunMessage]:
     return user_message, final_message
 
 
+def _completed_event(run: AgentRun, final_message: RunMessage, sequence: int) -> RunEvent:
+    """构造与最终 assistant 消息绑定的成功终态事件。"""
+    return RunEvent(
+        run_id=run.run_id,
+        sequence=sequence,
+        event_type=RunEventType.RUN_COMPLETED,
+        occurred_at="2026-07-16T00:00:03+00:00",
+        message_ids=(final_message.message_id,),
+    )
+
+
 async def test_file_run_repository_preserves_message_event_order(tmp_path: Path) -> None:
     """事件只能引用已原子保存的消息，且序号必须连续。"""
     repository: FileRunRepository = FileRunRepository(tmp_path)
@@ -154,7 +165,7 @@ async def test_success_projection_and_checkpoint_are_isolated_by_run(tmp_path: P
         ended_at="2026-07-16T00:00:02+00:00",
         final_message_id=final_message.message_id,
     )
-    await run_repository.commit_success(completed_run, final_message)
+    await run_repository.commit_success(completed_run, final_message, _completed_event(completed_run, final_message, 1))
     conversation = await run_repository.load_conversation(running_run.session_id)
     assert conversation[0].content == final_message.content
     assert conversation[0].role is MessageRole.ASSISTANT
@@ -191,8 +202,9 @@ async def test_success_projection_uses_existing_session_and_is_idempotent(tmp_pa
         ended_at="2026-07-16T00:00:02+00:00",
         final_message_id=final_message.message_id,
     )
-    await repository.commit_success(completed_run, final_message)
-    await repository.commit_success(completed_run, final_message)
+    completed_event: RunEvent = _completed_event(completed_run, final_message, 1)
+    await repository.commit_success(completed_run, final_message, completed_event)
+    await repository.commit_success(completed_run, final_message, completed_event)
 
     loaded_session: Session | None = await session_manager.load(running_run.session_id)
     assert loaded_session is not None
@@ -201,6 +213,47 @@ async def test_success_projection_uses_existing_session_and_is_idempotent(tmp_pa
     assert loaded_session.conversations[0].final_answer == final_message.content
     assert loaded_session.conversations[0].agent_run_ids == [running_run.run_id]
     assert not (tmp_path / running_run.session_id / "conversation.json").exists()
+
+
+class FailingConversationProjector:
+    """模拟 Conversation 投影失败，用于验证 run.json 不会抢先提交完成态。"""
+
+    async def project_success(
+        self,
+        run: AgentRun,
+        user_message: RunMessage,
+        final_message: RunMessage,
+    ) -> None:
+        """始终中断投影，使调用方可验证可恢复提交边界。"""
+        raise RuntimeError("Conversation 投影失败")
+
+
+async def test_success_commit_uses_run_completion_as_last_visibility_marker(tmp_path: Path) -> None:
+    """成功事件或 Conversation 投影失败时，不得暴露已完成但不完整的 AgentRun。"""
+    repository: FileRunRepository = FileRunRepository(tmp_path, FailingConversationProjector())
+    running_run: AgentRun = _build_running_run()
+    user_message: RunMessage
+    final_message: RunMessage
+    user_message, final_message = _build_messages()
+    await repository.create_run(running_run)
+    await repository.save_messages(running_run.session_id, running_run.run_id, (user_message, final_message))
+    completed_run: AgentRun = replace(
+        running_run,
+        status=RunStatus.COMPLETED,
+        ended_at="2026-07-16T00:00:02+00:00",
+        final_message_id=final_message.message_id,
+    )
+
+    with pytest.raises(RuntimeError, match="投影失败"):
+        await repository.commit_success(
+            completed_run,
+            final_message,
+            _completed_event(completed_run, final_message, 1),
+        )
+
+    persisted_run: AgentRun | None = await repository.load_run(running_run.session_id, running_run.run_id)
+    assert persisted_run is not None
+    assert persisted_run.status is RunStatus.RUNNING
 
 
 async def test_checkpoint_rejects_full_prompt_and_tool_result_payloads(tmp_path: Path) -> None:

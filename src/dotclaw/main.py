@@ -57,7 +57,7 @@ async def _run_cli() -> None:
     from dotclaw.config import _find_project_root
     rich_console.print(build_banner(
         agent_name=agent.agent_name,
-        model=agent._resolve_model(),
+        model=agent.model_id,
         session_title=current_session.title,
         workspace=str(_find_project_root()),
     ))
@@ -127,7 +127,7 @@ async def _run_cli() -> None:
                 elif cmd == "/skills":
                     _cmd_skills(channel, agent.skill_registry)
                 elif cmd == "/model":
-                    channel.print_info(f"当前模型: {agent._resolve_model()}")
+                    channel.print_info(f"当前模型: {agent.model_id}")
                 else:
                     channel.print_error(f"未知命令: {cmd}")
                 continue

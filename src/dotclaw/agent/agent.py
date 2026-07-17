@@ -68,6 +68,11 @@ class Agent:
         return self._config
 
     @property
+    def model_id(self) -> str:
+        """返回当前 Agent 解析后的模型标识，供 CLI 只读展示。"""
+        return self._identity.resolve_model(self._config.llm.default_model)
+
+    @property
     def last_run_result(self) -> RunResult | None:
         """返回最近一次运行结果，供 Channel 展示审批或错误信息。"""
         return self._last_run_result

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from ..application.ports import ConversationProjectionPort
-from ..domain.events import RunEvent
+from ..domain.events import RunEvent, RunEventType
 from ..domain.models import (
     AgentPolicySnapshot,
     AgentRun,
@@ -78,18 +78,25 @@ class FileRunRepository:
         """在消息已落盘后追加有序事件。"""
         await asyncio.to_thread(self._append_event_sync, session_id, event)
 
-    async def commit_success(self, run: AgentRun, final_message: RunMessage) -> None:
-        """写入完成摘要并投影最终 assistant 消息到 Conversation。"""
+    async def commit_success(
+        self,
+        run: AgentRun,
+        final_message: RunMessage,
+        completed_event: RunEvent,
+    ) -> None:
+        """以 run.json 成功终态为最后提交标记，统一提交成功事实和 Conversation。"""
         user_message: RunMessage = await asyncio.to_thread(
             self._validate_success_and_get_input_sync,
             run,
             final_message,
         )
-        await asyncio.to_thread(self._save_run_sync, run)
+        await asyncio.to_thread(self._validate_completed_event_sync, run, final_message, completed_event)
+        await asyncio.to_thread(self._ensure_event_sync, run.session_id, completed_event)
         if self._conversation_projector is not None:
             await self._conversation_projector.project_success(run, user_message, final_message)
-            return
-        await asyncio.to_thread(self._append_standalone_conversation_sync, run, final_message)
+        else:
+            await asyncio.to_thread(self._append_standalone_conversation_sync, run, final_message)
+        await asyncio.to_thread(self._save_run_sync, run)
 
     async def load_conversation(self, session_id: str) -> tuple[ConversationMessage, ...]:
         """读取该仓储维护的成功 Conversation 投影。"""
@@ -196,8 +203,42 @@ class FileRunRepository:
             raise ValueError("最终消息必须先以完整 RunMessage 保存后才能提交成功投影")
         return input_message
 
+    def _validate_completed_event_sync(
+        self,
+        run: AgentRun,
+        final_message: RunMessage,
+        completed_event: RunEvent,
+    ) -> None:
+        """校验成功提交携带唯一且引用最终消息的完成事件。"""
+        if completed_event.run_id != run.run_id:
+            raise ValueError("完成事件必须属于当前运行")
+        if completed_event.event_type is not RunEventType.RUN_COMPLETED:
+            raise ValueError("成功提交必须携带 RUN_COMPLETED 事件")
+        if completed_event.message_ids != (final_message.message_id,):
+            raise ValueError("完成事件必须且只能引用最终 assistant 消息")
+
+    def _ensure_event_sync(self, session_id: str, event: RunEvent) -> None:
+        """幂等写入成功终态事件，使提交失败后的重试可继续完成。"""
+        path: Path = self._run_path(session_id, event.run_id).with_name(RunStorageFileName.EVENTS.value)
+        if path.is_file():
+            serialized_event: str = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True)
+            existing_line: str
+            for existing_line in path.read_text(encoding="utf-8").splitlines():
+                decoded_value: JSONValue = json.loads(existing_line)
+                existing_event: JSONMap = require_json_map(decoded_value)
+                if get_integer(existing_event, "sequence") != event.sequence:
+                    continue
+                existing_serialized_event: str = json.dumps(existing_event, ensure_ascii=False, sort_keys=True)
+                if existing_serialized_event != serialized_event:
+                    raise ValueError("完成事件序号已被其他事件占用")
+                return
+        self._append_event_sync(session_id, event)
+
     def _append_standalone_conversation_sync(self, run: AgentRun, final_message: RunMessage) -> None:
         """在未注入 Session 投影器时保留独立 Conversation 兼容容器。"""
+        existing_messages: tuple[ConversationMessage, ...] = self._load_conversation_sync(run.session_id)
+        if any(message.message_id == final_message.message_id for message in existing_messages):
+            return
         conversation_message: ConversationMessage = ConversationMessage(
             message_id=final_message.message_id,
             role=MessageRole.ASSISTANT,

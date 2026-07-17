@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .models import AgentAction, AgentPolicySnapshot, JSONMap, RunRequest
+from .models import AgentAction, AgentPolicySnapshot, JSONMap, RunMessage, RunRequest
 from .state import AgentState
 
 
@@ -72,6 +72,8 @@ class RunExecution:
     message_cursor: int = 0
     cancellation: CancellationToken = field(default_factory=CancellationToken)
     pending_control: PendingControl | None = None
+    run_messages: tuple[RunMessage, ...] = ()
+    """当前 Run 已持久化的执行消息，仅供 Port 构造后续上下文。"""
 
     def view(self) -> RunExecutionView:
         """生成提供给 Port 的只读执行视图。"""
@@ -82,6 +84,7 @@ class RunExecution:
             budget=self.budget,
             message_cursor=self.message_cursor,
             pending_control=self.pending_control,
+            run_messages=self.run_messages,
         )
 
     def update_state(self, state: AgentState, action: AgentAction) -> None:
@@ -89,6 +92,11 @@ class RunExecution:
         self.state = state
         if action is not AgentAction.WAIT:
             self.pending_control = None
+
+    def replace_run_messages(self, messages: tuple[RunMessage, ...]) -> None:
+        """同步已持久化的运行消息，使后续 Port 可重放本 Run 的 ReAct 证据。"""
+        self.run_messages = messages
+        self.message_cursor = len(messages)
 
     def to_dict(self) -> JSONMap:
         """序列化为不含外部实例引用的检查点数据。"""
@@ -116,3 +124,5 @@ class RunExecutionView:
     budget: RunBudget
     message_cursor: int
     pending_control: PendingControl | None
+    run_messages: tuple[RunMessage, ...] = ()
+    """本 Run 已持久化的消息证据；不包含 Session 可变对象。"""

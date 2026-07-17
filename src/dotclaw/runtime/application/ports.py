@@ -57,8 +57,13 @@ class RunRepository(Protocol):
     async def append_event(self, session_id: str, event: RunEvent) -> None:
         """追加已引用存在消息的运行事件。"""
 
-    async def commit_success(self, run: AgentRun, final_message: RunMessage) -> None:
-        """提交成功终态与 Conversation assistant 投影。"""
+    async def commit_success(
+        self,
+        run: AgentRun,
+        final_message: RunMessage,
+        completed_event: RunEvent,
+    ) -> None:
+        """以成功终态为提交标记，统一提交事件、Conversation 投影和 Run 摘要。"""
 
 
 class CheckpointRepository(Protocol):
