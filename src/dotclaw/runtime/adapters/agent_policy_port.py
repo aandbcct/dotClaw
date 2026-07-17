@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ...agent.identity import AgentIdentity
 from ...config.settings import Config
+from ...orchestration.registry import AgentRegistry
 from ...tools.base import ToolDefinition as LegacyToolDefinition
 from ...tools.executor import ToolExecutor
 from ..application.ports import RunPolicyPort
@@ -16,41 +17,59 @@ from ..domain.models import AgentPolicySnapshot, RunRequest, ToolDefinition
 class AgentPolicyPort(RunPolicyPort):
     """将旧 Agent 配置转换为一次 Run 不可变的策略快照。"""
 
-    def __init__(self, identity: AgentIdentity, config: Config, executor: ToolExecutor, project_root: Path) -> None:
+    def __init__(
+        self,
+        identity: AgentIdentity,
+        config: Config,
+        executor: ToolExecutor,
+        project_root: Path,
+        agent_registry: AgentRegistry | None = None,
+    ) -> None:
         """绑定一个 Agent 的身份、配置和工具注册表。"""
         self._identity: AgentIdentity = identity
         self._config: Config = config
         self._executor: ToolExecutor = executor
         self._project_root: Path = project_root
+        self._agent_registry: AgentRegistry | None = agent_registry
 
     async def resolve(self, request: RunRequest) -> AgentPolicySnapshot:
         """冻结身份、模型、工具定义、提示词和上下文预算。"""
-        if request.agent_id != self._identity.agent_id:
-            raise ValueError(f"策略端口未装配 Agent {request.agent_id}")
+        identity: AgentIdentity = self._resolve_identity(request.agent_id)
         tools: tuple[ToolDefinition, ...] = tuple(
             ToolDefinition(definition.name, definition.description, definition.parameters)
-            for definition in self._allowed_definitions()
+            for definition in self._allowed_definitions(identity)
         )
-        identity_version = _identity_version(self._identity)
+        identity_version: str = _identity_version(identity)
         return AgentPolicySnapshot(
-            agent_id=self._identity.agent_id,
+            agent_id=identity.agent_id,
             identity_version=identity_version,
-            model_id=self._identity.resolve_model(self._config.llm.default_model),
-            max_iterations=self._identity.max_loop_steps,
+            model_id=identity.resolve_model(self._config.llm.default_model),
+            max_iterations=identity.max_loop_steps,
             policy_data={
-                "system_prompt": self._identity.resolve_system_prompt() or self._config.agent.system_prompt,
+                "system_prompt": identity.resolve_system_prompt() or self._config.agent.system_prompt,
                 "tools": [tool.to_dict() for tool in tools],
                 "project_root": str(self._project_root),
                 "max_context_tokens": self._config.agent.max_context_tokens,
             },
         )
 
-    def _allowed_definitions(self) -> list[LegacyToolDefinition]:
+    def _resolve_identity(self, agent_id: str) -> AgentIdentity:
+        """解析主 Agent 或登记的 delegation target Identity。"""
+        if agent_id == self._identity.agent_id:
+            return self._identity
+        if self._agent_registry is None:
+            raise ValueError(f"策略端口未装配 Agent {agent_id}")
+        identity: AgentIdentity | None = self._agent_registry.get(agent_id)
+        if identity is None:
+            raise ValueError(f"未找到 delegation target Agent {agent_id}")
+        return identity
+
+    def _allowed_definitions(self, identity: AgentIdentity) -> list[LegacyToolDefinition]:
         """按 Agent 白名单过滤既有工具定义。"""
         definitions: list[LegacyToolDefinition] = self._executor.get_definitions()
-        if not self._identity.allowed_tools:
+        if not identity.allowed_tools:
             return definitions
-        allowed: set[str] = set(self._identity.allowed_tools)
+        allowed: set[str] = set(identity.allowed_tools)
         return [definition for definition in definitions if definition.name in allowed]
 
 

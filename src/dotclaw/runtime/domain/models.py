@@ -199,13 +199,15 @@ class AgentPolicySnapshot:
 
 @dataclass(frozen=True)
 class RunRequest:
-    """提交给 RuntimeEngine 的普通用户请求。"""
+    """提交给 RuntimeEngine 的普通或委托子运行请求。"""
 
     session_id: str
     lease_id: str
     agent_id: str
     user_message: ConversationMessage
     conversation: ConversationSnapshot
+    parent_run_id: str | None = None
+    root_run_id: str | None = None
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -428,6 +430,7 @@ class DelegationRequest:
     """Runtime 提交给 DelegationPort 的子执行请求。"""
 
     parent_run_id: str
+    root_run_id: str
     target_agent_id: str
     input_message: ConversationMessage
 

@@ -1,7 +1,7 @@
 """Journal trace recording 测试。
 
 测试 Journal.record_message() 以 TRACE_MESSAGE 事件写入 trace.jsonl，
-Journal._update_state() 覆盖写入 state.json。
+旧 Journal StateSink 覆盖写入 state.json 的历史兼容测试。
 v2：产出路径统一为 session/{session_id}/
 """
 
@@ -211,6 +211,7 @@ class TestJournalRecordMessage:
 # Journal _update_state
 # ═══════════════════════════════════════════════════════════════════
 
+@pytest.mark.legacy
 class TestJournalUpdateState:
     """Journal._update_state() 集成测试。"""
 

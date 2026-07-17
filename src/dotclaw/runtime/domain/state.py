@@ -7,6 +7,7 @@ from enum import StrEnum
 
 from .events import (
     ApprovalResolved,
+    DelegationSubmitted,
     CancelRequested,
     DelegationCompleted,
     DomainEvent,
@@ -59,6 +60,8 @@ class AgentState:
             return self._on_tool_completed(event)
         if isinstance(event, ApprovalResolved):
             return self._on_approval_resolved(event)
+        if isinstance(event, DelegationSubmitted):
+            return self._on_delegation_submitted(event)
         if isinstance(event, DelegationCompleted):
             return self._on_delegation_completed(event)
         raise RuntimeError("不支持的领域事件")
@@ -123,6 +126,11 @@ class AgentState:
             next_state: AgentState = self._with_phase(AgentPhase.WAITING_TOOLS)
             return StateTransition(next_state, AgentAction.EXECUTE_TOOLS)
         return StateTransition(self._with_phase(AgentPhase.CANCELLED), AgentAction.FINALIZE)
+
+    def _on_delegation_submitted(self, event: DelegationSubmitted) -> StateTransition:
+        """进入等待子运行结果的状态，由 Engine 继续查询 DelegationPort。"""
+        self._require_phase(AgentPhase.WAITING_TOOLS)
+        return StateTransition(self._with_phase(AgentPhase.WAITING_DELEGATION), AgentAction.WAIT)
 
     def _on_delegation_completed(self, event: DelegationCompleted) -> StateTransition:
         self._require_phase(AgentPhase.WAITING_DELEGATION)

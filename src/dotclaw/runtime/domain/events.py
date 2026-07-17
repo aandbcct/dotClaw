@@ -120,6 +120,14 @@ class DelegationCompleted:
 
 
 @dataclass(frozen=True)
+class DelegationSubmitted:
+    """父运行已提交一个结构化子运行请求。"""
+
+    child_run_id: str
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
 class CancelRequested:
     """取消指定运行的控制事件。"""
 
@@ -135,4 +143,4 @@ class TimeoutReached:
     occurred_at: str = field(default_factory=utc_now_iso)
 
 
-DomainEvent = RunStarted | LLMCompleted | ToolCompleted | ApprovalResolved | DelegationCompleted | CancelRequested | TimeoutReached
+DomainEvent = RunStarted | LLMCompleted | ToolCompleted | ApprovalResolved | DelegationSubmitted | DelegationCompleted | CancelRequested | TimeoutReached

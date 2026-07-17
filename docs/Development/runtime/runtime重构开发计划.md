@@ -1,6 +1,6 @@
 # Runtime 重构开发计划
 
-> 状态：待实施  
+> 状态：Phase 1–Phase 5 已完成；Phase 6 待实施。
 > 对应设计：[Runtime 重构设计](runtime重构设计.md)  
 > 实施策略：**一个完整重构目标、一个工作分支、分阶段迁移、最终统一切换**。中间阶段不要求对外发布，但每阶段必须可运行、可测试、可回退。
 
@@ -384,6 +384,14 @@ cancel(run_id) → Runtime 标记取消 → 安全点停止 → RUN_CANCELLED
 - 禁用 Journal 后 RuntimeEngine 仍能执行、恢复、保存运行数据；
 - delegation 的父 / 子运行关系以 `parent_run_id`、`root_run_id` 与 RunEvent 表达；
 - RuntimeEngine 可使用 fake DelegationPort 测试，不需要创建真实子 Agent。
+
+### 实施结果（2026-07-17）
+
+- 已新增 `orchestration/runtime_delegation_adapter.py`。它为每个 target Identity 创建独立 Session 与子 Run，并通过 `SessionRunCoordinator` 执行；父子关系写入 `parent_run_id`、`root_run_id` 和 delegation 事件。
+- `RuntimeEngine` 仅依赖 `DelegationPort`：结构化 `delegate` 调用提交子运行、查询结果并转换为 `DelegationSubmitted`、`DelegationCompleted` 领域事件；Engine 不 import Dispatcher、Journal 或旧 Runtime。
+- `AgentPolicyPort` 可根据 `AgentRegistry` 冻结 target Identity 的子运行策略，保持多 Agent 策略边界。
+- Journal 已停止注册 StateSink、写入 `state.json` 和恢复 StateSink 累加器；旧 Journal 状态写入集成测试已标记为 `legacy`，独立 StateSink 兼容实现保留到 Phase 6 删除。
+- 已新增 `test_delegation_port.py` 与 `test_no_journal_dependency.py`，覆盖 fake Port 父子事件、target Session 请求映射和 Engine 无旧基础设施依赖。
 
 ## 9. Phase 6：统一切换、删除旧路径与最终验证
 

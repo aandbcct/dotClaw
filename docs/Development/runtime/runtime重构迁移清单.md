@@ -1,6 +1,6 @@
 # Runtime 重构迁移清单
 
-> 状态：Phase 1–Phase 4 已完成并通过回归验收。普通 CLI/Agent 入口已切换到 Runtime v2；旧 Runtime 仅保留 delegation、handoff 与历史兼容边界。本文记录旧 Runtime 相关模块的归属、当前调用方、替代方向与删除条件；后续 Phase 完成时必须同步更新。
+> 状态：Phase 1–Phase 5 已完成并通过回归验收。普通 CLI/Agent 入口及 Runtime v2 delegation 已切换到 Port；旧 Runtime 仅保留历史 delegation/handoff 兼容边界，物理删除留待 Phase 6。本文记录旧 Runtime 相关模块的归属、当前调用方、替代方向与删除条件；后续 Phase 完成时必须同步更新。
 > 对应设计：[Runtime 重构设计](runtime重构设计.md)。
 
 ## 使用规则
@@ -13,15 +13,15 @@
 
 | 旧模块 / API | 当前调用方或职责 | 替代模块 | 计划 Phase | 删除条件 |
 | --- | --- | --- | --- | --- |
-| `runtime/runtime.py::LegacyRuntimeFacade`（兼容别名 `Runtime`） | 仅 `orchestration/dispatcher.py`、`orchestration/runners/local.py`、handoff/delegation 兼容代码和历史测试；`main.py`、普通 Agent、工厂已迁移 | `runtime/application/engine.py::RuntimeEngine` + `SessionRunCoordinator` | 4–5 | delegation adapter 覆盖父子运行隔离且历史兼容调用方归零后删除 |
-| `runtime/runtime.py::Runtime.derive()` | 子 Agent 与 handoff 的运行隔离 | `RunExecution`、作用域化 ContextPort 与 `DelegationPort` | 4–5 | delegation adapter 覆盖父子运行隔离，生产代码不再调用 `derive()` |
+| `runtime/runtime.py::LegacyRuntimeFacade`（兼容别名 `Runtime`） | 仅旧 `orchestration/runners/local.py`、handoff/delegation 兼容代码和历史测试；`main.py`、普通 Agent、工厂及 Runtime v2 delegation 已迁移 | `runtime/application/engine.py::RuntimeEngine` + `SessionRunCoordinator` + `RuntimeDelegationAdapter` | 4–6 | 历史兼容调用方归零后删除 |
+| `runtime/runtime.py::Runtime.derive()` | 仅旧 target runner / handoff 的历史运行隔离 | `RunExecution`、作用域化 ContextPort 与 `DelegationPort` | 5–6 | Phase 6 清除旧 runner 与 handoff 兼容调用方后删除 |
 | `runtime/agent_state.py::AgentState` | 旧 Runtime 驱动 ReAct；状态持有 LLM 响应、工具结果与 Task | `runtime/domain/state.py::AgentState`；旧模块显式导出 `V2AgentState` 等迁移别名 | 1 | 新状态机测试覆盖全部转移，旧 Runtime 兼容门面不再依赖旧状态机 |
-| `runtime/task.py` 与 `AgentState.tasks` | 旧状态机内的跨 Run 任务语义 | 本轮不替代；新版 `AgentState` 已无 Task 依赖，delegation 后续仅经 `DelegationPort` 返回 | 1、5 | 保留调用方迁移至 delegation adapter 或明确移除 |
+| `runtime/task.py` 与 `AgentState.tasks` | 仅旧 Runtime delegation 兼容语义 | Runtime v2 通过 `DelegationPort`、`DelegationRequest`、`DelegationResult` 与 RunEvent 表达父子关系 | 5–6 | Phase 6 清除旧 runner / handoff 后删除 |
 | `runtime/state_store.py::StateStore` | `Runtime`、`agent/resume.py`；以 Session ID 保存恢复快照 | `CheckpointRepository`（以 `run_id` 为键；Phase 2 已增加委托入口） | 2 | 新增和恢复运行只使用 CheckpointRepository，旧 `state.json` 仅保留 `save_legacy` / `load_legacy` 兼容路径或迁移脚本 |
 | `session/agent_run.py::AgentRun` 的 `messages`、`state_snapshot`、`trace_ids` | 旧 Runtime 写入，`AgentRunManager` 读取 | `RunMessage`、`Checkpoint`、`RunEvent` 与摘要 AgentRun（Phase 2 文件仓储已新增） | 2 | Runtime v2 新运行不写这些字段；迁移脚本可处理旧样例，旧 Runtime 迁移至新入口后删除兼容读写 |
 | `agent/slotContext.py::SlotContext`、`ContextAssembler` | 旧 Runtime 兼容回退与历史测试；新工厂不再构造或注入 | `context/slot_context.py`、`SlotContextProvider`、`ScopedCache` | 3 | RuntimeEngine 完成切换后移除旧 Runtime 的回退分支；旧 Slot 测试迁移至 `tests/runtime_v2/test_context_port.py` 后删除 |
 | `agent/agent.py::Agent.process()` 的 Session 直接提交 | 已删除；普通消息由 `main.py` 调用迁移后的 Agent 门面 | `SessionRunCoordinator.submit()` 与 RunRepository 成功投影 | 4 | 已满足：Conversation 仅由成功终态的 RunRepository 提交，Agent 不直接写 Session |
-| `journal/journal.py` 的私有状态与 `journal/sinks/state_sink.py` | 旧 Runtime 读取 `_events`、`_agentrun_id`、`_agentrun_sequence`，并经 Journal 间接保存状态 | `RunEvent`、RunRepository、CheckpointRepository；Journal 退化为可选渲染器 | 2、5 | RuntimeEngine 无 Journal import 或私有字段读取；恢复集成测试不依赖 StateSink |
+| `journal/journal.py` 的私有状态与 `journal/sinks/state_sink.py` | Journal 已停止注册 StateSink、写 `state.json` 和恢复状态；独立 sink 与历史兼容测试仍存在 | `RunEvent`、RunRepository、CheckpointRepository；Journal 退化为可选渲染器 | 5–6 | Phase 6 确认独立 sink 无调用方后物理删除 |
 | `tools/executor.py` / `tools/approval.py` 的直接交互 | 仅旧 Runtime/delegation 兼容用途；新主路径由 `ToolExecutorPort` 调用无交互入口 | `ToolPort` 返回标准化结果或 `ApprovalRequired` | 4 | 已满足新入口：Channel 只提交有限审批决定，RuntimeEngine 经 ApprovalRepository 恢复 |
 | `agent/factory.py` 的 Runtime 具体装配 | 已移除普通消息的旧 Runtime、Journal、StateStore、旧 AgentRunManager 装配 | `bootstrap/runtime_factory.py` 组合根 | 3–4 | 已满足：新工厂只装配 Ports、RuntimeEngine 与 Coordinator；delegation 留待 Phase 5 |
 
@@ -66,3 +66,6 @@ rg "Runtime|StateStore|ContextAssembler|slotContext|state_sink" src tests docs
 - `runtime/application/session_run_coordinator.py`：同 Session FIFO 租约、不同 Session 并行的请求协调器；审批恢复与取消同样按所属 Session 获取租约。
 - `runtime/application/approval_service.py`、`cancellation_service.py`：审批记录的唯一消费入口与 run 级取消令牌管理。
 - `tests/runtime_v2/test_runtime_engine.py`：覆盖普通澄清完成、跨 Session 隔离、同 Session FIFO、审批同 run_id 恢复、审批拒绝、审批恢复与新消息的租约互斥及取消不写 Conversation。
+- `orchestration/runtime_delegation_adapter.py`：DelegationPort 的 Runtime v2 适配器；创建 target Session / 子 Run，缓存标准化结果，不让 Engine 依赖 Dispatcher 或旧 Runtime。
+- `tests/runtime_v2/test_delegation_port.py`：覆盖 fake DelegationPort 父子 RunEvent、target 子运行请求映射与 `parent_run_id` / `root_run_id`。
+- `tests/runtime_v2/test_no_journal_dependency.py`：验证 RuntimeEngine 不导入 Journal、Dispatcher 或旧 Runtime。

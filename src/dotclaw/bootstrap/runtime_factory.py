@@ -39,6 +39,7 @@ from ..tools.executor import ToolExecutor
 from ..skills.registry import SkillRegistry
 from ..memory.manager import MemoryManager
 from ..orchestration.registry import AgentRegistry
+from ..orchestration.runtime_delegation_adapter import RuntimeDelegationAdapter
 from ..mcp.provider import MCPToolProvider
 
 
@@ -83,19 +84,26 @@ def build_runtime_services(
     )
     run_repository = FileRunRepository(storage_root, SessionConversationProjector(session_manager))
     approval_repository = FileApprovalRepository(storage_root)
+    delegation_port: RuntimeDelegationAdapter = RuntimeDelegationAdapter(
+        session_manager,
+        agent_registry,
+    )
     engine = RuntimeEngine(
         run_repository=run_repository,
         checkpoint_repository=FileCheckpointRepository(storage_root),
         context_port=context_port,
         llm_port=LLMProxyPort(llm_proxy),
         tool_port=ToolExecutorPort(tool_executor),
-        policy_port=AgentPolicyPort(identity, config, tool_executor, project_root),
+        policy_port=AgentPolicyPort(identity, config, tool_executor, project_root, agent_registry),
         approval_service=ApprovalService(approval_repository),
         cancellation_service=CancellationService(),
+        delegation_port=delegation_port,
     )
+    coordinator: SessionRunCoordinator = SessionRunCoordinator(engine)
+    delegation_port.bind_coordinator(coordinator)
     return RuntimeServices(
         engine=engine,
-        coordinator=SessionRunCoordinator(engine),
+        coordinator=coordinator,
         tool_executor=tool_executor,
         mcp_provider=mcp_provider,
         skill_registry=skill_registry,

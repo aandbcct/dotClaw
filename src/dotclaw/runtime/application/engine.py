@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from ..domain.events import (
     ApprovalResolved,
+    DelegationCompleted,
+    DelegationSubmitted,
     LLMCompleted,
     LLMCompletionKind,
     RunEvent,
@@ -20,6 +22,9 @@ from ..domain.models import (
     AgentRun,
     ConversationMessage,
     ConversationSnapshot,
+    DelegationRequest,
+    DelegationResult,
+    JSONMap,
     MessageRole,
     RunCheckpoint,
     RunError,
@@ -36,10 +41,10 @@ from ..domain.models import (
     ToolResultStatus,
     utc_now_iso,
 )
-from ..domain.state import AgentState
+from ..domain.state import AgentPhase, AgentState
 from .approval_service import ApprovalService
 from .cancellation_service import CancellationService
-from .ports import CheckpointRepository, ContextPort, LLMPort, RunPolicyPort, RunRepository, ToolPort
+from .ports import CheckpointRepository, ContextPort, DelegationPort, LLMPort, RunPolicyPort, RunRepository, ToolPort
 
 
 class RuntimeEngine:
@@ -55,6 +60,7 @@ class RuntimeEngine:
         policy_port: RunPolicyPort,
         approval_service: ApprovalService,
         cancellation_service: CancellationService,
+        delegation_port: DelegationPort | None = None,
     ) -> None:
         """绑定执行所需 Ports；不保存任何单次运行的状态。"""
         self._run_repository: RunRepository = run_repository
@@ -65,6 +71,7 @@ class RuntimeEngine:
         self._policy_port: RunPolicyPort = policy_port
         self._approval_service: ApprovalService = approval_service
         self._cancellation_service: CancellationService = cancellation_service
+        self._delegation_port: DelegationPort | None = delegation_port
 
     async def execute(self, request: RunRequest) -> RunResult:
         """创建新的 RunExecution，并执行到成功、失败、取消或审批等待。"""
@@ -85,6 +92,8 @@ class RuntimeEngine:
             started_at=utc_now_iso(),
             policy=policy,
             input_message_id=request.user_message.message_id,
+            parent_run_id=request.parent_run_id,
+            root_run_id=request.root_run_id or request.parent_run_id,
         )
         await self._run_repository.create_run(run)
         self._cancellation_service.register(run_id, execution.cancellation)
@@ -193,11 +202,31 @@ class RuntimeEngine:
         while not execution.state.is_terminal():
             if execution.cancellation.cancelled:
                 return await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
-            if execution.state.phase.value == "waiting_tools":
+            if execution.state.phase is AgentPhase.WAITING_TOOLS:
                 tool_calls: tuple[ToolCall, ...] = pending_calls
                 pending_calls = ()
                 if not tool_calls:
                     return await self._fail(execution, run, tuple(messages), event_number, "缺少待执行工具调用")
+                delegation_request: DelegationRequest | None = _delegation_request(
+                    execution.run_id,
+                    run.root_run_id or run.run_id,
+                    tool_calls[0],
+                )
+                if delegation_request is not None:
+                    delegation_result = await self._delegate(
+                        execution,
+                        run,
+                        messages,
+                        sequence,
+                        event_number,
+                        delegation_request,
+                    )
+                    if delegation_result.error is not None:
+                        return delegation_result.error
+                    run = delegation_result.run
+                    sequence = delegation_result.message_sequence
+                    event_number = delegation_result.event_sequence
+                    continue
                 try:
                     tool_result = await self._tool_port.execute(ToolInvocation(execution.run_id, tool_calls[0]), execution.view())
                 except Exception as error:
@@ -258,6 +287,105 @@ class RuntimeEngine:
         """原子保存运行完整消息。"""
         await self._run_repository.save_messages(run.session_id, run.run_id, tuple(messages))
 
+    async def _delegate(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        messages: list[RunMessage],
+        sequence: int,
+        event_sequence: int,
+        request: DelegationRequest,
+    ) -> "DelegationDriveResult":
+        """提交、获取并持久化一次 delegation 结果，不接触具体编排实现。"""
+        if self._delegation_port is None:
+            failed: RunResult = await self._fail(
+                execution,
+                run,
+                tuple(messages),
+                event_sequence,
+                "当前 Runtime 未装配 DelegationPort",
+                RunErrorCode.INVALID_STATE,
+            )
+            return DelegationDriveResult(error=failed)
+        try:
+            child_run_id: str = await self._delegation_port.submit(request)
+            submitted_transition = execution.state.transition(DelegationSubmitted(child_run_id))
+            execution.update_state(submitted_transition.state, submitted_transition.action)
+            next_event_sequence: int = await self._event(
+                run,
+                event_sequence,
+                RunEventType.DELEGATION_SUBMITTED,
+                (),
+                "已提交 delegation 子运行",
+                {"child_run_id": child_run_id},
+            )
+            child_result: DelegationResult | None = await self._delegation_port.result(child_run_id)
+        except Exception as error:
+            failed = await self._fail(
+                execution,
+                run,
+                tuple(messages),
+                event_sequence,
+                f"delegation 调用失败：{error}",
+                RunErrorCode.TOOL_FAILURE,
+            )
+            return DelegationDriveResult(error=failed)
+        if child_result is None:
+            failed = await self._fail(
+                execution,
+                run,
+                tuple(messages),
+                next_event_sequence,
+                "delegation 未返回子运行结果",
+                RunErrorCode.INVALID_STATE,
+            )
+            return DelegationDriveResult(error=failed)
+        next_sequence: int = sequence + 1
+        child_output: str = child_result.output or (
+            child_result.error.message if child_result.error is not None else "delegation 未返回输出"
+        )
+        result_message: RunMessage = RunMessage(
+            message_id=f"delegation-{execution.run_id}-{next_sequence}",
+            sequence=next_sequence,
+            kind=RunMessageKind.TOOL_RESULT,
+            role=MessageRole.TOOL,
+            content=child_output,
+            tool_call_id="delegation",
+        )
+        messages.append(result_message)
+        delegated_run: AgentRun = _with_tool_statistic(run)
+        await self._save_messages(delegated_run, messages)
+        next_event_sequence = await self._event(
+            delegated_run,
+            next_event_sequence,
+            RunEventType.DELEGATION_COMPLETED,
+            (result_message.message_id,),
+            "delegation 子运行已完成",
+            {"child_run_id": child_result.child_run_id, "status": child_result.status.value},
+        )
+        succeeded: bool = child_result.status is RunStatus.COMPLETED
+        transition = execution.state.transition(DelegationCompleted(
+            child_result.child_run_id,
+            succeeded,
+            child_result.error,
+        ))
+        execution.update_state(transition.state, transition.action)
+        if not succeeded:
+            failed = await self._fail(
+                execution,
+                delegated_run,
+                tuple(messages),
+                next_event_sequence,
+                child_result.error.message if child_result.error is not None else "delegation 子运行失败",
+                RunErrorCode.TOOL_FAILURE,
+            )
+            return DelegationDriveResult(error=failed)
+        return DelegationDriveResult(
+            run=delegated_run,
+            message_sequence=next_sequence,
+            event_sequence=next_event_sequence,
+        )
+
     async def _event(
         self,
         run: AgentRun,
@@ -265,6 +393,7 @@ class RuntimeEngine:
         event_type: RunEventType,
         message_ids: tuple[str, ...],
         summary: str = "",
+        data: JSONMap | None = None,
     ) -> int:
         """追加引用已保存消息的事件并返回下一序号。"""
         next_sequence: int = sequence + 1
@@ -275,6 +404,7 @@ class RuntimeEngine:
             utc_now_iso(),
             message_ids,
             summary,
+            data or {},
         )
         await self._run_repository.append_event(run.session_id, event)
         return next_sequence
@@ -349,3 +479,40 @@ def _with_tool_statistic(run: AgentRun) -> AgentRun:
         tokens_in=statistics.tokens_in,
         tokens_out=statistics.tokens_out,
     ))
+
+
+@dataclass(frozen=True)
+class DelegationDriveResult:
+    """单次 delegation 驱动后的局部持久化游标或终态结果。"""
+
+    run: AgentRun | None = None
+    message_sequence: int = 0
+    event_sequence: int = 0
+    error: RunResult | None = None
+
+
+def _delegation_request(
+    parent_run_id: str,
+    root_run_id: str,
+    call: ToolCall,
+) -> DelegationRequest | None:
+    """将模型的 delegate 调用转换为 Runtime 独立的委托请求。"""
+    if call.name != "delegate":
+        return None
+    target_agent_id = call.arguments.get("target_agent_id")
+    title = call.arguments.get("title")
+    objective = call.arguments.get("objective")
+    if not isinstance(target_agent_id, str) or not isinstance(title, str) or not isinstance(objective, str):
+        raise ValueError("delegate 调用必须包含 target_agent_id、title 和 objective")
+    content: str = f"任务：{title}\n\n目标：{objective}"
+    return DelegationRequest(
+        parent_run_id=parent_run_id,
+        root_run_id=root_run_id,
+        target_agent_id=target_agent_id,
+        input_message=ConversationMessage(
+            message_id=f"delegation-request-{parent_run_id}-{call.call_id}",
+            role=MessageRole.USER,
+            content=content,
+            created_at=utc_now_iso(),
+        ),
+    )

@@ -69,8 +69,6 @@ class Journal:
         self._agentrun_sequence: int = 0
         # trace sink：单一 trace.jsonl 文件句柄
         self._trace_file: Any = None
-        # state sink
-        self._state_sink: Any = None
 
     # ═══ 内部辅助 ═══
 
@@ -223,8 +221,6 @@ class Journal:
             "success": success,
             "total_duration_ms": round(total_duration_ms, 1),
         })
-        status = "completed" if success else "error"
-        self._update_state(status)
 
     # ═══ AgentRun 管理 ═══
 
@@ -518,58 +514,6 @@ class Journal:
             "message": message,
         })
 
-    # ═══ State 覆盖写入 ═══
-
-    def _update_state(self, status: str) -> None:
-        """覆盖写入 state.json（内部调用）。
-
-        Args:
-            status: "running" | "completed" | "error"
-        """
-        if not self._config or not self._config.state:
-            return
-        if not self._session_id:
-            return
-        if self._state_sink is None:
-            out_dir = self._trace_output_dir()
-            if out_dir is None:
-                return
-            from dotclaw.journal.sinks.state_sink import StateSink
-            self._state_sink = StateSink(out_dir / "state.json")
-
-        elapsed = int((time.time() - self._session_start_ts) * 1000) if self._session_start_ts else 0
-
-        state: dict = {
-            "session_id": self._session_id or "",
-            "agentrun_id": self._agentrun_id or "",
-            "agentrun_sequence": self._agentrun_sequence,
-            "status": status,
-            "message_count": self._message_count,
-            "total_input_tokens": self._token_accum["input"],
-            "total_output_tokens": self._token_accum["output"],
-            "total_tool_calls": self._tool_count,
-            "elapsed_ms": elapsed,
-            "errors": list(self._errors_list),
-            "model": self._model,
-            "max_loop_steps": self._max_loop_steps,
-            "updated_at": _dt.now(CHINA_TZ).isoformat(),
-        }
-        self._state_sink.write(state)
-
-    # ═══ 生命周期 ═══
-
-    def restore_state(self, state: dict) -> None:
-        """从上次 state.json 恢复累加器。
-
-        resume 时在 session_start() 之后调用。
-        """
-        self._agentrun_sequence = state.get("agentrun_sequence", -1)
-        self._token_accum["input"] = state.get("total_input_tokens", 0)
-        self._token_accum["output"] = state.get("total_output_tokens", 0)
-        self._tool_count = state.get("total_tool_calls", 0)
-        self._errors_list = list(state.get("errors", []))
-        self._message_count = state.get("message_count", 0)
-
     def finalize(self) -> None:
         """会话结束处理：构建 report.json + snapshot.json。
 
@@ -635,8 +579,6 @@ class Journal:
             except OSError:
                 pass
             self._trace_file = None
-        if self._state_sink is not None:
-            self._state_sink = None
 
 
 def _build_report(
