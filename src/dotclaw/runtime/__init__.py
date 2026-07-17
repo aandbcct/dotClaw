@@ -1,7 +1,9 @@
 """Runtime v2 的公开执行 API。"""
 
-from .domain.models import AgentRun, RunRequest, RunResult, RunStatus
-from .domain.state import AgentAction, AgentPhase, AgentState
+from .application.dto import RunRequest, RunResult
+from .domain.facts import AgentRun, RunStatus
+from .domain.control import AgentAction
+from .domain.state import AgentPhase, AgentState
 from .application.engine import RuntimeEngine
 from .application.session_run_coordinator import SessionRunCoordinator
 

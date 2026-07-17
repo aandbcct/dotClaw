@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
-from ..domain.models import ApprovalRecord, ApprovalStatus, JSONMap, JSONValue, get_string
+from ..domain.facts import ApprovalRecord, ApprovalStatus, JSONMap, JSONValue, get_string
 from ._file_support import load_json_map, validate_path_segment, write_json_atomic
 
 

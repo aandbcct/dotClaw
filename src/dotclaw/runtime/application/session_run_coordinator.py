@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol
 
-from ..domain.models import RunRequest, RunResult
+from .dto import RunRequest, RunResult
 
 
 class RuntimeExecutionPort(Protocol):

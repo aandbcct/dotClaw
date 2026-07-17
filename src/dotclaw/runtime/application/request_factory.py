@@ -5,7 +5,8 @@ from __future__ import annotations
 import uuid
 from typing import Protocol
 
-from ..domain.models import ConversationMessage, ConversationSnapshot, MessageRole, RunRequest, utc_now_iso
+from ..domain.facts import MessageRole, utc_now_iso
+from .dto import ConversationMessage, ConversationSnapshot, RunRequest
 
 
 class ConversationSnapshotSource(Protocol):

@@ -18,7 +18,7 @@ from .events import (
     ToolCompleted,
     ToolCompletionKind,
 )
-from .models import AgentAction
+from .control import AgentAction
 
 
 class AgentPhase(StrEnum):

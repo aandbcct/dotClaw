@@ -18,32 +18,35 @@ from ..domain.events import (
     ToolCompletionKind,
 )
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
-from ..domain.models import (
+from ..domain.facts import (
     AgentRun,
-    ConversationMessage,
-    ConversationSnapshot,
-    DelegationRequest,
-    DelegationResult,
     JSONMap,
+    JSONValue,
     MessageRole,
     RunCheckpoint,
     RunError,
     RunErrorCode,
     RunMessage,
     RunMessageKind,
-    RunRequest,
-    RunResult,
     RunStatistics,
     RunStatus,
     ToolCall,
-    ToolInvocation,
-    ToolResult,
-    ToolResultStatus,
     utc_now_iso,
 )
 from ..domain.state import AgentPhase, AgentState
 from .approval_service import ApprovalService
 from .cancellation_service import CancellationService
+from .dto import (
+    ConversationMessage,
+    ConversationSnapshot,
+    DelegationRequest,
+    DelegationResult,
+    RunRequest,
+    RunResult,
+    ToolInvocation,
+    ToolResult,
+    ToolResultStatus,
+)
 from .ports import CheckpointRepository, ContextPort, DelegationPort, LLMPort, RunPolicyPort, RunRepository, ToolPort
 
 

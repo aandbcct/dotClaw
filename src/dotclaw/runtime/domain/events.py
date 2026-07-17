@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .models import JSONMap, RunError, utc_now_iso
+from .facts import JSONMap, RunError, utc_now_iso
 
 
 class RunEventType(StrEnum):

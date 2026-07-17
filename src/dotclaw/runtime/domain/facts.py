@@ -1,8 +1,4 @@
-"""Runtime v2 的可序列化领域模型。
-
-本模块只描述一次运行的输入、输出和持久化事实，不依赖 LLM、工具、
-Session 或存储实现。
-"""
+"""Runtime 长期持久化的领域事实与 JSON 类型工具。"""
 
 from __future__ import annotations
 
@@ -10,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Mapping, TypeAlias
+
+from .control import AgentAction
 
 
 JSONPrimitive: TypeAlias = str | int | float | bool | None
@@ -47,16 +45,6 @@ class RunStatus(StrEnum):
     WAITING_APPROVAL = "waiting_approval"
 
 
-class AgentAction(StrEnum):
-    """Runtime 依据领域状态执行的下一项原子动作。"""
-
-    INVOKE_LLM = "invoke_llm"
-    EXECUTE_TOOLS = "execute_tools"
-    FINALIZE = "finalize"
-    WAIT = "wait"
-    HANDOFF_TARGET = "handoff_target"
-
-
 class RunErrorCode(StrEnum):
     """运行失败的标准化错误类别。"""
 
@@ -77,14 +65,6 @@ class ApprovalStatus(StrEnum):
     CONSUMED = "consumed"
 
 
-class ToolResultStatus(StrEnum):
-    """工具调用的标准化结果状态。"""
-
-    COMPLETED = "completed"
-    FAILED = "failed"
-    APPROVAL_REQUIRED = "approval_required"
-
-
 @dataclass(frozen=True)
 class ToolCall:
     """模型请求执行的一次工具调用。"""
@@ -96,19 +76,6 @@ class ToolCall:
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
         return {"call_id": self.call_id, "name": self.name, "arguments": self.arguments}
-
-
-@dataclass(frozen=True)
-class ToolDefinition:
-    """提供给模型的工具定义。"""
-
-    name: str
-    description: str
-    parameters: JSONMap
-
-    def to_dict(self) -> JSONMap:
-        """转换为 JSON 兼容字典。"""
-        return {"name": self.name, "description": self.description, "parameters": self.parameters}
 
 
 @dataclass(frozen=True)
@@ -141,42 +108,6 @@ class RunMessage:
 
 
 @dataclass(frozen=True)
-class ConversationMessage:
-    """成功投影到 Conversation 的单条对话消息。"""
-
-    message_id: str
-    role: MessageRole
-    content: str
-    created_at: str
-
-    def to_dict(self) -> JSONMap:
-        """转换为 JSON 兼容字典。"""
-        return {
-            "id": self.message_id,
-            "role": self.role.value,
-            "content": self.content,
-            "created_at": self.created_at,
-        }
-
-
-@dataclass(frozen=True)
-class ConversationSnapshot:
-    """启动运行时冻结的会话视图。"""
-
-    session_id: str
-    messages: tuple[ConversationMessage, ...]
-    version: int
-
-    def to_dict(self) -> JSONMap:
-        """转换为 JSON 兼容字典。"""
-        return {
-            "session_id": self.session_id,
-            "messages": [message.to_dict() for message in self.messages],
-            "version": self.version,
-        }
-
-
-@dataclass(frozen=True)
 class AgentPolicySnapshot:
     """运行期间不可变的 Agent 身份与执行策略。"""
 
@@ -198,34 +129,6 @@ class AgentPolicySnapshot:
 
 
 @dataclass(frozen=True)
-class RunRequest:
-    """提交给 RuntimeEngine 的普通或委托子运行请求。"""
-
-    session_id: str
-    lease_id: str
-    agent_id: str
-    user_message: ConversationMessage
-    conversation: ConversationSnapshot
-    parent_run_id: str | None = None
-    root_run_id: str | None = None
-    run_id: str = ""
-    """调用方可选地预分配的运行标识；普通入口留空由 Engine 生成。"""
-
-    def to_dict(self) -> JSONMap:
-        """转换为 JSON 兼容字典。"""
-        return {
-            "session_id": self.session_id,
-            "lease_id": self.lease_id,
-            "agent_id": self.agent_id,
-            "user_message": self.user_message.to_dict(),
-            "conversation": self.conversation.to_dict(),
-            "parent_run_id": self.parent_run_id,
-            "root_run_id": self.root_run_id,
-            "run_id": self.run_id,
-        }
-
-
-@dataclass(frozen=True)
 class RunError:
     """运行失败时向调用方和持久化层提供的错误摘要。"""
 
@@ -236,27 +139,6 @@ class RunError:
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
         return {"code": self.code.value, "message": self.message, "retryable": self.retryable}
-
-
-@dataclass(frozen=True)
-class RunResult:
-    """RuntimeEngine 执行或恢复一次运行后的结果。"""
-
-    run_id: str
-    status: RunStatus
-    final_message: ConversationMessage | None = None
-    error: RunError | None = None
-    approval_id: str | None = None
-
-    def to_dict(self) -> JSONMap:
-        """转换为 JSON 兼容字典。"""
-        return {
-            "run_id": self.run_id,
-            "status": self.status.value,
-            "final_message": None if self.final_message is None else self.final_message.to_dict(),
-            "error": None if self.error is None else self.error.to_dict(),
-            "approval_id": self.approval_id,
-        }
 
 
 @dataclass(frozen=True)
@@ -322,42 +204,6 @@ class AgentRun:
 
 
 @dataclass(frozen=True)
-class ContextMetadata:
-    """上下文构建器返回的裁剪与来源元数据。"""
-
-    estimated_tokens: int
-    source_names: tuple[str, ...] = ()
-    truncation_applied: bool = False
-    details: JSONMap = field(default_factory=dict)
-
-    def to_dict(self) -> JSONMap:
-        """转换为 JSON 兼容字典。"""
-        return {
-            "estimated_tokens": self.estimated_tokens,
-            "source_names": list(self.source_names),
-            "truncation_applied": self.truncation_applied,
-            "details": self.details,
-        }
-
-
-@dataclass(frozen=True)
-class ContextBundle:
-    """ContextPort 提供给模型调用端的完整上下文。"""
-
-    messages: tuple[RunMessage, ...]
-    tools: tuple[ToolDefinition, ...]
-    metadata: ContextMetadata
-
-    def to_dict(self) -> JSONMap:
-        """转换为 JSON 兼容字典。"""
-        return {
-            "messages": [message.to_dict() for message in self.messages],
-            "tools": [tool.to_dict() for tool in self.tools],
-            "metadata": self.metadata.to_dict(),
-        }
-
-
-@dataclass(frozen=True)
 class RunCheckpoint:
     """从安全边界恢复运行所需的最小快照。"""
 
@@ -409,49 +255,6 @@ class ApprovalRecord:
             "created_at": self.created_at,
             "metadata": self.metadata,
         }
-
-
-@dataclass(frozen=True)
-class ToolInvocation:
-    """Runtime 提交给 ToolPort 的工具调用。"""
-
-    run_id: str
-    call: ToolCall
-
-
-@dataclass(frozen=True)
-class ToolResult:
-    """ToolPort 返回给 Runtime 的标准化工具结果。"""
-
-    call_id: str
-    status: ToolResultStatus
-    output: str = ""
-    approval_id: str | None = None
-    error: RunError | None = None
-
-
-@dataclass(frozen=True)
-class DelegationRequest:
-    """Runtime 提交给 DelegationPort 的子执行请求。"""
-
-    parent_run_id: str
-    root_run_id: str
-    target_agent_id: str
-    input_message: ConversationMessage
-    source_agent_id: str = ""
-    """父运行所属 Agent，仅供 orchestration 校验来源端点。"""
-    source_session_id: str = ""
-    """父运行所属 Session，仅供 orchestration 建立 Task 关联。"""
-
-
-@dataclass(frozen=True)
-class DelegationResult:
-    """DelegationPort 返回的子执行结果。"""
-
-    child_run_id: str
-    status: RunStatus
-    output: str = ""
-    error: RunError | None = None
 
 
 def utc_now_iso() -> str:

@@ -2,6 +2,7 @@
 
 from .approval_service import ApprovalService
 from .cancellation_service import CancellationService
+from .dto import ContextBundle, RunRequest, RunResult
 from .engine import RuntimeEngine
 from .ports import ApprovalRepository, CheckpointRepository, ContextPort, DelegationPort, LLMPort, RunPolicyPort, RunRepository, ToolPort
 from .session_run_coordinator import SessionRunCoordinator
@@ -12,11 +13,14 @@ __all__ = [
     "CancellationService",
     "CheckpointRepository",
     "ContextPort",
+    "ContextBundle",
     "DelegationPort",
     "LLMPort",
     "RunRepository",
     "RunPolicyPort",
+    "RunRequest",
     "RuntimeEngine",
+    "RunResult",
     "SessionRunCoordinator",
     "ToolPort",
 ]

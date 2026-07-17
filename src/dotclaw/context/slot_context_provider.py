@@ -6,17 +6,19 @@ from enum import StrEnum
 from pathlib import Path
 
 from dotclaw.runtime.application.execution import RunExecutionView
-from ..runtime.domain.models import (
+from ..runtime.application.dto import (
     ConversationMessage,
     ContextBundle,
     ContextMetadata,
+    RunRequest,
+    ToolDefinition,
+)
+from ..runtime.domain.facts import (
     JSONMap,
     JSONValue,
     MessageRole,
     RunMessage,
     RunMessageKind,
-    RunRequest,
-    ToolDefinition,
     get_integer,
     get_string,
     require_json_map,

@@ -6,9 +6,10 @@ import uuid
 
 from ...tools.base import ToolExecutionContext
 from ...tools.executor import ToolExecutor
+from ..application.dto import ToolInvocation, ToolResult, ToolResultStatus
 from ..application.ports import ToolPort
 from dotclaw.runtime.application.execution import RunExecutionView
-from ..domain.models import RunError, RunErrorCode, ToolInvocation, ToolResult, ToolResultStatus
+from ..domain.facts import RunError, RunErrorCode
 
 
 class ToolExecutorAdapter(ToolPort):

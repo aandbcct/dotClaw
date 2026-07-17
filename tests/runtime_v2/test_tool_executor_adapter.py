@@ -9,10 +9,12 @@ from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, RunPolicyPort
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
-from dotclaw.runtime.domain.models import (
-    AgentPolicySnapshot, ContextBundle, ContextMetadata, ConversationMessage,
-    ConversationSnapshot, MessageRole, RunMessage, RunMessageKind, RunRequest,
-    ToolCall, ToolInvocation, ToolResultStatus,
+from dotclaw.runtime.application.dto import (
+    ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot,
+    RunRequest, ToolInvocation, ToolResultStatus,
+)
+from dotclaw.runtime.domain.facts import (
+    AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, ToolCall,
 )
 from dotclaw.runtime.domain.state import AgentState
 from dotclaw.tools.approval import ApprovalManager

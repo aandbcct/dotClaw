@@ -86,20 +86,24 @@
 src/dotclaw/runtime/
 ├── domain/
 │   ├── __init__.py
-│   ├── models.py
+│   ├── facts.py
+│   ├── control.py
 │   ├── events.py
-│   ├── execution.py
 │   └── state.py
 └── application/
     ├── __init__.py
+    ├── dto.py
+    ├── execution.py
     └── ports.py
 ```
 
 | 文件 | 新增内容 |
 |---|---|
-| `runtime/domain/models.py` | `RunRequest`、`RunResult`、`RunStatus`、`RunError`、`ConversationSnapshot`、`ContextBundle`、`AgentPolicySnapshot` |
+| `runtime/domain/facts.py` | `AgentRun`、`RunMessage`、`RunCheckpoint`、`ApprovalRecord`、`RunStatus`、`RunError`、`AgentPolicySnapshot` 等可持久化事实 |
+| `runtime/domain/control.py` | `AgentAction`：纯状态机向 Application 表达的下一步控制动作 |
 | `runtime/domain/events.py` | `RunEvent`、`RunEventType`、`LLMCompleted`、`ToolCompleted`、`ApprovalResolved` 等领域事件 |
-| `runtime/domain/execution.py` | `RunExecution`、预算、取消令牌、pending control 数据、消息游标 |
+| `runtime/application/dto.py` | `RunRequest`、`RunResult`、`ConversationSnapshot`、`ContextBundle` 与 Tool / Delegation Port DTO |
+| `runtime/application/execution.py` | `RunExecution`、预算、取消令牌、pending control 数据、消息游标 |
 | `runtime/domain/state.py` | 新版纯 `AgentState`、Phase、Action 与转移表；不含 Message / Tool / Task 具体类型 |
 | `runtime/application/ports.py` | `RunRepository`、`CheckpointRepository`、`ContextPort`、`LLMPort`、`ToolPort`、`ApprovalRepository`、`DelegationPort` Protocol |
 | `tests/runtime_v2/test_domain_state.py` | 新状态机单测：只传领域事件、断言状态和 Action |

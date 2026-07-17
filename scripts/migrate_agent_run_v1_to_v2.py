@@ -12,8 +12,8 @@ from pathlib import Path
 
 from dotclaw.runtime.adapters import CheckpointRepositoryAdapter, RunRepositoryAdapter
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
-from dotclaw.runtime.domain.models import (
-    AgentAction,
+from dotclaw.runtime.domain.control import AgentAction
+from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot,
     AgentRun,
     JSONMap,

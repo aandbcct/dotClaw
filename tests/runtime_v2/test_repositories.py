@@ -17,8 +17,8 @@ from dotclaw.runtime.adapters import (
     SessionConversationProjector,
 )
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
-from dotclaw.runtime.domain.models import (
-    AgentAction,
+from dotclaw.runtime.domain.control import AgentAction
+from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot,
     AgentRun,
     ApprovalRecord,

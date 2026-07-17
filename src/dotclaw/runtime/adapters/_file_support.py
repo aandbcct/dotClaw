@@ -8,7 +8,7 @@ import tempfile
 from enum import IntEnum, StrEnum
 from pathlib import Path
 
-from ..domain.models import JSONMap, JSONValue, require_json_map
+from ..domain.facts import JSONMap, JSONValue, require_json_map
 
 
 class StorageFormatVersion(IntEnum):

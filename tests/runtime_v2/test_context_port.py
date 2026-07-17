@@ -15,12 +15,14 @@ from dotclaw.context import (
 )
 from dotclaw.context.slots import ContextSlot, IdentitySlot, MemorySlot, ProjectSlot
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
-from dotclaw.runtime.domain.models import (
-    AgentPolicySnapshot,
+from dotclaw.runtime.application.dto import (
     ConversationMessage,
     ConversationSnapshot,
-    MessageRole,
     RunRequest,
+)
+from dotclaw.runtime.domain.facts import (
+    AgentPolicySnapshot,
+    MessageRole,
 )
 from dotclaw.runtime.domain.state import AgentState
 

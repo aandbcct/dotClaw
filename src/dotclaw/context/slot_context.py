@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotclaw.runtime.application.execution import RunExecutionView
-from ..runtime.domain.models import RunRequest, ToolDefinition
+from ..runtime.application.dto import RunRequest, ToolDefinition
 from .ports import ContextDependencies
 
 

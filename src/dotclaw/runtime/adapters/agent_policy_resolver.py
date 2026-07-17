@@ -10,8 +10,9 @@ from ...config.settings import Config
 from ...orchestration.registry import AgentRegistry
 from ...tools.base import ToolDefinition as LegacyToolDefinition
 from ...tools.executor import ToolExecutor
+from ..application.dto import RunRequest, ToolDefinition
 from ..application.ports import RunPolicyPort
-from ..domain.models import AgentPolicySnapshot, RunRequest, ToolDefinition
+from ..domain.facts import AgentPolicySnapshot
 
 
 LEGACY_TASK_TOOL_NAMES: frozenset[str] = frozenset({

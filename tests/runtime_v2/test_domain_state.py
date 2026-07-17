@@ -18,13 +18,15 @@ from dotclaw.runtime.domain.events import (
     ToolCompletionKind,
 )
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
-from dotclaw.runtime.domain.models import (
-    AgentAction,
-    AgentPolicySnapshot,
+from dotclaw.runtime.application.dto import (
     ConversationMessage,
     ConversationSnapshot,
-    MessageRole,
     RunRequest,
+)
+from dotclaw.runtime.domain.control import AgentAction
+from dotclaw.runtime.domain.facts import (
+    AgentPolicySnapshot,
+    MessageRole,
 )
 from dotclaw.runtime.domain.state import AgentPhase, AgentState
 

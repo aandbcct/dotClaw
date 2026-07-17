@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 from ..runtime.application.ports import ContextPort
-from ..runtime.domain.models import ContextMetadata
+from ..runtime.application.dto import ContextMetadata
 
 __all__ = [
     "AgentDescriptor",

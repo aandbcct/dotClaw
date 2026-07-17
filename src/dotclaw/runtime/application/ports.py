@@ -6,19 +6,14 @@ from typing import Protocol
 
 from ..domain.events import RunEvent
 from dotclaw.runtime.application.execution import RunExecutionView
-from ..domain.models import (
+from ..domain.facts import (
     AgentRun,
     ApprovalRecord,
-    ContextBundle,
-    DelegationRequest,
-    DelegationResult,
     RunCheckpoint,
     RunMessage,
-    RunRequest,
     AgentPolicySnapshot,
-    ToolInvocation,
-    ToolResult,
 )
+from .dto import ContextBundle, DelegationRequest, DelegationResult, RunRequest, ToolInvocation, ToolResult
 
 
 class ConversationProjectionPort(Protocol):

@@ -24,7 +24,7 @@ Agent
 | `runtime/runtime.py`、旧 Runtime facade | `RuntimeEngine` + `SessionRunCoordinator` | main、Agent、orchestration 已切换；v2 运行与委派测试通过 | 已删除 |
 | `runtime/state_store.py`、Session 级 `state.json` | `CheckpointRepository` | 审批恢复、取消与 checkpoint 边界测试通过 | 已删除 |
 | `runtime/agent_state.py`、`runtime/task.py` | `runtime/domain/state.py`、`DelegationPort` | 领域状态机和 delegation adapter 测试通过 | 已删除 |
-| `session/agent_run.py`、旧 `messages/state_snapshot/trace_ids` | `runtime/domain/models.py::AgentRun`、RunMessage、RunEvent、Checkpoint | 旧样例迁移和摘要边界测试通过 | 已删除 |
+| `session/agent_run.py`、旧 `messages/state_snapshot/trace_ids` | `runtime/domain/facts.py::AgentRun`、RunMessage、RunEvent、Checkpoint | 旧样例迁移和摘要边界测试通过 | 已删除 |
 | `agent/slotContext.py`、`slotContextImp.py` | `context/slot_context.py`、`slots.py`、`SlotContextProvider` | scoped cache、预算与降级测试通过 | 已删除 |
 | `agent/resume.py`、旧 trace 恢复 | `ApprovalService` + `CheckpointRepository` | 同 run_id 审批恢复测试通过 | 已删除 |
 | `orchestration/runners/local.py`、旧 Task 工具 | `RuntimeDelegationAdapter` | 真实 Adapter → Dispatcher → Coordinator 回调及取消测试通过 | 已删除 |

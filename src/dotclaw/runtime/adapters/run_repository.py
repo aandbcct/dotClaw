@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..application.ports import ConversationProjectionPort
+from ..application.dto import ConversationMessage
 from ..domain.events import RunEvent, RunEventType
-from ..domain.models import (
+from ..domain.facts import (
     AgentPolicySnapshot,
     AgentRun,
-    ConversationMessage,
     JSONMap,
     JSONValue,
     MessageRole,

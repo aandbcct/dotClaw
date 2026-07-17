@@ -7,7 +7,7 @@ import json
 from enum import StrEnum
 from pathlib import Path
 
-from ..runtime.domain.models import ToolDefinition
+from ..runtime.application.dto import ToolDefinition
 from .ports import AgentDescriptor, MemorySearchRecord
 from .scoped_cache import SlotCacheScope
 from .slot_context import SlotContext

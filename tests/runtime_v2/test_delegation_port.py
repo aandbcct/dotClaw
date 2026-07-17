@@ -19,25 +19,27 @@ from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.ports import ContextPort, DelegationPort, LLMPort, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.application.execution import RunExecutionView
-from dotclaw.runtime.domain.models import (
-    AgentPolicySnapshot,
+from dotclaw.runtime.application.dto import (
     ContextBundle,
     ContextMetadata,
     ConversationMessage,
     ConversationSnapshot,
     DelegationRequest,
     DelegationResult,
+    RunRequest,
+    RunResult,
+    ToolInvocation,
+    ToolResult,
+    ToolResultStatus,
+)
+from dotclaw.runtime.domain.facts import (
+    AgentPolicySnapshot,
     JSONMap,
     MessageRole,
     RunMessage,
     RunMessageKind,
-    RunRequest,
-    RunResult,
     RunStatus,
     ToolCall,
-    ToolInvocation,
-    ToolResult,
-    ToolResultStatus,
 )
 from dotclaw.session.session import SessionManager
 

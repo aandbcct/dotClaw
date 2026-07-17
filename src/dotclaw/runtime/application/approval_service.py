@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from ..domain.models import ApprovalRecord, ApprovalStatus, utc_now_iso
+from ..domain.facts import ApprovalRecord, ApprovalStatus, utc_now_iso
 from .ports import ApprovalRepository
 
 

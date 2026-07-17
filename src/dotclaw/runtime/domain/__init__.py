@@ -1,8 +1,8 @@
-"""Runtime v2 的纯领域层公开接口。"""
+"""Runtime v2 纯领域层公开接口，只导出事实、事件和状态规则。"""
 
+from .control import AgentAction
 from .events import RunEvent, RunEventType
-from dotclaw.runtime.application.execution import RunExecution, RunExecutionView
-from .models import AgentAction, AgentRun, RunRequest, RunResult, RunStatus
+from .facts import AgentRun, RunStatus
 from .state import AgentPhase, AgentState
 
 __all__ = [
@@ -12,9 +12,5 @@ __all__ = [
     "AgentState",
     "RunEvent",
     "RunEventType",
-    "RunExecution",
-    "RunExecutionView",
-    "RunRequest",
-    "RunResult",
     "RunStatus",
 ]

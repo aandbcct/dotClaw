@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..domain.models import AgentRun, RunMessage
+from ..domain.facts import AgentRun, RunMessage
 from ...session.session import Session, SessionManager
 
 

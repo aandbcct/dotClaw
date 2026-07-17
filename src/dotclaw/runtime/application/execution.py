@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from dotclaw.runtime.domain.models import AgentAction, AgentPolicySnapshot, JSONMap, RunMessage, RunRequest
+from ..domain.control import AgentAction
+from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage
 from dotclaw.runtime.domain.state import AgentState
+from .dto import RunRequest
 
 
 class PendingControlKind(StrEnum):

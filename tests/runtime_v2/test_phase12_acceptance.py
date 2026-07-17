@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dotclaw.runtime.domain.models import AgentPolicySnapshot, AgentRun, JSONMap, RunStatus
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, JSONMap, RunStatus
 
 
 def test_phase2_runtime_v2_agent_run_is_summary_only() -> None:

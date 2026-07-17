@@ -187,3 +187,23 @@ def test_runtime_v2_boundary_has_no_concrete_infrastructure_imports() -> None:
     ]
 
     assert not violation_descriptions, "\n".join(violation_descriptions)
+
+
+def test_domain_has_no_application_dependency_and_no_generic_models_module() -> None:
+    """Domain 只能描述事实和规则，不能反向导入 Application DTO 或执行过程。"""
+    domain_directory: Path = RUNTIME_ROOT / RuntimeV2BoundaryDirectory.DOMAIN.value
+    domain_paths: tuple[Path, ...] = tuple(sorted(domain_directory.rglob("*.py")))
+    application_imports: list[str] = []
+    source_path: Path
+    for source_path in domain_paths:
+        imported_module: str
+        for imported_module in _collect_imported_modules(source_path):
+            if imported_module == "dotclaw.runtime.application" or imported_module.startswith(
+                "dotclaw.runtime.application.",
+            ):
+                application_imports.append(
+                    f"{source_path.relative_to(PROJECT_ROOT)} -> {imported_module}",
+                )
+
+    assert not application_imports, "\n".join(application_imports)
+    assert not (domain_directory / "models.py").exists()

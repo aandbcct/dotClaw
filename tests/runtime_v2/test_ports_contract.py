@@ -4,20 +4,17 @@ from __future__ import annotations
 
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, ToolPort
 from dotclaw.runtime.application.execution import RunBudget, RunExecution, RunExecutionView
-from dotclaw.runtime.domain.models import (
-    AgentPolicySnapshot,
+from dotclaw.runtime.application.dto import (
     ContextBundle,
     ContextMetadata,
     ConversationMessage,
     ConversationSnapshot,
-    MessageRole,
-    RunMessage,
-    RunMessageKind,
     RunRequest,
     ToolInvocation,
     ToolResult,
     ToolResultStatus,
 )
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
 from dotclaw.runtime.domain.state import AgentState
 
 

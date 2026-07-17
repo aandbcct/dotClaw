@@ -6,7 +6,8 @@ import asyncio
 from enum import StrEnum
 from pathlib import Path
 
-from ..domain.models import AgentAction, JSONMap, JSONValue, RunCheckpoint, get_integer, get_string
+from ..domain.control import AgentAction
+from ..domain.facts import JSONMap, JSONValue, RunCheckpoint, get_integer, get_string
 from ._file_support import RunStorageFileName, load_json_map, validate_path_segment, write_json_atomic
 
 

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from ..config import Config
     from ..memory.dream import DeepDream
     from ..runtime.application.session_run_coordinator import SessionRunCoordinator
-    from ..runtime.domain.models import RunResult
+    from ..runtime.application.dto import RunResult
     from ..session.session import Session
     from ..skills.registry import SkillRegistry
     from ..tools.executor import ToolExecutor

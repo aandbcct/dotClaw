@@ -62,10 +62,12 @@ src/dotclaw/
 │   ├── domain/
 │   │   ├── state.py                # AgentState、AgentPhase、AgentAction
 │   │   ├── events.py               # 领域事件：LLMCompleted、ToolCompleted 等
-│   │   ├── models.py               # RunRequest、RunResult、RunStatus、RunError
-│   │   └── execution.py            # RunExecution：一次运行的内存事务对象
+│   │   ├── control.py              # AgentAction：状态机与应用层之间的控制动作
+│   │   └── facts.py                # AgentRun、RunMessage、Checkpoint 等持久化事实
 │   │
 │   ├── application/
+│   │   ├── dto.py                  # RunRequest、RunResult、ContextBundle、Port 交互 DTO
+│   │   ├── execution.py            # RunExecution：单次运行的内存执行上下文
 │   │   ├── engine.py               # RuntimeEngine：生命周期协调器
 │   │   ├── approval_service.py     # resolve_approval() 控制协议
 │   │   ├── ports.py                # Context / LLM / Tool / Repository 等 Protocol

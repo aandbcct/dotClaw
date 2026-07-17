@@ -7,18 +7,16 @@ import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..runtime.application.ports import DelegationPort
-from ..runtime.domain.models import (
+from ..runtime.application.dto import (
     ConversationMessage,
     ConversationSnapshot,
     DelegationRequest,
     DelegationResult,
     RunRequest,
-    RunError,
-    RunErrorCode,
     RunResult,
-    RunStatus,
 )
+from ..runtime.application.ports import DelegationPort
+from ..runtime.domain.facts import RunError, RunErrorCode, RunStatus
 from ..session.session import SessionManager
 from .dispatcher import AgentDispatcher
 from .registry import AgentRegistry
