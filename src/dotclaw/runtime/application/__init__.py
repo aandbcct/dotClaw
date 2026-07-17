@@ -1,4 +1,8 @@
-"""Runtime v2 应用层公开执行服务与协议。"""
+"""
+Runtime v2 应用层公开执行服务与协议。
+定义“一个请求如何被组织、按什么流程执行”
+存放：用例流程、运行编排、Port 协议、执行期上下文、事务时机
+"""
 
 from .approval_service import ApprovalService
 from .cancellation_service import CancellationService
