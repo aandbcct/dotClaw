@@ -76,6 +76,8 @@ class RunExecution:
     pending_control: PendingControl | None = None
     run_messages: tuple[RunMessage, ...] = ()
     """当前 Run 已持久化的执行消息，仅供 Port 构造后续上下文。"""
+    has_streamed_text: bool = False
+    """本次运行是否已向入口发送过模型文本增量。"""
 
     def view(self) -> RunExecutionView:
         """生成提供给 Port 的只读执行视图。"""
@@ -99,6 +101,10 @@ class RunExecution:
         """同步已持久化的运行消息，使后续 Port 可重放本 Run 的 ReAct 证据。"""
         self.run_messages = messages
         self.message_cursor = len(messages)
+
+    def mark_text_streamed(self) -> None:
+        """记录入口已收到模型文本，避免终态重复呈现相同内容。"""
+        self.has_streamed_text = True
 
     def to_dict(self) -> JSONMap:
         """序列化为不含外部实例引用的检查点数据。"""

@@ -30,10 +30,22 @@ class StreamingProxy:
         yield ChatChunk(content="请稍候", is_final=True, input_tokens=12, output_tokens=4)
 
 
+class TextStreamCollector:
+    """收集入口层应立即收到的文本增量。"""
+
+    def __init__(self) -> None:
+        self.chunks: list[tuple[str, str]] = []
+
+    async def emit(self, run_id: str, chunk: str) -> None:
+        """记录转发时的运行标识和文本块。"""
+        self.chunks.append((run_id, chunk))
+
+
 async def test_llm_proxy_adapter_converts_context_and_aggregates_chunks() -> None:
-    """完整上下文、工具定义、工具调用和 token 统计均转换到 v2 模型。"""
+    """完整上下文、工具定义、工具调用、token 与文本流均转换到 v2 模型。"""
     proxy = StreamingProxy()
-    port: LLMProxyAdapter = LLMProxyAdapter(proxy)  # type: ignore[arg-type]
+    stream_collector: TextStreamCollector = TextStreamCollector()
+    port: LLMProxyAdapter = LLMProxyAdapter(proxy, stream_collector)  # type: ignore[arg-type]
     context = ContextBundle(
         messages=(RunMessage("m1", 1, RunMessageKind.LLM_REQUEST, MessageRole.USER, "查天气"),),
         tools=(ToolDefinition("weather", "查询天气", {"type": "object"}),),
@@ -48,4 +60,5 @@ async def test_llm_proxy_adapter_converts_context_and_aggregates_chunks() -> Non
     assert proxy.model == "model-x"
     assert message.content == "你好，请稍候"
     assert message.tool_calls[0].arguments == {"city": "上海"}
-    assert message.metadata == {"input_tokens": 12, "output_tokens": 4}
+    assert message.metadata == {"input_tokens": 12, "output_tokens": 4, "has_streamed_text": True}
+    assert stream_collector.chunks == [("run-1", "你好，"), ("run-1", "请稍候")]

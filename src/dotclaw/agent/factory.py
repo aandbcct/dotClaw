@@ -331,6 +331,7 @@ async def build_agent(
     from dotclaw.agent import Agent as AgentCls
     from dotclaw.agent.identity import load_agent_config as load_id
     from dotclaw.bootstrap.runtime_factory import RuntimeServices, build_runtime_services
+    from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
 
     config = get_config()
     project_root = _find_project_root()
@@ -360,6 +361,9 @@ async def build_agent(
     agent_registry = AgentRegistry()
     agent_config_dir = project_root / ".dotclaw" / "agentConfig"
     agent_registry.load_all(agent_config_dir)
+    text_stream_port: ChannelTextStreamAdapter | None = (
+        ChannelTextStreamAdapter(channel) if channel is not None else None
+    )
     runtime_services = build_runtime_services(
         config=config,
         project_root=project_root,
@@ -371,6 +375,7 @@ async def build_agent(
         memory_manager=memory_mgr,
         agent_registry=agent_registry,
         mcp_provider=mcp_provider,
+        text_stream_port=text_stream_port,
     )
     await runtime_services.run_repository.recover_pending_success_commits()
 

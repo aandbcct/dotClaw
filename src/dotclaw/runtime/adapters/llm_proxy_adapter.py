@@ -11,7 +11,7 @@ from ...llm.base import ToolCall as LegacyToolCall
 from ...llm.base import ToolDefinition as LegacyToolDefinition
 from ...llm.proxy import LLMProxy
 from ..application.dto import ContextBundle
-from ..application.ports import LLMPort
+from ..application.ports import LLMPort, TextStreamPort
 from dotclaw.runtime.application.execution import RunExecutionView
 from ..domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 
@@ -19,9 +19,10 @@ from ..domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 class LLMProxyAdapter(LLMPort):
     """聚合旧流式响应并转换为 Runtime v2 完整 RunMessage 的适配器。"""
 
-    def __init__(self, proxy: LLMProxy) -> None:
-        """绑定既有 LLM 代理；模型选择由冻结策略指定。"""
+    def __init__(self, proxy: LLMProxy, text_stream_port: TextStreamPort | None = None) -> None:
+        """绑定既有 LLM 代理与可选的入口文本流端口。"""
         self._proxy: LLMProxy = proxy
+        self._text_stream_port: TextStreamPort | None = text_stream_port
 
     async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
         """调用旧代理并聚合文本、工具调用与 token 统计。"""
@@ -43,6 +44,7 @@ class LLMProxyAdapter(LLMPort):
         tool_calls: list[ToolCall] = []
         input_tokens: int = 0
         output_tokens: int = 0
+        has_streamed_text: bool = False
         response: AsyncIterator[ChatChunk] = self._proxy.chat(
             messages=messages,
             tools=tools or None,
@@ -52,6 +54,9 @@ class LLMProxyAdapter(LLMPort):
         async for chunk in response:
             if chunk.content:
                 content_parts.append(chunk.content)
+                if self._text_stream_port is not None:
+                    await self._text_stream_port.emit(execution.run_id, chunk.content)
+                    has_streamed_text = True
             if chunk.tool_call is not None:
                 tool_calls.append(_tool_call_from_legacy(chunk.tool_call))
             if chunk.is_final:
@@ -64,7 +69,11 @@ class LLMProxyAdapter(LLMPort):
             role=MessageRole.ASSISTANT,
             content="".join(content_parts),
             tool_calls=tuple(tool_calls),
-            metadata={"input_tokens": input_tokens, "output_tokens": output_tokens},
+            metadata={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "has_streamed_text": has_streamed_text,
+            },
         )
 
     async def cancel(self, run_id: str) -> None:

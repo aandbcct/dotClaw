@@ -78,6 +78,12 @@ class Agent:
         return self._last_run_result
 
     @property
+    def has_streamed_final_answer(self) -> bool:
+        """判断最近成功回复是否已在执行期间流式呈现。"""
+        result: RunResult | None = self._last_run_result
+        return result is not None and result.final_message is not None and result.has_streamed_text
+
+    @property
     def tool_executor(self) -> ToolExecutor | None:
         """返回仅供 CLI 展示的工具执行器。"""
         return self._tool_executor

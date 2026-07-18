@@ -33,6 +33,7 @@ from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.engine import RuntimeEngine
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
+from ..runtime.application.ports import TextStreamPort
 from ..session.session import SessionManager
 from ..llm.proxy import LLMProxy
 from ..tools.executor import ToolExecutor
@@ -70,6 +71,7 @@ def build_runtime_services(
     memory_manager: MemoryManager | None,
     agent_registry: AgentRegistry,
     mcp_provider: MCPToolProvider | None,
+    text_stream_port: TextStreamPort | None = None,
 ) -> RuntimeServices:
     """按 Port 边界装配 RuntimeEngine 与 SessionRunCoordinator。"""
     if tool_executor is None:
@@ -101,7 +103,7 @@ def build_runtime_services(
         run_repository=run_repository,
         checkpoint_repository=CheckpointRepositoryAdapter(storage_root),
         context_port=context_port,
-        llm_port=LLMProxyAdapter(llm_proxy),
+        llm_port=LLMProxyAdapter(llm_proxy, text_stream_port),
         tool_port=ToolExecutorAdapter(tool_executor),
         policy_port=AgentPolicyResolver(identity, config, tool_executor, project_root, agent_registry),
         approval_service=ApprovalService(approval_repository),

@@ -322,6 +322,8 @@ class RuntimeEngine:
                 response = await self._llm_port.complete(context, execution.view())
             except Exception as error:
                 return await self._fail(execution, run, tuple(messages), event_number, f"模型调用失败：{error}", RunErrorCode.LLM_FAILURE)
+            if response.metadata.get("has_streamed_text") is True:
+                execution.mark_text_streamed()
             if execution.cancellation.cancelled:
                 return await self._finish_cancelled(
                     execution,
@@ -350,7 +352,12 @@ class RuntimeEngine:
                 )
                 await self._run_repository.commit_success(completed, response_message, completed_event)
                 await self._checkpoint_repository.delete(run.session_id, run.run_id)
-                return RunResult(run.run_id, RunStatus.COMPLETED, ConversationMessage(response_message.message_id, MessageRole.ASSISTANT, response_message.content, completed.ended_at or ""))
+                return RunResult(
+                    run.run_id,
+                    RunStatus.COMPLETED,
+                    ConversationMessage(response_message.message_id, MessageRole.ASSISTANT, response_message.content, completed.ended_at or ""),
+                    has_streamed_text=execution.has_streamed_text,
+                )
             pending_calls = response.tool_calls
         return await self._fail(execution, run, tuple(messages), event_number, "状态机意外结束")
 

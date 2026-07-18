@@ -15,3 +15,6 @@ def test_cli_uses_agent_v2_submission_and_engine_control_operations() -> None:
     assert "agent.model_id" in source
     assert "agent._resolve_model()" not in source
     assert "Runtime.run" not in source
+    assert "await channel.print_markdown(final_answer)" in source
+    assert "agent.has_streamed_final_answer" in source
+    assert "await channel.stream(\"\\n\")" in source

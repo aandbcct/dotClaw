@@ -138,6 +138,12 @@ async def _run_cli() -> None:
 
             if not final_answer:
                 channel.print_error("执行异常：未返回有效回复")
+            elif agent.has_streamed_final_answer:
+                # 文本增量已在运行期间输出，此处仅补齐终端换行，避免重复显示最终回复。
+                await channel.stream("\n")
+            else:
+                # 最终回复由 CLI 入口负责呈现，Runtime 仅返回执行结果以保持边界解耦。
+                await channel.print_markdown(final_answer)
 
             sys.stdout.flush()
 

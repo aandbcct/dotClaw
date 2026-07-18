@@ -16,6 +16,13 @@ from ..domain.facts import (
 from .dto import ContextBundle, DelegationRequest, DelegationResult, RunRequest, ToolInvocation, ToolResult
 
 
+class TextStreamPort(Protocol):
+    """将模型文本增量交付给入口层的应用协议。"""
+
+    async def emit(self, run_id: str, chunk: str) -> None:
+        """输出指定运行的一段非空文本增量。"""
+
+
 class ConversationProjectionPort(Protocol):
     """将成功运行投影到既有 Session Conversation 的协议。"""
 

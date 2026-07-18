@@ -87,6 +87,8 @@ class RunResult:
     final_message: ConversationMessage | None = None
     error: RunError | None = None
     approval_id: str | None = None
+    has_streamed_text: bool = False
+    """本次运行是否已通过 TextStreamPort 向入口输出过文本。"""
 
     def to_dict(self) -> JSONMap:
         """转换为 Channel 或 API 可消费的结果数据。"""
@@ -96,6 +98,7 @@ class RunResult:
             "final_message": None if self.final_message is None else self.final_message.to_dict(),
             "error": None if self.error is None else self.error.to_dict(),
             "approval_id": self.approval_id,
+            "has_streamed_text": self.has_streamed_text,
         }
 
 
