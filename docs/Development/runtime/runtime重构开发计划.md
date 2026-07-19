@@ -457,7 +457,56 @@ rg "旧符号或旧模块" src tests docs
 - 已删除或改写依赖旧 API 的历史测试；保留的运行、审批、取消、上下文、仓储、委派和迁移场景均由 `tests/runtime_v2/` 覆盖。
 - README、开发架构状态和迁移清单已切换为 Runtime v2 的唯一叙事；旧样例迁移和缺失输入的可行动错误均有自动化测试。
 
-## 10. 推荐提交顺序
+## 10. 后续阶段：上下文快照、消息证据与 Session 历史压缩
+
+### 本阶段范围
+
+本阶段在 Runtime v2 完成后继续收口持久化语义。目标不是实现运行中上下文压缩，
+而是确定 `run.json`、`events.jsonl`、`messages.json` 与 `session.json` 的唯一职责，
+并只在创建 Run 前完成 `SESSION_HISTORY` 压缩。`RUN_CONTEXT` 的通用接口与枚举需要
+预留，但不得在本阶段改变每次 LLM 调用前的行为。
+
+### 新增
+
+| 区域 | 新增内容 |
+|---|---|
+| `runtime/domain` | system context 快照、Slot 状态、初始历史快照、上下文压缩作用域与版本化压缩摘要事实模型 |
+| `runtime/application` | `ContextCompactionPort`、预算规划与 Session 历史准备服务；压缩失败的标准化结果 |
+| `runtime/adapters` | Session JSON 的压缩摘要读写适配器，以及基于现有 LLM 的压缩适配器 |
+| `session/session.py` | `Conversation.conversation_id`、Conversation 版本与压缩版本链字段 |
+| `scripts/` | 将旧 `messages.json` 转换为含 `initial_context` 的格式迁移脚本，或显式的只读兼容适配器 |
+
+### 修改
+
+| 文件 / 区域 | 修改内容 |
+|---|---|
+| `ContextPort` 与 `SlotContextProvider` | 输出按 Slot 划分的 system context，并在 Run 首次调用前冻结 system / history；当前版本内不得悄悄改变该快照 |
+| `RunRepository` | `messages.json` 格式升级：顶层保存 `initial_context`，数组只保存 Run 内增量消息；读旧格式须迁移或只读兼容 |
+| `RuntimeEngine` | 不再把完整 LLM 输入逐条写成 `RunMessage`；每次调用前写 `LLM_STARTED`，在事件中记录模型、上下文版本、增量消息引用与 hash |
+| `RunEvent` | `DELEGATION_SUBMITTED` 保存 task_id、child_run_id、目标 Agent / Session；`LLM_STARTED` 成为模型输入审计唯一入口 |
+| `SessionRunCoordinator` / Agent 入口 | 在 Session 租约内先准备或压缩 Session 历史，再冻结 `RunRequest`；压缩失败时拒绝创建 Run |
+| 审批恢复 | 基于 `initial_context + 增量 RunMessage + 最后上下文版本` 恢复，禁止扫描历史 payload 副本推断上下文 |
+
+### 废弃与删除
+
+| 废弃内容 | 替代者 | 删除条件 |
+|---|---|---|
+| 新写入路径中的 `RunMessageKind.LLM_REQUEST` | `RunEventType.LLM_STARTED` | 新格式读写、恢复、迁移与审计测试通过后，生产写入和新测试均无该 kind |
+| 每轮复制 system / history / 当前输入到 `messages.json` | `initial_context` + `LLM_STARTED` 的引用与 hash | 新 Run 的 `messages.json` 不再包含历史副本，且可重建每次实际 LLM 输入 |
+| ContextPort 内静默裁剪历史 | Session 压缩准备服务 | 压缩失败、边界预算和恢复测试通过；Runtime 仅保留预算校验，不再静默删除历史 |
+| 父 Run 中重复的目标 Agent 输入 | 子 Run 的 `USER_INPUT` + delegation 关联事件 | 委派审计可通过 task_id / child_run_id 完整追踪 |
+
+### 实施顺序与验收
+
+1. 建立领域模型、JSON 格式版本和旧格式迁移 / 只读兼容测试；
+2. 为 Session 增加稳定 Conversation ID、压缩摘要版本链与原子更新；
+3. 实现 `ContextCompactionPort` 与创建 Run 前的 `SESSION_HISTORY` 压缩；
+4. 迁移 ContextPort、RunRepository、RuntimeEngine 与审批恢复到新的初始快照 / 增量消息 / 调用事件语义；
+5. 覆盖普通对话、多轮工具、审批恢复、delegation、压缩失败、重复压缩、旧数据迁移与并发 Session 场景。
+
+完成门槛：新 Run 的 `messages.json` 能逐项解释本 Run 上下文如何演化；`events.jsonl` 能解释每次外部调用；`run.json` 只保留索引和终态摘要；Session 压缩后仍可精确冻结并恢复实际历史上下文。
+
+## 11. 推荐提交顺序
 
 即使最终一次合并，也建议按以下提交顺序保留历史：
 
@@ -474,7 +523,7 @@ rg "旧符号或旧模块" src tests docs
 10. docs(test): 更新文档、迁移测试并完成全量回归
 ```
 
-## 11. 风险与控制点
+## 12. 风险与控制点
 
 | 风险 | 控制措施 |
 |---|---|
@@ -486,7 +535,7 @@ rg "旧符号或旧模块" src tests docs
 | Journal 删除过早丢失排障能力 | RunEvent + RunMessage 先覆盖事实；Journal 先退化为可选渲染器，最后再删状态职责 |
 | delegation 扩大改造范围 | 本轮只做 DelegationPort adapter，不改变 Dispatcher 内部业务语义 |
 
-## 12. 完成定义
+## 13. 完成定义
 
 本重构完成不以“新文件已经创建”为准，而以以下事实为准：
 

@@ -363,24 +363,64 @@ RUN_COMPLETED / RUN_FAILED / RUN_CANCELLED
 
 ### 8.3 RunMessage
 
-`RunMessage` 是完整执行消息证据。每个 Run 一个 `messages.json`，不按 message 单独建文件：
+`RunMessage` 是本次 Run 在启动后新产生的执行消息证据。每个 Run 一个
+`messages.json`，不按 message 单独建文件。Run 启动时冻结的 system 与历史上下文
+不属于增量消息，保存于顶层 `initial_context`：
 
 ```json
 {
   "run_id": "r-123",
-  "version": 1,
+  "version": 2,
+  "initial_context": {
+    "system_context": {
+      "version": 1,
+      "slot_order": ["identity", "skills", "memory"],
+      "slots": [
+        {"name": "identity", "scope": "static", "status": "included", "content": "..."}
+      ],
+      "rendered_content_hash": "..."
+    },
+    "history": {
+      "source_session_id": "s-001",
+      "source_conversation_version": 12,
+      "compressed_history": null,
+      "recent_messages": []
+    }
+  },
   "messages": [
-    {"id": "m-001", "sequence": 1, "kind": "llm_request", "role": "system"},
-    {"id": "m-002", "sequence": 2, "kind": "llm_request", "role": "user"},
-    {"id": "m-003", "sequence": 3, "kind": "llm_response", "role": "assistant"},
-    {"id": "m-004", "sequence": 4, "kind": "tool_result", "role": "tool"}
+    {"id": "m-001", "sequence": 1, "kind": "user_input", "role": "user"},
+    {"id": "m-002", "sequence": 2, "kind": "llm_response", "role": "assistant"},
+    {"id": "m-003", "sequence": 3, "kind": "tool_result", "role": "tool"}
   ]
 }
 ```
 
-实际内容需要按脱敏策略保存。每次 LLM 调用都保存实际发送的完整输入快照，即使 system prompt 重复；第一阶段优先保证可回放和排障，去重以后再做。
+`initial_context.system_context` 必须按 Slot 保存名称、作用域、状态、内容与 hash，
+并按 `slot_order` 还原实际 system 内容；当前版本在 Run 开始后冻结为版本 1。
+未来若运行中增删 Slot 或修改 Slot 内容，必须新增 system context 版本，不能覆盖旧版本。
+
+`initial_context.history` 只保存经过预算准备后实际注入的历史子集。若 Session 已存在
+有效压缩摘要，先注入该摘要，再注入压缩边界之后的原始 Conversation。完整 Session
+历史仍由 `session.json` 保存，不复制到 Run。
+
+`LLM_REQUEST` 不是 `RunMessage`。每次模型调用由 `events.jsonl` 中的 `LLM_STARTED`
+事件记录调用序号、模型、system context 版本、历史版本、增量消息 ID 与内容 hash；事件
+不复制完整 payload。父子 Agent 的委派请求由父 Run 的 assistant tool call 表达，
+`DELEGATION_SUBMITTED` 事件记录 task_id 与 child_run_id，目标输入仅保存于子 Run。
 
 写入顺序必须是：**先原子更新 `messages.json`，再追加引用这些消息的 `RunEvent`**。因此任一已落盘 Event 都不会指向不存在的消息。
+
+### 8.3.1 Session 历史压缩
+
+Session 持久化原始 `conversations`、当前生效的压缩版本和历史压缩版本链。每个
+Conversation 必须有稳定 `conversation_id`，压缩摘要以
+`covered_through_conversation_id` 标识其覆盖边界。压缩摘要只替代后续模型注入的
+历史视图，不删除原始 Conversation。
+
+本阶段仅在创建 Run 前、获得 Session 租约后判断并执行 `SESSION_HISTORY` 压缩。压缩
+成功后必须原子更新 `session.json`，再冻结 `RunRequest`；压缩失败则拒绝启动 Run，禁止
+静默裁剪。`ContextCompactionPort` 的接口同时预留 `RUN_CONTEXT` 作用域，但本阶段不在
+每次 LLM 调用前启用运行中压缩。
 
 ### 8.4 Checkpoint
 
