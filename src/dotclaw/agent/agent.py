@@ -16,7 +16,8 @@ if TYPE_CHECKING:
     from ..config import Config
     from ..memory.dream import DeepDream
     from ..runtime.application.session_run_coordinator import SessionRunCoordinator
-    from ..runtime.application.dto import RunResult
+    from ..runtime.application.session_history_preparation import SessionHistoryPreparationService
+    from ..runtime.application.dto import RunRequest, RunResult
     from ..session.session import Session
     from ..skills.registry import SkillRegistry
     from ..tools.executor import ToolExecutor
@@ -35,6 +36,7 @@ class Agent:
         skill_registry: SkillRegistry | None = None,
         memory_dream: DeepDream | None = None,
         mcp_task: asyncio.Task[None] | None = None,
+        history_preparation_service: SessionHistoryPreparationService | None = None,
     ) -> None:
         """绑定执行协调器与仅供展示或关闭的基础设施依赖。"""
         self._identity: AgentIdentity = identity
@@ -46,6 +48,7 @@ class Agent:
         self._last_run_result: RunResult | None = None
         self._memory_dream: DeepDream | None = memory_dream
         self._mcp_task: asyncio.Task[None] | None = mcp_task
+        self._history_preparation_service: SessionHistoryPreparationService | None = history_preparation_service
 
     @property
     def identity(self) -> AgentIdentity:
@@ -116,10 +119,15 @@ class Agent:
 
     async def process(self, session: Session, user_message: str) -> str:
         """提交普通用户消息，并将标准 RunResult 转换为 Channel 文本。"""
-        from ..runtime.application.request_factory import create_run_request
+        from ..runtime.application.request_factory import create_run_request, create_run_request_from_snapshot
 
-        request = create_run_request(session, self.agent_id, user_message)
-        result: RunResult = await self._coordinator.submit(request)
+        async def create_request() -> RunRequest:
+            if self._history_preparation_service is None:
+                return create_run_request(session, self.agent_id, user_message)
+            snapshot = await self._history_preparation_service.prepare(session.id)
+            return create_run_request_from_snapshot(session.id, self.agent_id, user_message, snapshot)
+
+        result: RunResult = await self._coordinator.submit_prepared(session.id, create_request)
         self._last_run_result = result
         return _display_result(result)
 

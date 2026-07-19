@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from .dto import RunRequest, RunResult
@@ -44,6 +45,19 @@ class SessionRunCoordinator:
         """按 Session 获取 FIFO 租约后执行请求。"""
         lock: asyncio.Lock = await self._get_lock(request.session_id)
         async with lock:
+            return await self._engine.execute(request)
+
+    async def submit_prepared(
+        self,
+        session_id: str,
+        request_factory: Callable[[], Awaitable[RunRequest]],
+    ) -> RunResult:
+        """在同一 Session 租约内准备冻结请求并执行，避免压缩版本并发覆盖。"""
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        async with lock:
+            request: RunRequest = await request_factory()
+            if request.session_id != session_id:
+                raise ValueError("冻结请求的 Session 与租约不一致")
             return await self._engine.execute(request)
 
     async def resolve_approval(self, approval_id: str, approved: bool) -> RunResult:

@@ -10,7 +10,12 @@ Session 是 dotClaw 的对话隔离单元：一个 Session 文件 = 一段独立
 
 from __future__ import annotations
 
+import asyncio
 import json
+import hashlib
+import os
+import tempfile
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +42,9 @@ class Conversation:
     user_query: str
     """用户输入文本"""
 
+    conversation_id: str = ""
+    """Conversation 的稳定标识，用于历史压缩覆盖边界。"""
+
     final_answer: str = ""
     """Agent 最终回答文本"""
 
@@ -45,6 +53,19 @@ class Conversation:
 
     created_at: str = ""
     """记录创建时间（ISO 8601）"""
+
+
+@dataclass
+class HistoryCompression:
+    """Session 历史的一个不可变压缩版本。"""
+
+    version: int
+    covered_through_conversation_id: str
+    content: str
+    content_hash: str
+    source_conversation_hash: str
+    previous_version: int = 0
+    created_at: str = ""
 
 
 # ============================================================================
@@ -82,6 +103,15 @@ class Session:
     conversations: list[Conversation] = field(default_factory=list)
     """对话记录列表。每条 = 一次用户请求的完整记录。"""
 
+    conversation_version: int = 0
+    """Conversation 列表的单调版本号。"""
+
+    active_compression_version: int = 0
+    """当前生效的历史压缩版本；0 表示尚未压缩。"""
+
+    history_compressions: list[HistoryCompression] = field(default_factory=list)
+    """按版本递增保存的历史压缩摘要链。"""
+
     # ── 序列化 ──
 
     def to_dict(self) -> dict:
@@ -95,10 +125,18 @@ class Session:
     def from_dict(cls, data: dict) -> Session:
         """从 dict 反序列化。"""
         convs_data: list[dict] = data.pop("conversations", [])
+        compression_data: list[dict] = data.pop("history_compressions", [])
         session: Session = cls(**data)
-        session.conversations = [
-            Conversation(**c) for c in convs_data
-        ]
+        session.conversations = []
+        index: int
+        conversation_data: dict
+        for index, conversation_data in enumerate(convs_data, start=1):
+            if not conversation_data.get("conversation_id"):
+                conversation_data["conversation_id"] = _legacy_conversation_id(session.id, index, conversation_data)
+            session.conversations.append(Conversation(**conversation_data))
+        session.history_compressions = [HistoryCompression(**item) for item in compression_data]
+        if session.conversation_version <= 0:
+            session.conversation_version = len(session.conversations)
         return session
 
     def add_conversation(self, user_query: str, final_answer: str,
@@ -115,12 +153,50 @@ class Session:
         """
         conv: Conversation = Conversation(
             user_query=user_query,
+            conversation_id=uuid.uuid4().hex,
             final_answer=final_answer,
             agent_run_ids=list(agent_run_ids),
             created_at=datetime.now().isoformat(),
         )
         self.conversations.append(conv)
+        self.conversation_version += 1
         return conv
+
+    def active_history_compression(self) -> HistoryCompression | None:
+        """返回当前生效的历史压缩版本。"""
+        if self.active_compression_version <= 0:
+            return None
+        return next(
+            (compression for compression in self.history_compressions if compression.version == self.active_compression_version),
+            None,
+        )
+
+    def append_history_compression(
+        self,
+        version: int,
+        covered_through_conversation_id: str,
+        content: str,
+        content_hash: str,
+        source_conversation_hash: str,
+        previous_version: int = 0,
+    ) -> None:
+        """追加下一版历史摘要并切换当前有效版本。"""
+        expected_version: int = self.active_compression_version + 1
+        if version != expected_version:
+            raise ValueError(f"历史压缩版本必须为 {expected_version}")
+        if not any(item.conversation_id == covered_through_conversation_id for item in self.conversations):
+            raise ValueError("历史压缩边界必须引用当前 Session 的 Conversation")
+        compression: HistoryCompression = HistoryCompression(
+            version=version,
+            covered_through_conversation_id=covered_through_conversation_id,
+            content=content,
+            content_hash=content_hash,
+            source_conversation_hash=source_conversation_hash,
+            previous_version=previous_version,
+            created_at=datetime.now().isoformat(),
+        )
+        self.history_compressions.append(compression)
+        self.active_compression_version = compression.version
 
 
 # ============================================================================
@@ -184,11 +260,8 @@ class SessionManager:
         """保存 Session 到磁盘。"""
         session.updated_at = datetime.now().isoformat()
         path: Path = self._session_path(session.id)
-        import aiofiles
-        async with aiofiles.open(path, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(
-                session.to_dict(), ensure_ascii=False, indent=2
-            ))
+        payload: str = json.dumps(session.to_dict(), ensure_ascii=False, indent=2)
+        await asyncio.to_thread(_write_text_atomic, path, payload)
 
     async def list_all(self) -> list[Session]:
         """列出所有 Session（按更新时间倒序）。"""
@@ -216,3 +289,29 @@ class SessionManager:
             path.unlink()
             return True
         return False
+
+
+def _legacy_conversation_id(session_id: str, index: int, conversation_data: dict) -> str:
+    """为旧 Session 中缺失标识的 Conversation 生成稳定兼容 ID。"""
+    payload: str = json.dumps(conversation_data, ensure_ascii=False, sort_keys=True)
+    digest: str = hashlib.sha256(f"{session_id}:{index}:{payload}".encode("utf-8")).hexdigest()[:16]
+    return f"legacy-{digest}"
+
+
+def _write_text_atomic(path: Path, payload: str) -> None:
+    """使用同目录临时文件原子替换 Session JSON。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor: int
+    temporary_path_text: str
+    descriptor, temporary_path_text = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
+    temporary_path: Path = Path(temporary_path_text)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
+            temporary_file.write(payload)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        temporary_path.replace(path)
+    except BaseException:
+        if temporary_path.exists():
+            temporary_path.unlink()
+        raise

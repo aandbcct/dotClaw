@@ -332,6 +332,11 @@ async def build_agent(
     from dotclaw.agent.identity import load_agent_config as load_id
     from dotclaw.bootstrap.runtime_factory import RuntimeServices, build_runtime_services
     from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
+    from dotclaw.runtime.adapters.llm_context_compactor import LLMContextCompactor
+    from dotclaw.runtime.application.session_history_preparation import (
+        HistoryPreparationPolicy,
+        SessionHistoryPreparationService,
+    )
 
     config = get_config()
     project_root = _find_project_root()
@@ -378,6 +383,16 @@ async def build_agent(
         text_stream_port=text_stream_port,
     )
     await runtime_services.run_repository.recover_pending_success_commits()
+    reserved_context_tokens: int = max(1024, config.agent.max_context_tokens // 4)
+    history_preparation_service: SessionHistoryPreparationService = SessionHistoryPreparationService(
+        store=session_mgr,
+        compactor=LLMContextCompactor(llm_proxy),
+        policy=HistoryPreparationPolicy(
+            max_context_tokens=config.agent.max_context_tokens,
+            max_recent_conversations=config.agent.keep_recent_messages,
+            reserved_tokens=reserved_context_tokens,
+        ),
+    )
 
     agent: AgentCls = AgentCls(
         identity=identity,
@@ -388,6 +403,7 @@ async def build_agent(
         skill_registry=skill_registry,
         memory_dream=memory_dream,
         mcp_task=mcp_task,
+        history_preparation_service=history_preparation_service,
     )
     logger.info("Agent [%s] 的 Runtime v2 服务已就绪", agent.agent_id)
     return agent, runtime_services, session_mgr

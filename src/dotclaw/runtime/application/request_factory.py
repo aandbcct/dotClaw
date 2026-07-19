@@ -40,16 +40,31 @@ def create_run_request(session: SessionSnapshotSource, agent_id: str, user_messa
             content=conversation.final_answer,
             created_at=conversation.created_at,
         ))
-    input_message = ConversationMessage(
+    return create_run_request_from_snapshot(
+        session_id=session.id,
+        agent_id=agent_id,
+        user_message=user_message,
+        conversation=ConversationSnapshot(session.id, tuple(history), len(session.conversations)),
+    )
+
+
+def create_run_request_from_snapshot(
+    session_id: str,
+    agent_id: str,
+    user_message: str,
+    conversation: ConversationSnapshot,
+) -> RunRequest:
+    """基于已准备完成的冻结历史创建单次 RunRequest。"""
+    input_message: ConversationMessage = ConversationMessage(
         message_id=f"input-{uuid.uuid4().hex}",
         role=MessageRole.USER,
         content=user_message,
         created_at=utc_now_iso(),
     )
     return RunRequest(
-        session_id=session.id,
+        session_id=session_id,
         lease_id=f"lease-{uuid.uuid4().hex}",
         agent_id=agent_id,
         user_message=input_message,
-        conversation=ConversationSnapshot(session.id, tuple(history), len(session.conversations)),
+        conversation=conversation,
     )
