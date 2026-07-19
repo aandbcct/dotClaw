@@ -59,6 +59,10 @@ data/sessions/{session_id}/agent_runs/{run_id}/
 `already_current`，不会修改 v2 运行目录。`messages.json` 和 `events.jsonl` 任一替换失败时，
 命令会利用备份补偿两者，恢复完整 v1 文件集。
 
+若 v1 文件含有 `LLM_REQUEST` 却缺少 `CONTEXT_BUILT` 事件，命令会拒绝迁移，避免把后续
+上下文副本误记为增量事实；此类文件只能保留只读并人工处理。待审批的 v1 Run 也会在消费
+审批前被 Runtime 拦截，必须完成迁移后才允许恢复。
+
 ## 最终审计命令
 
 ```powershell

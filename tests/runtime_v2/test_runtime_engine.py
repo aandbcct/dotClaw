@@ -18,7 +18,7 @@ from dotclaw.runtime.application.dto import (
     RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
-    AgentPolicySnapshot, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, RunStatus, ToolCall,
+    AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, RunStatus, ToolCall,
     require_json_map,
 )
 from dotclaw.context import ContextDependencies, SlotContextProvider
@@ -189,6 +189,43 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
     ]
     assert event_types.index("approval_resolved") < event_types.index("run_resumed")
     assert event_types.index("run_resumed") < event_types.index("run_completed")
+
+
+async def test_approval_refuses_v1_messages_without_consuming_pending_record(tmp_path: Path) -> None:
+    """v1 Run 必须先迁移；恢复入口不得消费审批或改变等待中的 Run。"""
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    approval_service: ApprovalService = ApprovalService(ApprovalRepositoryAdapter(tmp_path))
+    engine: RuntimeEngine = RuntimeEngine(
+        run_repository,
+        CheckpointRepositoryAdapter(tmp_path),
+        ContextFake(),
+        ApprovalLLM(),
+        ApprovalTool(),
+        PolicyPort(),
+        approval_service,
+        CancellationService(),
+    )
+    waiting: RunResult = await engine.execute(_request("session-v1-approval"))
+    messages_path: Path = tmp_path / "session-v1-approval" / "agent_runs" / waiting.run_id / "messages.json"
+    current_payload: JSONMap = require_json_map(json.loads(messages_path.read_text(encoding="utf-8")))
+    raw_messages: JSONValue | None = current_payload.get("messages")
+    assert isinstance(raw_messages, list)
+    legacy_payload: JSONMap = {
+        "run_id": waiting.run_id,
+        "version": 1,
+        "messages": raw_messages,
+    }
+    messages_path.write_text(json.dumps(legacy_payload, ensure_ascii=False), encoding="utf-8")
+
+    result: RunResult = await engine.resolve_approval(waiting.approval_id or "", approved=True)
+
+    assert result.status is RunStatus.FAILED
+    assert result.error is not None
+    assert "migrate_messages_v1_to_v2" in result.error.message
+    assert await approval_service.find_pending(waiting.approval_id or "") is not None
+    run: AgentRun | None = await run_repository.load_run("session-v1-approval", waiting.run_id)
+    assert run is not None
+    assert run.status is RunStatus.WAITING_APPROVAL
 
 
 class ReActLLM(LLMPort):

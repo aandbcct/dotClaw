@@ -110,6 +110,10 @@ class RunRepositoryAdapter:
         """读取 Run 的初始上下文；旧格式文件没有该区域时返回空。"""
         return await asyncio.to_thread(self._load_initial_context_sync, session_id, run_id)
 
+    async def requires_messages_migration(self, session_id: str, run_id: str) -> bool:
+        """判断消息文件是否仍为只能读取的 v1 格式。"""
+        return await asyncio.to_thread(self._requires_messages_migration_sync, session_id, run_id)
+
     async def load_messages(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         """读取完整消息；尚未写入时返回空元组。"""
         return await asyncio.to_thread(self._load_messages_sync, session_id, run_id)
@@ -215,6 +219,14 @@ class RunRepositoryAdapter:
         """从 messages.json 读取格式 v2 的 initial_context。"""
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
         return self._load_initial_context_from_path_sync(path)
+
+    def _requires_messages_migration_sync(self, session_id: str, run_id: str) -> bool:
+        """读取格式版本；不存在消息文件时不要求迁移。"""
+        path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
+        if not path.is_file():
+            return False
+        payload: JSONMap = load_json_map(path)
+        return _validate_messages_format_version(payload) < StorageFormatVersion.INITIAL_CONTEXT
 
     async def _recover_session_success_commits(self, session_id: str) -> None:
         """补偿指定 Session 下的所有未决成功提交，避免读取到互相矛盾的事实。"""

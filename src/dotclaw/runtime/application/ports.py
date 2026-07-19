@@ -73,6 +73,9 @@ class RunRepository(Protocol):
     async def load_initial_context(self, session_id: str, run_id: str) -> InitialContextSnapshot | None:
         """加载 Run 的冻结初始上下文；旧格式或尚未保存时返回空。"""
 
+    async def requires_messages_migration(self, session_id: str, run_id: str) -> bool:
+        """判断 Run 是否仍使用只读的 messages.json v1 格式。"""
+
     async def load_messages(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         """加载完整运行消息。"""
 

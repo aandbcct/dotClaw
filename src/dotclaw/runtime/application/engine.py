@@ -22,6 +22,7 @@ from ..domain.events import (
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
 from ..domain.facts import (
     AgentRun,
+    ApprovalRecord,
     HistoryContextSnapshot,
     HistoryMessageSnapshot,
     InitialContextSnapshot,
@@ -118,7 +119,33 @@ class RuntimeEngine:
 
     async def resolve_approval(self, approval_id: str, approved: bool) -> RunResult:
         """消费审批记录，并在同一 run_id 上恢复等待中的执行。"""
-        record = await self._approval_service.consume(approval_id)
+        pending_record: ApprovalRecord | None = await self._approval_service.find_pending(approval_id)
+        if pending_record is None:
+            return RunResult("", RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在或已消费"))
+        if await self._run_repository.requires_messages_migration(
+            pending_record.session_id,
+            pending_record.run_id,
+        ):
+            return RunResult(
+                pending_record.run_id,
+                RunStatus.FAILED,
+                error=RunError(
+                    RunErrorCode.PERSISTENCE_FAILURE,
+                    "该 Run 使用 messages.json v1，请先执行 scripts/migrate_messages_v1_to_v2.py 后再处理审批",
+                ),
+            )
+        initial_context: InitialContextSnapshot | None = await self._run_repository.load_initial_context(
+            pending_record.session_id,
+            pending_record.run_id,
+        )
+        if initial_context is None:
+            return RunResult(
+                pending_record.run_id,
+                RunStatus.FAILED,
+                error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "Run 缺少冻结 initial_context，拒绝恢复审批"),
+            )
+        frozen_initial_context: InitialContextSnapshot = initial_context
+        record: ApprovalRecord | None = await self._approval_service.consume(approval_id)
         if record is None:
             return RunResult("", RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在或已消费"))
         run = await self._run_repository.load_run(record.session_id, record.run_id)
@@ -126,10 +153,6 @@ class RuntimeEngine:
         if run is None or checkpoint is None or run.status is not RunStatus.WAITING_APPROVAL:
             return RunResult(record.run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "审批恢复状态无效"))
         messages = await self._run_repository.load_messages(record.session_id, record.run_id)
-        initial_context: InitialContextSnapshot | None = await self._run_repository.load_initial_context(
-            record.session_id,
-            record.run_id,
-        )
         input_message = next((message for message in messages if message.message_id == run.input_message_id), None)
         if input_message is None:
             return RunResult(record.run_id, RunStatus.FAILED, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "缺少运行输入消息"))
@@ -138,11 +161,7 @@ class RuntimeEngine:
             lease_id="approval-resume",
             agent_id=run.agent_id,
             user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
-            conversation=(
-                _conversation_from_initial_context(initial_context)
-                if initial_context is not None
-                else _legacy_conversation_from_run_messages(run, messages, input_message)
-            ),
+            conversation=_conversation_from_initial_context(frozen_initial_context),
         )
         state: AgentState = _state_from_checkpoint(checkpoint)
         transition = state.transition(ApprovalResolved(approval_id, approved))
@@ -154,7 +173,7 @@ class RuntimeEngine:
             budget=RunBudget(max_iterations=run.policy.max_iterations),
             message_cursor=checkpoint.message_sequence,
             run_messages=messages,
-            initial_context=initial_context,
+            initial_context=frozen_initial_context,
         )
         pending_calls: tuple[ToolCall, ...] = _calls_from_checkpoint(checkpoint)
         event_sequence: int = await self._event(
@@ -746,45 +765,6 @@ def _hash_json_value(value: JSONValue | list[JSONMap]) -> str:
     """以稳定 JSON 序列化计算审计 hash，避免字典顺序影响结果。"""
     serialized: str = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return _hash_text(serialized)
-
-
-def _legacy_conversation_from_run_messages(
-    run: AgentRun,
-    messages: tuple[RunMessage, ...],
-    input_message: RunMessage,
-) -> ConversationSnapshot:
-    """从首轮实际 LLM 请求重建冻结会话快照，避免审批恢复丢失历史上下文。"""
-    initial_context: list[RunMessage] = []
-    message: RunMessage
-    for message in messages:
-        if message.kind in {RunMessageKind.LLM_RESPONSE, RunMessageKind.FINAL_RESPONSE}:
-            break
-        if message.kind is RunMessageKind.LLM_REQUEST and message.role is not MessageRole.SYSTEM:
-            initial_context.append(message)
-    current_input_index: int | None = next(
-        (
-            index
-            for index in range(len(initial_context) - 1, -1, -1)
-            if initial_context[index].role is MessageRole.USER
-            and initial_context[index].content == input_message.content
-        ),
-        None,
-    )
-    if current_input_index is not None:
-        del initial_context[current_input_index]
-    history: tuple[ConversationMessage, ...] = tuple(
-        ConversationMessage(
-            message_id=message.message_id,
-            role=message.role,
-            content=message.content,
-            created_at=run.started_at,
-        )
-        for message in initial_context
-    )
-    conversation_version: int = sum(
-        1 for message in history if message.role is MessageRole.USER
-    )
-    return ConversationSnapshot(run.session_id, history, conversation_version)
 
 
 def _with_llm_statistics(run: AgentRun, response: RunMessage) -> AgentRun:

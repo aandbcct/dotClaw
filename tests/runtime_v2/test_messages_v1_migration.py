@@ -186,6 +186,21 @@ def test_migration_is_idempotent_for_current_format(tmp_path: Path) -> None:
     assert report.events_backup_path is None
 
 
+def test_migration_rejects_repeated_requests_without_context_event_index(tmp_path: Path) -> None:
+    """缺少 CONTEXT_BUILT 索引时不能可靠识别后续轮次副本，必须保持 v1 只读。"""
+    run_directory: Path = tmp_path / "session-unsafe" / "agent_runs" / "run-unsafe"
+    _write_v1_run(run_directory)
+    events_path: Path = run_directory / "events.jsonl"
+    events_path.unlink()
+    original_messages: str = (run_directory / "messages.json").read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="缺少 CONTEXT_BUILT"):
+        migrate_messages_v1_run(run_directory)
+
+    assert (run_directory / "messages.json").read_text(encoding="utf-8") == original_messages
+    assert not (run_directory / "messages.json.v1.bak").exists()
+
+
 def test_migration_restores_v1_backups_when_event_rewrite_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
