@@ -26,6 +26,7 @@ from dotclaw.runtime.application.dto import (
     ConversationSnapshot,
     DelegationRequest,
     DelegationResult,
+    DelegationSubmission,
     RunRequest,
     RunResult,
     ToolInvocation,
@@ -188,10 +189,10 @@ class CompletedDelegation(DelegationPort):
     def __init__(self) -> None:
         self.request: DelegationRequest | None = None
 
-    async def submit(self, request: DelegationRequest) -> str:
+    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
         """保存结构化请求并返回固定子运行标识。"""
         self.request = request
-        return "child-run"
+        return DelegationSubmission("child-run", "task-child-run", "child-session")
 
     async def result(self, child_run_id: str) -> DelegationResult | None:
         """返回成功子运行的标准化结果。"""
@@ -243,8 +244,23 @@ async def test_engine_records_delegation_parent_child_events_without_dispatcher(
     assert delegation.request.root_run_id == result.run_id
     assert [event["event_type"] for event in events].count("delegation_submitted") == 1
     assert [event["event_type"] for event in events].count("delegation_completed") == 1
-    completed_event = next(event for event in events if event["event_type"] == "delegation_completed")
-    assert completed_event["data"] == {"child_run_id": "child-run", "status": "completed"}
+    submitted_event: JSONMap = next(
+        event for event in events if event["event_type"] == "delegation_submitted"
+    )
+    assert submitted_event["data"] == {
+        "task_id": "task-child-run",
+        "child_run_id": "child-run",
+        "target_agent_id": "target-agent",
+        "target_session_id": "child-session",
+    }
+    completed_event: JSONMap = next(
+        event for event in events if event["event_type"] == "delegation_completed"
+    )
+    assert completed_event["data"] == {
+        "task_id": "task-child-run",
+        "child_run_id": "child-run",
+        "status": "completed",
+    }
 
 
 class RecordingCoordinator:
@@ -282,7 +298,8 @@ async def test_runtime_delegation_adapter_creates_target_run_with_parent_and_roo
         source_session_id="parent-session",
     )
 
-    child_run_id: str = await adapter.submit(request)
+    submission: DelegationSubmission = await adapter.submit(request)
+    child_run_id: str = submission.child_run_id
     result: DelegationResult | None = await adapter.result(child_run_id)
     assert coordinator.request is not None
     assert coordinator.request.parent_run_id == "parent-run"

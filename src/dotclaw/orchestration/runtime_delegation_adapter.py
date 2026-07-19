@@ -12,6 +12,7 @@ from ..runtime.application.dto import (
     ConversationSnapshot,
     DelegationRequest,
     DelegationResult,
+    DelegationSubmission,
     RunRequest,
     RunResult,
 )
@@ -70,7 +71,7 @@ class RuntimeDelegationAdapter(DelegationPort):
             raise RuntimeError("DelegationPort 已绑定协调器，禁止重复装配")
         self._coordinator = coordinator
 
-    async def submit(self, request: DelegationRequest) -> str:
+    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
         """创建目标 Session 后异步提交子 Run，并立即返回稳定运行标识。"""
         if not request.source_agent_id or not request.source_session_id:
             raise ValueError("delegation 请求必须包含来源 Agent 与 Session")
@@ -116,7 +117,11 @@ class RuntimeDelegationAdapter(DelegationPort):
         )
         # 让子协程先完成 Run 注册，再向父 Engine 返回可取消的子运行标识。
         await asyncio.sleep(0)
-        return child_run_id
+        return DelegationSubmission(
+            child_run_id=child_run_id,
+            task_id=task.task_id,
+            target_session_id=session.id,
+        )
 
     async def result(self, child_run_id: str) -> DelegationResult | None:
         """等待并返回标准化子运行结果；未知标识表示尚无结果。"""

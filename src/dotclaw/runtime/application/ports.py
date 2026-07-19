@@ -15,7 +15,7 @@ from ..domain.facts import (
     AgentPolicySnapshot,
 )
 from .context_compaction import ContextCompactionRequest, ContextCompactionResult
-from .dto import ContextBundle, DelegationRequest, DelegationResult, RunRequest, ToolInvocation, ToolResult
+from .dto import ContextBundle, DelegationRequest, DelegationResult, DelegationSubmission, RunRequest, ToolInvocation, ToolResult
 
 
 class TextStreamPort(Protocol):
@@ -151,8 +151,8 @@ class ApprovalRepository(Protocol):
 class DelegationPort(Protocol):
     """提交、查询和取消外部子执行的可选协议。"""
 
-    async def submit(self, request: DelegationRequest) -> str:
-        """提交子执行并返回子运行 ID。"""
+    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
+        """提交子执行并返回子 Run、Task 与目标 Session 的稳定关联。"""
 
     async def result(self, child_run_id: str) -> DelegationResult | None:
         """查询子执行结果。"""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,8 @@ from dotclaw.runtime.application.dto import (
 from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot,
     MessageRole,
+    SystemContextSnapshot,
+    SystemContextSlotStatus,
 )
 from dotclaw.runtime.domain.state import AgentState
 
@@ -121,6 +124,18 @@ async def test_context_port_returns_full_messages_and_isolates_scope_cache() -> 
         MessageRole.USER,
     ]
     assert bundle.messages[0].content == "静态上下文\n\n会话上下文\n\n运行上下文"
+    raw_system_context: SystemContextSnapshot | None = bundle.metadata.system_context
+    assert raw_system_context is not None
+    system_context: SystemContextSnapshot = raw_system_context
+    assert system_context.slot_order == ("static", "session", "run")
+    assert [slot.status for slot in system_context.slots] == [
+        SystemContextSlotStatus.INCLUDED,
+        SystemContextSlotStatus.INCLUDED,
+        SystemContextSlotStatus.INCLUDED,
+    ]
+    assert system_context.rendered_content_hash == sha256(
+        bundle.messages[0].content.encode("utf-8")
+    ).hexdigest()
 
 
 async def test_memory_failure_degrades_current_context_only() -> None:
@@ -134,6 +149,13 @@ async def test_memory_failure_degrades_current_context_only() -> None:
 
     assert bundle.messages[0].content == "你是测试助手。"
     assert bundle.metadata.details["failed_slots"] == ["memory"]
+    raw_system_context: SystemContextSnapshot | None = bundle.metadata.system_context
+    assert raw_system_context is not None
+    system_context: SystemContextSnapshot = raw_system_context
+    assert [slot.status for slot in system_context.slots] == [
+        SystemContextSlotStatus.INCLUDED,
+        SystemContextSlotStatus.FAILED,
+    ]
 
 
 async def test_token_budget_truncates_oldest_history() -> None:

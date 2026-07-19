@@ -18,9 +18,13 @@ from dotclaw.runtime.application.dto import (
     RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
-    AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, RunStatus, ToolCall,
+    AgentPolicySnapshot, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, RunStatus, ToolCall,
+    require_json_map,
 )
 from dotclaw.context import ContextDependencies, SlotContextProvider
+from dotclaw.context.scoped_cache import SlotCacheScope
+from dotclaw.context.slot_context import SlotContext
+from dotclaw.context.slots import ContextSlot
 
 
 class PolicyPort(RunPolicyPort):
@@ -142,6 +146,21 @@ class ApprovalTool(ToolPort):
 
     async def cancel(self, run_id: str) -> None:
         """测试替身无需远程取消。"""
+
+
+class ChangingSystemSlot(ContextSlot):
+    """每次生成不同文本，用于验证恢复路径必须重放首次冻结 Slot。"""
+
+    name: str = "changing"
+    scope: SlotCacheScope = SlotCacheScope.DYNAMIC
+
+    def __init__(self) -> None:
+        self.calls: int = 0
+
+    async def produce(self, context: SlotContext) -> str | None:
+        """返回带调用序号的 system 内容。"""
+        self.calls += 1
+        return f"system-{self.calls}"
 
 
 async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: Path) -> None:
@@ -274,6 +293,73 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
     assert [message.tool_call_id for message in second_context.messages[4:]] == ["call-1", "call-2"]
 
 
+async def test_engine_freezes_initial_context_and_audits_llm_calls_without_request_message_copies(tmp_path: Path) -> None:
+    """新 Run 只保存增量事实，LLM 调用通过事件引用冻结上下文和消息序列。"""
+    llm: ReActLLM = ReActLLM()
+    engine: RuntimeEngine = RuntimeEngine(
+        RunRepositoryAdapter(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
+        SlotContextProvider((), ContextDependencies()),
+        llm,
+        CompletedTool(),
+        PolicyPort(),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+        CancellationService(),
+    )
+
+    result: RunResult = await engine.execute(_request_with_history("session-initial-context"))
+
+    messages_path: Path = tmp_path / "session-initial-context" / "agent_runs" / result.run_id / "messages.json"
+    events_path: Path = tmp_path / "session-initial-context" / "agent_runs" / result.run_id / "events.jsonl"
+    payload: JSONMap = require_json_map(json.loads(messages_path.read_text(encoding="utf-8")))
+    raw_initial_context: JSONValue | None = payload.get("initial_context")
+    assert isinstance(raw_initial_context, dict)
+    initial_context: JSONMap = raw_initial_context
+    raw_history: JSONValue | None = initial_context.get("history")
+    assert isinstance(raw_history, dict)
+    history: JSONMap = raw_history
+    assert history["recent_messages"] == [{
+        "conversation_id": "history-1",
+        "role": "assistant",
+        "content": "这是之前的回答。",
+        "created_at": "2026-07-16T00:00:00+00:00",
+    }]
+    raw_stored_messages: JSONValue | None = payload.get("messages")
+    assert isinstance(raw_stored_messages, list)
+    stored_messages: list[JSONValue] = raw_stored_messages
+    assert [message["kind"] for message in stored_messages if isinstance(message, dict)] == [
+        "user_input",
+        "llm_response",
+        "tool_result",
+        "tool_result",
+        "final_response",
+    ]
+    assert all(message["kind"] != "llm_request" for message in stored_messages if isinstance(message, dict))
+
+    events: list[JSONMap] = [
+        require_json_map(json.loads(line))
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    llm_started_events: list[JSONMap] = [
+        event for event in events if event["event_type"] == "llm_started"
+    ]
+    assert len(llm_started_events) == 2
+    raw_first_data: JSONValue | None = llm_started_events[0].get("data")
+    raw_second_data: JSONValue | None = llm_started_events[1].get("data")
+    assert isinstance(raw_first_data, dict)
+    assert isinstance(raw_second_data, dict)
+    first_data: JSONMap = raw_first_data
+    second_data: JSONMap = raw_second_data
+    assert first_data["incremental_message_ids"] == ["user-1"]
+    assert second_data["incremental_message_ids"] == [
+        "user-1",
+        f"response-{result.run_id}-2",
+        f"tool-{result.run_id}-3",
+        f"tool-{result.run_id}-4",
+    ]
+    assert all(event["event_type"] != "context_built" for event in events)
+
+
 async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path: Path) -> None:
     """审批批准后应保留首轮 Conversation、assistant 工具调用和工具执行结果。"""
     llm: ReActLLM = ReActLLM()
@@ -307,6 +393,30 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
         ToolCall("call-1", "lookup", {"source": "first"}),
         ToolCall("call-2", "lookup", {"source": "second"}),
     )
+
+
+async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> None:
+    """审批恢复不得重新计算动态 Slot，后续上下文必须使用首次冻结文本。"""
+    llm: ReActLLM = ReActLLM()
+    changing_slot: ChangingSystemSlot = ChangingSystemSlot()
+    engine: RuntimeEngine = RuntimeEngine(
+        RunRepositoryAdapter(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
+        SlotContextProvider((changing_slot,), ContextDependencies()),
+        llm,
+        ApprovalTool(),
+        PolicyPort(),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+        CancellationService(),
+    )
+
+    waiting: RunResult = await engine.execute(_request_with_history("session-frozen-slots"))
+    completed: RunResult = await engine.resolve_approval(waiting.approval_id or "", approved=True)
+
+    assert completed.status is RunStatus.COMPLETED
+    assert changing_slot.calls == 1
+    assert llm.contexts[0].messages[0].content == "system-1"
+    assert llm.contexts[1].messages[0].content == "system-1"
 
 
 async def test_rejected_approval_records_decision_and_cancels_without_conversation(tmp_path: Path) -> None:

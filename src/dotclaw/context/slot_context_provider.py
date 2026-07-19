@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 
 from dotclaw.runtime.application.execution import RunExecutionView
@@ -19,6 +20,10 @@ from ..runtime.domain.facts import (
     MessageRole,
     RunMessage,
     RunMessageKind,
+    SystemContextSlot,
+    SystemContextSlotScope,
+    SystemContextSlotStatus,
+    SystemContextSnapshot,
     get_integer,
     get_string,
     require_json_map,
@@ -60,22 +65,27 @@ class SlotContextProvider:
         """从冻结请求和执行视图构造实际发送给模型的完整消息。"""
         profile: ContextProfile = _profile_from_execution(request, execution)
         context: SlotContext = SlotContext(request, execution, profile, self._dependencies)
-        slot_texts: list[str] = []
-        source_names: list[str] = []
-        failed_slots: list[str] = []
-        slot: ContextSlot
-        for slot in self._slots:
-            if slot.name in profile.excluded_slot_names:
-                continue
-            try:
-                content: str | None = await self._load_slot(slot, context)
-            except Exception:
-                failed_slots.append(slot.name)
-                continue
-            if content:
-                slot_texts.append(content)
-                source_names.append(slot.name)
-        system_content: str = "\n\n".join(slot_texts)
+        system_context: SystemContextSnapshot
+        source_names: tuple[str, ...]
+        failed_slots: tuple[str, ...]
+        if execution.initial_context is None:
+            system_context, source_names, failed_slots = await self._build_system_context(
+                context,
+                profile,
+            )
+        else:
+            system_context = execution.initial_context.system_context
+            source_names = tuple(
+                slot.name
+                for slot in system_context.slots
+                if slot.status is SystemContextSlotStatus.INCLUDED
+            )
+            failed_slots = tuple(
+                slot.name
+                for slot in system_context.slots
+                if slot.status is SystemContextSlotStatus.FAILED
+            )
+        system_content: str = _render_system_context(system_context)
         messages: tuple[RunMessage, ...] = _build_messages(
             request,
             execution,
@@ -90,15 +100,69 @@ class SlotContextProvider:
         budgeted_messages, truncated = budget_result
         metadata: ContextMetadata = ContextMetadata(
             estimated_tokens=_estimate_tokens(budgeted_messages),
-            source_names=tuple(source_names),
+            source_names=source_names,
             truncation_applied=truncated,
             details={
-                "failed_slots": failed_slots,
+                "failed_slots": list(failed_slots),
                 "budget_policy": self._budget_policy.value,
                 "max_context_tokens": profile.max_context_tokens,
             },
+            system_context=system_context,
         )
         return ContextBundle(messages=budgeted_messages, tools=profile.tools, metadata=metadata)
+
+    async def _build_system_context(
+        self,
+        context: SlotContext,
+        profile: ContextProfile,
+    ) -> tuple[SystemContextSnapshot, tuple[str, ...], tuple[str, ...]]:
+        """首次调用计算全部 Slot 并生成可在本 Run 内重放的冻结 system 快照。"""
+        slot_texts: list[str] = []
+        source_names: list[str] = []
+        failed_slots: list[str] = []
+        slot_snapshots: list[SystemContextSlot] = []
+        slot: ContextSlot
+        for slot in self._slots:
+            if slot.name in profile.excluded_slot_names:
+                continue
+            try:
+                content: str | None = await self._load_slot(slot, context)
+            except Exception:
+                failed_slots.append(slot.name)
+                slot_snapshots.append(SystemContextSlot(
+                    name=slot.name,
+                    scope=SystemContextSlotScope(slot.scope.value),
+                    status=SystemContextSlotStatus.FAILED,
+                    error_code="slot_production_failed",
+                ))
+                continue
+            if content:
+                slot_texts.append(content)
+                source_names.append(slot.name)
+                slot_snapshots.append(SystemContextSlot(
+                    name=slot.name,
+                    scope=SystemContextSlotScope(slot.scope.value),
+                    status=SystemContextSlotStatus.INCLUDED,
+                    content=content,
+                    content_hash=_content_hash(content),
+                ))
+                continue
+            slot_snapshots.append(SystemContextSlot(
+                name=slot.name,
+                scope=SystemContextSlotScope(slot.scope.value),
+                status=SystemContextSlotStatus.EMPTY,
+            ))
+        system_content: str = "\n\n".join(slot_texts)
+        return (
+            SystemContextSnapshot(
+                version=1,
+                slot_order=tuple(snapshot.name for snapshot in slot_snapshots),
+                slots=tuple(slot_snapshots),
+                rendered_content_hash=_content_hash(system_content),
+            ),
+            tuple(source_names),
+            tuple(failed_slots),
+        )
 
     async def _load_slot(self, slot: ContextSlot, context: SlotContext) -> str | None:
         """按槽位声明的作用域读取或生成缓存内容。"""
@@ -210,6 +274,7 @@ def _build_messages(
         if run_message.kind not in {
             RunMessageKind.LLM_RESPONSE,
             RunMessageKind.TOOL_RESULT,
+            RunMessageKind.DELEGATION_RESULT,
         }:
             continue
         messages.append(RunMessage(
@@ -242,6 +307,25 @@ def _estimate_tokens(messages: tuple[RunMessage, ...]) -> int:
     """使用保守的字符估算计算上下文 token 数。"""
     character_count: int = sum(len(message.content) for message in messages)
     return max((character_count + 3) // 4, 1)
+
+
+def _content_hash(content: str) -> str:
+    """计算冻结文本的 SHA-256，供审计和恢复时校验。"""
+    return sha256(content.encode("utf-8")).hexdigest()
+
+
+def _render_system_context(system_context: SystemContextSnapshot) -> str:
+    """按冻结 Slot 顺序重建 system 文本，忽略空槽和失败槽。"""
+    slots_by_name: dict[str, SystemContextSlot] = {
+        slot.name: slot for slot in system_context.slots
+    }
+    contents: list[str] = []
+    slot_name: str
+    for slot_name in system_context.slot_order:
+        slot: SystemContextSlot = slots_by_name[slot_name]
+        if slot.status is SystemContextSlotStatus.INCLUDED:
+            contents.append(slot.content)
+    return "\n\n".join(contents)
 
 
 def _resequenced(messages: tuple[RunMessage, ...]) -> tuple[RunMessage, ...]:

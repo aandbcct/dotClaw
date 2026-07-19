@@ -12,6 +12,7 @@ class RunEventType(StrEnum):
     """需要持久化的运行事实类型。"""
 
     RUN_STARTED = "run_started"
+    # 仅用于读取阶段 C 之前的历史 events.jsonl；新写入路径改由 LLM_STARTED 审计。
     CONTEXT_BUILT = "context_built"
     LLM_STARTED = "llm_started"
     LLM_COMPLETED = "llm_completed"

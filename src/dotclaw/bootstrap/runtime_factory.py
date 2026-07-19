@@ -9,6 +9,7 @@ from ..agent.identity import AgentIdentity
 from ..config.settings import Config
 from ..context import (
     AvailableAgentsSlot,
+    ContextBudgetPolicy,
     ContextDependencies,
     IdentitySlot,
     KnowledgeSlot,
@@ -87,6 +88,7 @@ def build_runtime_services(
             memory_manager=memory_manager,
             agent_registry=agent_registry,
         ),
+        budget_policy=ContextBudgetPolicy.REJECT,
     )
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(
         storage_root,

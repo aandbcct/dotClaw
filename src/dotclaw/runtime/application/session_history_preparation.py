@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..domain.facts import ContextCompactionScope, MessageRole
+from ..domain.facts import ContextCompactionScope, HistoryCompressionSnapshot, MessageRole
 from .context_compaction import ContextCompactionRequest, ContextFragment
 from .dto import ConversationMessage, ConversationSnapshot
 from .ports import ContextCompactionPort
@@ -170,7 +170,20 @@ class SessionHistoryPreparationService:
         for conversation in _recent_conversations(session, active.covered_through_conversation_id if active is not None else ""):
             messages.append(ConversationMessage(f"{conversation.conversation_id}:user", MessageRole.USER, conversation.user_query, conversation.created_at))
             messages.append(ConversationMessage(f"{conversation.conversation_id}:assistant", MessageRole.ASSISTANT, conversation.final_answer, conversation.created_at))
-        return ConversationSnapshot(session.id, tuple(messages), session.conversation_version)
+        compressed_history: HistoryCompressionSnapshot | None = None
+        if active is not None:
+            compressed_history = HistoryCompressionSnapshot(
+                compression_version=active.version,
+                covered_through_conversation_id=active.covered_through_conversation_id,
+                content=active.content,
+                content_hash=active.content_hash,
+            )
+        return ConversationSnapshot(
+            session.id,
+            tuple(messages),
+            session.conversation_version,
+            compressed_history,
+        )
 
 
 def _recent_conversations(

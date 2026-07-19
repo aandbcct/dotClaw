@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ..domain.control import AgentAction
-from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage
+from ..domain.facts import AgentPolicySnapshot, InitialContextSnapshot, JSONMap, RunMessage
 from dotclaw.runtime.domain.state import AgentState
 from .dto import RunRequest
 
@@ -78,6 +78,8 @@ class RunExecution:
     """当前 Run 已持久化的执行消息，仅供 Port 构造后续上下文。"""
     has_streamed_text: bool = False
     """本次运行是否已向入口发送过模型文本增量。"""
+    initial_context: InitialContextSnapshot | None = None
+    """首次模型调用冻结的初始上下文；后续轮次和审批恢复必须重放该事实。"""
 
     def view(self) -> RunExecutionView:
         """生成提供给 Port 的只读执行视图。"""
@@ -89,6 +91,7 @@ class RunExecution:
             message_cursor=self.message_cursor,
             pending_control=self.pending_control,
             run_messages=self.run_messages,
+            initial_context=self.initial_context,
         )
 
     def update_state(self, state: AgentState, action: AgentAction) -> None:
@@ -105,6 +108,12 @@ class RunExecution:
     def mark_text_streamed(self) -> None:
         """记录入口已收到模型文本，避免终态重复呈现相同内容。"""
         self.has_streamed_text = True
+
+    def freeze_initial_context(self, initial_context: InitialContextSnapshot) -> None:
+        """绑定已落盘的初始上下文，禁止本次运行后续轮次重新生成 system Slot。"""
+        if self.initial_context is not None and self.initial_context != initial_context:
+            raise ValueError("Run 初始上下文已冻结，禁止替换为不同内容")
+        self.initial_context = initial_context
 
     def to_dict(self) -> JSONMap:
         """序列化为不含外部实例引用的检查点数据。"""
@@ -134,3 +143,5 @@ class RunExecutionView:
     pending_control: PendingControl | None
     run_messages: tuple[RunMessage, ...] = ()
     """本 Run 已持久化的消息证据；不包含 Session 可变对象。"""
+    initial_context: InitialContextSnapshot | None = None
+    """首次调用冻结的 system 与历史快照；存在时 ContextPort 必须直接重放。"""

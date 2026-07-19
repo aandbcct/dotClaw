@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, replace
+from hashlib import sha256
 
 from ..domain.events import (
     ApprovalResolved,
@@ -20,6 +22,9 @@ from ..domain.events import (
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
 from ..domain.facts import (
     AgentRun,
+    HistoryContextSnapshot,
+    HistoryMessageSnapshot,
+    InitialContextSnapshot,
     JSONMap,
     JSONValue,
     MessageRole,
@@ -30,6 +35,10 @@ from ..domain.facts import (
     RunMessageKind,
     RunStatistics,
     RunStatus,
+    SystemContextSlot,
+    SystemContextSlotScope,
+    SystemContextSlotStatus,
+    SystemContextSnapshot,
     ToolCall,
     utc_now_iso,
 )
@@ -37,10 +46,12 @@ from ..domain.state import AgentPhase, AgentState
 from .approval_service import ApprovalService
 from .cancellation_service import CancellationService
 from .dto import (
+    ContextBundle,
     ConversationMessage,
     ConversationSnapshot,
     DelegationRequest,
     DelegationResult,
+    DelegationSubmission,
     RunRequest,
     RunResult,
     ToolInvocation,
@@ -115,6 +126,10 @@ class RuntimeEngine:
         if run is None or checkpoint is None or run.status is not RunStatus.WAITING_APPROVAL:
             return RunResult(record.run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "审批恢复状态无效"))
         messages = await self._run_repository.load_messages(record.session_id, record.run_id)
+        initial_context: InitialContextSnapshot | None = await self._run_repository.load_initial_context(
+            record.session_id,
+            record.run_id,
+        )
         input_message = next((message for message in messages if message.message_id == run.input_message_id), None)
         if input_message is None:
             return RunResult(record.run_id, RunStatus.FAILED, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "缺少运行输入消息"))
@@ -123,7 +138,11 @@ class RuntimeEngine:
             lease_id="approval-resume",
             agent_id=run.agent_id,
             user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
-            conversation=_conversation_from_run_messages(run, messages, input_message),
+            conversation=(
+                _conversation_from_initial_context(initial_context)
+                if initial_context is not None
+                else _legacy_conversation_from_run_messages(run, messages, input_message)
+            ),
         )
         state: AgentState = _state_from_checkpoint(checkpoint)
         transition = state.transition(ApprovalResolved(approval_id, approved))
@@ -135,6 +154,7 @@ class RuntimeEngine:
             budget=RunBudget(max_iterations=run.policy.max_iterations),
             message_cursor=checkpoint.message_sequence,
             run_messages=messages,
+            initial_context=initial_context,
         )
         pending_calls: tuple[ToolCall, ...] = _calls_from_checkpoint(checkpoint)
         event_sequence: int = await self._event(
@@ -309,15 +329,38 @@ class RuntimeEngine:
                 ))
                 execution.update_state(transition.state, transition.action)
                 continue
-            context = await self._context_port.build(execution.request, execution.view())
-            context_message_ids: list[str] = []
-            for context_message in context.messages:
-                sequence += 1
-                persisted_context_message = replace(context_message, message_id=f"context-{execution.run_id}-{sequence}", sequence=sequence)
-                messages.append(persisted_context_message)
-                context_message_ids.append(persisted_context_message.message_id)
-            await self._save_messages(run, execution, messages)
-            event_number = await self._event(run, event_number, RunEventType.CONTEXT_BUILT, tuple(context_message_ids))
+            try:
+                context = await self._context_port.build(execution.request, execution.view())
+            except Exception as error:
+                return await self._fail(execution, run, tuple(messages), event_number, f"模型上下文构建失败：{error}")
+            if context.metadata.truncation_applied:
+                return await self._fail(
+                    execution,
+                    run,
+                    tuple(messages),
+                    event_number,
+                    "Runtime 不允许在 Run 内静默裁剪上下文，请在创建 Run 前压缩 Session 历史",
+                )
+            initial_context: InitialContextSnapshot | None = await self._run_repository.load_initial_context(
+                run.session_id,
+                run.run_id,
+            )
+            if initial_context is None:
+                initial_context = _initial_context_from_request(execution.request, context)
+                await self._run_repository.save_initial_context(
+                    run.session_id,
+                    run.run_id,
+                    initial_context,
+                )
+            execution.freeze_initial_context(initial_context)
+            event_number = await self._event(
+                run,
+                event_number,
+                RunEventType.LLM_STARTED,
+                tuple(message.message_id for message in messages),
+                "模型调用开始",
+                _llm_started_data(run, initial_context, messages, context),
+            )
             try:
                 response = await self._llm_port.complete(context, execution.view())
             except Exception as error:
@@ -394,7 +437,8 @@ class RuntimeEngine:
             )
             return DelegationDriveResult(error=failed)
         try:
-            child_run_id: str = await self._delegation_port.submit(request)
+            submission: DelegationSubmission = await self._delegation_port.submit(request)
+            child_run_id: str = submission.child_run_id
             self._cancellation_service.register_delegated_run(execution.run_id, child_run_id)
             if manage_state:
                 submitted_transition = execution.state.transition(DelegationSubmitted(child_run_id))
@@ -405,7 +449,12 @@ class RuntimeEngine:
                 RunEventType.DELEGATION_SUBMITTED,
                 (),
                 "已提交 delegation 子运行",
-                {"child_run_id": child_run_id},
+                {
+                    "task_id": submission.task_id,
+                    "child_run_id": child_run_id,
+                    "target_agent_id": request.target_agent_id,
+                    "target_session_id": submission.target_session_id,
+                },
             )
             child_result: DelegationResult | None = await self._delegation_port.result(child_run_id)
         except Exception as error:
@@ -447,10 +496,16 @@ class RuntimeEngine:
         result_message: RunMessage = RunMessage(
             message_id=f"delegation-{execution.run_id}-{next_sequence}",
             sequence=next_sequence,
-            kind=RunMessageKind.TOOL_RESULT,
+            kind=RunMessageKind.DELEGATION_RESULT,
             role=MessageRole.TOOL,
             content=child_output,
-            tool_call_id="delegation",
+            tool_call_id=request.source_tool_call_id,
+            metadata={
+                "task_id": submission.task_id,
+                "child_run_id": child_result.child_run_id,
+                "target_agent_id": request.target_agent_id,
+                "target_session_id": submission.target_session_id,
+            },
         )
         messages.append(result_message)
         delegated_run: AgentRun = _with_tool_statistic(run)
@@ -461,7 +516,11 @@ class RuntimeEngine:
             RunEventType.DELEGATION_COMPLETED,
             (result_message.message_id,),
             "delegation 子运行已完成",
-            {"child_run_id": child_result.child_run_id, "status": child_result.status.value},
+            {
+                "task_id": submission.task_id,
+                "child_run_id": child_result.child_run_id,
+                "status": child_result.status.value,
+            },
         )
         succeeded: bool = child_result.status is RunStatus.COMPLETED
         if manage_state:
@@ -568,7 +627,128 @@ def _calls_from_checkpoint(checkpoint: RunCheckpoint) -> tuple[ToolCall, ...]:
     return (ToolCall(call_id, call_name, arguments),)
 
 
-def _conversation_from_run_messages(
+def _initial_context_from_request(
+    request: RunRequest,
+    context: ContextBundle,
+) -> InitialContextSnapshot:
+    """将首次实际注入的 system 和 Session 历史冻结为 Run 的顶层快照。"""
+    system_context: SystemContextSnapshot = context.metadata.system_context or _fallback_system_context(context)
+    recent_messages: list[HistoryMessageSnapshot] = []
+    conversation_message: ConversationMessage
+    for conversation_message in request.conversation.messages:
+        if _is_compression_summary_message(conversation_message):
+            continue
+        recent_messages.append(HistoryMessageSnapshot(
+            conversation_id=conversation_message.message_id,
+            role=conversation_message.role,
+            content=conversation_message.content,
+            created_at=conversation_message.created_at,
+        ))
+    history: HistoryContextSnapshot = HistoryContextSnapshot(
+        source_session_id=request.conversation.session_id,
+        source_conversation_version=request.conversation.version,
+        recent_messages=tuple(recent_messages),
+        content_hash=_hash_json_value({
+            "compressed_history": (
+                None
+                if request.conversation.compressed_history is None
+                else request.conversation.compressed_history.to_dict()
+            ),
+            "recent_messages": [message.to_dict() for message in recent_messages],
+        }),
+        compressed_history=request.conversation.compressed_history,
+        truncation_applied=context.metadata.truncation_applied,
+    )
+    return InitialContextSnapshot(system_context=system_context, history=history)
+
+
+def _fallback_system_context(context: ContextBundle) -> SystemContextSnapshot:
+    """为旧 ContextPort 生成兼容快照，确保新运行不再持久化 LLM_REQUEST。"""
+    system_content: str = "\n\n".join(
+        message.content for message in context.messages if message.role is MessageRole.SYSTEM
+    )
+    slot: SystemContextSlot = SystemContextSlot(
+        name="legacy_context_port",
+        scope=SystemContextSlotScope.DYNAMIC,
+        status=SystemContextSlotStatus.INCLUDED if system_content else SystemContextSlotStatus.EMPTY,
+        content=system_content,
+        content_hash=_hash_text(system_content) if system_content else "",
+    )
+    return SystemContextSnapshot(
+        version=1,
+        slot_order=(slot.name,),
+        slots=(slot,),
+        rendered_content_hash=_hash_text(system_content),
+    )
+
+
+def _llm_started_data(
+    run: AgentRun,
+    initial_context: InitialContextSnapshot,
+    messages: list[RunMessage],
+    context: ContextBundle,
+) -> JSONMap:
+    """构造可复原模型输入的审计字段，而不将完整输入重复写入消息流。"""
+    history_version: int = (
+        initial_context.history.compressed_history.compression_version
+        if initial_context.history.compressed_history is not None
+        else initial_context.history.source_conversation_version
+    )
+    return {
+        "call_index": run.statistics.llm_call_count + 1,
+        "model_id": run.policy.model_id,
+        "system_context_version": initial_context.system_context.version,
+        "history_version": history_version,
+        "incremental_message_ids": [message.message_id for message in messages],
+        "context_hash": _hash_json_value([message.to_dict() for message in context.messages]),
+        "tool_schema_hash": _hash_json_value([tool.to_dict() for tool in context.tools]),
+    }
+
+
+def _conversation_from_initial_context(initial_context: InitialContextSnapshot) -> ConversationSnapshot:
+    """由冻结快照重建审批恢复所需的历史，不查询当前 Session 可变状态。"""
+    messages: list[ConversationMessage] = []
+    compression = initial_context.history.compressed_history
+    if compression is not None:
+        messages.append(ConversationMessage(
+            message_id=f"history-compression-{compression.compression_version}",
+            role=MessageRole.SYSTEM,
+            content=f"以下是此前对话的压缩摘要：\n{compression.content}",
+            created_at="",
+        ))
+    history_message: HistoryMessageSnapshot
+    for history_message in initial_context.history.recent_messages:
+        messages.append(ConversationMessage(
+            message_id=history_message.conversation_id,
+            role=history_message.role,
+            content=history_message.content,
+            created_at=history_message.created_at,
+        ))
+    return ConversationSnapshot(
+        session_id=initial_context.history.source_session_id,
+        messages=tuple(messages),
+        version=initial_context.history.source_conversation_version,
+        compressed_history=compression,
+    )
+
+
+def _is_compression_summary_message(message: ConversationMessage) -> bool:
+    """识别历史准备服务生成的摘要占位消息，避免在初始快照中重复保存。"""
+    return message.message_id.startswith("history-compression-") and message.role is MessageRole.SYSTEM
+
+
+def _hash_text(content: str) -> str:
+    """计算 UTF-8 文本的 SHA-256 摘要。"""
+    return sha256(content.encode("utf-8")).hexdigest()
+
+
+def _hash_json_value(value: JSONValue | list[JSONMap]) -> str:
+    """以稳定 JSON 序列化计算审计 hash，避免字典顺序影响结果。"""
+    serialized: str = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return _hash_text(serialized)
+
+
+def _legacy_conversation_from_run_messages(
     run: AgentRun,
     messages: tuple[RunMessage, ...],
     input_message: RunMessage,
@@ -673,4 +853,5 @@ def _delegation_request(
         ),
         source_agent_id=source_agent_id,
         source_session_id=source_session_id,
+        source_tool_call_id=call.call_id,
     )

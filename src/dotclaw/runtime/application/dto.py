@@ -6,11 +6,13 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ..domain.facts import (
+    HistoryCompressionSnapshot,
     JSONMap,
     MessageRole,
     RunError,
     RunMessage,
     RunStatus,
+    SystemContextSnapshot,
     ToolCall,
 )
 
@@ -41,6 +43,7 @@ class ConversationSnapshot:
     session_id: str
     messages: tuple[ConversationMessage, ...]
     version: int
+    compressed_history: HistoryCompressionSnapshot | None = None
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -48,6 +51,9 @@ class ConversationSnapshot:
             "session_id": self.session_id,
             "messages": [message.to_dict() for message in self.messages],
             "version": self.version,
+            "compressed_history": (
+                None if self.compressed_history is None else self.compressed_history.to_dict()
+            ),
         }
 
 
@@ -123,6 +129,7 @@ class ContextMetadata:
     source_names: tuple[str, ...] = ()
     truncation_applied: bool = False
     details: JSONMap = field(default_factory=dict)
+    system_context: SystemContextSnapshot | None = None
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -131,6 +138,9 @@ class ContextMetadata:
             "source_names": list(self.source_names),
             "truncation_applied": self.truncation_applied,
             "details": self.details,
+            "system_context": (
+                None if self.system_context is None else self.system_context.to_dict()
+            ),
         }
 
 
@@ -188,6 +198,16 @@ class DelegationRequest:
     input_message: ConversationMessage
     source_agent_id: str = ""
     source_session_id: str = ""
+    source_tool_call_id: str = ""
+
+
+@dataclass(frozen=True)
+class DelegationSubmission:
+    """DelegationPort 已受理的子运行和 Task 队列关联信息。"""
+
+    child_run_id: str
+    task_id: str
+    target_session_id: str
 
 
 @dataclass(frozen=True)
