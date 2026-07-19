@@ -15,4 +15,4 @@
 
 ## 上下文压缩
 
-考虑在单次agentrun中需要触发压缩的情况，每次llm_request前判断压缩
+- [ ] 考虑在单次agentrun中需要触发压缩的情况，每次llm_request前判断压缩
