@@ -28,11 +28,37 @@ class RunMessageKind(StrEnum):
     """运行消息在执行证据中的用途。"""
 
     USER_INPUT = "user_input"
+    # 仅用于读取阶段 A 之前的历史 messages.json；新写入路径改由 LLM_STARTED 事件审计调用。
     LLM_REQUEST = "llm_request"
     LLM_RESPONSE = "llm_response"
     TOOL_RESULT = "tool_result"
+    DELEGATION_RESULT = "delegation_result"
     FINAL_RESPONSE = "final_response"
     ERROR = "error"
+
+
+class ContextCompactionScope(StrEnum):
+    """版本化上下文摘要的持久化归属范围。"""
+
+    SESSION_HISTORY = "session_history"
+    RUN_CONTEXT = "run_context"
+
+
+class SystemContextSlotStatus(StrEnum):
+    """单个 system Slot 在冻结上下文中的产出状态。"""
+
+    INCLUDED = "included"
+    EMPTY = "empty"
+    FAILED = "failed"
+
+
+class SystemContextSlotScope(StrEnum):
+    """冻结 system Slot 的缓存与变化边界。"""
+
+    STATIC = "static"
+    SESSION = "session"
+    CONDITIONAL = "conditional"
+    DYNAMIC = "dynamic"
 
 
 class RunStatus(StrEnum):
@@ -104,6 +130,124 @@ class RunMessage:
             "name": self.name,
             "tool_calls": [tool_call.to_dict() for tool_call in self.tool_calls],
             "metadata": self.metadata,
+        }
+
+
+@dataclass(frozen=True)
+class SystemContextSlot:
+    """一次 Run 冻结的单个 system Slot 产物。"""
+
+    name: str
+    scope: SystemContextSlotScope
+    status: SystemContextSlotStatus
+    content: str = ""
+    content_hash: str = ""
+    error_code: str = ""
+
+    def to_dict(self) -> JSONMap:
+        """转换为 messages.json 可持久化的 Slot 记录。"""
+        return {
+            "name": self.name,
+            "scope": self.scope.value,
+            "status": self.status.value,
+            "content": self.content,
+            "content_hash": self.content_hash,
+            "error_code": self.error_code,
+        }
+
+
+@dataclass(frozen=True)
+class SystemContextSnapshot:
+    """Run 开始时冻结的结构化 system context。"""
+
+    version: int
+    slot_order: tuple[str, ...]
+    slots: tuple[SystemContextSlot, ...]
+    rendered_content_hash: str
+
+    def to_dict(self) -> JSONMap:
+        """转换为 messages.json 的 system_context 区域。"""
+        return {
+            "version": self.version,
+            "slot_order": list(self.slot_order),
+            "slots": [slot.to_dict() for slot in self.slots],
+            "rendered_content_hash": self.rendered_content_hash,
+        }
+
+
+@dataclass(frozen=True)
+class HistoryMessageSnapshot:
+    """冻结历史中来自指定 Conversation 的一条消息。"""
+
+    conversation_id: str
+    role: MessageRole
+    content: str
+    created_at: str = ""
+
+    def to_dict(self) -> JSONMap:
+        """转换为 messages.json 的近期历史记录。"""
+        return {
+            "conversation_id": self.conversation_id,
+            "role": self.role.value,
+            "content": self.content,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class HistoryCompressionSnapshot:
+    """某个 Session 历史压缩版本在 Run 中的冻结引用。"""
+
+    compression_version: int
+    covered_through_conversation_id: str
+    content: str
+    content_hash: str
+
+    def to_dict(self) -> JSONMap:
+        """转换为 messages.json 的压缩历史记录。"""
+        return {
+            "compression_version": self.compression_version,
+            "covered_through_conversation_id": self.covered_through_conversation_id,
+            "content": self.content,
+            "content_hash": self.content_hash,
+        }
+
+
+@dataclass(frozen=True)
+class HistoryContextSnapshot:
+    """Run 开始时实际注入的 Session 历史视图。"""
+
+    source_session_id: str
+    source_conversation_version: int
+    recent_messages: tuple[HistoryMessageSnapshot, ...]
+    content_hash: str
+    compressed_history: HistoryCompressionSnapshot | None = None
+    truncation_applied: bool = False
+
+    def to_dict(self) -> JSONMap:
+        """转换为 messages.json 的 history 区域。"""
+        return {
+            "source_session_id": self.source_session_id,
+            "source_conversation_version": self.source_conversation_version,
+            "compressed_history": None if self.compressed_history is None else self.compressed_history.to_dict(),
+            "recent_messages": [message.to_dict() for message in self.recent_messages],
+            "truncation_applied": self.truncation_applied,
+            "content_hash": self.content_hash,
+        }
+
+
+@dataclass(frozen=True)
+class InitialContextSnapshot:
+    """一次 AgentRun 在任何增量消息发生前的冻结上下文。"""
+
+    system_context: SystemContextSnapshot
+    history: HistoryContextSnapshot
+
+    def to_dict(self) -> JSONMap:
+        """转换为 messages.json 顶层 initial_context 区域。"""
+        return {
+            "system_context": self.system_context.to_dict(),
+            "history": self.history.to_dict(),
         }
 
 

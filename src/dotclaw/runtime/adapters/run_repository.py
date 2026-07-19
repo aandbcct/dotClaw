@@ -14,6 +14,10 @@ from ..domain.events import RunEvent, RunEventType
 from ..domain.facts import (
     AgentPolicySnapshot,
     AgentRun,
+    HistoryCompressionSnapshot,
+    HistoryContextSnapshot,
+    HistoryMessageSnapshot,
+    InitialContextSnapshot,
     JSONMap,
     JSONValue,
     MessageRole,
@@ -23,6 +27,10 @@ from ..domain.facts import (
     RunMessageKind,
     RunStatistics,
     RunStatus,
+    SystemContextSlot,
+    SystemContextSlotScope,
+    SystemContextSlotStatus,
+    SystemContextSnapshot,
     ToolCall,
     get_integer,
     get_string,
@@ -88,6 +96,19 @@ class RunRepositoryAdapter:
     async def save_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         """原子保存完整消息，并保证消息序号与标识唯一。"""
         await asyncio.to_thread(self._save_messages_sync, session_id, run_id, messages)
+
+    async def save_initial_context(
+        self,
+        session_id: str,
+        run_id: str,
+        initial_context: InitialContextSnapshot,
+    ) -> None:
+        """原子保存 Run 的初始上下文，不允许不同内容覆盖已冻结快照。"""
+        await asyncio.to_thread(self._save_initial_context_sync, session_id, run_id, initial_context)
+
+    async def load_initial_context(self, session_id: str, run_id: str) -> InitialContextSnapshot | None:
+        """读取 Run 的初始上下文；旧格式文件没有该区域时返回空。"""
+        return await asyncio.to_thread(self._load_initial_context_sync, session_id, run_id)
 
     async def load_messages(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         """读取完整消息；尚未写入时返回空元组。"""
@@ -158,12 +179,29 @@ class RunRepositoryAdapter:
     def _save_messages_sync(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         self._validate_messages(messages)
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
-        payload: JSONMap = {
-            "run_id": run_id,
-            "version": StorageFormatVersion.INITIAL,
-            "messages": [message.to_dict() for message in messages],
-        }
-        write_json_atomic(path, payload)
+        initial_context: InitialContextSnapshot | None = self._load_initial_context_from_path_sync(path)
+        self._write_messages_payload_sync(path, run_id, messages, initial_context)
+
+    def _save_initial_context_sync(
+        self,
+        session_id: str,
+        run_id: str,
+        initial_context: InitialContextSnapshot,
+    ) -> None:
+        """冻结初始上下文，并保留可能已写入的增量消息。"""
+        path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
+        existing_initial_context: InitialContextSnapshot | None = self._load_initial_context_from_path_sync(path)
+        if existing_initial_context is not None:
+            if existing_initial_context != initial_context:
+                raise ValueError("Run 初始上下文已冻结，禁止覆盖为不同内容")
+            return
+        messages: tuple[RunMessage, ...] = self._load_messages_from_path_sync(path)
+        self._write_messages_payload_sync(path, run_id, messages, initial_context)
+
+    def _load_initial_context_sync(self, session_id: str, run_id: str) -> InitialContextSnapshot | None:
+        """从 messages.json 读取格式 v2 的 initial_context。"""
+        path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
+        return self._load_initial_context_from_path_sync(path)
 
     async def _recover_session_success_commits(self, session_id: str) -> None:
         """补偿指定 Session 下的所有未决成功提交，避免读取到互相矛盾的事实。"""
@@ -261,9 +299,14 @@ class RunRepositoryAdapter:
 
     def _load_messages_sync(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
+        return self._load_messages_from_path_sync(path)
+
+    def _load_messages_from_path_sync(self, path: Path) -> tuple[RunMessage, ...]:
+        """兼容读取格式 v1 和 v2 的增量 RunMessage 数组。"""
         if not path.is_file():
             return ()
         payload: JSONMap = load_json_map(path)
+        _validate_messages_format_version(payload)
         raw_messages: JSONValue | None = payload.get("messages")
         if not isinstance(raw_messages, list):
             raise ValueError("messages.json 的 messages 字段必须是数组")
@@ -271,8 +314,38 @@ class RunRepositoryAdapter:
         raw_message: JSONValue
         for raw_message in raw_messages:
             messages.append(_run_message_from_dict(require_json_map(raw_message)))
-        self._validate_messages(tuple(messages))
-        return tuple(messages)
+        result: tuple[RunMessage, ...] = tuple(messages)
+        self._validate_messages(result)
+        return result
+
+    def _load_initial_context_from_path_sync(self, path: Path) -> InitialContextSnapshot | None:
+        """读取 v2 初始上下文；v1 或未初始化文件均视为没有快照。"""
+        if not path.is_file():
+            return None
+        payload: JSONMap = load_json_map(path)
+        version: int = _validate_messages_format_version(payload)
+        if version < StorageFormatVersion.INITIAL_CONTEXT:
+            return None
+        raw_initial_context: JSONValue | None = payload.get("initial_context")
+        if raw_initial_context is None:
+            return None
+        return _initial_context_from_dict(require_json_map(raw_initial_context))
+
+    def _write_messages_payload_sync(
+        self,
+        path: Path,
+        run_id: str,
+        messages: tuple[RunMessage, ...],
+        initial_context: InitialContextSnapshot | None,
+    ) -> None:
+        """以当前 v2 格式原子写入初始上下文和增量消息。"""
+        payload: JSONMap = {
+            "run_id": run_id,
+            "version": StorageFormatVersion.INITIAL_CONTEXT,
+            "initial_context": None if initial_context is None else initial_context.to_dict(),
+            "messages": [message.to_dict() for message in messages],
+        }
+        write_json_atomic(path, payload)
 
     def _append_event_sync(self, session_id: str, event: RunEvent) -> None:
         message_ids: frozenset[str] = frozenset(
@@ -525,6 +598,107 @@ def _run_message_from_dict(data: JSONMap) -> RunMessage:
         tool_calls=tuple(tool_calls),
         metadata=_json_map_or_empty(data.get("metadata")),
     )
+
+
+def _validate_messages_format_version(payload: JSONMap) -> int:
+    """校验 messages.json 支持的格式版本并返回其整数值。"""
+    version: int = get_integer(payload, "version", int(StorageFormatVersion.INITIAL))
+    supported_versions: frozenset[int] = frozenset({
+        int(StorageFormatVersion.INITIAL),
+        int(StorageFormatVersion.INITIAL_CONTEXT),
+    })
+    if version not in supported_versions:
+        raise ValueError(f"不支持的 messages.json 格式版本：{version}")
+    return version
+
+
+def _initial_context_from_dict(data: JSONMap) -> InitialContextSnapshot:
+    """将 messages.json v2 的 initial_context 反序列化为领域事实。"""
+    raw_system_context: JSONValue | None = data.get("system_context")
+    raw_history: JSONValue | None = data.get("history")
+    if raw_system_context is None or raw_history is None:
+        raise ValueError("initial_context 必须包含 system_context 和 history")
+    return InitialContextSnapshot(
+        system_context=_system_context_snapshot_from_dict(require_json_map(raw_system_context)),
+        history=_history_context_snapshot_from_dict(require_json_map(raw_history)),
+    )
+
+
+def _system_context_snapshot_from_dict(data: JSONMap) -> SystemContextSnapshot:
+    """反序列化按 Slot 记录的冻结 system context。"""
+    raw_slot_order: JSONValue | None = data.get("slot_order")
+    raw_slots: JSONValue | None = data.get("slots")
+    if not isinstance(raw_slot_order, list) or not all(isinstance(name, str) for name in raw_slot_order):
+        raise ValueError("system_context.slot_order 必须是字符串数组")
+    if not isinstance(raw_slots, list):
+        raise ValueError("system_context.slots 必须是数组")
+    slots: list[SystemContextSlot] = []
+    raw_slot: JSONValue
+    for raw_slot in raw_slots:
+        slot_data: JSONMap = require_json_map(raw_slot)
+        slots.append(SystemContextSlot(
+            name=get_string(slot_data, "name"),
+            scope=SystemContextSlotScope(get_string(slot_data, "scope")),
+            status=SystemContextSlotStatus(get_string(slot_data, "status")),
+            content=get_string(slot_data, "content"),
+            content_hash=get_string(slot_data, "content_hash"),
+            error_code=get_string(slot_data, "error_code"),
+        ))
+    slot_order: tuple[str, ...] = tuple(raw_slot_order)
+    slot_names: frozenset[str] = frozenset(slot.name for slot in slots)
+    if len(slot_order) != len(set(slot_order)) or set(slot_order) != slot_names:
+        raise ValueError("system_context.slot_order 必须与 slots 一一对应且不重复")
+    return SystemContextSnapshot(
+        version=get_integer(data, "version"),
+        slot_order=slot_order,
+        slots=tuple(slots),
+        rendered_content_hash=get_string(data, "rendered_content_hash"),
+    )
+
+
+def _history_context_snapshot_from_dict(data: JSONMap) -> HistoryContextSnapshot:
+    """反序列化冻结的压缩历史和近期原始历史。"""
+    raw_recent_messages: JSONValue | None = data.get("recent_messages")
+    if not isinstance(raw_recent_messages, list):
+        raise ValueError("history.recent_messages 必须是数组")
+    recent_messages: list[HistoryMessageSnapshot] = []
+    raw_message: JSONValue
+    for raw_message in raw_recent_messages:
+        message_data: JSONMap = require_json_map(raw_message)
+        recent_messages.append(HistoryMessageSnapshot(
+            conversation_id=get_string(message_data, "conversation_id"),
+            role=MessageRole(get_string(message_data, "role")),
+            content=get_string(message_data, "content"),
+            created_at=get_string(message_data, "created_at"),
+        ))
+    raw_compressed_history: JSONValue | None = data.get("compressed_history")
+    compressed_history: HistoryCompressionSnapshot | None = None
+    if raw_compressed_history is not None:
+        compressed_data: JSONMap = require_json_map(raw_compressed_history)
+        compressed_history = HistoryCompressionSnapshot(
+            compression_version=get_integer(compressed_data, "compression_version"),
+            covered_through_conversation_id=get_string(compressed_data, "covered_through_conversation_id"),
+            content=get_string(compressed_data, "content"),
+            content_hash=get_string(compressed_data, "content_hash"),
+        )
+    return HistoryContextSnapshot(
+        source_session_id=get_string(data, "source_session_id"),
+        source_conversation_version=get_integer(data, "source_conversation_version"),
+        recent_messages=tuple(recent_messages),
+        content_hash=get_string(data, "content_hash"),
+        compressed_history=compressed_history,
+        truncation_applied=_get_boolean(data, "truncation_applied"),
+    )
+
+
+def _get_boolean(data: JSONMap, field_name: str, default: bool = False) -> bool:
+    """读取严格布尔字段，缺失时使用调用方给出的默认值。"""
+    value: JSONValue | None = data.get(field_name)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} 必须是布尔值")
+    return value
 
 
 def _conversation_message_from_dict(data: JSONMap) -> ConversationMessage:

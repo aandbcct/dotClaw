@@ -15,6 +15,7 @@ class StorageFormatVersion(IntEnum):
     """Runtime v2 文件容器的当前格式版本。"""
 
     INITIAL = 1
+    INITIAL_CONTEXT = 2
 
 
 class RunStorageFileName(StrEnum):

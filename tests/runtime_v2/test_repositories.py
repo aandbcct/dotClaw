@@ -23,12 +23,28 @@ from dotclaw.runtime.domain.facts import (
     AgentRun,
     ApprovalRecord,
     ApprovalStatus,
+    ContextCompactionScope,
+    HistoryContextSnapshot,
+    HistoryMessageSnapshot,
+    InitialContextSnapshot,
+    JSONMap,
+    JSONValue,
     MessageRole,
     RunCheckpoint,
     RunMessage,
     RunMessageKind,
     RunStatistics,
     RunStatus,
+    SystemContextSlot,
+    SystemContextSlotScope,
+    SystemContextSlotStatus,
+    SystemContextSnapshot,
+    require_json_map,
+)
+from dotclaw.runtime.application.context_compaction import (
+    ContextCompactionRequest,
+    ContextCompactionResult,
+    ContextFragment,
 )
 from dotclaw.session.session import Session, SessionManager
 
@@ -70,6 +86,35 @@ def _build_messages() -> tuple[RunMessage, RunMessage]:
         content="你好，我可以帮助你。",
     )
     return user_message, final_message
+
+
+def _build_initial_context() -> InitialContextSnapshot:
+    """构造包含按 Slot 记录 system 内容的 v2 初始上下文。"""
+    return InitialContextSnapshot(
+        system_context=SystemContextSnapshot(
+            version=1,
+            slot_order=("identity",),
+            slots=(SystemContextSlot(
+                name="identity",
+                scope=SystemContextSlotScope.STATIC,
+                status=SystemContextSlotStatus.INCLUDED,
+                content="你是测试助手。",
+                content_hash="system-slot-hash",
+            ),),
+            rendered_content_hash="system-rendered-hash",
+        ),
+        history=HistoryContextSnapshot(
+            source_session_id="session-1",
+            source_conversation_version=1,
+            recent_messages=(HistoryMessageSnapshot(
+                conversation_id="conversation-1",
+                role=MessageRole.USER,
+                content="历史问题",
+                created_at="2026-07-16T00:00:00+00:00",
+            ),),
+            content_hash="history-hash",
+        ),
+    )
 
 
 def _completed_event(run: AgentRun, final_message: RunMessage, sequence: int) -> RunEvent:
@@ -118,6 +163,118 @@ async def test_run_repository_adapter_preserves_message_event_order(tmp_path: Pa
     events_path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "events.jsonl"
     assert len(events_path.read_text(encoding="utf-8").splitlines()) == 2
     assert not tuple(tmp_path.rglob("*.tmp"))
+
+
+async def test_messages_v2_persists_immutable_initial_context_and_incremental_messages(tmp_path: Path) -> None:
+    """v2 将初始上下文与 Run 增量消息分开保存，且冻结后不可被不同内容覆盖。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run: AgentRun = _build_running_run()
+    user_message: RunMessage
+    final_message: RunMessage
+    user_message, final_message = _build_messages()
+    initial_context: InitialContextSnapshot = _build_initial_context()
+    await repository.create_run(run)
+
+    await repository.save_initial_context(run.session_id, run.run_id, initial_context)
+    await repository.save_messages(run.session_id, run.run_id, (user_message, final_message))
+
+    assert await repository.load_initial_context(run.session_id, run.run_id) == initial_context
+    assert await repository.load_messages(run.session_id, run.run_id) == (user_message, final_message)
+    payload_path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "messages.json"
+    payload: JSONMap = require_json_map(json.loads(payload_path.read_text(encoding="utf-8")))
+    assert payload["version"] == 2
+    assert payload["initial_context"] == initial_context.to_dict()
+    raw_messages: JSONValue = payload["messages"]
+    assert isinstance(raw_messages, list)
+    serialized_messages: list[JSONMap] = [require_json_map(message) for message in raw_messages]
+    assert [message["kind"] for message in serialized_messages] == ["user_input", "final_response"]
+
+    changed_context: InitialContextSnapshot = replace(
+        initial_context,
+        system_context=replace(initial_context.system_context, rendered_content_hash="changed-hash"),
+    )
+    with pytest.raises(ValueError, match="初始上下文已冻结"):
+        await repository.save_initial_context(run.session_id, run.run_id, changed_context)
+
+
+async def test_messages_v1_remains_readable_and_is_upgraded_on_next_write(tmp_path: Path) -> None:
+    """旧格式可读取；下一次消息写入自动升级为没有初始快照的 v2 格式。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run: AgentRun = _build_running_run()
+    user_message: RunMessage
+    final_message: RunMessage
+    user_message, final_message = _build_messages()
+    await repository.create_run(run)
+    message_path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "messages.json"
+    message_path.write_text(json.dumps({
+        "run_id": run.run_id,
+        "version": 1,
+        "messages": [user_message.to_dict()],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    assert await repository.load_initial_context(run.session_id, run.run_id) is None
+    assert await repository.load_messages(run.session_id, run.run_id) == (user_message,)
+
+    await repository.save_messages(run.session_id, run.run_id, (user_message, final_message))
+    upgraded_payload: JSONMap = require_json_map(json.loads(message_path.read_text(encoding="utf-8")))
+    assert upgraded_payload["version"] == 2
+    assert upgraded_payload["initial_context"] is None
+    assert await repository.load_messages(run.session_id, run.run_id) == (user_message, final_message)
+
+
+async def test_llm_started_event_audits_call_without_llm_request_message(tmp_path: Path) -> None:
+    """模型调用由 LLM_STARTED 事件审计，事件只引用已保存的增量消息。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run: AgentRun = _build_running_run()
+    user_message: RunMessage
+    user_message, _ = _build_messages()
+    await repository.create_run(run)
+    await repository.save_messages(run.session_id, run.run_id, (user_message,))
+
+    event: RunEvent = RunEvent(
+        run_id=run.run_id,
+        sequence=1,
+        event_type=RunEventType.LLM_STARTED,
+        occurred_at="2026-07-16T00:00:01+00:00",
+        message_ids=(user_message.message_id,),
+        data={
+            "call_index": 1,
+            "model_id": "model-v1",
+            "system_context_version": 1,
+            "history_version": 1,
+            "incremental_message_ids": [user_message.message_id],
+            "context_hash": "context-hash",
+            "tool_schema_hash": "tool-schema-hash",
+        },
+    )
+    await repository.append_event(run.session_id, event)
+
+    event_path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "events.jsonl"
+    event_data: JSONMap = require_json_map(json.loads(event_path.read_text(encoding="utf-8")))
+    assert event_data["event_type"] == RunEventType.LLM_STARTED.value
+    assert event_data["message_ids"] == [user_message.message_id]
+
+
+def test_context_compaction_contract_supports_session_and_run_scopes() -> None:
+    """通用压缩 DTO 从阶段 A 起支持 Session 与 Run 两个作用域。"""
+    fragment: ContextFragment = ContextFragment("fragment-1", MessageRole.USER, "需要压缩的内容")
+    session_request: ContextCompactionRequest = ContextCompactionRequest(
+        scope=ContextCompactionScope.SESSION_HISTORY,
+        source_version=3,
+        target_token_budget=1200,
+        fragments=(fragment,),
+    )
+    run_result: ContextCompactionResult = ContextCompactionResult(
+        scope=ContextCompactionScope.RUN_CONTEXT,
+        version=1,
+        covered_through_fragment_id=fragment.fragment_id,
+        content="压缩摘要",
+        content_hash="content-hash",
+        source_hash="source-hash",
+    )
+
+    assert session_request.scope is ContextCompactionScope.SESSION_HISTORY
+    assert run_result.scope is ContextCompactionScope.RUN_CONTEXT
 
 
 async def test_success_projection_and_checkpoint_are_isolated_by_run(tmp_path: Path) -> None:

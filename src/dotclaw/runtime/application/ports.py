@@ -9,10 +9,12 @@ from dotclaw.runtime.application.execution import RunExecutionView
 from ..domain.facts import (
     AgentRun,
     ApprovalRecord,
+    InitialContextSnapshot,
     RunCheckpoint,
     RunMessage,
     AgentPolicySnapshot,
 )
+from .context_compaction import ContextCompactionRequest, ContextCompactionResult
 from .dto import ContextBundle, DelegationRequest, DelegationResult, RunRequest, ToolInvocation, ToolResult
 
 
@@ -21,6 +23,13 @@ class TextStreamPort(Protocol):
 
     async def emit(self, run_id: str, chunk: str) -> None:
         """输出指定运行的一段非空文本增量。"""
+
+
+class ContextCompactionPort(Protocol):
+    """将有序上下文片段压缩为可版本化摘要的协议。"""
+
+    async def compact(self, request: ContextCompactionRequest) -> ContextCompactionResult:
+        """基于已有摘要与待覆盖片段生成新的摘要。"""
 
 
 class ConversationProjectionPort(Protocol):
@@ -52,6 +61,17 @@ class RunRepository(Protocol):
 
     async def save_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         """原子更新完整运行消息。"""
+
+    async def save_initial_context(
+        self,
+        session_id: str,
+        run_id: str,
+        initial_context: InitialContextSnapshot,
+    ) -> None:
+        """原子保存 Run 的冻结初始上下文，禁止覆盖内容不同的既有快照。"""
+
+    async def load_initial_context(self, session_id: str, run_id: str) -> InitialContextSnapshot | None:
+        """加载 Run 的冻结初始上下文；旧格式或尚未保存时返回空。"""
 
     async def load_messages(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         """加载完整运行消息。"""
