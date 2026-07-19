@@ -179,6 +179,7 @@ class RunRepositoryAdapter:
     def _save_messages_sync(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         self._validate_messages(messages)
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
+        self._reject_legacy_messages_write_sync(path)
         initial_context: InitialContextSnapshot | None = self._load_initial_context_from_path_sync(path)
         self._write_messages_payload_sync(path, run_id, messages, initial_context)
 
@@ -190,6 +191,7 @@ class RunRepositoryAdapter:
     ) -> None:
         """冻结初始上下文，并保留可能已写入的增量消息。"""
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
+        self._reject_legacy_messages_write_sync(path)
         existing_initial_context: InitialContextSnapshot | None = self._load_initial_context_from_path_sync(path)
         if existing_initial_context is not None:
             if existing_initial_context != initial_context:
@@ -197,6 +199,17 @@ class RunRepositoryAdapter:
             return
         messages: tuple[RunMessage, ...] = self._load_messages_from_path_sync(path)
         self._write_messages_payload_sync(path, run_id, messages, initial_context)
+
+    def _reject_legacy_messages_write_sync(self, path: Path) -> None:
+        """禁止原地改写 v1 消息，避免将重复请求错误伪装成 v2 增量事实。"""
+        if not path.is_file():
+            return
+        payload: JSONMap = load_json_map(path)
+        version: int = _validate_messages_format_version(payload)
+        if version < StorageFormatVersion.INITIAL_CONTEXT:
+            raise ValueError(
+                "messages.json v1 仅支持读取，请先执行 scripts/migrate_messages_v1_to_v2.py",
+            )
 
     def _load_initial_context_sync(self, session_id: str, run_id: str) -> InitialContextSnapshot | None:
         """从 messages.json 读取格式 v2 的 initial_context。"""

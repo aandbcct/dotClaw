@@ -197,8 +197,8 @@ async def test_messages_v2_persists_immutable_initial_context_and_incremental_me
         await repository.save_initial_context(run.session_id, run.run_id, changed_context)
 
 
-async def test_messages_v1_remains_readable_and_is_upgraded_on_next_write(tmp_path: Path) -> None:
-    """旧格式可读取；下一次消息写入自动升级为没有初始快照的 v2 格式。"""
+async def test_messages_v1_is_read_only_until_explicit_migration(tmp_path: Path) -> None:
+    """旧格式可读取，但禁止由运行仓储直接覆写为缺失快照的伪 v2 格式。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     run: AgentRun = _build_running_run()
     user_message: RunMessage
@@ -215,11 +215,11 @@ async def test_messages_v1_remains_readable_and_is_upgraded_on_next_write(tmp_pa
     assert await repository.load_initial_context(run.session_id, run.run_id) is None
     assert await repository.load_messages(run.session_id, run.run_id) == (user_message,)
 
-    await repository.save_messages(run.session_id, run.run_id, (user_message, final_message))
-    upgraded_payload: JSONMap = require_json_map(json.loads(message_path.read_text(encoding="utf-8")))
-    assert upgraded_payload["version"] == 2
-    assert upgraded_payload["initial_context"] is None
-    assert await repository.load_messages(run.session_id, run.run_id) == (user_message, final_message)
+    with pytest.raises(ValueError, match="migrate_messages_v1_to_v2"):
+        await repository.save_messages(run.session_id, run.run_id, (user_message, final_message))
+    preserved_payload: JSONMap = require_json_map(json.loads(message_path.read_text(encoding="utf-8")))
+    assert preserved_payload["version"] == 1
+    assert await repository.load_messages(run.session_id, run.run_id) == (user_message,)
 
 
 async def test_llm_started_event_audits_call_without_llm_request_message(tmp_path: Path) -> None:
@@ -459,7 +459,7 @@ async def test_checkpoint_rejects_full_prompt_and_tool_result_payloads(tmp_path:
 async def test_migration_converts_legacy_agent_run_sample(tmp_path: Path) -> None:
     """旧 AgentRun 样例可迁移为消息、事件、检查点和 Conversation 容器。"""
     project_root: Path = Path(__file__).resolve().parents[2]
-    legacy_run_path: Path = project_root / "data" / "sessions" / "1a8d087e" / "agent_runs" / "5a6a8ae0.json"
+    legacy_run_path: Path = project_root / "tests" / "fixtures" / "runtime" / "legacy_agent_run_v1.json"
     report = await migrate_agent_run(legacy_run_path, tmp_path, "1a8d087e")
 
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)

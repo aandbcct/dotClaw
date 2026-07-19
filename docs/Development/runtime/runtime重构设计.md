@@ -449,12 +449,21 @@ Checkpoint 只服务于从安全边界恢复：
 data/sessions/{session_id}/agent_runs/{run_id}/
 ├── run.json            # AgentRun 摘要
 ├── events.jsonl        # RunEvent，追加写
-├── messages.json       # RunMessage，完整执行消息
+├── messages.json       # initial_context + RunMessage 增量执行事实
 ├── checkpoint.json     # 最新安全恢复点
 └── success_commit.json # 仅在成功提交未完成时存在的可恢复事务意图
 ```
 
 未来替换为 SQLite、PostgreSQL 或对象存储时，应仅替换 Repository Adapter，不改变 Runtime 域模型和 Port。
+
+`messages.json` 的当前格式版本为 2：顶层 `initial_context` 保存本 Run 首次模型调用前冻结的
+system Slot 与历史快照；`messages` 数组只保存 `USER_INPUT`、模型回复、工具结果、委派结果和
+最终回复等 Run 内增量事实。`LLM_STARTED` 位于 `events.jsonl`，引用版本与增量消息 ID，不复制
+完整 prompt。
+
+版本 1 的 `messages.json` 仅允许只读检查。需要恢复或继续写入时必须先通过
+`scripts/migrate_messages_v1_to_v2.py` 显式迁移；迁移工具会备份源文件，清理旧
+`CONTEXT_BUILT` / 重复请求副本并补写 `LLM_STARTED` 审计事件。
 
 ## 9. 运行事务与提交时机
 

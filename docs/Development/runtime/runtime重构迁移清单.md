@@ -43,7 +43,21 @@ data/sessions/{session_id}/agent_runs/{run_id}/
 └── success_commit.json # 仅在成功事务未完成时存在，恢复后自动删除
 ```
 
-迁移脚本保留旧源文件；成功迁移、checkpoint 脱敏和缺失源文件的可行动错误均由 `tests/runtime_v2/test_file_repositories.py` 验证。
+迁移脚本保留旧源文件；成功迁移、checkpoint 脱敏和缺失源文件的可行动错误均由
+`tests/runtime_v2/test_repositories.py` 验证，迁移样例固定在
+`tests/fixtures/runtime/legacy_agent_run_v1.json`，不再依赖未受版本控制的 `data/` 目录。
+
+对于已拆分但仍为格式 v1 的 `messages.json`，`RunRepositoryAdapter` 仅支持读取，禁止普通
+写入路径自动升级。必须显式执行：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/migrate_messages_v1_to_v2.py data/sessions/{session_id}/agent_runs/{run_id}
+```
+
+该命令保留 `.v1.bak` 备份，移除每轮 `CONTEXT_BUILT` 的请求副本，冻结兼容
+`initial_context`，并将模型调用审计改写为 `LLM_STARTED`。再次执行只返回
+`already_current`，不会修改 v2 运行目录。`messages.json` 和 `events.jsonl` 任一替换失败时，
+命令会利用备份补偿两者，恢复完整 v1 文件集。
 
 ## 最终审计命令
 
@@ -53,6 +67,9 @@ data/sessions/{session_id}/agent_runs/{run_id}/
 
 # Runtime v2 架构和物理删除护栏
 .\.venv\Scripts\python.exe -m pytest tests/runtime_v2/test_architecture_contract.py tests/runtime_v2/test_phase6_finalization.py
+
+# 持久化格式 v1→v2 迁移与回归
+.\.venv\Scripts\python.exe -m pytest tests/runtime_v2/test_messages_v1_migration.py tests/runtime_v2/test_repositories.py
 
 # 禁止旧生产模块残留
 rg "runtime\.runtime|runtime\.state_store|runtime\.agent_state|runtime\.task|session\.agent_run|StateSink|ContextAssembler" src/dotclaw
