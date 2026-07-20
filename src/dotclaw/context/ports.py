@@ -7,11 +7,13 @@ from typing import Protocol, Sequence
 
 from ..runtime.application.ports import ContextPort
 from ..runtime.application.dto import ContextMetadata
+from ..runtime.domain.context import ContextOwner
 
 __all__ = [
     "AgentDescriptor",
     "AgentDirectoryPort",
     "ContextDependencies",
+    "ContextPlanConfigurationPort",
     "ContextMetadata",
     "ContextPort",
     "KnowledgeSearchPort",
@@ -68,6 +70,13 @@ class AgentDirectoryPort(Protocol):
         """返回所有可见 Agent。"""
 
 
+class ContextPlanConfigurationPort(Protocol):
+    """为每种 Owner 及其精确标识解析已启用 Slot。"""
+
+    def enabled_slot_ids(self, owner: ContextOwner, owner_key: str) -> tuple[str, ...]:
+        """返回本次 Owner 在有效 Context Plan 中启用的 Slot 标识。"""
+
+
 @dataclass(frozen=True)
 class UserProfile:
     """可选用户资料的最小展示字段。"""
@@ -85,3 +94,4 @@ class ContextDependencies:
     knowledge_base: KnowledgeSearchPort | None = None
     user_profile: UserProfile | None = None
     agent_registry: AgentDirectoryPort | None = None
+    plan_configuration: ContextPlanConfigurationPort | None = None

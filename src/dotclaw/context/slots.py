@@ -6,6 +6,7 @@ from dotclaw.runtime.domain.context import ContextContributionKind, ContextSlotS
 from dotclaw.runtime.domain.facts import JSONValue
 
 from .contracts import ContextContribution, ContextSlotBinding
+from .signals import ContextRefreshSignal
 
 
 class _TextOwnerSlot:
@@ -23,6 +24,10 @@ class _TextOwnerSlot:
 
     async def refresh(self, binding: ContextSlotBinding) -> None:
         """内置文本 Slot 不保存内容缓存。"""
+
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """内置文本 Slot 仅接受自己的精确 Owner 定向事件。"""
+        return _matches_signal(binding, signal)
 
     async def release(self) -> None:
         """内置文本 Slot 不持有外部资源。"""
@@ -51,6 +56,10 @@ class ToolsSlot:
 
     async def refresh(self, binding: ContextSlotBinding) -> None:
         """工具定义来自每次冻结的 Agent 策略。"""
+
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """仅接受当前 Agent 的工具策略刷新事件。"""
+        return _matches_signal(binding, signal)
 
     async def release(self) -> None:
         """工具 Slot 不持有资源。"""
@@ -101,6 +110,10 @@ class HistorySlot:
     async def refresh(self, binding: ContextSlotBinding) -> None:
         """历史数据由 Session Owner 快照决定。"""
 
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """仅接受当前 Session 的历史变更事件。"""
+        return _matches_signal(binding, signal)
+
     async def release(self) -> None:
         """History Slot 不持有资源。"""
 
@@ -120,5 +133,18 @@ class RunMessagesSlot:
     async def refresh(self, binding: ContextSlotBinding) -> None:
         """Run Message 集合由 Run Owner 快照决定。"""
 
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """仅接受当前 Run 的消息变更事件。"""
+        return _matches_signal(binding, signal)
+
     async def release(self) -> None:
         """RunMessagesSlot 不持有资源。"""
+
+
+def _matches_signal(binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+    """校验事件是否精确指向当前 Slot 实例，载荷由具体 Slot 自行判定。"""
+    return (
+        signal.slot_id == binding.descriptor.slot_id
+        and signal.owner is binding.descriptor.owner
+        and signal.owner_key == binding.owner_key
+    )

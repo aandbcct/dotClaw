@@ -5,6 +5,7 @@ from __future__ import annotations
 from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner
 
 from .contracts import ContextCacheScope, ContextRefreshPolicy, ContextSlotDescriptor
+from .plan_configuration import ContextOwnerPlanConfiguration, InMemoryContextPlanConfiguration
 from .plan_resolver import ContextPlanResolver
 from .ports import ContextDependencies
 from .provider import ContextProvider
@@ -24,27 +25,28 @@ from .slots import (
 )
 
 
-DEFAULT_CONTEXT_SLOT_IDS: tuple[str, ...] = (
-    "identity",
-    "tools",
-    "skills",
-    "available_agents",
-    "user_info",
-    "history",
-    "memory",
-    "knowledge",
-    "run_messages",
-)
-"""默认 Plan 启用的 Slot；不包含已废弃的 Workspace 与 Project Slot。"""
-
-
 def build_context_provider(dependencies: ContextDependencies) -> ContextProvider:
     """装配内置注册表、解析器、生命周期管理器和 ContextPort。"""
     registry: ContextSlotRegistry = ContextSlotRegistry()
     _register_defaults(registry)
     signal_bus: ContextSignalBus = ContextSignalBus()
     manager: ContextSlotManager = ContextSlotManager(registry, signal_bus)
-    return ContextProvider(ContextPlanResolver(registry), manager, DEFAULT_CONTEXT_SLOT_IDS, dependencies)
+    configuration: InMemoryContextPlanConfiguration = default_context_plan_configuration()
+    resolver: ContextPlanResolver = ContextPlanResolver(
+        registry,
+        dependencies.plan_configuration or configuration,
+    )
+    return ContextProvider(resolver, manager, dependencies)
+
+
+def default_context_plan_configuration() -> InMemoryContextPlanConfiguration:
+    """提供兼容现有行为的 Owner 默认配置，具体 Agent 可由 Port 覆盖。"""
+    return InMemoryContextPlanConfiguration((
+        ContextOwnerPlanConfiguration(ContextOwner.AGENT, ("identity", "tools", "skills")),
+        ContextOwnerPlanConfiguration(ContextOwner.GLOBAL, ("available_agents",)),
+        ContextOwnerPlanConfiguration(ContextOwner.SESSION, ("user_info", "history")),
+        ContextOwnerPlanConfiguration(ContextOwner.RUN, ("memory", "knowledge", "run_messages")),
+    ))
 
 
 def _register_defaults(registry: ContextSlotRegistry) -> None:

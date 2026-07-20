@@ -22,6 +22,7 @@ from dotclaw.tools.approval import ApprovalManager
 from dotclaw.tools.executor import ToolExecutor
 from dotclaw.tools.handler import BuiltinToolHandler
 from dotclaw.tools.registry import ToolRegistry
+from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
 
 def _execution() -> RunExecutionView:
@@ -60,7 +61,13 @@ class FixedPolicy(RunPolicyPort):
 
     async def resolve(self, request: RunRequest) -> AgentPolicySnapshot:
         """返回最小运行策略。"""
-        return AgentPolicySnapshot(request.agent_id, "v1", "model", 4)
+        return AgentPolicySnapshot(
+            request.agent_id,
+            "v1",
+            "model",
+            4,
+            policy_data={"context_window": 128, "tokenizer_encoding": "cl100k_base"},
+        )
 
 
 class EmptyContext(ContextPort):
@@ -123,6 +130,8 @@ async def test_tool_executor_adapter_drives_engine_approval_resume_with_same_run
         FixedPolicy(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     waiting = await engine.execute(_request())

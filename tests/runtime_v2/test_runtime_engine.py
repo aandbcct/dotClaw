@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
 from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
@@ -25,19 +26,23 @@ from dotclaw.context import (
     ContextCacheScope,
     ContextContribution,
     ContextDependencies,
+    ContextOwnerPlanConfiguration,
     ContextPlanResolver,
     ContextProvider,
     ContextRefreshPolicy,
+    ContextRefreshSignal,
     ContextSignalBus,
     ContextSlotBinding,
     ContextSlotDescriptor,
     ContextSlotManager,
     ContextSlotRegistry,
     HistorySlot,
+    InMemoryContextPlanConfiguration,
     RunMessagesSlot,
     build_context_provider,
 )
 from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextSlotStatus
+from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
 
 class PolicyPort(RunPolicyPort):
@@ -45,7 +50,13 @@ class PolicyPort(RunPolicyPort):
 
     async def resolve(self, request: RunRequest) -> AgentPolicySnapshot:
         """构造最小策略快照。"""
-        return AgentPolicySnapshot(request.agent_id, "identity-v1", "model-v1", 8)
+        return AgentPolicySnapshot(
+            request.agent_id,
+            "identity-v1",
+            "model-v1",
+            8,
+            policy_data={"context_window": 128, "tokenizer_encoding": "cl100k_base"},
+        )
 
 
 class ContextFake(ContextPort):
@@ -105,7 +116,24 @@ def _engine(root: Path) -> RuntimeEngine:
         PolicyPort(),
         ApprovalService(approval_repository),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
+
+
+def test_engine_rejects_missing_context_budget_ports(tmp_path: Path) -> None:
+    """Engine 未装配精确计数和摘要 Port 时必须在启动前明确失败。"""
+    with pytest.raises(ValueError, match="TokenCounterPort 和 HistoryCompactorPort"):
+        RuntimeEngine(
+            RunRepositoryAdapter(tmp_path),
+            CheckpointRepositoryAdapter(tmp_path),
+            ContextFake(),
+            FinalLLM(),
+            ToolFake(),
+            PolicyPort(),
+            ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+            CancellationService(),
+        )
 
 
 async def test_engine_completes_clarification_as_normal_conversation(tmp_path: Path) -> None:
@@ -133,6 +161,8 @@ async def test_engine_releases_run_scope_only_after_terminal_result(tmp_path: Pa
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     result = await engine.execute(_request("session-release"))
@@ -201,6 +231,10 @@ class ChangingSystemSlot:
     async def refresh(self, binding: ContextSlotBinding) -> None:
         """测试 Slot 不保存缓存。"""
 
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """测试不发布事件，始终拒绝刷新。"""
+        return False
+
     async def release(self) -> None:
         """测试 Slot 不持有资源。"""
 
@@ -233,10 +267,14 @@ def _changing_context_port(slot: ChangingSystemSlot) -> ContextProvider:
         ContextRefreshPolicy.SIGNAL,
         30,
     ), RunMessagesSlot)
+    configuration: InMemoryContextPlanConfiguration = InMemoryContextPlanConfiguration((
+        ContextOwnerPlanConfiguration(ContextOwner.AGENT, ("changing",)),
+        ContextOwnerPlanConfiguration(ContextOwner.SESSION, ("history",)),
+        ContextOwnerPlanConfiguration(ContextOwner.RUN, ("run_messages",)),
+    ))
     return ContextProvider(
-        ContextPlanResolver(registry),
+        ContextPlanResolver(registry, configuration),
         ContextSlotManager(registry, ContextSignalBus()),
-        ("changing", "history", "run_messages"),
         ContextDependencies(),
     )
 
@@ -253,6 +291,8 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-approval"))
     completed = await engine.resolve_approval("approval-1", approved=True)
@@ -349,6 +389,8 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     result: RunResult = await engine.execute(_request_with_history("session-react"))
@@ -382,6 +424,8 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     result: RunResult = await engine.execute(_request_with_history("session-context-version"))
@@ -454,6 +498,8 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     waiting: RunResult = await engine.execute(_request_with_history("session-approval-context"))
@@ -488,6 +534,8 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     waiting: RunResult = await engine.execute(_request_with_history("session-frozen-slots"))
@@ -511,6 +559,8 @@ async def test_rejected_approval_records_decision_and_cancels_without_conversati
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     waiting: RunResult = await engine.execute(_request("session-rejected"))
@@ -540,6 +590,8 @@ async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) ->
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-cancel"))
     await engine.cancel(waiting.run_id, "用户取消")

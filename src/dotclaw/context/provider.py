@@ -21,19 +21,17 @@ class ContextProvider:
         self,
         resolver: ContextPlanResolver,
         manager: ContextSlotManager,
-        enabled_slot_ids: tuple[str, ...],
         dependencies: ContextDependencies,
     ) -> None:
         self._resolver: ContextPlanResolver = resolver
         self._manager: ContextSlotManager = manager
-        self._enabled_slot_ids: tuple[str, ...] = enabled_slot_ids
         self._dependencies: ContextDependencies = dependencies
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """加载已绑定 Slot；未启用 Slot 不进入本次上下文。"""
         if execution.replay_active_context and execution.active_context_version is not None:
             return _bundle_from_active_version(request, execution)
         owner_data: dict[ContextOwner, JSONMap] = await self._owner_data(request, execution)
-        plan = self._resolver.resolve(self._enabled_slot_ids, owner_data)
+        plan = self._resolver.resolve(owner_data)
         contributions: tuple[ContextContribution, ...] = await self._manager.load_plan(plan)
         messages: list[RunMessage] = []
         sequence: int = 1
@@ -54,7 +52,11 @@ class ContextProvider:
             sequence += 1
         tools: tuple[ToolDefinition, ...] = _tools(execution.policy.policy_data)
         snapshots: tuple[ContextSlotSnapshot, ...] = _snapshots(plan.bindings, contributions)
-        return ContextBundle(tuple(messages), tools, ContextMetadata(0, tuple(self._enabled_slot_ids), slot_snapshots=snapshots))
+        return ContextBundle(
+            tuple(messages),
+            tools,
+            ContextMetadata(0, tuple(binding.descriptor.slot_id for binding in plan.bindings), slot_snapshots=snapshots),
+        )
 
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """由 Owner 生命周期终点释放对应缓存实例。"""

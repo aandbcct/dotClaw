@@ -11,7 +11,10 @@ from ..config.settings import Config
 from ..config.settings import load_router_config
 from ..context import (
     ContextDependencies,
+    ContextPlanConfigurationPort,
+    InMemoryContextPlanConfiguration,
     build_context_provider,
+    default_context_plan_configuration,
 )
 from ..runtime.adapters import (
     AgentPolicyResolver,
@@ -79,6 +82,7 @@ def build_runtime_services(
         skill_registry=skill_registry,
         memory_manager=memory_manager,
         agent_registry=agent_registry,
+        plan_configuration=_agent_context_plan_configuration(identity),
     ))
     session_manager.set_deletion_handler(_session_context_releaser(context_port))
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(
@@ -129,6 +133,17 @@ def _storage_root(project_root: Path, configured_directory: str) -> Path:
     """将 Session 存储目录解析为与 SessionManager 相同的绝对根目录。"""
     directory = Path(configured_directory)
     return directory if directory.is_absolute() else project_root / directory
+
+
+def _agent_context_plan_configuration(identity: AgentIdentity) -> ContextPlanConfigurationPort | None:
+    """将 Agent 显式 Slot 启用项覆盖到完整多 Owner 默认计划中。"""
+    if identity.context_slot_ids is None:
+        return None
+    defaults: InMemoryContextPlanConfiguration = default_context_plan_configuration()
+    return InMemoryContextPlanConfiguration(
+        default_configurations=defaults.default_configurations,
+        owner_configurations={ContextOwner.AGENT: {identity.agent_id: identity.context_slot_ids}},
+    )
 
 
 def _session_context_releaser(context_port: ContextPort) -> Callable[[str], Awaitable[None]]:

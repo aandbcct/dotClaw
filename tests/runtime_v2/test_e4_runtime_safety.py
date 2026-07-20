@@ -16,7 +16,7 @@ from dotclaw.runtime.application.ports import ContextPort, HistoryCompactorPort,
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.context import ContextOwner
-from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, MessageRole, RunCheckpoint, RunError, RunErrorCode, RunMessage, RunMessageKind, RunStatus, ToolCall
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, HistoryCompressionSnapshot, MessageRole, RunCheckpoint, RunError, RunErrorCode, RunMessage, RunMessageKind, RunStatus, ToolCall
 from dotclaw.agent.agent import _display_result
 
 
@@ -119,6 +119,21 @@ class StillOverBudgetCounter(ScriptedCounter):
             return TokenCountResult(100)
         if len(request.history_messages) >= 4:
             return TokenCountResult(100)
+        if request.history_messages:
+            return TokenCountResult(8)
+        return TokenCountResult(0)
+
+
+class RepeatedCompressionCounter(ScriptedCounter):
+    """模拟已有摘要仍超限，并验证再次压缩后仅保留新摘要。"""
+
+    async def count(self, request: TokenCountRequest) -> TokenCountResult:
+        """在旧摘要加三条原文时超限，替换后回到窗口内。"""
+        self.requests.append(request)
+        if request.history_summary and len(request.history_messages) >= 4:
+            return TokenCountResult(100)
+        if request.history_summary:
+            return TokenCountResult(12)
         if request.history_messages:
             return TokenCountResult(8)
         return TokenCountResult(0)
@@ -358,6 +373,46 @@ async def test_context_still_over_budget_after_compression_fails_without_candida
     assert run.staged_history_compressions == ()
     assert versions == ()
     assert checkpoint is None
+
+
+async def test_repeated_compression_replaces_prior_summary_in_context_version(tmp_path: Path) -> None:
+    """已有摘要再次压缩时，新 Context Version 不能重复保留旧 system 摘要。"""
+    base_request: RunRequest = _request()
+    prior_summary: ConversationMessage = ConversationMessage(
+        "history-compression-1",
+        MessageRole.SYSTEM,
+        "以下是此前对话的压缩摘要：\n旧摘要",
+        "",
+    )
+    prior_compression: HistoryCompressionSnapshot = HistoryCompressionSnapshot(
+        1,
+        "conversation-before-window",
+        "旧摘要",
+        "old-hash",
+    )
+    request: RunRequest = RunRequest(
+        base_request.session_id,
+        base_request.lease_id,
+        base_request.agent_id,
+        base_request.user_message,
+        ConversationSnapshot(
+            base_request.conversation.session_id,
+            (prior_summary, *base_request.conversation.messages),
+            base_request.conversation.version,
+            prior_compression,
+        ),
+    )
+    counter: RepeatedCompressionCounter = RepeatedCompressionCounter(100)
+    compactor: ScriptedCompactor = ScriptedCompactor()
+    engine, repository = _engine(tmp_path, counter, compactor, FinalLLM())
+
+    result: RunResult = await engine.execute(request)
+    versions = await repository.load_context_versions(request.session_id, result.run_id)
+    history_slot = next(slot for slot in versions[0].slots if slot.contribution_kind.value == "history")
+
+    assert result.status is RunStatus.COMPLETED
+    assert "history-compression-2" in str(history_slot.attributes)
+    assert "history-compression-1" not in str(history_slot.attributes)
 
 
 async def test_invalid_context_window_fails_deterministically_without_checkpoint(tmp_path: Path) -> None:

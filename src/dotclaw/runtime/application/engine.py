@@ -114,11 +114,11 @@ class RuntimeEngine:
         self._approval_service: ApprovalService = approval_service
         self._cancellation_service: CancellationService = cancellation_service
         self._delegation_port: DelegationPort | None = delegation_port
-        self._budget_planner: ContextBudgetPlanner | None = (
-            ContextBudgetPlanner(token_counter) if token_counter is not None else None
-        )
-        self._token_counter: TokenCounterPort | None = token_counter
-        self._history_compactor: HistoryCompactorPort | None = history_compactor
+        if token_counter is None or history_compactor is None:
+            raise ValueError("RuntimeEngine 必须装配 TokenCounterPort 和 HistoryCompactorPort")
+        self._budget_planner: ContextBudgetPlanner = ContextBudgetPlanner(token_counter)
+        self._token_counter: TokenCounterPort = token_counter
+        self._history_compactor: HistoryCompactorPort = history_compactor
 
     async def execute(self, request: RunRequest) -> RunResult:
         """创建新的 RunExecution，并执行到成功、失败、取消或审批等待。"""
@@ -601,8 +601,6 @@ class RuntimeEngine:
     ) -> _PreparedContext:
         """在每次 LLM_STARTED 前构造、精确计数并必要时生成历史压缩候选。"""
         context: ContextBundle = await self._context_port.build(execution.request, execution.view())
-        if self._budget_planner is None or self._token_counter is None or self._history_compactor is None:
-            return _PreparedContext(context)
         decision: ContextBudgetDecision = await self._budget_planner.plan(
             _token_request(context, execution.request, tuple(messages), _tokenizer_encoding(execution.policy.policy_data)),
             _context_window(execution.policy.policy_data),
@@ -626,8 +624,6 @@ class RuntimeEngine:
         messages: list[RunMessage],
     ) -> _PreparedContext:
         """仅压缩最旧完整 Conversation，重建真实输入后必须再次精确计数。"""
-        if self._budget_planner is None or self._token_counter is None or self._history_compactor is None:
-            raise ContextBudgetRejected("上下文预算 Port 未装配")
         batches: tuple[ConversationBatch, ...] = await _conversation_batches(
             self._token_counter,
             _tokenizer_encoding(execution.policy.policy_data),
@@ -1162,6 +1158,8 @@ def _request_with_compressed_history(
     current_conversation_id: str = ""
     message: ConversationMessage
     for message in request.conversation.messages:
+        if message.role is MessageRole.SYSTEM:
+            continue
         if message.role is MessageRole.USER:
             current_conversation_id = message.message_id
         if current_conversation_id not in selected_ids:

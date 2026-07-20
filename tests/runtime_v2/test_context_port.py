@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from dotclaw.context import (
     ContextCacheScope,
     ContextContribution,
     ContextDependencies,
+    ContextOwnerPlanConfiguration,
     ContextPlanResolver,
     ContextProvider,
     ContextRefreshPolicy,
+    ContextRefreshReason,
     ContextRefreshSignal,
+    InMemoryContextPlanConfiguration,
     ContextSignalBus,
     ContextSlotBinding,
     ContextSlotDescriptor,
@@ -19,7 +22,7 @@ from dotclaw.context import (
     ContextSlotRegistry,
     build_context_provider,
 )
-from dotclaw.runtime.application.dto import ConversationMessage, ConversationSnapshot, RunRequest
+from dotclaw.runtime.application.dto import ContextBundle, ConversationMessage, ConversationSnapshot, RunRequest
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
 from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextSlotStatus
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
@@ -44,6 +47,14 @@ class RecordingSlot:
         """记录下一安全点的定向刷新。"""
         self.refreshes += 1
 
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """默认接受精确指向当前绑定的刷新事件。"""
+        return (
+            signal.slot_id == binding.descriptor.slot_id
+            and signal.owner is binding.descriptor.owner
+            and signal.owner_key == binding.owner_key
+        )
+
     async def release(self) -> None:
         """记录 Owner 生命周期释放。"""
         self.releases += 1
@@ -59,8 +70,44 @@ class FailingSlot:
     async def refresh(self, binding: ContextSlotBinding) -> None:
         """失败 Slot 不保存刷新状态。"""
 
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """失败 Slot 仍只接收自己的精确事件。"""
+        return signal.slot_id == binding.descriptor.slot_id and signal.owner_key == binding.owner_key
+
     async def release(self) -> None:
         """失败 Slot 不持有资源。"""
+
+
+@dataclass
+class PayloadFilteringSlot:
+    """按事件载荷决定是否刷新的可观测 Slot。"""
+
+    contribution: ContextContribution
+    refreshes: int = 0
+    received_payloads: list[bool] = field(default_factory=list)
+
+    async def load(self, binding: ContextSlotBinding) -> ContextContribution:
+        """返回固定贡献。"""
+        return self.contribution
+
+    async def refresh(self, binding: ContextSlotBinding) -> None:
+        """记录真正被当前实例接受的刷新。"""
+        self.refreshes += 1
+
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """读取事件载荷，仅在显式标记时刷新当前 Owner。"""
+        raw_should_refresh = signal.payload.get("should_refresh")
+        should_refresh: bool = raw_should_refresh is True
+        self.received_payloads.append(should_refresh)
+        return (
+            signal.slot_id == binding.descriptor.slot_id
+            and signal.owner is binding.descriptor.owner
+            and signal.owner_key == binding.owner_key
+            and should_refresh
+        )
+
+    async def release(self) -> None:
+        """测试 Slot 不持有外部资源。"""
 
 
 def _descriptor(slot_id: str, owner: ContextOwner, kind: ContextContributionKind, scope: ContextCacheScope, order: int) -> ContextSlotDescriptor:
@@ -73,6 +120,26 @@ def _request() -> RunRequest:
     history = ConversationMessage("history-1", MessageRole.ASSISTANT, "历史回答", "")
     user = ConversationMessage("user-1", MessageRole.USER, "当前问题", "")
     return RunRequest("session-1", "lease-1", "agent-1", user, ConversationSnapshot("session-1", (history,), 1))
+
+
+def _provider(
+    registry: ContextSlotRegistry,
+    manager: ContextSlotManager,
+    slot_ids: tuple[str, ...],
+) -> ContextProvider:
+    """按已注册 Descriptor 构造测试专用的 Owner 可配置 Context Plan。"""
+    grouped: dict[ContextOwner, list[str]] = {}
+    slot_id: str
+    for slot_id in slot_ids:
+        owner: ContextOwner = registry.descriptor(slot_id).owner
+        grouped.setdefault(owner, []).append(slot_id)
+    configurations: tuple[ContextOwnerPlanConfiguration, ...] = tuple(
+        ContextOwnerPlanConfiguration(owner, tuple(grouped[owner]))
+        for owner in ContextOwner
+        if owner in grouped
+    )
+    configuration: InMemoryContextPlanConfiguration = InMemoryContextPlanConfiguration(configurations)
+    return ContextProvider(ContextPlanResolver(registry, configuration), manager, ContextDependencies())
 
 
 def _execution(request: RunRequest, run_messages: tuple[RunMessage, ...] = ()) -> RunExecution:
@@ -99,10 +166,14 @@ async def test_bound_slots_are_snapshotted_and_unenabled_slot_is_absent() -> Non
     registry.register(_descriptor("empty", ContextOwner.SESSION, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.SESSION, 20), lambda: empty)
     registry.register(_descriptor("failed", ContextOwner.RUN, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.RUN, 30), FailingSlot)
     registry.register(_descriptor("unenabled", ContextOwner.GLOBAL, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 40), lambda: empty)
-    provider = ContextProvider(ContextPlanResolver(registry), ContextSlotManager(registry, ContextSignalBus()), ("custom", "empty", "failed"), ContextDependencies())
+    provider = _provider(
+        registry,
+        ContextSlotManager(registry, ContextSignalBus()),
+        ("custom", "empty", "failed"),
+    )
     request = _request()
 
-    bundle = await provider.build(request, _execution(request).view())
+    bundle: ContextBundle = await provider.build(request, _execution(request).view())
 
     assert [snapshot.slot_id for snapshot in bundle.metadata.slot_snapshots] == ["custom", "empty", "failed"]
     assert [snapshot.status for snapshot in bundle.metadata.slot_snapshots] == [ContextSlotStatus.INCLUDED, ContextSlotStatus.EMPTY, ContextSlotStatus.FAILED]
@@ -133,15 +204,27 @@ async def test_signal_and_direct_refresh_take_effect_at_next_build() -> None:
     registry.register(_descriptor("refreshable", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 10), lambda: slot)
     signals = ContextSignalBus()
     manager = ContextSlotManager(registry, signals)
-    provider = ContextProvider(ContextPlanResolver(registry), manager, ("refreshable",), ContextDependencies())
+    provider = _provider(registry, manager, ("refreshable",))
     request = _request()
 
     await provider.build(request, _execution(request).view())
-    manager.request_refresh("refreshable")
+    manager.request_refresh("refreshable", ContextOwner.AGENT, "agent-1")
     await provider.build(request, _execution(request).view())
-    signals.publish(ContextRefreshSignal("refreshable", "配置更新"))
+    signals.publish(ContextRefreshSignal(
+        "refreshable",
+        ContextOwner.AGENT,
+        "agent-1",
+        ContextRefreshReason.CONFIGURATION_CHANGED,
+        {"version": "v2"},
+    ))
     await provider.build(request, _execution(request).view())
-    signals.publish(ContextRefreshSignal("unbound", "无效刷新"))
+    signals.publish(ContextRefreshSignal(
+        "unbound",
+        ContextOwner.AGENT,
+        "agent-1",
+        ContextRefreshReason.CONFIGURATION_CHANGED,
+        {},
+    ))
     await provider.build(request, _execution(request).view())
 
     assert slot.loads == 4
@@ -157,7 +240,11 @@ async def test_release_scope_releases_cached_owner_instances() -> None:
     registry.register(_descriptor("agent", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 10), lambda: agent_slot)
     registry.register(_descriptor("session", ContextOwner.SESSION, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.SESSION, 20), lambda: session_slot)
     registry.register(_descriptor("run", ContextOwner.RUN, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.RUN, 30), lambda: run_slot)
-    provider = ContextProvider(ContextPlanResolver(registry), ContextSlotManager(registry, ContextSignalBus()), ("agent", "session", "run"), ContextDependencies())
+    provider = _provider(
+        registry,
+        ContextSlotManager(registry, ContextSignalBus()),
+        ("agent", "session", "run"),
+    )
     request = _request()
 
     await provider.build(request, _execution(request).view())
@@ -180,7 +267,11 @@ async def test_cache_instance_isolated_by_exact_owner_key() -> None:
         return slot
 
     registry.register(_descriptor("agent_cache", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 10), create_slot)
-    provider = ContextProvider(ContextPlanResolver(registry), ContextSlotManager(registry, ContextSignalBus()), ("agent_cache",), ContextDependencies())
+    provider = _provider(
+        registry,
+        ContextSlotManager(registry, ContextSignalBus()),
+        ("agent_cache",),
+    )
     first_request = _request()
     second_request = replace(first_request, agent_id="agent-2")
 
@@ -188,3 +279,79 @@ async def test_cache_instance_isolated_by_exact_owner_key() -> None:
     await provider.build(second_request, _execution(second_request).view())
 
     assert len(instances) == 2
+
+
+async def test_owner_plan_configuration_composes_all_owner_scopes_without_global_slot_tuple() -> None:
+    """Agent、Session、Run、Global 的有效配置独立组合，新增 Slot 只需写入配置。"""
+    registry = ContextSlotRegistry()
+    global_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "全局"))
+    agent_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "Agent"))
+    session_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "Session"))
+    run_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "Run"))
+    registry.register(_descriptor("global_extra", ContextOwner.GLOBAL, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.NONE, 10), lambda: global_slot)
+    registry.register(_descriptor("agent_extra", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 20), lambda: agent_slot)
+    registry.register(_descriptor("session_extra", ContextOwner.SESSION, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.SESSION, 30), lambda: session_slot)
+    registry.register(_descriptor("run_extra", ContextOwner.RUN, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.RUN, 40), lambda: run_slot)
+    configuration: InMemoryContextPlanConfiguration = InMemoryContextPlanConfiguration(
+        default_configurations=(
+            ContextOwnerPlanConfiguration(ContextOwner.GLOBAL, ("global_extra",)),
+            ContextOwnerPlanConfiguration(ContextOwner.AGENT, ("agent_extra",)),
+        ),
+        owner_configurations={
+            ContextOwner.SESSION: {"session-1": ("session_extra",)},
+            ContextOwner.RUN: {"run-1": ("run_extra",)},
+        },
+    )
+    provider: ContextProvider = ContextProvider(
+        ContextPlanResolver(registry, configuration),
+        ContextSlotManager(registry, ContextSignalBus()),
+        ContextDependencies(),
+    )
+    request: RunRequest = _request()
+
+    bundle: ContextBundle = await provider.build(request, _execution(request).view())
+
+    assert bundle.metadata.source_names == ("global_extra", "agent_extra", "session_extra", "run_extra")
+    assert [message.content for message in bundle.messages[:4]] == ["全局", "Agent", "Session", "Run"]
+
+
+async def test_signal_payload_filtering_and_owner_key_isolation() -> None:
+    """同类 Slot 的事件载荷由实例判断，刷新绝不影响其他 Owner Key。"""
+    registry = ContextSlotRegistry()
+    instances: list[PayloadFilteringSlot] = []
+
+    def create_slot() -> PayloadFilteringSlot:
+        """创建可分别观察的 Agent 缓存实例。"""
+        slot = PayloadFilteringSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.EMPTY))
+        instances.append(slot)
+        return slot
+
+    registry.register(_descriptor("filtered", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 10), create_slot)
+    signals: ContextSignalBus = ContextSignalBus()
+    provider: ContextProvider = _provider(registry, ContextSlotManager(registry, signals), ("filtered",))
+    first_request: RunRequest = _request()
+    second_request: RunRequest = replace(first_request, agent_id="agent-2")
+
+    await provider.build(first_request, _execution(first_request).view())
+    await provider.build(second_request, _execution(second_request).view())
+    signals.publish(ContextRefreshSignal(
+        "filtered",
+        ContextOwner.AGENT,
+        "agent-1",
+        ContextRefreshReason.EXTERNAL_SOURCE_CHANGED,
+        {"should_refresh": False},
+    ))
+    signals.publish(ContextRefreshSignal(
+        "filtered",
+        ContextOwner.AGENT,
+        "agent-2",
+        ContextRefreshReason.EXTERNAL_SOURCE_CHANGED,
+        {"should_refresh": True},
+    ))
+    await provider.build(first_request, _execution(first_request).view())
+    await provider.build(second_request, _execution(second_request).view())
+
+    assert len(instances) == 2
+    assert instances[0].received_payloads == [False]
+    assert instances[1].received_payloads == [True]
+    assert [slot.refreshes for slot in instances] == [0, 1]

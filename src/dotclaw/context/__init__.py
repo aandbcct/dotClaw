@@ -13,12 +13,13 @@ from .contracts import (
     ContextSlotBinding,
     ContextSlotDescriptor,
 )
-from .defaults import DEFAULT_CONTEXT_SLOT_IDS, build_context_provider
-from .ports import ContextDependencies
+from .defaults import build_context_provider, default_context_plan_configuration
+from .plan_configuration import ContextOwnerPlanConfiguration, InMemoryContextPlanConfiguration
+from .ports import ContextDependencies, ContextPlanConfigurationPort
 from .plan_resolver import ContextPlanResolver
 from .provider import ContextProvider
 from .registry import ContextSlotRegistry
-from .signals import ContextRefreshSignal, ContextSignalBus, ContextSignalSubscription
+from .signals import ContextRefreshReason, ContextRefreshSignal, ContextSignalBus, ContextSignalSubscription
 from .slot_manager import ContextSlotManager
 from .slots import (
     AvailableAgentsSlot,
@@ -37,6 +38,8 @@ __all__ = [
     "ContextCacheScope",
     "ContextContribution",
     "ContextDependencies",
+    "ContextOwnerPlanConfiguration",
+    "ContextPlanConfigurationPort",
     "ContextMetadata",
     "ContextOwnerSnapshot",
     "ContextPlan",
@@ -44,6 +47,7 @@ __all__ = [
     "ContextPort",
     "ContextProvider",
     "ContextRefreshPolicy",
+    "ContextRefreshReason",
     "ContextRefreshSignal",
     "ContextSignalBus",
     "ContextSignalSubscription",
@@ -52,7 +56,7 @@ __all__ = [
     "ContextSlotDescriptor",
     "ContextSlotManager",
     "ContextSlotRegistry",
-    "DEFAULT_CONTEXT_SLOT_IDS",
+    "InMemoryContextPlanConfiguration",
     "HistorySlot",
     "IdentitySlot",
     "KnowledgeSlot",
@@ -62,4 +66,5 @@ __all__ = [
     "ToolsSlot",
     "UserInfoSlot",
     "build_context_provider",
+    "default_context_plan_configuration",
 ]

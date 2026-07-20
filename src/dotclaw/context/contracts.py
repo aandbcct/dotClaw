@@ -9,6 +9,8 @@ from typing import Protocol
 from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextSlotStatus
 from dotclaw.runtime.domain.facts import JSONMap
 
+from .signals import ContextRefreshSignal
+
 
 class ContextCacheScope(StrEnum):
     """Slot 实例缓存的生命周期范围。"""
@@ -74,5 +76,7 @@ class ContextSlot(Protocol):
         """从绑定的 Owner 快照读取结构化贡献。"""
     async def refresh(self, binding: ContextSlotBinding) -> None:
         """失效当前绑定的私有缓存。"""
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """读取完整刷新事件并决定当前绑定是否需要失效。"""
     async def release(self) -> None:
         """释放 Slot 私有资源。"""
