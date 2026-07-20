@@ -36,3 +36,6 @@ build/
 /.learnings/LEARNINGS.md
 /.codebuddy/settings.local.json
 /skills/
+/Eval/dataset/
+/8gu.py
+/tmp/
