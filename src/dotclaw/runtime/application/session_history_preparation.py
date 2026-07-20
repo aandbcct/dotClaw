@@ -1,5 +1,4 @@
 """创建 Run 前的 Session 历史压缩与冻结服务。"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -116,7 +115,7 @@ class SessionHistoryPreparationService:
         recent_conversations = _recent_conversations(session, active.covered_through_conversation_id if active is not None else "")
         if len(recent_conversations) > self._policy.max_recent_conversations:
             return True
-        return _estimate_history_tokens(session) > self._policy.history_token_budget
+        return False
 
     async def _compact(self, session: SessionHistoryRecord) -> None:
         """将可归档历史合成为下一版摘要并更新 Session 内存事实。"""
@@ -197,12 +196,3 @@ def _recent_conversations(
         if conversation.conversation_id == covered_through_conversation_id:
             return list(session.conversations[index + 1:])
     raise SessionHistoryPreparationError("当前历史压缩边界不属于 Session Conversation")
-
-
-def _estimate_history_tokens(session: SessionHistoryRecord) -> int:
-    """按中文与英文混合文本的保守四字符近似估算历史 token。"""
-    active = session.active_history_compression()
-    characters: int = len(active.content) if active is not None else 0
-    for conversation in _recent_conversations(session, active.covered_through_conversation_id if active is not None else ""):
-        characters += len(conversation.user_query) + len(conversation.final_answer)
-    return max((characters + 3) // 4, 1)

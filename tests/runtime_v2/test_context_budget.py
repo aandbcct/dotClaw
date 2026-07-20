@@ -32,6 +32,23 @@ async def test_token_counter_rejects_unavailable_encoding_without_prompt_logging
     assert "秘密" not in result.warning
 
 
+async def test_token_counter_counts_actual_tiktoken_input_components() -> None:
+    """已安装 tiktoken 时，所有结构化输入组成项都计入结果。"""
+    request: TokenCountRequest = TokenCountRequest(
+        tokenizer_encoding="cl100k_base",
+        system_contents=("系统",),
+        history_summary="摘要",
+        history_messages=(_message("history", MessageRole.USER, "历史"),),
+        current_user_message=_message("user", MessageRole.USER, "当前"),
+        run_messages=(RunMessage("run", 1, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "结果"),),
+        tools=(ToolDefinition("lookup", "查询", {"type": "string"}),),
+        protocol_overhead_tokens=2,
+    )
+    result = await TiktokenTokenCounter().count(request)
+    assert result.error_code is None
+    assert result.input_tokens > request.protocol_overhead_tokens
+
+
 def test_select_oldest_seventy_five_percent_keeps_latest_conversation() -> None:
     """75% 选择仅处理最旧完整 Conversation，始终保留最新原文。"""
     batches: tuple[ConversationBatch, ...] = tuple(

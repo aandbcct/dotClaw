@@ -36,16 +36,22 @@ class LLMContextCompactor:
     async def compact(self, request: ContextCompactionRequest) -> ContextCompactionResult:
         """生成下一版摘要；空摘要视为压缩失败，避免丢失原始历史。"""
         messages: list[Message] = _build_compaction_messages(request)
-        chunks: AsyncIterator[ChatChunk] = self._llm_proxy.chat(
-            messages=messages,
-            tools=None,
-            purpose=LLMUsage.CONTEXT_COMPACTION,
-            stream=False,
-        )
+        try:
+            chunks: AsyncIterator[ChatChunk] = self._llm_proxy.chat(
+                messages=messages,
+                tools=None,
+                purpose=LLMUsage.CONTEXT_COMPACTION,
+                stream=False,
+            )
+        except Exception as error:
+            raise HistoryCompactorUnavailable("上下文压缩服务不可用") from error
         content_parts: list[str] = []
-        async for chunk in chunks:
-            if chunk.content:
-                content_parts.append(chunk.content)
+        try:
+            async for chunk in chunks:
+                if chunk.content:
+                    content_parts.append(chunk.content)
+        except Exception as error:
+            raise HistoryCompactorUnavailable("上下文压缩服务不可用") from error
         summary: str = "".join(content_parts).strip()
         if not summary:
             raise RuntimeError("上下文压缩模型未返回有效摘要")
@@ -95,3 +101,7 @@ def _source_hash(request: ContextCompactionRequest) -> str:
 def _hash_text(content: str) -> str:
     """返回带算法前缀的 UTF-8 文本 hash。"""
     return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+
+
+class HistoryCompactorUnavailable(RuntimeError):
+    """压缩模型服务不可用，可由后续 Engine 映射为可恢复中断。"""
