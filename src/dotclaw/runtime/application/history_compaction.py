@@ -16,6 +16,7 @@ class ConversationBatch:
     """不可拆分的一条完整 Conversation。"""
     conversation_id: str
     messages: tuple[ConversationMessage, ...]
+    input_tokens: int
 
 
 @dataclass(frozen=True)
@@ -46,18 +47,38 @@ async def compact_in_batches(
     previous_summary: str,
     batches: tuple[ConversationBatch, ...],
     source_context_window: int,
-    max_batches_per_request: int,
+    previous_summary_tokens: int,
 ) -> HistoryCompactionResult:
-    """按 Conversation 分批滚动摘要，绝不拆分单条 Conversation。"""
-    if max_batches_per_request <= 0:
-        raise ValueError("每次压缩的 Conversation 数必须为正数")
+    """按精确 Token 计数和模型窗口滚动摘要，绝不拆分 Conversation。"""
+    if source_context_window <= 0:
+        raise ValueError("压缩模型窗口必须为正数")
     summary: str = previous_summary
-    for start_index in range(0, len(batches), max_batches_per_request):
+    for batch_group in _partition_batches(batches, source_context_window, previous_summary_tokens):
         request: HistoryCompactionRequest = HistoryCompactionRequest(
             previous_summary=summary,
-            batches=batches[start_index:start_index + max_batches_per_request],
+            batches=batch_group,
             source_context_window=source_context_window,
         )
         result: HistoryCompactionResult = await compactor.compact_history(request)
         summary = result.summary
     return HistoryCompactionResult(summary)
+
+
+def _partition_batches(batches: tuple[ConversationBatch, ...], window: int, summary_tokens: int) -> tuple[tuple[ConversationBatch, ...], ...]:
+    """依据已精确统计的 Token 将完整 Conversation 分组。"""
+    groups: list[tuple[ConversationBatch, ...]] = []
+    current: list[ConversationBatch] = []
+    current_tokens: int = summary_tokens
+    batch: ConversationBatch
+    for batch in batches:
+        if batch.input_tokens <= 0 or batch.input_tokens + summary_tokens > window:
+            raise ValueError("单条 Conversation 的精确 Token 计数不满足压缩窗口")
+        if current and current_tokens + batch.input_tokens > window:
+            groups.append(tuple(current))
+            current = []
+            current_tokens = 0
+        current.append(batch)
+        current_tokens += batch.input_tokens
+    if current:
+        groups.append(tuple(current))
+    return tuple(groups)

@@ -52,7 +52,7 @@ async def test_token_counter_counts_actual_tiktoken_input_components() -> None:
 def test_select_oldest_seventy_five_percent_keeps_latest_conversation() -> None:
     """75% 选择仅处理最旧完整 Conversation，始终保留最新原文。"""
     batches: tuple[ConversationBatch, ...] = tuple(
-        ConversationBatch(f"conversation-{index}", (_message(str(index), MessageRole.USER, str(index)),))
+        ConversationBatch(f"conversation-{index}", (_message(str(index), MessageRole.USER, str(index)),), 2)
         for index in range(1, 5)
     )
     selected: tuple[ConversationBatch, ...] = select_oldest_conversations(batches)
@@ -73,10 +73,10 @@ async def test_rolling_compaction_preserves_batches_and_passes_previous_summary(
     """滚动压缩按完整 Conversation 分批，并将上一批摘要传给下一批。"""
     fake: ScriptedHistoryCompactor = ScriptedHistoryCompactor()
     batches: tuple[ConversationBatch, ...] = tuple(
-        ConversationBatch(f"conversation-{index}", (_message(str(index), MessageRole.USER, str(index)),))
+        ConversationBatch(f"conversation-{index}", (_message(str(index), MessageRole.USER, str(index)),), 3)
         for index in range(1, 4)
     )
-    result: HistoryCompactionResult = await compact_in_batches(fake, "初始摘要", batches, 100, 2)
+    result: HistoryCompactionResult = await compact_in_batches(fake, "初始摘要", batches, 6, 0)
     assert result.summary == "摘要-2"
     assert [batch.conversation_id for batch in fake.requests[0].batches] == ["conversation-1", "conversation-2"]
     assert [batch.conversation_id for batch in fake.requests[1].batches] == ["conversation-3"]

@@ -9,7 +9,10 @@ from typing import Protocol
 
 from ...llm.base import ChatChunk, Message, ToolDefinition
 from ...llm.base import LLMUsage
-from ..application.context_compaction import ContextCompactionRequest, ContextCompactionResult
+from ..application.context_compaction import ContextCompactionRequest, ContextCompactionResult, ContextFragment
+from ..application.dto import ConversationMessage
+from ..application.history_compaction import ConversationBatch, HistoryCompactionRequest, HistoryCompactionResult
+from ..domain.facts import ContextCompactionScope
 
 
 class LLMCompactionClient(Protocol):
@@ -65,6 +68,23 @@ class LLMContextCompactor:
             content_hash=_hash_text(summary),
             source_hash=source_hash,
         )
+
+    async def compact_history(self, request: HistoryCompactionRequest) -> HistoryCompactionResult:
+        """实现 HistoryCompactorPort，使用真实压缩路由处理完整 Conversation 批次。"""
+        fragments: list[ContextFragment] = []
+        batch: ConversationBatch
+        for batch in request.batches:
+            message: ConversationMessage
+            for message in batch.messages:
+                fragments.append(ContextFragment(f"{batch.conversation_id}:{message.message_id}", message.role, message.content))
+        result: ContextCompactionResult = await self.compact(ContextCompactionRequest(
+            scope=ContextCompactionScope.SESSION_HISTORY,
+            source_version=0,
+            target_token_budget=request.source_context_window,
+            fragments=tuple(fragments),
+            previous_summary=request.previous_summary,
+        ))
+        return HistoryCompactionResult(result.content)
 
 
 def _build_compaction_messages(request: ContextCompactionRequest) -> list[Message]:
