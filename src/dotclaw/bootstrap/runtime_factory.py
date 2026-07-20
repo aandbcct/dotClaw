@@ -18,6 +18,8 @@ from ..runtime.adapters import (
     ApprovalRepositoryAdapter,
     CheckpointRepositoryAdapter,
     RunRepositoryAdapter,
+    TiktokenTokenCounter,
+    LLMContextCompactor,
     LLMProxyAdapter,
     SessionConversationProjector,
     ToolExecutorAdapter,
@@ -107,6 +109,8 @@ def build_runtime_services(
         approval_service=ApprovalService(approval_repository),
         cancellation_service=CancellationService(),
         delegation_port=delegation_port,
+        token_counter=TiktokenTokenCounter(),
+        history_compactor=LLMContextCompactor(llm_proxy),
     )
     coordinator: SessionRunCoordinator = SessionRunCoordinator(engine)
     delegation_port.bind_coordinator(coordinator)

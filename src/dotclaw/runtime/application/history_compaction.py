@@ -13,6 +13,10 @@ if TYPE_CHECKING:
     from .ports import HistoryCompactorPort, TokenCounterPort
 
 
+class HistoryCompactorUnavailable(RuntimeError):
+    """压缩模型服务重试耗尽后的可恢复外部错误。"""
+
+
 @dataclass(frozen=True)
 class ConversationBatch:
     """不可拆分的一条完整 Conversation。"""

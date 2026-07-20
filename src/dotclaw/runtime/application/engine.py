@@ -25,6 +25,8 @@ from ..domain.context import (
     ContextSlotSnapshot,
     ContextSlotStatus,
     ContextVersion,
+    StagedHistoryCompression,
+    StagedHistoryCompressionStatus,
     new_context_version,
 )
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
@@ -46,8 +48,10 @@ from ..domain.facts import (
     utc_now_iso,
 )
 from ..domain.state import AgentPhase, AgentState
+from ..domain.control import AgentAction
 from .approval_service import ApprovalService
 from .cancellation_service import CancellationService
+from .context_budget import ContextBudgetDecision, ContextBudgetPlanner, ContextBudgetStatus, TokenCountRequest
 from .dto import (
     ContextBundle,
     ConversationMessage,
@@ -61,7 +65,25 @@ from .dto import (
     ToolResult,
     ToolResultStatus,
 )
-from .ports import CheckpointRepository, ContextPort, DelegationPort, LLMPort, RunPolicyPort, RunRepository, ToolPort
+from .history_compaction import ConversationBatch, HistoryCompactorUnavailable, compact_in_batches, select_oldest_conversations
+from .ports import CheckpointRepository, ContextPort, DelegationPort, HistoryCompactorPort, LLMPort, LLMUnavailableError, RunPolicyPort, RunRepository, TokenCounterPort, ToolPort
+
+
+class ContextBudgetRejected(RuntimeError):
+    """真实输入无法满足上下文窗口时携带失败枚举的确定性错误。"""
+
+    def __init__(self, message: str, code: RunErrorCode = RunErrorCode.CONTEXT_BUDGET) -> None:
+        """保存供失败结果使用的精确错误类别。"""
+        super().__init__(message)
+        self.code: RunErrorCode = code
+
+
+@dataclass(frozen=True)
+class _PreparedContext:
+    """预算安全点准备出的实际输入与可选待持久化候选。"""
+
+    context: ContextBundle
+    candidate: StagedHistoryCompression | None = None
 
 
 class RuntimeEngine:
@@ -78,6 +100,8 @@ class RuntimeEngine:
         approval_service: ApprovalService,
         cancellation_service: CancellationService,
         delegation_port: DelegationPort | None = None,
+        token_counter: TokenCounterPort | None = None,
+        history_compactor: HistoryCompactorPort | None = None,
     ) -> None:
         """绑定执行所需 Ports；不保存任何单次运行的状态。"""
         self._run_repository: RunRepository = run_repository
@@ -89,6 +113,11 @@ class RuntimeEngine:
         self._approval_service: ApprovalService = approval_service
         self._cancellation_service: CancellationService = cancellation_service
         self._delegation_port: DelegationPort | None = delegation_port
+        self._budget_planner: ContextBudgetPlanner | None = (
+            ContextBudgetPlanner(token_counter) if token_counter is not None else None
+        )
+        self._token_counter: TokenCounterPort | None = token_counter
+        self._history_compactor: HistoryCompactorPort | None = history_compactor
 
     async def execute(self, request: RunRequest) -> RunResult:
         """创建新的 RunExecution，并执行到成功、失败、取消或审批等待。"""
@@ -179,6 +208,8 @@ class RuntimeEngine:
             message_cursor=checkpoint.message_sequence,
             run_messages=messages,
             active_context_version=active_context_version,
+            staged_history_compressions=run.staged_history_compressions,
+            replay_active_context=True,
         )
         pending_calls: tuple[ToolCall, ...] = _calls_from_checkpoint(checkpoint)
         event_sequence: int = await self._event(
@@ -222,6 +253,100 @@ class RuntimeEngine:
         """返回运行所属 Session，供取消操作遵守单 Session 串行约束。"""
         run: AgentRun | None = await self._run_repository.find_run(run_id)
         return run.session_id if run is not None else None
+
+    async def recover_session(self, session_id: str) -> None:
+        """将进程重启遗留的 RUNNING Run 转为仍占用 Session 的 INTERRUPTED。"""
+        runs: tuple[AgentRun, ...] = await self._run_repository.list_active_runs(session_id)
+        run: AgentRun
+        for run in runs:
+            if run.status is not RunStatus.RUNNING:
+                continue
+            error: RunError = RunError(RunErrorCode.PROCESS_RESTART, "进程重启导致运行中断", retryable=True)
+            interrupted: AgentRun = replace(run, status=RunStatus.INTERRUPTED, error=error)
+            await self._run_repository.save_run(interrupted)
+            checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(run.session_id, run.run_id)
+            if checkpoint is not None:
+                event_sequence: int = await self._event(
+                    interrupted,
+                    checkpoint.event_sequence,
+                    RunEventType.RUN_INTERRUPTED,
+                    (),
+                )
+                await self._checkpoint_repository.save(replace(checkpoint, event_sequence=event_sequence))
+
+    async def active_run(self, session_id: str) -> AgentRun | None:
+        """返回当前占用 Session 的唯一非终态 Run。"""
+        runs: tuple[AgentRun, ...] = await self._run_repository.list_active_runs(session_id)
+        if len(runs) > 1:
+            raise RuntimeError("同一 Session 存在多个未终态 Run")
+        return runs[0] if runs else None
+
+    async def retry_interrupted(self, run_id: str) -> RunResult:
+        """依据 checkpoint 和活动 Context Version 重试被外部服务中断的 Run。"""
+        run: AgentRun | None = await self._run_repository.find_run(run_id)
+        if run is None or run.status is not RunStatus.INTERRUPTED:
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "Run 不处于可重试中断状态"))
+        checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(run.session_id, run.run_id)
+        if checkpoint is None or checkpoint.active_context_version is None or checkpoint.next_action is not AgentAction.INVOKE_LLM:
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "中断 Run 缺少可重试的 LLM checkpoint"))
+        versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(run.session_id, run.run_id)
+        version: ContextVersion | None = next((item for item in versions if item.version == checkpoint.active_context_version), None)
+        if version is None:
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "checkpoint 引用的 Context Version 不存在"))
+        messages: tuple[RunMessage, ...] = await self._run_repository.load_messages(run.session_id, run.run_id)
+        input_message: RunMessage | None = next((item for item in messages if item.message_id == run.input_message_id), None)
+        if input_message is None:
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "中断 Run 缺少用户输入消息"))
+        request: RunRequest = RunRequest(
+            run.session_id,
+            "retry-interrupted",
+            run.agent_id,
+            ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
+            _conversation_from_context_version(version),
+            run_id=run.run_id,
+        )
+        execution: RunExecution = RunExecution(
+            run.run_id,
+            request,
+            run.policy,
+            _state_from_checkpoint(checkpoint),
+            RunBudget(run.policy.max_iterations),
+            message_cursor=checkpoint.message_sequence,
+            run_messages=messages,
+            active_context_version=version,
+            staged_history_compressions=run.staged_history_compressions,
+            replay_active_context=True,
+        )
+        resumed: AgentRun = replace(run, status=RunStatus.RUNNING, resume_count=run.resume_count + 1)
+        await self._run_repository.save_run(resumed)
+        event_sequence: int = await self._event(resumed, checkpoint.event_sequence, RunEventType.RUN_RESUMED, (), "重试中断 Run")
+        self._cancellation_service.register(run.run_id, execution.cancellation)
+        try:
+            result: RunResult = await self._drive(execution, resumed, messages, (), event_sequence)
+            await self._release_run_context_if_terminal(result)
+            return result
+        finally:
+            self._cancellation_service.unregister(run.run_id)
+
+    async def abandon_interrupted(self, run_id: str) -> RunResult:
+        """放弃中断 Run，保留审计事实并解除其 Session 占用。"""
+        run: AgentRun | None = await self._run_repository.find_run(run_id)
+        if run is None or run.status is not RunStatus.INTERRUPTED:
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "Run 不处于可放弃中断状态"))
+        checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(run.session_id, run.run_id)
+        abandoned: AgentRun = replace(
+            run,
+            status=RunStatus.ABANDONED,
+            ended_at=utc_now_iso(),
+            error=RunError(RunErrorCode.CANCELLED, "已被新的用户请求放弃"),
+        )
+        await self._run_repository.save_run(abandoned)
+        await self._checkpoint_repository.delete(run.session_id, run.run_id)
+        if checkpoint is not None:
+            await self._event(abandoned, checkpoint.event_sequence, RunEventType.RUN_ABANDONED, ())
+        result: RunResult = RunResult(run.run_id, RunStatus.ABANDONED, error=abandoned.error)
+        await self._release_run_context_if_terminal(result)
+        return result
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """请求活动 run 停止；等待中的 run 立即持久化为取消终态。"""
@@ -374,23 +499,25 @@ class RuntimeEngine:
                 execution.update_state(transition.state, transition.action)
                 continue
             try:
-                context = await self._context_port.build(execution.request, execution.view())
+                prepared: _PreparedContext = await self._prepare_context(execution, run, messages)
+            except HistoryCompactorUnavailable as error:
+                await self._checkpoint_repository.save(
+                    _compaction_checkpoint(run, execution, event_number, sequence),
+                )
+                return await self._interrupt(execution, run, tuple(messages), event_number, str(error))
+            except ContextBudgetRejected as error:
+                return await self._fail(execution, run, tuple(messages), event_number, str(error), error.code)
             except Exception as error:
                 return await self._fail(execution, run, tuple(messages), event_number, f"模型上下文构建失败：{error}")
-            if context.metadata.truncation_applied:
-                return await self._fail(
-                    execution,
-                    run,
-                    tuple(messages),
-                    event_number,
-                    "Runtime 不允许在 Run 内静默裁剪上下文，请在创建 Run 前压缩 Session 历史",
-                )
+            context: ContextBundle = prepared.context
             context_version: ContextVersion = await self._append_context_version(
                 run,
                 execution,
                 context,
                 messages,
             )
+            if prepared.candidate is not None:
+                run = await self._persist_staged_candidate(run, execution, prepared.candidate, context_version.version)
             execution.activate_context_version(context_version)
             await self._run_repository.set_active_context_version(
                 run.session_id,
@@ -398,6 +525,8 @@ class RuntimeEngine:
                 context_version.version,
             )
             run = replace(run, active_context_version=context_version.version)
+            checkpoint: RunCheckpoint = _llm_checkpoint(run, execution, event_number, sequence, context_version.version)
+            await self._checkpoint_repository.save(checkpoint)
             event_number = await self._event(
                 run,
                 event_number,
@@ -406,8 +535,11 @@ class RuntimeEngine:
                 "模型调用开始",
                 _llm_started_data(run, context_version, messages, context),
             )
+            await self._checkpoint_repository.save(replace(checkpoint, event_sequence=event_number))
             try:
                 response = await self._llm_port.complete(context, execution.view())
+            except LLMUnavailableError as error:
+                return await self._interrupt(execution, run, tuple(messages), event_number, str(error))
             except Exception as error:
                 return await self._fail(execution, run, tuple(messages), event_number, f"模型调用失败：{error}", RunErrorCode.LLM_FAILURE)
             if response.metadata.get("has_streamed_text") is True:
@@ -448,6 +580,115 @@ class RuntimeEngine:
                 )
             pending_calls = response.tool_calls
         return await self._fail(execution, run, tuple(messages), event_number, "状态机意外结束")
+
+    async def _prepare_context(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        messages: list[RunMessage],
+    ) -> _PreparedContext:
+        """在每次 LLM_STARTED 前构造、精确计数并必要时生成历史压缩候选。"""
+        context: ContextBundle = await self._context_port.build(execution.request, execution.view())
+        if self._budget_planner is None or self._token_counter is None or self._history_compactor is None:
+            return _PreparedContext(context)
+        decision: ContextBudgetDecision = await self._budget_planner.plan(
+            _token_request(context, execution.request, tuple(messages), _tokenizer_encoding(execution.policy.policy_data)),
+            _context_window(execution.policy.policy_data),
+        )
+        execution.record_context_budget_decision(decision)
+        if decision.status is ContextBudgetStatus.WITHIN_BUDGET:
+            return _PreparedContext(context)
+        if decision.status is ContextBudgetStatus.REJECTED:
+            code: RunErrorCode = (
+                RunErrorCode.TOKENIZER_UNAVAILABLE
+                if decision.reason == "tokenizer_unavailable"
+                else RunErrorCode.CONTEXT_BUDGET
+            )
+            raise ContextBudgetRejected(f"{code.value}：{decision.reason}", code)
+        return await self._compact_and_rebuild(execution, run, messages)
+
+    async def _compact_and_rebuild(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        messages: list[RunMessage],
+    ) -> _PreparedContext:
+        """仅压缩最旧完整 Conversation，重建真实输入后必须再次精确计数。"""
+        if self._budget_planner is None or self._token_counter is None or self._history_compactor is None:
+            raise ContextBudgetRejected("上下文预算 Port 未装配")
+        batches: tuple[ConversationBatch, ...] = await _conversation_batches(
+            self._token_counter,
+            _tokenizer_encoding(execution.policy.policy_data),
+            execution.request.conversation.messages,
+        )
+        selected: tuple[ConversationBatch, ...] = select_oldest_conversations(batches)
+        if not selected:
+            raise ContextBudgetRejected("上下文超限且至少必须保留一条最新 Conversation 原文")
+        previous_summary: str = (
+            execution.request.conversation.compressed_history.content
+            if execution.request.conversation.compressed_history is not None else ""
+        )
+        summary_result = await compact_in_batches(
+            self._history_compactor,
+            self._token_counter,
+            previous_summary,
+            selected,
+            _context_window(execution.policy.policy_data),
+            _tokenizer_encoding(execution.policy.policy_data),
+        )
+        rebuilt_request: RunRequest = _request_with_compressed_history(
+            execution.request,
+            selected,
+            summary_result.summary,
+        )
+        execution.request = rebuilt_request
+        rebuilt_context: ContextBundle = await self._context_port.build(rebuilt_request, execution.view())
+        rebuilt_decision: ContextBudgetDecision = await self._budget_planner.plan(
+            _token_request(rebuilt_context, rebuilt_request, tuple(messages), _tokenizer_encoding(execution.policy.policy_data)),
+            _context_window(execution.policy.policy_data),
+        )
+        execution.record_context_budget_decision(rebuilt_decision)
+        if rebuilt_decision.status is not ContextBudgetStatus.WITHIN_BUDGET:
+            raise ContextBudgetRejected("历史压缩后真实输入仍超过上下文窗口")
+        source_hash: str = _hash_json_value([
+            {
+                "conversation_id": batch.conversation_id,
+                "messages": [message.to_dict() for message in batch.messages],
+            }
+            for batch in selected
+        ])
+        candidate: StagedHistoryCompression = StagedHistoryCompression(
+            candidate_id=f"history-{run.run_id}-{len(execution.staged_history_compressions) + 1}",
+            status=StagedHistoryCompressionStatus.STAGED,
+            session_baseline_version=execution.request.conversation.version,
+            covered_through_conversation_id=selected[-1].conversation_id,
+            source_hash=source_hash,
+            summary_hash=_hash_text(summary_result.summary),
+            context_version=0,
+        )
+        return _PreparedContext(rebuilt_context, candidate)
+
+    async def _persist_staged_candidate(
+        self,
+        run: AgentRun,
+        execution: RunExecution,
+        candidate: StagedHistoryCompression,
+        context_version: int,
+    ) -> AgentRun:
+        """以活动版本引用保存控制信息，摘要正文只保留在 Context Version 中。"""
+        finalized: StagedHistoryCompression = replace(candidate, context_version=context_version)
+        candidates: list[StagedHistoryCompression] = []
+        existing: StagedHistoryCompression
+        for existing in execution.staged_history_compressions:
+            candidates.append(
+                replace(existing, status=StagedHistoryCompressionStatus.SUPERSEDED)
+                if existing.status is StagedHistoryCompressionStatus.STAGED else existing
+            )
+        candidates.append(finalized)
+        saved: tuple[StagedHistoryCompression, ...] = tuple(candidates)
+        await self._run_repository.save_staged_history_compressions(run.session_id, run.run_id, saved)
+        execution.staged_history_compressions = saved
+        return replace(run, staged_history_compressions=saved)
 
     async def _save_messages(
         self,
@@ -652,6 +893,29 @@ class RuntimeEngine:
         await self._event(run, event_sequence, RunEventType.RUN_CANCELLED, ())
         return RunResult(run.run_id, RunStatus.CANCELLED, error=cancelled.error)
 
+    async def _interrupt(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        messages: tuple[RunMessage, ...],
+        event_sequence: int,
+        reason: str,
+    ) -> RunResult:
+        """保留调用前 checkpoint，将可恢复外部不可用映射为 INTERRUPTED。"""
+        error: RunError = RunError(RunErrorCode.LLM_FAILURE, reason, retryable=True)
+        interrupted: AgentRun = replace(run, status=RunStatus.INTERRUPTED, error=error)
+        await self._run_repository.save_run(interrupted)
+        interrupted_event_sequence: int = await self._event(
+            interrupted,
+            event_sequence,
+            RunEventType.RUN_INTERRUPTED,
+            (),
+        )
+        checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(run.session_id, run.run_id)
+        if checkpoint is not None:
+            await self._checkpoint_repository.save(replace(checkpoint, event_sequence=interrupted_event_sequence))
+        return RunResult(run.run_id, RunStatus.INTERRUPTED, error=error)
+
     async def _fail(
         self,
         execution: RunExecution,
@@ -665,6 +929,7 @@ class RuntimeEngine:
         error = RunError(code, message)
         failed = replace(run, status=RunStatus.FAILED, ended_at=utc_now_iso(), error=error)
         await self._run_repository.save_run(failed)
+        await self._checkpoint_repository.delete(run.session_id, run.run_id)
         await self._event(run, event_sequence, RunEventType.RUN_FAILED, ())
         return RunResult(run.run_id, RunStatus.FAILED, error=error)
 
@@ -717,6 +982,204 @@ def _llm_started_data(
         "context_hash": context_version.content_hash,
         "tool_schema_hash": context_version.tool_schema_hash,
     }
+
+
+def _llm_checkpoint(
+    run: AgentRun,
+    execution: RunExecution,
+    event_sequence: int,
+    message_sequence: int,
+    context_version: int,
+) -> RunCheckpoint:
+    """在业务模型调用前保存可恢复安全点，不记录重复上下文正文。"""
+    return RunCheckpoint(
+        checkpoint_id=f"checkpoint-{run.run_id}",
+        run_id=run.run_id,
+        session_id=run.session_id,
+        checkpoint_sequence=1,
+        event_sequence=event_sequence,
+        message_sequence=message_sequence,
+        agent_state=execution.state.to_dict(),
+        next_action=AgentAction.INVOKE_LLM,
+        pending={},
+        budget=_checkpoint_budget(execution),
+        active_context_version=context_version,
+        staged_history_compression_ids=tuple(
+            candidate.candidate_id for candidate in execution.staged_history_compressions
+        ),
+    )
+
+
+def _compaction_checkpoint(
+    run: AgentRun,
+    execution: RunExecution,
+    event_sequence: int,
+    message_sequence: int,
+) -> RunCheckpoint:
+    """在压缩服务不可用时保存可重建输入的 checkpoint，且不生成半成品版本。"""
+    return RunCheckpoint(
+        checkpoint_id=f"checkpoint-{run.run_id}",
+        run_id=run.run_id,
+        session_id=run.session_id,
+        checkpoint_sequence=1,
+        event_sequence=event_sequence,
+        message_sequence=message_sequence,
+        agent_state=execution.state.to_dict(),
+        next_action=AgentAction.INVOKE_LLM,
+        pending={},
+        budget=_checkpoint_budget(execution),
+        staged_history_compression_ids=tuple(
+            candidate.candidate_id for candidate in execution.staged_history_compressions
+        ),
+    )
+
+
+def _checkpoint_budget(execution: RunExecution) -> JSONMap:
+    """合并运行资源预算与本次真实输入预算结论，不保存上下文正文。"""
+    budget: JSONMap = execution.budget.to_dict()
+    decision: ContextBudgetDecision | None = execution.context_budget_decision
+    if decision is not None:
+        budget["context_budget"] = decision.to_dict()
+    return budget
+
+
+def _context_window(policy_data: JSONMap) -> int:
+    """读取冻结的模型上下文窗口，缺失时以确定性错误拒绝。"""
+    value: JSONValue | None = policy_data.get("context_window")
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ContextBudgetRejected("Agent 策略缺少有效 context_window")
+    return value
+
+
+def _tokenizer_encoding(policy_data: JSONMap) -> str:
+    """读取冻结 Tokenizer 编码，禁止回退到字符估算。"""
+    value: JSONValue | None = policy_data.get("tokenizer_encoding")
+    if not isinstance(value, str) or not value:
+        raise ContextBudgetRejected("Agent 策略缺少 tokenizer_encoding")
+    return value
+
+
+def _token_request(
+    context: ContextBundle,
+    request: RunRequest,
+    run_messages: tuple[RunMessage, ...],
+    tokenizer_encoding: str,
+) -> TokenCountRequest:
+    """从实际 ContextBundle 还原精确计数的全部输入组成。"""
+    compressed: HistoryCompressionSnapshot | None = request.conversation.compressed_history
+    summary_message: str = _history_summary_message(compressed.content) if compressed is not None else ""
+    system_contents: tuple[str, ...] = tuple(
+        message.content
+        for message in context.messages
+        if message.role is MessageRole.SYSTEM and message.content != summary_message
+    )
+    history_messages: tuple[ConversationMessage, ...] = tuple(
+        message for message in request.conversation.messages if message.role is not MessageRole.SYSTEM
+    )
+    input_run_messages: tuple[RunMessage, ...] = tuple(
+        message for message in run_messages if message.message_id != request.user_message.message_id
+    )
+    return TokenCountRequest(
+        tokenizer_encoding=tokenizer_encoding,
+        system_contents=system_contents,
+        history_summary="" if compressed is None else compressed.content,
+        history_messages=history_messages,
+        current_user_message=request.user_message,
+        run_messages=input_run_messages,
+        tools=context.tools,
+        protocol_overhead_tokens=0,
+    )
+
+
+async def _conversation_batches(
+    token_counter: TokenCounterPort,
+    tokenizer_encoding: str,
+    messages: tuple[ConversationMessage, ...],
+) -> tuple[ConversationBatch, ...]:
+    """按用户消息及其后续回答切分完整 Conversation，并使用同一 TokenPort 计数。"""
+    batches: list[ConversationBatch] = []
+    current_messages: list[ConversationMessage] = []
+    current_id: str = ""
+    message: ConversationMessage
+    for message in messages:
+        if message.role is MessageRole.SYSTEM:
+            continue
+        if message.role is MessageRole.USER:
+            if current_messages:
+                batches.append(await _count_conversation_batch(token_counter, tokenizer_encoding, current_id, tuple(current_messages)))
+            current_id = message.message_id
+            current_messages = [message]
+            continue
+        if current_messages:
+            current_messages.append(message)
+    if current_messages:
+        batches.append(await _count_conversation_batch(token_counter, tokenizer_encoding, current_id, tuple(current_messages)))
+    return tuple(batches)
+
+
+async def _count_conversation_batch(
+    token_counter: TokenCounterPort,
+    tokenizer_encoding: str,
+    conversation_id: str,
+    messages: tuple[ConversationMessage, ...],
+) -> ConversationBatch:
+    """使用精确 TokenCounter 得到一条完整 Conversation 的压缩成本。"""
+    result = await token_counter.count(TokenCountRequest(
+        tokenizer_encoding=tokenizer_encoding,
+        system_contents=(),
+        history_summary="",
+        history_messages=messages,
+        current_user_message=ConversationMessage("budget-empty", MessageRole.USER, "", ""),
+        run_messages=(),
+        tools=(),
+        protocol_overhead_tokens=0,
+    ))
+    if result.error_code is not None:
+        raise ContextBudgetRejected(f"{result.error_code.value}：无法计算 Conversation Token")
+    return ConversationBatch(conversation_id, messages, result.input_tokens)
+
+
+def _request_with_compressed_history(
+    request: RunRequest,
+    selected: tuple[ConversationBatch, ...],
+    summary: str,
+) -> RunRequest:
+    """以候选摘要替换已覆盖 Conversation，原 Session 绝不在此时被写入。"""
+    selected_ids: frozenset[str] = frozenset(batch.conversation_id for batch in selected)
+    remaining: list[ConversationMessage] = []
+    current_conversation_id: str = ""
+    message: ConversationMessage
+    for message in request.conversation.messages:
+        if message.role is MessageRole.USER:
+            current_conversation_id = message.message_id
+        if current_conversation_id not in selected_ids:
+            remaining.append(message)
+    previous: HistoryCompressionSnapshot | None = request.conversation.compressed_history
+    compression_version: int = 1 if previous is None else previous.compression_version + 1
+    compressed: HistoryCompressionSnapshot = HistoryCompressionSnapshot(
+        compression_version=compression_version,
+        covered_through_conversation_id=selected[-1].conversation_id,
+        content=summary,
+        content_hash=_hash_text(summary),
+    )
+    summary_message: ConversationMessage = ConversationMessage(
+        message_id=f"history-compression-{compression_version}",
+        role=MessageRole.SYSTEM,
+        content=_history_summary_message(summary),
+        created_at=utc_now_iso(),
+    )
+    conversation: ConversationSnapshot = ConversationSnapshot(
+        request.session_id,
+        (summary_message, *remaining),
+        request.conversation.version,
+        compressed,
+    )
+    return replace(request, conversation=conversation)
+
+
+def _history_summary_message(summary: str) -> str:
+    """统一摘要注入文本，保证预算输入与实际消息一致。"""
+    return f"以下是此前对话的压缩摘要：\n{summary}"
 
 
 def _context_slots_from_bundle(

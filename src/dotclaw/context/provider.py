@@ -30,7 +30,7 @@ class ContextProvider:
         self._dependencies: ContextDependencies = dependencies
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """加载已绑定 Slot；未启用 Slot 不进入本次上下文。"""
-        if execution.active_context_version is not None:
+        if execution.replay_active_context and execution.active_context_version is not None:
             return _bundle_from_active_version(request, execution)
         owner_data: dict[ContextOwner, JSONMap] = await self._owner_data(request, execution)
         plan = self._resolver.resolve(self._enabled_slot_ids, owner_data)

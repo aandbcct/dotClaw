@@ -20,6 +20,10 @@ from .history_compaction import HistoryCompactionRequest, HistoryCompactionResul
 from .dto import ContextBundle, DelegationRequest, DelegationResult, DelegationSubmission, RunRequest, ToolInvocation, ToolResult
 
 
+class LLMUnavailableError(RuntimeError):
+    """业务模型代理重试耗尽后的可恢复外部错误。"""
+
+
 class TextStreamPort(Protocol):
     """将模型文本增量交付给入口层的应用协议。"""
 
@@ -69,6 +73,9 @@ class RunRepository(Protocol):
 
     async def find_run(self, run_id: str) -> AgentRun | None:
         """按运行标识定位摘要，供取消和审批恢复使用。"""
+
+    async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
+        """读取指定 Session 的全部未终态 Run，作为串行占用的持久化真相。"""
 
     async def save_run(self, run: AgentRun) -> None:
         """原子更新运行摘要。"""

@@ -67,6 +67,10 @@ class RunErrorCode(StrEnum):
     CANCELLED = "cancelled"
     INVALID_STATE = "invalid_state"
     PERSISTENCE_FAILURE = "persistence_failure"
+    CONTEXT_BUDGET = "context_budget"
+    TOKENIZER_UNAVAILABLE = "tokenizer_unavailable"
+    SESSION_BUSY = "session_busy"
+    PROCESS_RESTART = "process_restart"
 
 
 class ApprovalStatus(StrEnum):

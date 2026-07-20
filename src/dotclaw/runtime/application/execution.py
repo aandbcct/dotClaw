@@ -9,6 +9,7 @@ from ..domain.control import AgentAction
 from ..domain.context import ContextVersion, StagedHistoryCompression
 from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage
 from dotclaw.runtime.domain.state import AgentState
+from .context_budget import ContextBudgetDecision
 from .dto import RunRequest
 
 
@@ -83,6 +84,10 @@ class RunExecution:
     """最近一次已落盘的上下文版本；后续轮次和审批恢复必须重放该事实。"""
     staged_history_compressions: tuple[StagedHistoryCompression, ...] = ()
     """本 Run 尚未提交到 Session 的历史压缩候选引用。"""
+    replay_active_context: bool = False
+    """仅审批或中断重试时重放已冻结 Context Version，普通下一轮仍重新加载 Slot。"""
+    context_budget_decision: ContextBudgetDecision | None = None
+    """最近一次业务 LLM 调用前的真实输入预算结论，仅保存不含正文的审计字段。"""
 
     def view(self) -> RunExecutionView:
         """生成提供给 Port 的只读执行视图。"""
@@ -96,6 +101,7 @@ class RunExecution:
             run_messages=self.run_messages,
             active_context_version=self.active_context_version,
             staged_history_compressions=self.staged_history_compressions,
+            replay_active_context=self.replay_active_context,
         )
 
     def update_state(self, state: AgentState, action: AgentAction) -> None:
@@ -121,6 +127,10 @@ class RunExecution:
         if current is not None and context_version.version == current.version and context_version != current:
             raise ValueError("同一 Context Version 禁止覆盖为不同内容")
         self.active_context_version = context_version
+
+    def record_context_budget_decision(self, decision: ContextBudgetDecision) -> None:
+        """记录当前安全点的预算结论，供紧邻的 checkpoint 持久化。"""
+        self.context_budget_decision = decision
 
     def to_dict(self) -> JSONMap:
         """序列化为不含外部实例引用的检查点数据。"""
@@ -154,3 +164,5 @@ class RunExecutionView:
     """最近一次调用前保存的完整上下文版本；存在时 ContextPort 必须直接重放已冻结 Slot。"""
     staged_history_compressions: tuple[StagedHistoryCompression, ...] = ()
     """尚未提交到 Session 的候选控制信息。"""
+    replay_active_context: bool = False
+    """是否要求 ContextPort 直接重放活动版本。"""

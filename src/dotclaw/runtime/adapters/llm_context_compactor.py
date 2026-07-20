@@ -11,7 +11,7 @@ from ...llm.base import ChatChunk, Message, ToolDefinition
 from ...llm.base import LLMUsage
 from ..application.context_compaction import ContextCompactionRequest, ContextCompactionResult, ContextFragment
 from ..application.dto import ConversationMessage
-from ..application.history_compaction import ConversationBatch, HistoryCompactionRequest, HistoryCompactionResult
+from ..application.history_compaction import ConversationBatch, HistoryCompactionRequest, HistoryCompactionResult, HistoryCompactorUnavailable
 from ..domain.facts import ContextCompactionScope
 
 
@@ -121,7 +121,3 @@ def _source_hash(request: ContextCompactionRequest) -> str:
 def _hash_text(content: str) -> str:
     """返回带算法前缀的 UTF-8 文本 hash。"""
     return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
-
-
-class HistoryCompactorUnavailable(RuntimeError):
-    """压缩模型服务不可用，可由后续 Engine 映射为可恢复中断。"""

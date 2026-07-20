@@ -11,7 +11,7 @@ from ...llm.base import ToolCall as LegacyToolCall
 from ...llm.base import ToolDefinition as LegacyToolDefinition
 from ...llm.proxy import LLMProxy
 from ..application.dto import ContextBundle
-from ..application.ports import LLMPort, TextStreamPort
+from ..application.ports import LLMPort, LLMUnavailableError, TextStreamPort
 from dotclaw.runtime.application.execution import RunExecutionView
 from ..domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 
@@ -51,17 +51,20 @@ class LLMProxyAdapter(LLMPort):
             model=execution.policy.model_id or None,
             stream=True,
         )
-        async for chunk in response:
-            if chunk.content:
-                content_parts.append(chunk.content)
-                if self._text_stream_port is not None:
-                    await self._text_stream_port.emit(execution.run_id, chunk.content)
-                    has_streamed_text = True
-            if chunk.tool_call is not None:
-                tool_calls.append(_tool_call_from_legacy(chunk.tool_call))
-            if chunk.is_final:
-                input_tokens = chunk.input_tokens
-                output_tokens = chunk.output_tokens
+        try:
+            async for chunk in response:
+                if chunk.content:
+                    content_parts.append(chunk.content)
+                    if self._text_stream_port is not None:
+                        await self._text_stream_port.emit(execution.run_id, chunk.content)
+                        has_streamed_text = True
+                if chunk.tool_call is not None:
+                    tool_calls.append(_tool_call_from_legacy(chunk.tool_call))
+                if chunk.is_final:
+                    input_tokens = chunk.input_tokens
+                    output_tokens = chunk.output_tokens
+        except Exception as error:
+            raise LLMUnavailableError("业务模型服务不可用") from error
         return RunMessage(
             message_id=f"llm-{execution.run_id}",
             sequence=0,

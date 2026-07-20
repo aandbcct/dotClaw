@@ -565,6 +565,21 @@ class OrderedEngine:
             await self.release.wait()
         return RunResult(request.lease_id, RunStatus.COMPLETED)
 
+    async def recover_session(self, session_id: str) -> None:
+        """测试替身没有持久化遗留运行。"""
+
+    async def active_run(self, session_id: str) -> AgentRun | None:
+        """测试替身不占用 Session。"""
+        return None
+
+    async def retry_interrupted(self, run_id: str) -> RunResult:
+        """测试替身不支持中断重试。"""
+        return RunResult(run_id, RunStatus.FAILED)
+
+    async def abandon_interrupted(self, run_id: str) -> RunResult:
+        """测试替身不支持中断放弃。"""
+        return RunResult(run_id, RunStatus.FAILED)
+
 
 async def test_session_coordinator_serializes_same_session_fifo() -> None:
     """同 Session 请求严格串行，后请求不得在前请求完成前启动。"""
@@ -613,6 +628,21 @@ class ControlOrderedEngine:
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """测试替身不需要取消行为。"""
+
+    async def recover_session(self, session_id: str) -> None:
+        """测试替身没有持久化遗留运行。"""
+
+    async def active_run(self, session_id: str) -> AgentRun | None:
+        """测试替身不占用 Session。"""
+        return None
+
+    async def retry_interrupted(self, run_id: str) -> RunResult:
+        """测试替身不支持中断重试。"""
+        return RunResult(run_id, RunStatus.FAILED)
+
+    async def abandon_interrupted(self, run_id: str) -> RunResult:
+        """测试替身不支持中断放弃。"""
+        return RunResult(run_id, RunStatus.FAILED)
 
 
 async def test_session_coordinator_serializes_approval_resume_with_new_message() -> None:

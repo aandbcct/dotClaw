@@ -88,6 +88,10 @@ class RunRepositoryAdapter:
         await self.recover_pending_success_commits()
         return await asyncio.to_thread(self._find_run_sync, run_id)
 
+    async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
+        """扫描指定 Session 的 run.json，返回持久化的未终态占用。"""
+        return await asyncio.to_thread(self._list_active_runs_sync, session_id)
+
     async def save_run(self, run: AgentRun) -> None:
         """原子更新已存在运行的摘要。"""
         await asyncio.to_thread(self._save_run_sync, run)
@@ -381,6 +385,26 @@ class RunRepositoryAdapter:
         result: tuple[RunMessage, ...] = tuple(messages)
         self._validate_messages(result)
         return result
+
+    def _list_active_runs_sync(self, session_id: str) -> tuple[AgentRun, ...]:
+        """读取 Session 下的所有运行摘要并过滤终态。"""
+        safe_session_id: str = validate_path_segment(session_id, "session_id")
+        directory: Path = self._root_directory / safe_session_id / "agent_runs"
+        if not directory.is_dir():
+            return ()
+        terminal: frozenset[RunStatus] = frozenset({
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+            RunStatus.ABANDONED,
+        })
+        runs: list[AgentRun] = []
+        path: Path
+        for path in directory.glob(f"*/{RunStorageFileName.RUN.value}"):
+            run: AgentRun = _agent_run_from_dict(load_json_map(path))
+            if run.status not in terminal:
+                runs.append(run)
+        return tuple(runs)
 
     def _load_context_versions_from_path_sync(self, path: Path) -> tuple[ContextVersion, ...]:
         """读取并校验 v3 的全部 Context Version。"""

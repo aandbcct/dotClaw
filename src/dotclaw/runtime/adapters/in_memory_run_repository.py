@@ -39,6 +39,16 @@ class InMemoryRunRepository:
             raise ValueError(f"运行 {run_id} 在多个 Session 中重复出现")
         return matches[0] if matches else None
 
+    async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
+        """返回仍占用 Session 的非终态 Run。"""
+        terminal: frozenset[RunStatus] = frozenset({
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+            RunStatus.ABANDONED,
+        })
+        return tuple(run for run in self._runs.values() if run.session_id == session_id and run.status not in terminal)
+
     async def save_run(self, run: AgentRun) -> None:
         """覆盖已创建的 Run 摘要。"""
         key: tuple[str, str] = (run.session_id, run.run_id)

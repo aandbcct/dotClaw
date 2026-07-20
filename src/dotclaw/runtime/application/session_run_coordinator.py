@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
+from ..domain.facts import AgentRun, RunError, RunErrorCode, RunStatus
 from .dto import RunRequest, RunResult
 
 
@@ -31,6 +32,18 @@ class RuntimeControlPort(RuntimeExecutionPort, Protocol):
     async def cancel(self, run_id: str, reason: str) -> None:
         """取消指定运行。"""
 
+    async def recover_session(self, session_id: str) -> None:
+        """恢复进程重启遗留的 Session 运行状态。"""
+
+    async def active_run(self, session_id: str) -> AgentRun | None:
+        """读取持久化的当前 Session 占用。"""
+
+    async def retry_interrupted(self, run_id: str) -> RunResult:
+        """重试可恢复中断 Run。"""
+
+    async def abandon_interrupted(self, run_id: str) -> RunResult:
+        """放弃可恢复中断 Run。"""
+
 
 class SessionRunCoordinator:
     """同一 Session FIFO、不同 Session 可并行的轻量租约协调器。"""
@@ -45,6 +58,9 @@ class SessionRunCoordinator:
         """按 Session 获取 FIFO 租约后执行请求。"""
         lock: asyncio.Lock = await self._get_lock(request.session_id)
         async with lock:
+            occupied: RunResult | None = await self._prepare_new_request(request.session_id)
+            if occupied is not None:
+                return occupied
             return await self._engine.execute(request)
 
     async def submit_prepared(
@@ -55,6 +71,9 @@ class SessionRunCoordinator:
         """在同一 Session 租约内准备冻结请求并执行，避免压缩版本并发覆盖。"""
         lock: asyncio.Lock = await self._get_lock(session_id)
         async with lock:
+            occupied: RunResult | None = await self._prepare_new_request(session_id)
+            if occupied is not None:
+                return occupied
             request: RunRequest = await request_factory()
             if request.session_id != session_id:
                 raise ValueError("冻结请求的 Session 与租约不一致")
@@ -77,6 +96,39 @@ class SessionRunCoordinator:
         正在执行且等待外部结果的 Run 相互等待。
         """
         await self._engine.cancel(run_id, reason)
+
+    async def retry_interrupted(self, run_id: str) -> RunResult:
+        """在所属 Session 锁内重试中断 Run，避免与普通请求并发。"""
+        session_id: str | None = await self._engine.get_run_session_id(run_id)
+        if session_id is None:
+            return await self._engine.retry_interrupted(run_id)
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        async with lock:
+            return await self._engine.retry_interrupted(run_id)
+
+    async def abandon_interrupted(self, run_id: str) -> RunResult:
+        """在所属 Session 锁内放弃中断 Run。"""
+        session_id: str | None = await self._engine.get_run_session_id(run_id)
+        if session_id is None:
+            return await self._engine.abandon_interrupted(run_id)
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        async with lock:
+            return await self._engine.abandon_interrupted(run_id)
+
+    async def _prepare_new_request(self, session_id: str) -> RunResult | None:
+        """以持久化占用表保证跨进程 Session 串行，并在新请求前放弃旧中断。"""
+        await self._engine.recover_session(session_id)
+        active: AgentRun | None = await self._engine.active_run(session_id)
+        if active is None:
+            return None
+        if active.status is RunStatus.INTERRUPTED:
+            await self._engine.abandon_interrupted(active.run_id)
+            return None
+        return RunResult(
+            active.run_id,
+            RunStatus.FAILED,
+            error=RunError(RunErrorCode.SESSION_BUSY, "Session 存在未终态 Run，暂不接受普通请求"),
+        )
 
     async def _get_lock(self, session_id: str) -> asyncio.Lock:
         """为 Session 创建或返回唯一的异步租约锁。"""

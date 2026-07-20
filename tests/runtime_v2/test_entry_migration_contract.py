@@ -31,7 +31,7 @@ async def test_agent_process_submits_to_coordinator_and_projector_writes_convers
     """普通消息经 Coordinator/Engine 执行，Agent 本身不直接写 Session。"""
     config = Config()
     config.session.directory = str(tmp_path)
-    identity = AgentIdentity(agent_id="agent-1", agent_name="测试 Agent")
+    identity = AgentIdentity(agent_id="agent-1", agent_name="测试 Agent", model="qwen3.7-max")
     session_manager = SessionManager(tmp_path)
     services = build_runtime_services(
         config=config,

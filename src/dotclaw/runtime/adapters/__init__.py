@@ -11,6 +11,7 @@ from .tiktoken_token_counter import TiktokenTokenCounter
 from .in_memory_run_repository import InMemoryRunRepository
 from .run_repository import RunRepositoryAdapter
 from .llm_proxy_adapter import LLMProxyAdapter
+from .llm_context_compactor import LLMContextCompactor
 from .session_conversation_projector import SessionConversationProjector
 from .tool_executor_adapter import ToolExecutorAdapter
 
@@ -22,6 +23,7 @@ __all__ = [
     "InMemoryRunRepository",
     "RunRepositoryAdapter",
     "LLMProxyAdapter",
+    "LLMContextCompactor",
     "SessionConversationProjector",
     "ToolExecutorAdapter",
 ]
