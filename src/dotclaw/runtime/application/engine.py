@@ -42,8 +42,6 @@ from ..domain.facts import (
     RunMessageKind,
     RunStatistics,
     RunStatus,
-    SystemContextSlot,
-    SystemContextSnapshot,
     ToolCall,
     utc_now_iso,
 )
@@ -117,7 +115,9 @@ class RuntimeEngine:
         await self._run_repository.create_run(run)
         self._cancellation_service.register(run_id, execution.cancellation)
         try:
-            return await self._drive(execution, run, (), ())
+            result: RunResult = await self._drive(execution, run, (), ())
+            await self._release_run_context_if_terminal(result)
+            return result
         finally:
             self._cancellation_service.unregister(run_id)
 
@@ -191,7 +191,9 @@ class RuntimeEngine:
         self._cancellation_service.register(run.run_id, execution.cancellation)
         try:
             if not approved:
-                return await self._finish_cancelled(execution, run, messages, event_sequence, "审批被拒绝")
+                result: RunResult = await self._finish_cancelled(execution, run, messages, event_sequence, "审批被拒绝")
+                await self._release_run_context_if_terminal(result)
+                return result
             resumed_run: AgentRun = replace(
                 run,
                 status=RunStatus.RUNNING,
@@ -205,7 +207,9 @@ class RuntimeEngine:
                 (),
                 "审批通过后恢复运行",
             )
-            return await self._drive(execution, resumed_run, messages, pending_calls, event_sequence)
+            result = await self._drive(execution, resumed_run, messages, pending_calls, event_sequence)
+            await self._release_run_context_if_terminal(result)
+            return result
         finally:
             self._cancellation_service.unregister(run.run_id)
 
@@ -236,7 +240,19 @@ class RuntimeEngine:
         checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
         event_sequence: int = checkpoint.event_sequence if checkpoint is not None else 0
         execution = RunExecution(run.run_id, RunRequest(run.session_id, "cancel", run.agent_id, ConversationMessage(run.input_message_id, MessageRole.USER, "", ""), ConversationSnapshot(run.session_id, (), 0)), run.policy, AgentState(), RunBudget(run.policy.max_iterations))
-        await self._finish_cancelled(execution, run, messages, event_sequence, reason)
+        result: RunResult = await self._finish_cancelled(execution, run, messages, event_sequence, reason)
+        await self._release_run_context_if_terminal(result)
+
+    async def _release_run_context_if_terminal(self, result: RunResult) -> None:
+        """仅在 Run 终态释放 Run Owner 的私有 Slot 实例。"""
+        terminal_statuses: frozenset[RunStatus] = frozenset({
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+            RunStatus.ABANDONED,
+        })
+        if result.status in terminal_statuses:
+            await self._context_port.release_scope(ContextOwner.RUN, result.run_id)
 
     async def _drive(self, execution: RunExecution, run: AgentRun, initial_messages: tuple[RunMessage, ...], pending_calls: tuple[ToolCall, ...], event_sequence: int = 0) -> RunResult:
         """驱动局部状态机，并在每个事实边界按顺序持久化。"""
@@ -709,35 +725,21 @@ def _context_slots_from_bundle(
     run_messages: list[RunMessage],
 ) -> tuple[ContextSlotSnapshot, ...]:
     """将当前有效 system、Session 和 Run 贡献转换为可审计 Slot 快照。"""
+    if context.metadata.slot_snapshots:
+        return context.metadata.slot_snapshots
     snapshots: list[ContextSlotSnapshot] = []
-    system_context: SystemContextSnapshot | None = context.metadata.system_context
-    if system_context is not None:
-        system_slot: SystemContextSlot
-        for system_slot in system_context.slots:
-            snapshots.append(ContextSlotSnapshot(
-                slot_id=system_slot.name,
-                owner=ContextOwner.AGENT,
-                contribution_kind=ContextContributionKind.SYSTEM_CONTENT,
-                status=ContextSlotStatus(system_slot.status.value),
-                injection_order=len(snapshots),
-                content=system_slot.content,
-                content_hash=system_slot.content_hash,
-                attributes={"scope": system_slot.scope.value},
-                error_code=system_slot.error_code,
-            ))
-    else:
-        system_content: str = "\n\n".join(
-            message.content for message in context.messages if message.role is MessageRole.SYSTEM
-        )
-        snapshots.append(ContextSlotSnapshot(
-            slot_id="legacy_context_port",
-            owner=ContextOwner.AGENT,
-            contribution_kind=ContextContributionKind.SYSTEM_CONTENT,
-            status=ContextSlotStatus.INCLUDED if system_content else ContextSlotStatus.EMPTY,
-            injection_order=len(snapshots),
-            content=system_content,
-            content_hash=_hash_text(system_content) if system_content else "",
-        ))
+    system_content: str = "\n\n".join(
+        message.content for message in context.messages if message.role is MessageRole.SYSTEM
+    )
+    snapshots.append(ContextSlotSnapshot(
+        slot_id="context_port",
+        owner=ContextOwner.AGENT,
+        contribution_kind=ContextContributionKind.SYSTEM_CONTENT,
+        status=ContextSlotStatus.INCLUDED if system_content else ContextSlotStatus.EMPTY,
+        injection_order=len(snapshots),
+        content=system_content,
+        content_hash=_hash_text(system_content) if system_content else "",
+    ))
     conversation_payload: JSONMap = request.conversation.to_dict()
     snapshots.append(ContextSlotSnapshot(
         slot_id="session_history",

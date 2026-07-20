@@ -1,198 +1,124 @@
-"""Runtime v2 的业务 ContextSlot 实现。"""
+"""按 Owner 快照加载的内置 Context Slot。"""
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-import json
-from enum import StrEnum
-from pathlib import Path
+from dotclaw.runtime.domain.context import ContextContributionKind, ContextSlotStatus
+from dotclaw.runtime.domain.facts import JSONValue
 
-from ..runtime.application.dto import ToolDefinition
-from .ports import AgentDescriptor, MemorySearchRecord
-from .scoped_cache import SlotCacheScope
-from .slot_context import SlotContext
+from .contracts import ContextContribution, ContextSlotBinding
 
 
-class ProjectContextFile(StrEnum):
-    """ProjectSlot 可读取的项目约定文件。"""
+class _TextOwnerSlot:
+    """从精确 Owner 字段读取文本的无状态基础 Slot。"""
 
-    AGENTS = "AGENTS.md"
-    CLAUDE = "CLAUDE.md"
-    README = "README.md"
+    def __init__(self, field_name: str) -> None:
+        self._field_name: str = field_name
 
+    async def load(self, binding: ContextSlotBinding) -> ContextContribution:
+        """把非空文本字段转换为 system 内容。"""
+        value: JSONValue | None = binding.owner_data.get(self._field_name)
+        if not isinstance(value, str) or not value:
+            return ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.EMPTY)
+        return ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, value)
 
-class ContextSlot(ABC):
-    """只负责产生一个上下文片段的抽象槽位。"""
+    async def refresh(self, binding: ContextSlotBinding) -> None:
+        """内置文本 Slot 不保存内容缓存。"""
 
-    name: str
-    scope: SlotCacheScope
-
-    @abstractmethod
-    async def produce(self, context: SlotContext) -> str | None:
-        """根据不可变输入产生文本；失败由 Provider 统一降级。"""
-
-
-class IdentitySlot(ContextSlot):
-    """提供冻结后的 Agent system prompt。"""
-
-    name: str = "identity"
-    scope: SlotCacheScope = SlotCacheScope.STATIC
-
-    async def produce(self, context: SlotContext) -> str | None:
-        """返回身份提示词。"""
-        return context.profile.system_prompt or None
+    async def release(self) -> None:
+        """内置文本 Slot 不持有外部资源。"""
 
 
-class ToolsSlot(ContextSlot):
-    """将可用工具定义格式化为 system prompt 片段。"""
+class IdentitySlot(_TextOwnerSlot):
+    """读取 Agent 冻结身份提示词。"""
 
-    name: str = "tools"
-    scope: SlotCacheScope = SlotCacheScope.SESSION
-
-    async def produce(self, context: SlotContext) -> str | None:
-        """返回所有可用工具的名称、说明与参数定义。"""
-        if not context.profile.tools:
-            return None
-        lines: list[str] = ["## 可用工具"]
-        tool: ToolDefinition
-        for tool in context.profile.tools:
-            lines.append(f"### {tool.name}")
-            if tool.description:
-                lines.append(tool.description)
-            if tool.parameters:
-                parameters_text: str = json.dumps(tool.parameters, ensure_ascii=False, indent=2)
-                lines.append(f"参数: {parameters_text}")
-        return "\n".join(lines)
+    def __init__(self) -> None:
+        super().__init__("system_prompt")
 
 
-class SkillsSlot(ContextSlot):
-    """提供技能注册表中的可用技能摘要。"""
+class SkillsSlot(_TextOwnerSlot):
+    """读取 Agent 所属技能摘要。"""
 
-    name: str = "skills"
-    scope: SlotCacheScope = SlotCacheScope.SESSION
-
-    async def produce(self, context: SlotContext) -> str | None:
-        """返回可用技能说明。"""
-        registry = context.dependencies.skill_registry
-        if registry is None:
-            return None
-        descriptions: str = registry.get_descriptions_block(max_desc_len=20)
-        if not descriptions:
-            return None
-        return "## 可用技能\n\n" + descriptions
+    def __init__(self) -> None:
+        super().__init__("skills_text")
 
 
-class WorkspaceSlot(ContextSlot):
-    """提供当前 Agent 的工作空间路径。"""
+class ToolsSlot:
+    """声明工具策略位置；完整 Schema 仅由 ContextBundle.tools 承载。"""
 
-    name: str = "workspace"
-    scope: SlotCacheScope = SlotCacheScope.SESSION
+    async def load(self, binding: ContextSlotBinding) -> ContextContribution:
+        """工具 Slot 不把 Schema 复制到 system 文本。"""
+        return ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.EMPTY)
 
-    async def produce(self, context: SlotContext) -> str | None:
-        """返回工作空间信息。"""
-        return f"工作空间: {context.profile.project_root}"
+    async def refresh(self, binding: ContextSlotBinding) -> None:
+        """工具定义来自每次冻结的 Agent 策略。"""
 
-
-class UserInfoSlot(ContextSlot):
-    """提供可选用户资料，避免 Slot 直接依赖 Channel 或 Session。"""
-
-    name: str = "user_info"
-    scope: SlotCacheScope = SlotCacheScope.SESSION
-
-    async def produce(self, context: SlotContext) -> str | None:
-        """返回可展示的用户名和语言偏好。"""
-        profile = context.dependencies.user_profile
-        if profile is None:
-            return None
-        lines: list[str] = []
-        if profile.name:
-            lines.append(f"用户: {profile.name}")
-        if profile.preferred_language:
-            lines.append(f"偏好语言: {profile.preferred_language}")
-        return "\n".join(lines) if lines else None
+    async def release(self) -> None:
+        """工具 Slot 不持有资源。"""
 
 
-class MemorySlot(ContextSlot):
-    """按当前用户输入检索相关记忆。"""
+class UserInfoSlot(_TextOwnerSlot):
+    """读取 Session 关联用户资料。"""
 
-    name: str = "memory"
-    scope: SlotCacheScope = SlotCacheScope.CONDITIONAL
-
-    async def produce(self, context: SlotContext) -> str | None:
-        """将记忆检索结果格式化为提示词片段。"""
-        memory_manager = context.dependencies.memory_manager
-        if memory_manager is None:
-            return None
-        results = await memory_manager.search(context.query)
-        if not results:
-            return None
-        lines: list[str] = []
-        result: MemorySearchRecord
-        for result in results:
-            title_prefix: str = f"[{result.title}] " if result.title else ""
-            lines.append(f"- ({result.source}:{result.path}) {title_prefix}{result.snippet}")
-        return "## 相关记忆\n\n" + "\n".join(lines)
+    def __init__(self) -> None:
+        super().__init__("user_info_text")
 
 
-class KnowledgeSlot(ContextSlot):
-    """按当前用户输入检索外部知识。"""
+class MemorySlot(_TextOwnerSlot):
+    """读取 Run 检索出的相关记忆。"""
 
-    name: str = "knowledge"
-    scope: SlotCacheScope = SlotCacheScope.CONDITIONAL
-
-    async def produce(self, context: SlotContext) -> str | None:
-        """返回知识库检索摘要。"""
-        knowledge_base = context.dependencies.knowledge_base
-        if knowledge_base is None:
-            return None
-        result: str | None = await knowledge_base.search(context.query)
-        return None if not result else "## 相关知识\n\n" + result
+    def __init__(self) -> None:
+        super().__init__("memory_text")
 
 
-class ProjectSlot(ContextSlot):
-    """读取有上限的项目约定文件，避免上下文无限增长。"""
+class KnowledgeSlot(_TextOwnerSlot):
+    """读取 Run 检索出的知识摘要。"""
 
-    name: str = "project"
-    scope: SlotCacheScope = SlotCacheScope.CONDITIONAL
-
-    async def produce(self, context: SlotContext) -> str | None:
-        """读取预算允许范围内的项目说明文件。"""
-        remaining_characters: int = max(context.profile.max_context_tokens * 4, 0)
-        contents: list[str] = []
-        filename: ProjectContextFile
-        for filename in ProjectContextFile:
-            if remaining_characters <= 0:
-                break
-            file_path: Path = context.profile.project_root / filename.value
-            if not file_path.is_file():
-                continue
-            text: str = file_path.read_text(encoding="utf-8").strip()
-            if not text:
-                continue
-            clipped_text: str = text[:remaining_characters]
-            contents.append(f"## {filename.value}\n\n{clipped_text}")
-            remaining_characters -= len(clipped_text)
-        return "\n\n".join(contents) if contents else None
+    def __init__(self) -> None:
+        super().__init__("knowledge_text")
 
 
-class AvailableAgentsSlot(ContextSlot):
-    """提供可委托 Agent 的简要目录。"""
+class AvailableAgentsSlot(_TextOwnerSlot):
+    """读取全局 Agent 目录摘要。"""
 
-    name: str = "available_agents"
-    scope: SlotCacheScope = SlotCacheScope.STATIC
+    def __init__(self) -> None:
+        super().__init__("available_agents_text")
 
-    async def produce(self, context: SlotContext) -> str | None:
-        """返回可用 Agent 列表。"""
-        registry = context.dependencies.agent_registry
-        if registry is None:
-            return None
-        agents = registry.list_all()
-        if not agents:
-            return None
-        lines: list[str] = ["## 可用子 Agent"]
-        agent: AgentDescriptor
-        for agent in agents:
-            description: str = agent.description or agent.agent_name
-            capabilities: str = ", ".join(agent.capabilities) if agent.capabilities else "通用"
-            lines.append(f"- **{agent.agent_id}** ({agent.agent_name}): {description}。能力：{capabilities}")
-        return "\n".join(lines)
+
+class HistorySlot:
+    """保存 Session Conversation 的结构化审计载荷。"""
+
+    async def load(self, binding: ContextSlotBinding) -> ContextContribution:
+        """仅携带 Conversation 载荷，不重复为 system 文本。"""
+        conversation: JSONValue | None = binding.owner_data.get("conversation")
+        if not isinstance(conversation, dict):
+            return ContextContribution(ContextContributionKind.HISTORY, ContextSlotStatus.EMPTY)
+        messages: JSONValue | None = conversation.get("messages")
+        status: ContextSlotStatus = (
+            ContextSlotStatus.INCLUDED if isinstance(messages, list) and messages else ContextSlotStatus.EMPTY
+        )
+        return ContextContribution(ContextContributionKind.HISTORY, status, attributes={"conversation": conversation})
+
+    async def refresh(self, binding: ContextSlotBinding) -> None:
+        """历史数据由 Session Owner 快照决定。"""
+
+    async def release(self) -> None:
+        """History Slot 不持有资源。"""
+
+
+class RunMessagesSlot:
+    """仅引用 Run Message 标识，正文始终留在 messages.json。"""
+
+    async def load(self, binding: ContextSlotBinding) -> ContextContribution:
+        """转换精确的字符串消息标识列表。"""
+        raw_ids: JSONValue | None = binding.owner_data.get("message_ids")
+        if not isinstance(raw_ids, list) or not all(isinstance(item, str) for item in raw_ids):
+            return ContextContribution(ContextContributionKind.RUN_MESSAGE_REFERENCES, ContextSlotStatus.EMPTY)
+        message_ids: tuple[str, ...] = tuple(raw_ids)
+        status: ContextSlotStatus = ContextSlotStatus.INCLUDED if message_ids else ContextSlotStatus.EMPTY
+        return ContextContribution(ContextContributionKind.RUN_MESSAGE_REFERENCES, status, message_ids=message_ids)
+
+    async def refresh(self, binding: ContextSlotBinding) -> None:
+        """Run Message 集合由 Run Owner 快照决定。"""
+
+    async def release(self) -> None:
+        """RunMessagesSlot 不持有资源。"""

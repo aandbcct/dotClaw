@@ -16,6 +16,7 @@ from dotclaw.runtime.application.dto import (
 from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, ToolCall,
 )
+from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.runtime.domain.state import AgentState
 from dotclaw.tools.approval import ApprovalManager
 from dotclaw.tools.executor import ToolExecutor
@@ -72,6 +73,9 @@ class EmptyContext(ContextPort):
             (),
             ContextMetadata(1),
         )
+
+    async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身不缓存 Slot 实例。"""
 
 
 class ToolThenFinalLLM(LLMPort):

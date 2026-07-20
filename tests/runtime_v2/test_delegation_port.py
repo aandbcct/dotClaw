@@ -42,6 +42,7 @@ from dotclaw.runtime.domain.facts import (
     RunStatus,
     ToolCall,
 )
+from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.session.session import SessionManager
 
 
@@ -66,6 +67,9 @@ class MinimalContext(ContextPort):
             "system",
         )
         return ContextBundle((system_message,), (), ContextMetadata(1))
+
+    async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身不缓存 Slot 实例。"""
 
 
 class DelegatingLLM(LLMPort):

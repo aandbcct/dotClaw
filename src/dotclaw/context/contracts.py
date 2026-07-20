@@ -47,9 +47,18 @@ class ContextSlotDescriptor:
 
 
 @dataclass(frozen=True)
+class ContextOwnerSnapshot:
+    """某个 Owner 在一次 Plan 解析时提供的标识与只读数据。"""
+
+    owner_key: str
+    data: JSONMap
+
+
+@dataclass(frozen=True)
 class ContextSlotBinding:
     """某次 Context Plan 对一个已启用 Slot 的绑定。"""
     descriptor: ContextSlotDescriptor
+    owner_key: str
     owner_data: JSONMap
 
 

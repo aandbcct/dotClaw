@@ -272,38 +272,14 @@ def _build_context_port(
     memory_manager: MemorySearchPort | None,
     agent_registry: AgentDirectoryPort,
 ) -> ContextPort:
-    """构建 Runtime v2 ContextPort 与作用域缓存。"""
-    from dotclaw.context import (
-        AvailableAgentsSlot,
-        ContextDependencies,
-        IdentitySlot,
-        KnowledgeSlot,
-        MemorySlot,
-        ProjectSlot,
-        SkillsSlot,
-        SlotContextProvider,
-        ToolsSlot,
-        UserInfoSlot,
-        WorkspaceSlot,
-    )
-    return SlotContextProvider(
-        slots=(
-            IdentitySlot(),
-            ToolsSlot(),
-            SkillsSlot(),
-            AvailableAgentsSlot(),
-            WorkspaceSlot(),
-            UserInfoSlot(),
-            MemorySlot(),
-            KnowledgeSlot(),
-            ProjectSlot(),
-        ),
-        dependencies=ContextDependencies(
-            skill_registry=skill_registry,
-            memory_manager=memory_manager,
-            agent_registry=agent_registry,
-        ),
-    )
+    """构建基于注册表与 Plan Resolver 的 Runtime ContextPort。"""
+    from dotclaw.context import ContextDependencies, build_context_provider
+
+    return build_context_provider(ContextDependencies(
+        skill_registry=skill_registry,
+        memory_manager=memory_manager,
+        agent_registry=agent_registry,
+    ))
 
 # ============================================================================
 # 主工厂函数
@@ -404,6 +380,7 @@ async def build_agent(
         memory_dream=memory_dream,
         mcp_task=mcp_task,
         history_preparation_service=history_preparation_service,
+        context_port=runtime_services.context_port,
     )
     logger.info("Agent [%s] 的 Runtime v2 服务已就绪", agent.agent_id)
     return agent, runtime_services, session_mgr

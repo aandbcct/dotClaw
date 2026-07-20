@@ -21,10 +21,23 @@ from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, RunStatus, ToolCall,
     require_json_map,
 )
-from dotclaw.context import ContextDependencies, SlotContextProvider
-from dotclaw.context.scoped_cache import SlotCacheScope
-from dotclaw.context.slot_context import SlotContext
-from dotclaw.context.slots import ContextSlot
+from dotclaw.context import (
+    ContextCacheScope,
+    ContextContribution,
+    ContextDependencies,
+    ContextPlanResolver,
+    ContextProvider,
+    ContextRefreshPolicy,
+    ContextSignalBus,
+    ContextSlotBinding,
+    ContextSlotDescriptor,
+    ContextSlotManager,
+    ContextSlotRegistry,
+    HistorySlot,
+    RunMessagesSlot,
+    build_context_provider,
+)
+from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextSlotStatus
 
 
 class PolicyPort(RunPolicyPort):
@@ -38,10 +51,17 @@ class PolicyPort(RunPolicyPort):
 class ContextFake(ContextPort):
     """返回一条固定 system 消息的上下文替身。"""
 
+    def __init__(self) -> None:
+        self.released_scopes: list[tuple[ContextOwner, str]] = []
+
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """构造完整模型请求的最小上下文。"""
         message = RunMessage("context", 1, RunMessageKind.LLM_REQUEST, MessageRole.SYSTEM, "系统提示")
         return ContextBundle((message,), (), ContextMetadata(estimated_tokens=1))
+
+    async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身不缓存 Slot 实例。"""
+        self.released_scopes.append((owner, owner_key))
 
 
 class FinalLLM(LLMPort):
@@ -101,6 +121,25 @@ async def test_engine_completes_clarification_as_normal_conversation(tmp_path: P
     assert conversation[0].content == "请补充信息"
 
 
+async def test_engine_releases_run_scope_only_after_terminal_result(tmp_path: Path) -> None:
+    """Run 完成后 Engine 必须通过 ContextPort 释放对应 Run Owner 缓存。"""
+    context_port = ContextFake()
+    engine = RuntimeEngine(
+        RunRepositoryAdapter(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
+        context_port,
+        FinalLLM(),
+        ToolFake(),
+        PolicyPort(),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+        CancellationService(),
+    )
+
+    result = await engine.execute(_request("session-release"))
+
+    assert context_port.released_scopes == [(ContextOwner.RUN, result.run_id)]
+
+
 async def test_engine_runs_different_sessions_concurrently(tmp_path: Path) -> None:
     """不同 Session 的 run 写入独立目录，不互相覆盖消息与事件。"""
     engine = _engine(tmp_path)
@@ -148,19 +187,58 @@ class ApprovalTool(ToolPort):
         """测试替身无需远程取消。"""
 
 
-class ChangingSystemSlot(ContextSlot):
+class ChangingSystemSlot:
     """每次生成不同文本，用于验证恢复路径必须重放首次冻结 Slot。"""
-
-    name: str = "changing"
-    scope: SlotCacheScope = SlotCacheScope.DYNAMIC
 
     def __init__(self) -> None:
         self.calls: int = 0
 
-    async def produce(self, context: SlotContext) -> str | None:
+    async def load(self, binding: ContextSlotBinding) -> ContextContribution:
         """返回带调用序号的 system 内容。"""
         self.calls += 1
-        return f"system-{self.calls}"
+        return ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, f"system-{self.calls}")
+
+    async def refresh(self, binding: ContextSlotBinding) -> None:
+        """测试 Slot 不保存缓存。"""
+
+    async def release(self) -> None:
+        """测试 Slot 不持有资源。"""
+
+
+def _changing_context_port(slot: ChangingSystemSlot) -> ContextProvider:
+    """通过 Registry 装配可验证冻结语义的自定义 Slot。"""
+    registry = ContextSlotRegistry()
+    descriptor = ContextSlotDescriptor(
+        "changing",
+        ContextOwner.AGENT,
+        ContextContributionKind.SYSTEM_CONTENT,
+        ContextCacheScope.AGENT,
+        ContextRefreshPolicy.SIGNAL,
+        10,
+    )
+    registry.register(descriptor, lambda: slot)
+    registry.register(ContextSlotDescriptor(
+        "history",
+        ContextOwner.SESSION,
+        ContextContributionKind.HISTORY,
+        ContextCacheScope.SESSION,
+        ContextRefreshPolicy.SIGNAL,
+        20,
+    ), HistorySlot)
+    registry.register(ContextSlotDescriptor(
+        "run_messages",
+        ContextOwner.RUN,
+        ContextContributionKind.RUN_MESSAGE_REFERENCES,
+        ContextCacheScope.RUN,
+        ContextRefreshPolicy.SIGNAL,
+        30,
+    ), RunMessagesSlot)
+    return ContextProvider(
+        ContextPlanResolver(registry),
+        ContextSlotManager(registry, ContextSignalBus()),
+        ("changing", "history", "run_messages"),
+        ContextDependencies(),
+    )
 
 
 async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: Path) -> None:
@@ -265,7 +343,7 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
         CheckpointRepositoryAdapter(tmp_path),
-        SlotContextProvider((), ContextDependencies()),
+        build_context_provider(ContextDependencies()),
         llm,
         tool_port,
         PolicyPort(),
@@ -279,18 +357,17 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
     assert [invocation.call.call_id for invocation in tool_port.calls] == ["call-1", "call-2"]
     second_context: ContextBundle = llm.contexts[1]
     assert [message.content for message in second_context.messages] == [
-        "",
         "这是之前的回答。",
         "请查询资料。",
         "我将查询两个来源。",
         "结果-call-1",
         "结果-call-2",
     ]
-    assert second_context.messages[3].tool_calls == (
+    assert second_context.messages[2].tool_calls == (
         ToolCall("call-1", "lookup", {"source": "first"}),
         ToolCall("call-2", "lookup", {"source": "second"}),
     )
-    assert [message.tool_call_id for message in second_context.messages[4:]] == ["call-1", "call-2"]
+    assert [message.tool_call_id for message in second_context.messages[3:]] == ["call-1", "call-2"]
 
 
 async def test_engine_appends_context_versions_and_audits_llm_calls_without_request_message_copies(tmp_path: Path) -> None:
@@ -299,7 +376,7 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
         CheckpointRepositoryAdapter(tmp_path),
-        SlotContextProvider((), ContextDependencies()),
+        build_context_provider(ContextDependencies()),
         llm,
         CompletedTool(),
         PolicyPort(),
@@ -319,7 +396,7 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
     raw_slots: JSONValue | None = first_version.get("slots")
     assert isinstance(raw_slots, list)
     history_slot: JSONMap = next(
-        require_json_map(item) for item in raw_slots if require_json_map(item)["slot_id"] == "session_history"
+        require_json_map(item) for item in raw_slots if require_json_map(item)["slot_id"] == "history"
     )
     attributes: JSONMap = require_json_map(history_slot["attributes"])
     conversation: JSONMap = require_json_map(attributes["conversation"])
@@ -371,7 +448,7 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
         CheckpointRepositoryAdapter(tmp_path),
-        SlotContextProvider((), ContextDependencies()),
+        build_context_provider(ContextDependencies()),
         llm,
         approval_tool,
         PolicyPort(),
@@ -385,7 +462,6 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
     assert completed.status is RunStatus.COMPLETED
     second_context: ContextBundle = llm.contexts[1]
     assert [message.content for message in second_context.messages] == [
-        "",
         "这是之前的回答。",
         "请查询资料。",
         "我将查询两个来源。",
@@ -393,7 +469,7 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
         "已执行",
         "已执行",
     ]
-    assert second_context.messages[3].tool_calls == (
+    assert second_context.messages[2].tool_calls == (
         ToolCall("call-1", "lookup", {"source": "first"}),
         ToolCall("call-2", "lookup", {"source": "second"}),
     )
@@ -406,7 +482,7 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
         CheckpointRepositoryAdapter(tmp_path),
-        SlotContextProvider((changing_slot,), ContextDependencies()),
+        _changing_context_port(changing_slot),
         llm,
         ApprovalTool(),
         PolicyPort(),

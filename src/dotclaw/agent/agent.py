@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ..runtime.application.session_run_coordinator import SessionRunCoordinator
     from ..runtime.application.session_history_preparation import SessionHistoryPreparationService
     from ..runtime.application.dto import RunRequest, RunResult
+    from ..runtime.application.ports import ContextPort
     from ..session.session import Session
     from ..skills.registry import SkillRegistry
     from ..tools.executor import ToolExecutor
@@ -37,6 +38,7 @@ class Agent:
         memory_dream: DeepDream | None = None,
         mcp_task: asyncio.Task[None] | None = None,
         history_preparation_service: SessionHistoryPreparationService | None = None,
+        context_port: ContextPort | None = None,
     ) -> None:
         """绑定执行协调器与仅供展示或关闭的基础设施依赖。"""
         self._identity: AgentIdentity = identity
@@ -49,6 +51,7 @@ class Agent:
         self._memory_dream: DeepDream | None = memory_dream
         self._mcp_task: asyncio.Task[None] | None = mcp_task
         self._history_preparation_service: SessionHistoryPreparationService | None = history_preparation_service
+        self._context_port: ContextPort | None = context_port
 
     @property
     def identity(self) -> AgentIdentity:
@@ -116,6 +119,10 @@ class Agent:
                 pass
         if self._mcp_provider is not None:
             await self._mcp_provider.shutdown()
+        if self._context_port is not None:
+            from ..runtime.domain.context import ContextOwner
+
+            await self._context_port.release_scope(ContextOwner.AGENT, self.agent_id)
 
     async def process(self, session: Session, user_message: str) -> str:
         """提交普通用户消息，并将标准 RunResult 转换为 Channel 文本。"""

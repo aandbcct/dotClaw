@@ -12,9 +12,9 @@ from ..domain.facts import (
     RunError,
     RunMessage,
     RunStatus,
-    SystemContextSnapshot,
     ToolCall,
 )
+from ..domain.context import ContextSlotSnapshot
 
 
 @dataclass(frozen=True)
@@ -129,7 +129,7 @@ class ContextMetadata:
     source_names: tuple[str, ...] = ()
     truncation_applied: bool = False
     details: JSONMap = field(default_factory=dict)
-    system_context: SystemContextSnapshot | None = None
+    slot_snapshots: tuple[ContextSlotSnapshot, ...] = ()
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -138,9 +138,7 @@ class ContextMetadata:
             "source_names": list(self.source_names),
             "truncation_applied": self.truncation_applied,
             "details": self.details,
-            "system_context": (
-                None if self.system_context is None else self.system_context.to_dict()
-            ),
+            "slot_snapshots": [snapshot.to_dict() for snapshot in self.slot_snapshots],
         }
 
 

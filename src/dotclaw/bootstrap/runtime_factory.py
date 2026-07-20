@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,17 +10,8 @@ from ..agent.identity import AgentIdentity
 from ..config.settings import Config
 from ..config.settings import load_router_config
 from ..context import (
-    AvailableAgentsSlot,
     ContextDependencies,
-    IdentitySlot,
-    KnowledgeSlot,
-    MemorySlot,
-    ProjectSlot,
-    SkillsSlot,
-    SlotContextProvider,
-    ToolsSlot,
-    UserInfoSlot,
-    WorkspaceSlot,
+    build_context_provider,
 )
 from ..runtime.adapters import (
     AgentPolicyResolver,
@@ -35,6 +27,8 @@ from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.engine import RuntimeEngine
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.application.ports import TextStreamPort
+from ..runtime.application.ports import ContextPort
+from ..runtime.domain.context import ContextOwner
 from ..session.session import SessionManager
 from ..llm.proxy import LLMProxy
 from ..tools.executor import ToolExecutor
@@ -52,6 +46,7 @@ class RuntimeServices:
     """普通入口需要的新版 Runtime 服务及兼容展示依赖。"""
 
     engine: RuntimeEngine
+    context_port: ContextPort
     coordinator: SessionRunCoordinator
     run_repository: RunRepositoryAdapter
     """启动阶段用于补偿未决成功提交的本地运行仓储。"""
@@ -78,17 +73,12 @@ def build_runtime_services(
     if tool_executor is None:
         raise RuntimeError("Runtime v2 普通入口需要 ToolExecutor")
     storage_root: Path = _storage_root(project_root, config.session.directory)
-    context_port = SlotContextProvider(
-        slots=(
-            IdentitySlot(), ToolsSlot(), SkillsSlot(), AvailableAgentsSlot(), WorkspaceSlot(),
-            UserInfoSlot(), MemorySlot(), KnowledgeSlot(), ProjectSlot(),
-        ),
-        dependencies=ContextDependencies(
-            skill_registry=skill_registry,
-            memory_manager=memory_manager,
-            agent_registry=agent_registry,
-        ),
-    )
+    context_port = build_context_provider(ContextDependencies(
+        skill_registry=skill_registry,
+        memory_manager=memory_manager,
+        agent_registry=agent_registry,
+    ))
+    session_manager.set_deletion_handler(_session_context_releaser(context_port))
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(
         storage_root,
         SessionConversationProjector(session_manager),
@@ -122,6 +112,7 @@ def build_runtime_services(
     delegation_port.bind_coordinator(coordinator)
     return RuntimeServices(
         engine=engine,
+        context_port=context_port,
         coordinator=coordinator,
         run_repository=run_repository,
         tool_executor=tool_executor,
@@ -134,3 +125,12 @@ def _storage_root(project_root: Path, configured_directory: str) -> Path:
     """将 Session 存储目录解析为与 SessionManager 相同的绝对根目录。"""
     directory = Path(configured_directory)
     return directory if directory.is_absolute() else project_root / directory
+
+
+def _session_context_releaser(context_port: ContextPort) -> Callable[[str], Awaitable[None]]:
+    """构造只释放指定 Session Owner 缓存的删除回调。"""
+    async def release(session_id: str) -> None:
+        """在 Session 文件删除后释放对应 Slot 实例。"""
+        await context_port.release_scope(ContextOwner.SESSION, session_id)
+
+    return release

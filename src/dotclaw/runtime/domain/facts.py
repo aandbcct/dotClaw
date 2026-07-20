@@ -46,23 +46,6 @@ class ContextCompactionScope(StrEnum):
     SESSION_HISTORY = "session_history"
 
 
-class SystemContextSlotStatus(StrEnum):
-    """单个 system Slot 在冻结上下文中的产出状态。"""
-
-    INCLUDED = "included"
-    EMPTY = "empty"
-    FAILED = "failed"
-
-
-class SystemContextSlotScope(StrEnum):
-    """冻结 system Slot 的缓存与变化边界。"""
-
-    STATIC = "static"
-    SESSION = "session"
-    CONDITIONAL = "conditional"
-    DYNAMIC = "dynamic"
-
-
 class RunStatus(StrEnum):
     """一次运行的生命周期状态。"""
 
@@ -134,48 +117,6 @@ class RunMessage:
             "name": self.name,
             "tool_calls": [tool_call.to_dict() for tool_call in self.tool_calls],
             "metadata": self.metadata,
-        }
-
-
-@dataclass(frozen=True)
-class SystemContextSlot:
-    """一次 Run 冻结的单个 system Slot 产物。"""
-
-    name: str
-    scope: SystemContextSlotScope
-    status: SystemContextSlotStatus
-    content: str = ""
-    content_hash: str = ""
-    error_code: str = ""
-
-    def to_dict(self) -> JSONMap:
-        """转换为 messages.json 可持久化的 Slot 记录。"""
-        return {
-            "name": self.name,
-            "scope": self.scope.value,
-            "status": self.status.value,
-            "content": self.content,
-            "content_hash": self.content_hash,
-            "error_code": self.error_code,
-        }
-
-
-@dataclass(frozen=True)
-class SystemContextSnapshot:
-    """Run 开始时冻结的结构化 system context。"""
-
-    version: int
-    slot_order: tuple[str, ...]
-    slots: tuple[SystemContextSlot, ...]
-    rendered_content_hash: str
-
-    def to_dict(self) -> JSONMap:
-        """转换为 messages.json 的 system_context 区域。"""
-        return {
-            "version": self.version,
-            "slot_order": list(self.slot_order),
-            "slots": [slot.to_dict() for slot in self.slots],
-            "rendered_content_hash": self.rendered_content_hash,
         }
 
 

@@ -6,7 +6,7 @@ from typing import Protocol
 
 from ..domain.events import RunEvent
 from dotclaw.runtime.application.execution import RunExecutionView
-from ..domain.context import ContextVersion, StagedHistoryCompression, SuccessCommitIntent
+from ..domain.context import ContextOwner, ContextVersion, StagedHistoryCompression, SuccessCommitIntent
 from ..domain.facts import (
     AgentRun,
     ApprovalRecord,
@@ -139,6 +139,9 @@ class ContextPort(Protocol):
 
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """构造完整模型消息、工具定义和上下文元数据。"""
+
+    async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """在指定 Owner 生命周期结束时释放其 Slot 实例缓存。"""
 
 
 class RunPolicyPort(Protocol):

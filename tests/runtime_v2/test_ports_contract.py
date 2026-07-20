@@ -15,6 +15,7 @@ from dotclaw.runtime.application.dto import (
     ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
+from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.runtime.domain.state import AgentState
 
 
@@ -35,6 +36,9 @@ class FakeContextPort:
             tools=(),
             metadata=ContextMetadata(estimated_tokens=1),
         )
+
+    async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身不缓存 Slot 实例。"""
 
 
 class FakeLLMPort:
