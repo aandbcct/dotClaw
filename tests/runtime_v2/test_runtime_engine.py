@@ -16,7 +16,7 @@ from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordi
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.dto import (
     ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot,
-    RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
+    ContextRefreshSignal, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, RunStatus, ToolCall,
@@ -73,6 +73,12 @@ class ContextFake(ContextPort):
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """测试替身不缓存 Slot 实例。"""
         self.released_scopes.append((owner, owner_key))
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身不维护独立 Slot 刷新状态。"""
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """测试替身不消费外部刷新信号。"""
 
 
 class FinalLLM(LLMPort):

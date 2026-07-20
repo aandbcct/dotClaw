@@ -18,7 +18,7 @@ from ..domain.facts import (
 from .context_budget import TokenCountRequest, TokenCountResult
 from .context_compaction import ContextCompactionRequest, ContextCompactionResult
 from .history_compaction import HistoryCompactionRequest, HistoryCompactionResult
-from .dto import ContextBundle, DelegationRequest, DelegationResult, DelegationSubmission, RunRequest, ToolInvocation, ToolResult
+from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, RunRequest, ToolInvocation, ToolResult
 
 
 class LLMUnavailableError(RuntimeError):
@@ -160,6 +160,12 @@ class ContextPort(Protocol):
 
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """在指定 Owner 生命周期结束时释放其 Slot 实例缓存。"""
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """请求指定 Owner 的 Slot 在下一次安全点刷新。"""
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """发布携带载荷的定向刷新事件。"""
 
 
 class RunPolicyPort(Protocol):

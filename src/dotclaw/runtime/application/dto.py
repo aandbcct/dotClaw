@@ -14,7 +14,7 @@ from ..domain.facts import (
     RunStatus,
     ToolCall,
 )
-from ..domain.context import ContextSlotSnapshot
+from ..domain.context import ContextOwner, ContextRefreshReason, ContextSlotSnapshot
 
 
 @dataclass(frozen=True)
@@ -157,6 +157,17 @@ class ContextBundle:
             "tools": [tool.to_dict() for tool in self.tools],
             "metadata": self.metadata.to_dict(),
         }
+
+
+@dataclass(frozen=True)
+class ContextRefreshSignal:
+    """通过 ContextPort 发布的定向 Slot 刷新事件 DTO。"""
+
+    slot_id: str
+    owner: ContextOwner
+    owner_key: str
+    reason: ContextRefreshReason
+    payload: JSONMap
 
 
 class ToolResultStatus(StrEnum):

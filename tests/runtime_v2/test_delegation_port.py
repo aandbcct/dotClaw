@@ -22,6 +22,7 @@ from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.dto import (
     ContextBundle,
     ContextMetadata,
+    ContextRefreshSignal,
     ConversationMessage,
     ConversationSnapshot,
     DelegationRequest,
@@ -77,6 +78,12 @@ class MinimalContext(ContextPort):
 
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """测试替身不缓存 Slot 实例。"""
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身没有可刷新的 Slot。"""
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """测试替身不消费刷新信号。"""
 
 
 class DelegatingLLM(LLMPort):

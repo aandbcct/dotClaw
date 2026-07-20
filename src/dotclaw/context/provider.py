@@ -12,6 +12,7 @@ from dotclaw.runtime.domain.facts import JSONMap, JSONValue, MessageRole, RunMes
 from .contracts import ContextContribution, ContextOwnerSnapshot, ContextSlotBinding
 from .plan_resolver import ContextPlanResolver
 from .ports import ContextDependencies, MemorySearchRecord
+from .signals import ContextRefreshSignal
 from .slot_manager import ContextSlotManager
 
 
@@ -61,6 +62,14 @@ class ContextProvider:
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """由 Owner 生命周期终点释放对应缓存实例。"""
         await self._manager.release_scope(owner, owner_key)
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """向 Manager 请求精确 Owner 的 Slot 在下一安全点刷新。"""
+        self._manager.request_refresh(slot_id, owner, owner_key)
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """通过 ContextPort 发布类型化刷新事件，避免外部接触内部总线。"""
+        self._manager.publish_signal(signal)
 
     async def _owner_data(self, request: RunRequest, execution: RunExecutionView) -> dict[ContextOwner, ContextOwnerSnapshot]:
         """在 Provider 边界读取 Owner 数据；Manager 永不读取外部领域数据。"""

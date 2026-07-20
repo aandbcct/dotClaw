@@ -870,7 +870,7 @@ class RuntimeEngine:
         context: ContextBundle,
         messages: list[RunMessage],
     ) -> ContextVersion:
-        """以实际模型输入和引用消息构造并追加下一版上下文事实。"""
+        """仅在实际输入内容变化时构造并追加下一版上下文事实。"""
         existing_versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(
             run.session_id,
             run.run_id,
@@ -880,11 +880,23 @@ class RuntimeEngine:
             context,
             messages,
         )
+        content_hash: str = _hash_json_value([message.to_dict() for message in context.messages])
+        tool_schema_hash: str = _hash_json_value([tool.to_dict() for tool in context.tools])
+        active_version: ContextVersion | None = execution.active_context_version
+        if active_version is not None and _is_same_context_version(
+            active_version,
+            slots,
+            content_hash,
+            tool_schema_hash,
+        ):
+            if not any(item.version == active_version.version for item in existing_versions):
+                raise ValueError("活动 Context Version 尚未持久化")
+            return active_version
         context_version: ContextVersion = new_context_version(
             version=len(existing_versions) + 1,
             slots=slots,
-            content_hash=_hash_json_value([message.to_dict() for message in context.messages]),
-            tool_schema_hash=_hash_json_value([tool.to_dict() for tool in context.tools]),
+            content_hash=content_hash,
+            tool_schema_hash=tool_schema_hash,
         )
         await self._run_repository.append_context_version(
             run.session_id,
@@ -1232,6 +1244,20 @@ def _context_slots_from_bundle(
         message_ids=tuple(message.message_id for message in run_messages),
     ))
     return tuple(snapshots)
+
+
+def _is_same_context_version(
+    version: ContextVersion,
+    slots: tuple[ContextSlotSnapshot, ...],
+    content_hash: str,
+    tool_schema_hash: str,
+) -> bool:
+    """比较实际输入与快照，确保重试仅复用内容完全相同的活动版本。"""
+    return (
+        version.slots == slots
+        and version.content_hash == content_hash
+        and version.tool_schema_hash == tool_schema_hash
+    )
 
 
 def _conversation_from_context_version(context_version: ContextVersion) -> ConversationSnapshot:

@@ -208,9 +208,9 @@ async def test_signal_and_direct_refresh_take_effect_at_next_build() -> None:
     request = _request()
 
     await provider.build(request, _execution(request).view())
-    manager.request_refresh("refreshable", ContextOwner.AGENT, "agent-1")
+    provider.request_refresh("refreshable", ContextOwner.AGENT, "agent-1")
     await provider.build(request, _execution(request).view())
-    signals.publish(ContextRefreshSignal(
+    provider.publish_signal(ContextRefreshSignal(
         "refreshable",
         ContextOwner.AGENT,
         "agent-1",
@@ -218,7 +218,7 @@ async def test_signal_and_direct_refresh_take_effect_at_next_build() -> None:
         {"version": "v2"},
     ))
     await provider.build(request, _execution(request).view())
-    signals.publish(ContextRefreshSignal(
+    provider.publish_signal(ContextRefreshSignal(
         "unbound",
         ContextOwner.AGENT,
         "agent-1",
@@ -334,14 +334,14 @@ async def test_signal_payload_filtering_and_owner_key_isolation() -> None:
 
     await provider.build(first_request, _execution(first_request).view())
     await provider.build(second_request, _execution(second_request).view())
-    signals.publish(ContextRefreshSignal(
+    provider.publish_signal(ContextRefreshSignal(
         "filtered",
         ContextOwner.AGENT,
         "agent-1",
         ContextRefreshReason.EXTERNAL_SOURCE_CHANGED,
         {"should_refresh": False},
     ))
-    signals.publish(ContextRefreshSignal(
+    provider.publish_signal(ContextRefreshSignal(
         "filtered",
         ContextOwner.AGENT,
         "agent-2",

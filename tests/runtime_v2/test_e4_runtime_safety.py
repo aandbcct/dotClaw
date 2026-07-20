@@ -8,14 +8,14 @@ from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointReposi
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.context_budget import TokenCountErrorCode, TokenCountRequest, TokenCountResult
-from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus
+from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ContextRefreshSignal, ConversationMessage, ConversationSnapshot, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult, HistoryCompactorUnavailable
 from dotclaw.runtime.application.ports import ContextPort, HistoryCompactorPort, LLMPort, LLMUnavailableError, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.domain.control import AgentAction
-from dotclaw.runtime.domain.context import ContextOwner
+from dotclaw.runtime.domain.context import ContextOwner, ContextVersion
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, HistoryCompressionSnapshot, MessageRole, RunCheckpoint, RunError, RunErrorCode, RunMessage, RunMessageKind, RunStatus, ToolCall
 from dotclaw.agent.agent import _display_result
 
@@ -30,6 +30,12 @@ class BudgetContext(ContextPort):
 
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """测试 Port 不保存 Slot 实例。"""
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """测试 ContextPort 不维护可刷新的 Slot 缓存。"""
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """测试 ContextPort 不订阅外部刷新信号。"""
 
 
 class BudgetPolicy(RunPolicyPort):
@@ -305,6 +311,11 @@ async def test_llm_unavailable_keeps_checkpoint_and_retry_reuses_context_version
     assert len(before_versions) == 1
     assert completed.status is RunStatus.COMPLETED
     assert llm.calls == 2
+    after_versions: tuple[ContextVersion, ...] = await repository.load_context_versions("session-e4", interrupted.run_id)
+    completed_run: AgentRun | None = await repository.find_run(interrupted.run_id)
+    assert [version.version for version in after_versions] == [1]
+    assert completed_run is not None
+    assert completed_run.active_context_version == 1
 
 
 async def test_new_request_abandons_interrupted_run_before_creating_replacement(tmp_path: Path) -> None:

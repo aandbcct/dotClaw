@@ -47,6 +47,9 @@ class ContextSlotManager:
     def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
         """标记精确 Owner 的 Slot 实例在下一安全点刷新。"""
         self._invalid_bindings.add((slot_id, owner, owner_key))
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """接收外部 ContextPort 转发的定向刷新事件。"""
+        self._signal_bus.publish(signal)
     async def drain_signals(self) -> None:
         """将定向事件交给已订阅 Slot 根据事件载荷决定是否失效。"""
         for signal in self._signal_bus.drain():

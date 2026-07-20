@@ -10,7 +10,7 @@ from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, RunPolicyPort
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.application.dto import (
-    ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot,
+    ContextBundle, ContextMetadata, ContextRefreshSignal, ConversationMessage, ConversationSnapshot,
     RunRequest, ToolInvocation, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
@@ -83,6 +83,12 @@ class EmptyContext(ContextPort):
 
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """测试替身不缓存 Slot 实例。"""
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身没有可刷新的 Slot。"""
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """测试替身不消费刷新信号。"""
 
 
 class ToolThenFinalLLM(LLMPort):

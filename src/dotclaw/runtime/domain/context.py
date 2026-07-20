@@ -33,6 +33,14 @@ class ContextOwner(StrEnum):
     GLOBAL = "global"
 
 
+class ContextRefreshReason(StrEnum):
+    """触发 Context Slot 刷新的标准原因。"""
+
+    OWNER_DATA_CHANGED = "owner_data_changed"
+    CONFIGURATION_CHANGED = "configuration_changed"
+    EXTERNAL_SOURCE_CHANGED = "external_source_changed"
+
+
 class StagedHistoryCompressionStatus(StrEnum):
     """Run 内历史压缩候选的生命周期状态。"""
 
