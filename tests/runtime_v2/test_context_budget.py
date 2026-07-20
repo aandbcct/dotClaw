@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dotclaw.runtime.adapters.tiktoken_token_counter import TiktokenTokenCounter
 from dotclaw.runtime.application.context_budget import TokenCountErrorCode, TokenCountRequest
+from dotclaw.runtime.application.context_budget import TokenCountResult
 from dotclaw.runtime.application.dto import ConversationMessage, ToolDefinition
 from dotclaw.runtime.application.history_compaction import ConversationBatch, compact_in_batches, select_oldest_conversations
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
@@ -69,6 +70,12 @@ class ScriptedHistoryCompactor:
         return HistoryCompactionResult(f"摘要-{len(self.requests)}")
 
 
+class SummaryTokenCounter:
+    """按摘要内容返回预设精确计数的 TokenCounter Fake。"""
+    async def count(self, request: TokenCountRequest) -> TokenCountResult:
+        return TokenCountResult(3 if request.system_contents == ("摘要-1",) else 0)
+
+
 async def test_rolling_compaction_preserves_batches_and_passes_previous_summary() -> None:
     """滚动压缩按完整 Conversation 分批，并将上一批摘要传给下一批。"""
     fake: ScriptedHistoryCompactor = ScriptedHistoryCompactor()
@@ -76,7 +83,14 @@ async def test_rolling_compaction_preserves_batches_and_passes_previous_summary(
         ConversationBatch(f"conversation-{index}", (_message(str(index), MessageRole.USER, str(index)),), 3)
         for index in range(1, 4)
     )
-    result: HistoryCompactionResult = await compact_in_batches(fake, "初始摘要", batches, 6, 0)
+    result: HistoryCompactionResult = await compact_in_batches(
+        fake,
+        SummaryTokenCounter(),
+        "初始摘要",
+        batches,
+        6,
+        "cl100k_base",
+    )
     assert result.summary == "摘要-2"
     assert [batch.conversation_id for batch in fake.requests[0].batches] == ["conversation-1", "conversation-2"]
     assert [batch.conversation_id for batch in fake.requests[1].batches] == ["conversation-3"]
