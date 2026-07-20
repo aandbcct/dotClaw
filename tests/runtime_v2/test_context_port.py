@@ -158,8 +158,8 @@ async def test_memory_failure_degrades_current_context_only() -> None:
     ]
 
 
-async def test_token_budget_truncates_oldest_history() -> None:
-    """预算不足时保留 system 和当前用户输入，并裁剪最旧历史。"""
+async def test_context_provider_keeps_history_for_budget_port() -> None:
+    """Provider 不再裁剪历史，完整输入交由后续 TokenCounter 预算。"""
     request: RunRequest = _request("session-truncate", "当前输入")
     policy: AgentPolicySnapshot = AgentPolicySnapshot(
         agent_id=request.agent_id,
@@ -186,12 +186,12 @@ async def test_token_budget_truncates_oldest_history() -> None:
 
     bundle = await provider.build(request, execution.view())
 
-    assert bundle.metadata.truncation_applied
-    assert [message.content for message in bundle.messages] == ["身份提示词", "当前输入"]
+    assert not bundle.metadata.truncation_applied
+    assert [message.content for message in bundle.messages] == ["身份提示词", "历史回答", "当前输入"]
 
 
-async def test_project_slot_has_read_limit_and_budget_failure_is_explicit(tmp_path: Path) -> None:
-    """ProjectSlot 不会无上限读入文件，必要消息超预算时明确失败。"""
+async def test_project_slot_has_read_limit_without_provider_budget_failure(tmp_path: Path) -> None:
+    """ProjectSlot 仍有读取上限，Provider 不承担预算失败职责。"""
     project_file: Path = tmp_path / "AGENTS.md"
     project_file.write_text("项目规则" * 100, encoding="utf-8")
     request: RunRequest = _request("session-budget", "当前输入")
@@ -219,5 +219,5 @@ async def test_project_slot_has_read_limit_and_budget_failure_is_explicit(tmp_pa
         dependencies=ContextDependencies(),
     )
 
-    with pytest.raises(ValueError, match="必要 system prompt"):
-        await provider.build(request, constrained_execution.view())
+    bundle = await provider.build(request, constrained_execution.view())
+    assert not bundle.metadata.truncation_applied

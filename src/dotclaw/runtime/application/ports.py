@@ -14,7 +14,9 @@ from ..domain.facts import (
     RunMessage,
     AgentPolicySnapshot,
 )
+from .context_budget import TokenCountRequest, TokenCountResult
 from .context_compaction import ContextCompactionRequest, ContextCompactionResult
+from .history_compaction import HistoryCompactionRequest, HistoryCompactionResult
 from .dto import ContextBundle, DelegationRequest, DelegationResult, DelegationSubmission, RunRequest, ToolInvocation, ToolResult
 
 
@@ -30,6 +32,18 @@ class ContextCompactionPort(Protocol):
 
     async def compact(self, request: ContextCompactionRequest) -> ContextCompactionResult:
         """基于已有摘要与待覆盖片段生成新的摘要。"""
+
+
+class TokenCounterPort(Protocol):
+    """统计结构化 LLM 输入 Token 的精确应用端口。"""
+    async def count(self, request: TokenCountRequest) -> TokenCountResult:
+        """返回精确数量或明确 Tokenizer 错误。"""
+
+
+class HistoryCompactorPort(Protocol):
+    """按完整 Conversation 批次生成滚动历史摘要。"""
+    async def compact_history(self, request: HistoryCompactionRequest) -> HistoryCompactionResult:
+        """压缩一批完整 Conversation，失败时不产生候选。"""
 
 
 class ConversationProjectionPort(Protocol):

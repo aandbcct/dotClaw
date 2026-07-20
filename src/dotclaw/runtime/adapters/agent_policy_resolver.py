@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ...agent.identity import AgentIdentity
 from ...config.settings import Config
+from ...config.settings import RouterConfig
 from ...orchestration.registry import AgentRegistry
 from ...tools.base import ToolDefinition as LegacyToolDefinition
 from ...tools.executor import ToolExecutor
@@ -34,6 +35,7 @@ class AgentPolicyResolver(RunPolicyPort):
         executor: ToolExecutor,
         project_root: Path,
         agent_registry: AgentRegistry | None = None,
+        router_config: RouterConfig | None = None,
     ) -> None:
         """绑定一个 Agent 的身份、配置和工具注册表。"""
         self._identity: AgentIdentity = identity
@@ -41,6 +43,7 @@ class AgentPolicyResolver(RunPolicyPort):
         self._executor: ToolExecutor = executor
         self._project_root: Path = project_root
         self._agent_registry: AgentRegistry | None = agent_registry
+        self._router_config: RouterConfig | None = router_config
 
     async def resolve(self, request: RunRequest) -> AgentPolicySnapshot:
         """冻结身份、模型、工具定义、提示词和上下文预算。"""
@@ -50,16 +53,22 @@ class AgentPolicyResolver(RunPolicyPort):
             for definition in self._allowed_definitions(identity)
         )
         identity_version: str = _identity_version(identity)
+        model_name: str = identity.resolve_model(self._config.llm.default_model)
+        context_window, tokenizer_encoding = self._model_budget_settings(model_name)
         return AgentPolicySnapshot(
             agent_id=identity.agent_id,
             identity_version=identity_version,
-            model_id=identity.resolve_model(self._config.llm.default_model),
+            model_id=model_name,
             max_iterations=identity.max_loop_steps,
             policy_data={
                 "system_prompt": identity.resolve_system_prompt() or self._config.agent.system_prompt,
                 "tools": [tool.to_dict() for tool in tools],
                 "project_root": str(self._project_root),
                 "max_context_tokens": self._config.agent.max_context_tokens,
+                "context_window": context_window,
+                "tokenizer_encoding": tokenizer_encoding,
+                "context_compaction_model": "qwen3.7-max",
+                "context_compaction_tokenizer_encoding": "cl100k_base",
             },
         )
 
@@ -85,6 +94,15 @@ class AgentPolicyResolver(RunPolicyPort):
             for definition in definitions
             if definition.name in allowed and definition.name not in LEGACY_TASK_TOOL_NAMES
         ]
+
+    def _model_budget_settings(self, model_name: str) -> tuple[int, str]:
+        """冻结模型窗口与显式 Tokenizer 编码；未配置时拒绝由后续预算端口处理。"""
+        if self._router_config is None:
+            return self._config.agent.max_context_tokens, ""
+        model = self._router_config.models.get(model_name)
+        if model is None:
+            return self._config.agent.max_context_tokens, ""
+        return model.context_window, model.tokenizer_encoding
 
 
 def _identity_version(identity: AgentIdentity) -> str:

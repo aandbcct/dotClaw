@@ -275,7 +275,6 @@ def _build_context_port(
     """构建 Runtime v2 ContextPort 与作用域缓存。"""
     from dotclaw.context import (
         AvailableAgentsSlot,
-        ContextBudgetPolicy,
         ContextDependencies,
         IdentitySlot,
         KnowledgeSlot,
@@ -304,7 +303,6 @@ def _build_context_port(
             memory_manager=memory_manager,
             agent_registry=agent_registry,
         ),
-        budget_policy=ContextBudgetPolicy.REJECT,
     )
 
 # ============================================================================

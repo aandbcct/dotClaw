@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from typing import Protocol
 
 from ...llm.base import ChatChunk, Message, ToolDefinition
+from ...llm.base import LLMUsage
 from ..application.context_compaction import ContextCompactionRequest, ContextCompactionResult
 
 
@@ -35,7 +36,12 @@ class LLMContextCompactor:
     async def compact(self, request: ContextCompactionRequest) -> ContextCompactionResult:
         """生成下一版摘要；空摘要视为压缩失败，避免丢失原始历史。"""
         messages: list[Message] = _build_compaction_messages(request)
-        chunks: AsyncIterator[ChatChunk] = self._llm_proxy.chat(messages=messages, tools=None, stream=False)
+        chunks: AsyncIterator[ChatChunk] = self._llm_proxy.chat(
+            messages=messages,
+            tools=None,
+            purpose=LLMUsage.CONTEXT_COMPACTION,
+            stream=False,
+        )
         content_parts: list[str] = []
         async for chunk in chunks:
             if chunk.content:

@@ -16,6 +16,7 @@ dependencies = [
     "rich>=13.0",
     "numpy>=1.26.0",
     "mcp>=1.0.0",
+    "tiktoken>=0.8.0",
 ]
 
 [project.optional-dependencies]

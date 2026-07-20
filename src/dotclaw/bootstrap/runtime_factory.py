@@ -7,9 +7,9 @@ from pathlib import Path
 
 from ..agent.identity import AgentIdentity
 from ..config.settings import Config
+from ..config.settings import load_router_config
 from ..context import (
     AvailableAgentsSlot,
-    ContextBudgetPolicy,
     ContextDependencies,
     IdentitySlot,
     KnowledgeSlot,
@@ -88,7 +88,6 @@ def build_runtime_services(
             memory_manager=memory_manager,
             agent_registry=agent_registry,
         ),
-        budget_policy=ContextBudgetPolicy.REJECT,
     )
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(
         storage_root,
@@ -107,7 +106,14 @@ def build_runtime_services(
         context_port=context_port,
         llm_port=LLMProxyAdapter(llm_proxy, text_stream_port),
         tool_port=ToolExecutorAdapter(tool_executor),
-        policy_port=AgentPolicyResolver(identity, config, tool_executor, project_root, agent_registry),
+        policy_port=AgentPolicyResolver(
+            identity,
+            config,
+            tool_executor,
+            project_root,
+            agent_registry,
+            load_router_config(project_root / "model_router_config.yaml"),
+        ),
         approval_service=ApprovalService(approval_repository),
         cancellation_service=CancellationService(),
         delegation_port=delegation_port,

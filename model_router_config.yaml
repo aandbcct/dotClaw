@@ -62,6 +62,7 @@ models:
     provider: qwen
     model_id: qwen3.7-max-2026-05-20
     context_window: 131072
+    tokenizer_encoding: cl100k_base
     capabilities: [chat, function_calling]
     status: active
 #  qwen-turbo:
@@ -112,4 +113,9 @@ purposes:
     description: "向量化"
     priority:
       - model: text-embedding-v4
+        priority: 1
+  context_compaction:
+    description: "上下文历史压缩"
+    priority:
+      - model: qwen3.7-max
         priority: 1

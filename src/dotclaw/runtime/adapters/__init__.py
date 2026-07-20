@@ -7,6 +7,7 @@ Runtime v3 的基础设施适配器。
 from .agent_policy_resolver import AgentPolicyResolver
 from .approval_repository import ApprovalRepositoryAdapter
 from .checkpoint_repository import CheckpointRepositoryAdapter
+from .tiktoken_token_counter import TiktokenTokenCounter
 from .in_memory_run_repository import InMemoryRunRepository
 from .run_repository import RunRepositoryAdapter
 from .llm_proxy_adapter import LLMProxyAdapter
@@ -17,6 +18,7 @@ __all__ = [
     "AgentPolicyResolver",
     "ApprovalRepositoryAdapter",
     "CheckpointRepositoryAdapter",
+    "TiktokenTokenCounter",
     "InMemoryRunRepository",
     "RunRepositoryAdapter",
     "LLMProxyAdapter",
