@@ -143,6 +143,18 @@ class Agent:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
+    async def retry_interrupted(self, run_id: str) -> str:
+        """重试可恢复中断 Run，并返回 Channel 可展示的结果。"""
+        result: RunResult = await self._coordinator.retry_interrupted(run_id)
+        self._last_run_result = result
+        return _display_result(result)
+
+    async def abandon_interrupted(self, run_id: str) -> str:
+        """放弃可恢复中断 Run，并返回 Channel 可展示的结果。"""
+        result: RunResult = await self._coordinator.abandon_interrupted(run_id)
+        self._last_run_result = result
+        return _display_result(result)
+
 
 def _display_result(result: RunResult) -> str:
     """将 Runtime 领域结果收敛为 Channel 可直接展示的文本。"""

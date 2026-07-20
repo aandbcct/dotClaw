@@ -1,6 +1,6 @@
 # LLM_STARTED 前上下文压缩与上下文槽重构开发计划
 
-> 状态：设计已确认，开发未开始
+> 状态：已完成（E1–E5 已验收）
 > 实施方式：同一分支、同一开发窗口内完成完整目标；按以下 E1–E5 阶段提交和验收，不采用无法定位回归的大爆炸改动。
 > 关联设计：[整体设计](LLM_STARTED前上下文压缩与上下文槽重构整体设计.md)
 
@@ -297,27 +297,27 @@ git diff --check
 
 ### 入口与架构边界
 
-- [ ] CLI/Channel/API 均通过 `SessionRunCoordinator` 进入 Runtime，普通 query 不绕过 Session 串行约束。
-- [ ] Engine 只依赖 Application Port；不直接依赖 Slot、文件 Repository、Session Manager 或 LLM SDK。
-- [ ] 新增 Slot 仅需实现 Slot、Descriptor、注册和 Owner 启用配置，无需改 Engine 或固定全局元组。
+- [x] CLI/Channel/API 均通过 `SessionRunCoordinator` 进入 Runtime，普通 query 不绕过 Session 串行约束。
+- [x] Engine 只依赖 Application Port；不直接依赖 Slot、文件 Repository、Session Manager 或 LLM SDK。
+- [x] 新增 Slot 仅需实现 Slot、Descriptor、注册和 Owner 启用配置，无需改 Engine 或固定全局元组。
 
 ### 上下文与持久化
 
-- [ ] 每个 `LLM_STARTED` 都可由 `context_version + incremental_message_ids + tool_schema_hash` 重建实际输入。
-- [ ] Snapshot 只包含有效 Plan Slot；每个绑定 Slot 的 `INCLUDED/EMPTY/FAILED` 状态完整可审计。
-- [ ] Context Version 只追加；摘要正文只出现于 Context Version，候选控制信息只出现于 Run。
-- [ ] 取消、失败、审批等待、中断和放弃均不向 Session 提交候选。
+- [x] 每个 `LLM_STARTED` 都可由 `context_version + incremental_message_ids + tool_schema_hash` 重建实际输入。
+- [x] Snapshot 只包含有效 Plan Slot；每个绑定 Slot 的 `INCLUDED/EMPTY/FAILED` 状态完整可审计。
+- [x] Context Version 只追加；摘要正文只出现于 Context Version，候选控制信息只出现于 Run。
+- [x] 取消、失败、审批等待、中断和放弃均不向 Session 提交候选。
 
 ### 压缩与模型调用
 
-- [ ] Token 统计包含所有实际输入内容和工具 Schema；未知 tokenizer 写 `WARNING` 后拒绝，不使用字符数估算。
-- [ ] 超限只压缩最旧 75% 完整 Conversation；摘要分批不拆 Conversation；压缩后仍超限明确失败。
-- [ ] 压缩使用 `CONTEXT_COMPACTION` 用途路由；代理重试耗尽时 Run 为 `INTERRUPTED`。
-- [ ] 工具结果会进入下一次 LLM 调用；审批恢复能看到原 Conversation 与 Run Message。
+- [x] Token 统计包含所有实际输入内容和工具 Schema；未知 tokenizer 写 `WARNING` 后拒绝，不使用字符数估算。
+- [x] 超限只压缩最旧 75% 完整 Conversation；摘要分批不拆 Conversation；压缩后仍超限明确失败。
+- [x] 压缩使用 `CONTEXT_COMPACTION` 用途路由；代理重试耗尽时 Run 为 `INTERRUPTED`。
+- [x] 工具结果会进入下一次 LLM 调用；审批恢复能看到原 Conversation 与 Run Message。
 
 ### 一致性、迁移与质量
 
-- [ ] 一个 Session 同时至多一个未终态 Run；重启后遗留 `RUNNING` 可恢复或放弃，不会永久阻塞。
-- [ ] SuccessCommitIntent 失败注入恢复后，Run 终态、Session Conversation、压缩候选和事件一致且幂等。
-- [ ] v1/v2、`initial_context`、`RUN_CONTEXT`、Run 前压缩、旧 Slot API、旧 token 估算及迁移脚本完成物理删除。
-- [ ] `python -m pytest -q`、针对性集成测试、`git diff --check` 和第 4 节搜索验证全部通过。
+- [x] 一个 Session 同时至多一个未终态 Run；重启后遗留 `RUNNING` 可恢复或放弃，不会永久阻塞。
+- [x] SuccessCommitIntent 失败注入恢复后，Run 终态、Session Conversation、压缩候选和事件一致且幂等。
+- [x] v1/v2、`initial_context`、`RUN_CONTEXT`、Run 前压缩、旧 Slot API、Runtime 预算中的旧 token 估算及迁移脚本完成物理删除。
+- [x] `python -m pytest -q`、针对性集成测试、`git diff --check` 和第 4 节搜索验证全部通过。

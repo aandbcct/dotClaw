@@ -1,6 +1,6 @@
 # LLM_STARTED 前上下文压缩与上下文槽重构整体设计
 
-> 状态：设计已确认，待按开发计划实施
+> 状态：已完成（E1–E5）
 > 范围：Runtime v3 的上下文版本、Session 历史压缩、Context Slot 生命周期、严格 Session 串行与可恢复模型中断。
 > 关联文档：[详细开发计划](LLM_STARTED前上下文压缩与上下文槽重构开发计划.md)
 
@@ -170,7 +170,7 @@ sequenceDiagram
     S-->>C: 输出结果
 ```
 
-成功提交以 `SuccessCommitIntent` 为恢复边界：先持久化包含最终 Conversation、最新候选引用和目标状态的意图；随后 Session Projector 对 `session.json` 原子应用 Conversation 与摘要；最后幂等写入 `RUN_COMPLETED` 和 `run.json=COMPLETED`。进程在任一中间点停止时，恢复器根据意图重复未完成步骤，禁止留下“事件完成而 Session 未投影”的矛盾事实。
+成功提交以 `SuccessCommitIntent` 为恢复边界：先持久化包含最终 Conversation、最新候选引用和目标状态的意图；随后 Session Projector 对 `session.json` 原子应用 Conversation 与摘要，再幂等写入 `RUN_COMPLETED`，写入 `run.json=COMPLETED`，删除 checkpoint，最后清除意图。进程在任一中间点停止时，`RunRepositoryAdapter.recover_pending_success_commits()` 根据意图重复未完成步骤，禁止留下“事件完成而 Session 未投影”的矛盾事实。
 
 ## 7. 状态、异常与恢复边界
 
@@ -218,4 +218,4 @@ sequenceDiagram
 | Workspace/Project 默认 Slot | 不纳入默认 Plan | 无生产引用及针对默认注入的测试 |
 | 字符数除以 4 的 token 估算/静默裁剪 | `TokenCounterPort` + 明确预算失败 | 所有预算路径和测试改为 TokenCounter |
 
-风险主要在于 tokenizer 编码与模型实际分词可能不完全一致。首期对 Qwen 压缩路由显式配置 `cl100k_base` 兼容编码，并将编码随策略冻结；若没有明确编码则记录不含 prompt 内容的 `WARNING` 并拒绝调用，而不是静默低估。代码与测试完成前，本文的目标能力均为设计要求，不可表述为已经具备的运行时事实。
+风险主要在于 tokenizer 编码与模型实际分词可能不完全一致。首期对 Qwen 压缩路由显式配置 `cl100k_base` 兼容编码，并将编码随策略冻结；若没有明确编码则记录不含 prompt 内容的 `WARNING` 并拒绝调用，而不是静默低估。成功提交恢复仅承诺单个工作目录内的原子替换与幂等补偿，不承诺跨主机分布式事务。

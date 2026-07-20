@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ..application.dto import ConversationMessage
-from ..domain.context import ContextVersion, StagedHistoryCompression, SuccessCommitIntent
+from ..domain.context import ContextVersion, StagedHistoryCompression, StagedHistoryCompressionStatus, SuccessCommitIntent
 from ..domain.events import RunEvent
 from ..domain.facts import AgentRun, MessageRole, RunMessage, RunStatus
 
@@ -139,10 +139,13 @@ class InMemoryRunRepository:
         run: AgentRun,
         final_message: RunMessage,
         completed_event: RunEvent,
+        success_intent: SuccessCommitIntent,
     ) -> None:
-        """以最小语义模拟成功终态和可见 Conversation 投影。"""
+        """以领域意图模拟幂等成功投影、终态事件与候选提交。"""
         if run.status is not RunStatus.COMPLETED or final_message.role is not MessageRole.ASSISTANT:
             raise ValueError("成功提交必须包含完成 Run 与 assistant 最终消息")
+        if success_intent.run_id != run.run_id or success_intent.session_id != run.session_id:
+            raise ValueError("成功提交意图必须属于当前运行")
         await self.append_event(run.session_id, completed_event)
         current: tuple[ConversationMessage, ...] = self._conversations.get(run.session_id, ())
         if not any(message.message_id == final_message.message_id for message in current):
@@ -153,7 +156,18 @@ class InMemoryRunRepository:
                 run.ended_at or "",
             ),)
         self._conversations[run.session_id] = current
-        await self.save_run(replace(run))
+        candidates: tuple[StagedHistoryCompression, ...] = tuple(
+            replace(
+                candidate,
+                status=(
+                    StagedHistoryCompressionStatus.COMMITTED
+                    if candidate.candidate_id == success_intent.latest_candidate_id
+                    else candidate.status
+                ),
+            )
+            for candidate in run.staged_history_compressions
+        )
+        await self.save_run(replace(run, staged_history_compressions=candidates, success_commit_intent=None))
 
 
 def _validate_messages(messages: tuple[RunMessage, ...]) -> None:

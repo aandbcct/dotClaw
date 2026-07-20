@@ -56,6 +56,17 @@ class RunAbandonedReason(StrEnum):
     USER_REQUESTED = "user_requested"
 
 
+class SuccessCommitFaultPoint(StrEnum):
+    """成功提交恢复流程可注入的故障边界。"""
+
+    BEFORE_SESSION_PROJECTION = "before_session_projection"
+    AFTER_SESSION_PROJECTION = "after_session_projection"
+    BEFORE_COMPLETED_EVENT = "before_completed_event"
+    AFTER_COMPLETED_EVENT = "after_completed_event"
+    BEFORE_RUN_FINALIZATION = "before_run_finalization"
+    AFTER_RUN_FINALIZATION = "after_run_finalization"
+
+
 @dataclass(frozen=True)
 class ContextSlotSnapshot:
     """一个已绑定 Slot 的不可变、可审计载荷快照。"""
@@ -140,6 +151,8 @@ class SuccessCommitIntent:
     conversation_id: str
     latest_candidate_id: str | None
     target_status: RunStatus
+    run_id: str = ""
+    session_id: str = ""
 
     def to_dict(self) -> JSONMap:
         """转换为 run.json 可恢复控制字段。"""
@@ -147,6 +160,8 @@ class SuccessCommitIntent:
             "conversation_id": self.conversation_id,
             "latest_candidate_id": self.latest_candidate_id,
             "target_status": self.target_status.value,
+            "run_id": self.run_id,
+            "session_id": self.session_id,
         }
 
 

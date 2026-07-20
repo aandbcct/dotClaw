@@ -6,10 +6,11 @@ from typing import Protocol
 
 from ..domain.events import RunEvent
 from dotclaw.runtime.application.execution import RunExecutionView
-from ..domain.context import ContextOwner, ContextVersion, StagedHistoryCompression, SuccessCommitIntent
+from ..domain.context import ContextOwner, ContextVersion, StagedHistoryCompression, SuccessCommitFaultPoint, SuccessCommitIntent
 from ..domain.facts import (
     AgentRun,
     ApprovalRecord,
+    HistoryCompressionSnapshot,
     RunCheckpoint,
     RunMessage,
     AgentPolicySnapshot,
@@ -58,8 +59,17 @@ class ConversationProjectionPort(Protocol):
         run: AgentRun,
         user_message: RunMessage,
         final_message: RunMessage,
+        history_compression: HistoryCompressionSnapshot | None,
+        source_conversation_hash: str,
     ) -> None:
-        """仅在运行成功后追加一条可见对话记录。"""
+        """原子投影成功 Conversation 与可选最新历史压缩。"""
+
+
+class SuccessCommitFaultPort(Protocol):
+    """仅供恢复测试在持久化边界模拟进程中断的端口。"""
+
+    async def inject(self, point: SuccessCommitFaultPoint) -> None:
+        """在指定成功提交边界抛出测试定义的中断异常。"""
 
 
 class RunRepository(Protocol):
@@ -124,8 +134,9 @@ class RunRepository(Protocol):
         run: AgentRun,
         final_message: RunMessage,
         completed_event: RunEvent,
+        success_intent: SuccessCommitIntent,
     ) -> None:
-        """以成功终态为提交标记，统一提交事件、Conversation 投影和 Run 摘要。"""
+        """以成功提交意图统一驱动 Conversation、事件和终态 Run 的恢复顺序。"""
 
 
 class CheckpointRepository(Protocol):

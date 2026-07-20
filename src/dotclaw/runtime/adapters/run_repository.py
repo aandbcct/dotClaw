@@ -8,11 +8,14 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..application.ports import ConversationProjectionPort
+from ..application.ports import ConversationProjectionPort, SuccessCommitFaultPort
 from ..application.dto import ConversationMessage
 from ..domain.events import RunEvent, RunEventType
 from ..domain.context import (
+    ContextContributionKind,
+    ContextOwner,
     ContextVersion,
+    SuccessCommitFaultPoint,
     StagedHistoryCompression,
     StagedHistoryCompressionStatus,
     SuccessCommitIntent as RunSuccessCommitIntent,
@@ -21,6 +24,7 @@ from ..domain.context import (
 from ..domain.facts import (
     AgentPolicySnapshot,
     AgentRun,
+    HistoryCompressionSnapshot,
     JSONMap,
     JSONValue,
     MessageRole,
@@ -52,6 +56,7 @@ class SuccessCommitIntent:
 
     run: AgentRun
     completed_event: RunEvent
+    success_intent: RunSuccessCommitIntent
 
     def to_dict(self) -> JSONMap:
         """转换为可原子保存的事务意图记录。"""
@@ -59,6 +64,7 @@ class SuccessCommitIntent:
             "version": int(StorageFormatVersion.CONTEXT_VERSIONS),
             "run": self.run.to_dict(),
             "completed_event": self.completed_event.to_dict(),
+            "success_intent": self.success_intent.to_dict(),
         }
 
 
@@ -69,10 +75,12 @@ class RunRepositoryAdapter:
         self,
         root_directory: str | Path,
         conversation_projector: ConversationProjectionPort | None = None,
+        success_commit_fault_port: SuccessCommitFaultPort | None = None,
     ) -> None:
         """初始化仓储根目录和可选的既有 Session 投影器。"""
         self._root_directory: Path = Path(root_directory).resolve()
         self._conversation_projector: ConversationProjectionPort | None = conversation_projector
+        self._success_commit_fault_port: SuccessCommitFaultPort | None = success_commit_fault_port
 
     async def create_run(self, run: AgentRun) -> None:
         """创建新的 run.json，禁止意外覆盖既有运行。"""
@@ -148,12 +156,16 @@ class RunRepositoryAdapter:
         run: AgentRun,
         final_message: RunMessage,
         completed_event: RunEvent,
+        success_intent: RunSuccessCommitIntent,
     ) -> None:
-        """创建可恢复事务意图，并在完成全部成功事实后清理该意图。"""
+        """以领域成功意图驱动可恢复事务，禁止分散写入成功事实。"""
         await asyncio.to_thread(self._validate_success_and_get_input_sync, run, final_message)
         await asyncio.to_thread(self._validate_completed_event_sync, run, final_message, completed_event)
-        intent: SuccessCommitIntent = SuccessCommitIntent(run, completed_event)
+        if success_intent.run_id != run.run_id or success_intent.session_id != run.session_id:
+            raise ValueError("成功提交意图必须属于当前运行")
+        intent: SuccessCommitIntent = SuccessCommitIntent(run, completed_event, success_intent)
         await asyncio.to_thread(self._prepare_success_commit_sync, intent)
+        await self.save_success_commit_intent(run.session_id, run.run_id, success_intent)
         await self._recover_success_commit(run.session_id, run.run_id)
 
     async def load_conversation(self, session_id: str) -> tuple[ConversationMessage, ...]:
@@ -282,7 +294,7 @@ class RunRepositoryAdapter:
             await self._recover_success_commit(session_id, run_id)
 
     async def _recover_success_commit(self, session_id: str, run_id: str) -> None:
-        """以事务意图为准幂等补齐成功提交；只有三类事实齐备后才删除意图文件。"""
+        """按 Session、事件、Run、checkpoint 顺序幂等补齐成功提交。"""
         intent: SuccessCommitIntent | None = await asyncio.to_thread(
             self._load_success_commit_intent_sync,
             session_id,
@@ -296,13 +308,94 @@ class RunRepositoryAdapter:
             intent.run,
             final_message,
         )
-        await asyncio.to_thread(self._ensure_event_sync, intent.run.session_id, intent.completed_event)
+        history_compression, source_hash = await asyncio.to_thread(
+            self._history_compression_for_intent_sync,
+            intent.run,
+            intent.success_intent,
+        )
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.BEFORE_SESSION_PROJECTION)
         if self._conversation_projector is not None:
-            await self._conversation_projector.project_success(intent.run, user_message, final_message)
+            await self._conversation_projector.project_success(
+                intent.run,
+                user_message,
+                final_message,
+                history_compression,
+                source_hash,
+            )
         else:
             await asyncio.to_thread(self._append_standalone_conversation_sync, intent.run, final_message)
-        await asyncio.to_thread(self._save_run_sync, intent.run)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.AFTER_SESSION_PROJECTION)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.BEFORE_COMPLETED_EVENT)
+        await asyncio.to_thread(self._ensure_event_sync, intent.run.session_id, intent.completed_event)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.AFTER_COMPLETED_EVENT)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.BEFORE_RUN_FINALIZATION)
+        completed_run: AgentRun = _completed_run_from_intent(intent.run, intent.success_intent)
+        await asyncio.to_thread(self._save_run_sync, completed_run)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.AFTER_RUN_FINALIZATION)
+        await asyncio.to_thread(self._delete_checkpoint_sync, intent.run.session_id, intent.run.run_id)
         await asyncio.to_thread(self._delete_success_commit_intent_sync, session_id, run_id)
+
+    async def _inject_success_commit_fault(self, point: SuccessCommitFaultPoint) -> None:
+        """仅在测试装配故障 Port 时于精确提交边界中断。"""
+        if self._success_commit_fault_port is not None:
+            await self._success_commit_fault_port.inject(point)
+
+    def _history_compression_for_intent_sync(
+        self,
+        run: AgentRun,
+        intent: RunSuccessCommitIntent,
+    ) -> tuple[HistoryCompressionSnapshot | None, str]:
+        """从候选引用的 Context Version 读取唯一保存的摘要正文。"""
+        if intent.latest_candidate_id is None:
+            return None, ""
+        candidate: StagedHistoryCompression | None = next(
+            (item for item in run.staged_history_compressions if item.candidate_id == intent.latest_candidate_id),
+            None,
+        )
+        if candidate is None:
+            raise ValueError("成功提交意图引用的历史压缩候选不存在")
+        versions: tuple[ContextVersion, ...] = self._load_context_versions_sync(run.session_id, run.run_id)
+        version: ContextVersion | None = next(
+            (item for item in versions if item.version == candidate.context_version),
+            None,
+        )
+        if version is None:
+            raise ValueError("历史压缩候选引用的 Context Version 不存在")
+        history_slot = next(
+            (
+                slot for slot in version.slots
+                if slot.owner is ContextOwner.SESSION
+                and slot.contribution_kind is ContextContributionKind.HISTORY
+            ),
+            None,
+        )
+        if history_slot is None:
+            raise ValueError("历史压缩候选引用的 Context Version 缺少 History Slot")
+        raw_conversation: JSONValue | None = history_slot.attributes.get("conversation")
+        if not isinstance(raw_conversation, dict):
+            raise ValueError("History Slot 缺少 Conversation 载荷")
+        raw_compression: JSONValue | None = raw_conversation.get("compressed_history")
+        if not isinstance(raw_compression, dict):
+            raise ValueError("History Slot 缺少压缩摘要载荷")
+        raw_version: JSONValue | None = raw_compression.get("compression_version")
+        raw_covered: JSONValue | None = raw_compression.get("covered_through_conversation_id")
+        raw_content: JSONValue | None = raw_compression.get("content")
+        raw_hash: JSONValue | None = raw_compression.get("content_hash")
+        if (
+            not isinstance(raw_version, int)
+            or isinstance(raw_version, bool)
+            or not all(isinstance(value, str) for value in (raw_covered, raw_content, raw_hash))
+        ):
+            raise ValueError("History Slot 的压缩摘要载荷无效")
+        if raw_hash != candidate.summary_hash:
+            raise ValueError("历史压缩候选与 Context Version 摘要 hash 不一致")
+        return HistoryCompressionSnapshot(raw_version, raw_covered, raw_content, raw_hash), candidate.source_hash
+
+    def _delete_checkpoint_sync(self, session_id: str, run_id: str) -> None:
+        """在终态 Run 已落盘后清理恢复 checkpoint。"""
+        path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.CHECKPOINT.value)
+        if path.is_file():
+            path.unlink()
 
     def _prepare_success_commit_sync(self, intent: SuccessCommitIntent) -> None:
         """原子创建或校验既有成功提交意图，保证重试不会覆盖另一笔提交。"""
@@ -652,11 +745,13 @@ def _success_commit_intent_from_dict(data: JSONMap) -> SuccessCommitIntent:
     """将临时成功提交意图反序列化为严格领域模型。"""
     raw_run: JSONValue | None = data.get("run")
     raw_completed_event: JSONValue | None = data.get("completed_event")
-    if raw_run is None or raw_completed_event is None:
-        raise ValueError("成功提交意图缺少 run 或 completed_event")
+    raw_success_intent: JSONValue | None = data.get("success_intent")
+    if raw_run is None or raw_completed_event is None or raw_success_intent is None:
+        raise ValueError("成功提交意图缺少 run、completed_event 或领域意图")
     return SuccessCommitIntent(
         run=_agent_run_from_dict(require_json_map(raw_run)),
         completed_event=_run_event_from_dict(require_json_map(raw_completed_event)),
+        success_intent=_run_success_commit_intent_from_dict(require_json_map(raw_success_intent)),
     )
 
 
@@ -758,6 +853,29 @@ def _run_success_commit_intent_from_dict(data: JSONMap) -> RunSuccessCommitInten
         conversation_id=get_string(data, "conversation_id"),
         latest_candidate_id=latest_candidate_id,
         target_status=RunStatus(get_string(data, "target_status")),
+        run_id=get_string(data, "run_id"),
+        session_id=get_string(data, "session_id"),
+    )
+
+
+def _completed_run_from_intent(run: AgentRun, intent: RunSuccessCommitIntent) -> AgentRun:
+    """以成功意图收敛终态 Run，并只提交最新的 staged 候选。"""
+    candidates: tuple[StagedHistoryCompression, ...] = tuple(
+        replace(
+            candidate,
+            status=(
+                StagedHistoryCompressionStatus.COMMITTED
+                if candidate.candidate_id == intent.latest_candidate_id
+                else candidate.status
+            ),
+        )
+        for candidate in run.staged_history_compressions
+    )
+    return replace(
+        run,
+        status=intent.target_status,
+        staged_history_compressions=candidates,
+        success_commit_intent=None,
     )
 
 

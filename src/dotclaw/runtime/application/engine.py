@@ -27,6 +27,7 @@ from ..domain.context import (
     ContextVersion,
     StagedHistoryCompression,
     StagedHistoryCompressionStatus,
+    SuccessCommitIntent,
     new_context_version,
 )
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
@@ -570,8 +571,19 @@ class RuntimeEngine:
                     occurred_at=utc_now_iso(),
                     message_ids=(response_message.message_id,),
                 )
-                await self._run_repository.commit_success(completed, response_message, completed_event)
-                await self._checkpoint_repository.delete(run.session_id, run.run_id)
+                success_intent: SuccessCommitIntent = SuccessCommitIntent(
+                    conversation_id=f"conversation-{run.run_id}",
+                    latest_candidate_id=_latest_staged_candidate_id(completed),
+                    target_status=RunStatus.COMPLETED,
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                )
+                await self._run_repository.commit_success(
+                    completed,
+                    response_message,
+                    completed_event,
+                    success_intent,
+                )
                 return RunResult(
                     run.run_id,
                     RunStatus.COMPLETED,
@@ -1300,6 +1312,16 @@ def _hash_json_value(value: JSONValue | list[JSONMap]) -> str:
     """以稳定 JSON 序列化计算审计 hash，避免字典顺序影响结果。"""
     serialized: str = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return _hash_text(serialized)
+
+
+def _latest_staged_candidate_id(run: AgentRun) -> str | None:
+    """返回成功路径唯一可提交的最新历史压缩候选标识。"""
+    candidates: tuple[StagedHistoryCompression, ...] = tuple(
+        candidate
+        for candidate in run.staged_history_compressions
+        if candidate.status is StagedHistoryCompressionStatus.STAGED
+    )
+    return candidates[-1].candidate_id if candidates else None
 
 
 def _with_llm_statistics(run: AgentRun, response: RunMessage) -> AgentRun:
