@@ -28,6 +28,7 @@ from ..runtime.domain.facts import (
     get_string,
     require_json_map,
 )
+from ..runtime.domain.context import ContextContributionKind, ContextOwner, ContextSlotSnapshot, ContextSlotStatus, ContextVersion
 from .ports import ContextDependencies
 from .scoped_cache import ScopedCache
 from .slot_context import ContextProfile, SlotContext
@@ -68,13 +69,13 @@ class SlotContextProvider:
         system_context: SystemContextSnapshot
         source_names: tuple[str, ...]
         failed_slots: tuple[str, ...]
-        if execution.initial_context is None:
+        if execution.active_context_version is None:
             system_context, source_names, failed_slots = await self._build_system_context(
                 context,
                 profile,
             )
         else:
-            system_context = execution.initial_context.system_context
+            system_context = _system_context_from_version(execution.active_context_version)
             source_names = tuple(
                 slot.name
                 for slot in system_context.slots
@@ -326,6 +327,37 @@ def _render_system_context(system_context: SystemContextSnapshot) -> str:
         if slot.status is SystemContextSlotStatus.INCLUDED:
             contents.append(slot.content)
     return "\n\n".join(contents)
+
+
+def _system_context_from_version(context_version: ContextVersion) -> SystemContextSnapshot:
+    """从 v3 Context Version 重放已冻结的 system Slot，不重新调用 Slot。"""
+    snapshots: tuple[ContextSlotSnapshot, ...] = tuple(
+        snapshot
+        for snapshot in context_version.slots
+        if snapshot.owner is ContextOwner.AGENT
+        and snapshot.contribution_kind is ContextContributionKind.SYSTEM_CONTENT
+    )
+    slots: list[SystemContextSlot] = []
+    snapshot: ContextSlotSnapshot
+    for snapshot in snapshots:
+        raw_scope: JSONValue | None = snapshot.attributes.get("scope")
+        scope_value: str = raw_scope if isinstance(raw_scope, str) else SystemContextSlotScope.DYNAMIC.value
+        slots.append(SystemContextSlot(
+            name=snapshot.slot_id,
+            scope=SystemContextSlotScope(scope_value),
+            status=SystemContextSlotStatus(snapshot.status.value),
+            content=snapshot.content,
+            content_hash=snapshot.content_hash,
+            error_code=snapshot.error_code,
+        ))
+    return SystemContextSnapshot(
+        version=context_version.version,
+        slot_order=tuple(snapshot.slot_id for snapshot in snapshots),
+        slots=tuple(slots),
+        rendered_content_hash=_content_hash("\n\n".join(
+            snapshot.content for snapshot in snapshots if snapshot.status is ContextSlotStatus.INCLUDED
+        )),
+    )
 
 
 def _resequenced(messages: tuple[RunMessage, ...]) -> tuple[RunMessage, ...]:

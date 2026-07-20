@@ -191,43 +191,6 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
     assert event_types.index("run_resumed") < event_types.index("run_completed")
 
 
-async def test_approval_refuses_v1_messages_without_consuming_pending_record(tmp_path: Path) -> None:
-    """v1 Run 必须先迁移；恢复入口不得消费审批或改变等待中的 Run。"""
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    approval_service: ApprovalService = ApprovalService(ApprovalRepositoryAdapter(tmp_path))
-    engine: RuntimeEngine = RuntimeEngine(
-        run_repository,
-        CheckpointRepositoryAdapter(tmp_path),
-        ContextFake(),
-        ApprovalLLM(),
-        ApprovalTool(),
-        PolicyPort(),
-        approval_service,
-        CancellationService(),
-    )
-    waiting: RunResult = await engine.execute(_request("session-v1-approval"))
-    messages_path: Path = tmp_path / "session-v1-approval" / "agent_runs" / waiting.run_id / "messages.json"
-    current_payload: JSONMap = require_json_map(json.loads(messages_path.read_text(encoding="utf-8")))
-    raw_messages: JSONValue | None = current_payload.get("messages")
-    assert isinstance(raw_messages, list)
-    legacy_payload: JSONMap = {
-        "run_id": waiting.run_id,
-        "version": 1,
-        "messages": raw_messages,
-    }
-    messages_path.write_text(json.dumps(legacy_payload, ensure_ascii=False), encoding="utf-8")
-
-    result: RunResult = await engine.resolve_approval(waiting.approval_id or "", approved=True)
-
-    assert result.status is RunStatus.FAILED
-    assert result.error is not None
-    assert "migrate_messages_v1_to_v2" in result.error.message
-    assert await approval_service.find_pending(waiting.approval_id or "") is not None
-    run: AgentRun | None = await run_repository.load_run("session-v1-approval", waiting.run_id)
-    assert run is not None
-    assert run.status is RunStatus.WAITING_APPROVAL
-
-
 class ReActLLM(LLMPort):
     """记录两轮模型上下文，以验证工具证据能够进入下一轮 ReAct 请求。"""
 
@@ -330,8 +293,8 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
     assert [message.tool_call_id for message in second_context.messages[4:]] == ["call-1", "call-2"]
 
 
-async def test_engine_freezes_initial_context_and_audits_llm_calls_without_request_message_copies(tmp_path: Path) -> None:
-    """新 Run 只保存增量事实，LLM 调用通过事件引用冻结上下文和消息序列。"""
+async def test_engine_appends_context_versions_and_audits_llm_calls_without_request_message_copies(tmp_path: Path) -> None:
+    """每次 LLM 调用前追加 v3 Context Version，并仅保存增量 Run Message。"""
     llm: ReActLLM = ReActLLM()
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
@@ -344,23 +307,25 @@ async def test_engine_freezes_initial_context_and_audits_llm_calls_without_reque
         CancellationService(),
     )
 
-    result: RunResult = await engine.execute(_request_with_history("session-initial-context"))
+    result: RunResult = await engine.execute(_request_with_history("session-context-version"))
 
-    messages_path: Path = tmp_path / "session-initial-context" / "agent_runs" / result.run_id / "messages.json"
-    events_path: Path = tmp_path / "session-initial-context" / "agent_runs" / result.run_id / "events.jsonl"
+    messages_path: Path = tmp_path / "session-context-version" / "agent_runs" / result.run_id / "messages.json"
+    events_path: Path = tmp_path / "session-context-version" / "agent_runs" / result.run_id / "events.jsonl"
     payload: JSONMap = require_json_map(json.loads(messages_path.read_text(encoding="utf-8")))
-    raw_initial_context: JSONValue | None = payload.get("initial_context")
-    assert isinstance(raw_initial_context, dict)
-    initial_context: JSONMap = raw_initial_context
-    raw_history: JSONValue | None = initial_context.get("history")
-    assert isinstance(raw_history, dict)
-    history: JSONMap = raw_history
-    assert history["recent_messages"] == [{
-        "conversation_id": "history-1",
-        "role": "assistant",
-        "content": "这是之前的回答。",
-        "created_at": "2026-07-16T00:00:00+00:00",
-    }]
+    raw_versions: JSONValue | None = payload.get("context_versions")
+    assert isinstance(raw_versions, list)
+    assert [require_json_map(item)["version"] for item in raw_versions] == [1, 2]
+    first_version: JSONMap = require_json_map(raw_versions[0])
+    raw_slots: JSONValue | None = first_version.get("slots")
+    assert isinstance(raw_slots, list)
+    history_slot: JSONMap = next(
+        require_json_map(item) for item in raw_slots if require_json_map(item)["slot_id"] == "session_history"
+    )
+    attributes: JSONMap = require_json_map(history_slot["attributes"])
+    conversation: JSONMap = require_json_map(attributes["conversation"])
+    raw_history_messages: JSONValue | None = conversation.get("messages")
+    assert isinstance(raw_history_messages, list)
+    assert require_json_map(raw_history_messages[0])["content"] == "这是之前的回答。"
     raw_stored_messages: JSONValue | None = payload.get("messages")
     assert isinstance(raw_stored_messages, list)
     stored_messages: list[JSONValue] = raw_stored_messages
@@ -387,6 +352,8 @@ async def test_engine_freezes_initial_context_and_audits_llm_calls_without_reque
     assert isinstance(raw_second_data, dict)
     first_data: JSONMap = raw_first_data
     second_data: JSONMap = raw_second_data
+    assert first_data["context_version"] == 1
+    assert second_data["context_version"] == 2
     assert first_data["incremental_message_ids"] == ["user-1"]
     assert second_data["incremental_message_ids"] == [
         "user-1",

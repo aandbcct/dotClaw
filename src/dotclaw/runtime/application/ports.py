@@ -1,4 +1,4 @@
-"""Runtime v2 依赖的外部能力协议。"""
+"""Runtime v3 依赖的外部能力协议。"""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from typing import Protocol
 
 from ..domain.events import RunEvent
 from dotclaw.runtime.application.execution import RunExecutionView
+from ..domain.context import ContextVersion, StagedHistoryCompression, SuccessCommitIntent
 from ..domain.facts import (
     AgentRun,
     ApprovalRecord,
-    InitialContextSnapshot,
     RunCheckpoint,
     RunMessage,
     AgentPolicySnapshot,
@@ -62,19 +62,35 @@ class RunRepository(Protocol):
     async def save_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         """原子更新完整运行消息。"""
 
-    async def save_initial_context(
+    async def append_context_version(
         self,
         session_id: str,
         run_id: str,
-        initial_context: InitialContextSnapshot,
+        context_version: ContextVersion,
     ) -> None:
-        """原子保存 Run 的冻结初始上下文，禁止覆盖内容不同的既有快照。"""
+        """追加 Run 的不可变 Context Version，禁止覆盖既有版本。"""
 
-    async def load_initial_context(self, session_id: str, run_id: str) -> InitialContextSnapshot | None:
-        """加载 Run 的冻结初始上下文；旧格式或尚未保存时返回空。"""
+    async def load_context_versions(self, session_id: str, run_id: str) -> tuple[ContextVersion, ...]:
+        """加载按版本连续递增的上下文版本事实。"""
 
-    async def requires_messages_migration(self, session_id: str, run_id: str) -> bool:
-        """判断 Run 是否仍使用只读的 messages.json v1 格式。"""
+    async def set_active_context_version(self, session_id: str, run_id: str, version: int) -> None:
+        """保存 Run 当前活动的 Context Version 引用。"""
+
+    async def save_staged_history_compressions(
+        self,
+        session_id: str,
+        run_id: str,
+        candidates: tuple[StagedHistoryCompression, ...],
+    ) -> None:
+        """保存不含摘要正文的历史压缩候选控制信息。"""
+
+    async def save_success_commit_intent(
+        self,
+        session_id: str,
+        run_id: str,
+        intent: SuccessCommitIntent,
+    ) -> None:
+        """保存可恢复成功提交意图控制信息。"""
 
     async def load_messages(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         """加载完整运行消息。"""

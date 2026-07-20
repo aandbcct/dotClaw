@@ -1,489 +1,259 @@
-"""Runtime v2 文件仓储的原子写入与引用完整性测试。"""
+"""Runtime E1 的 v3 RunRepository 格式与契约测试。"""
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import replace
 import json
+from dataclasses import replace
 from pathlib import Path
+from typing import Protocol
 
 import pytest
 
-from scripts.migrate_agent_run_v1_to_v2 import migrate_agent_run
-from dotclaw.runtime.adapters import (
-    ApprovalRepositoryAdapter,
-    CheckpointRepositoryAdapter,
-    RunRepositoryAdapter,
-    SessionConversationProjector,
+from dotclaw.runtime.adapters import CheckpointRepositoryAdapter, InMemoryRunRepository, RunRepositoryAdapter
+from dotclaw.runtime.application.ports import RunRepository
+from dotclaw.runtime.domain.context import (
+    ContextContributionKind,
+    ContextOwner,
+    ContextSlotSnapshot,
+    ContextSlotStatus,
+    ContextVersion,
+    StagedHistoryCompression,
+    StagedHistoryCompressionStatus,
+    SuccessCommitIntent,
+    new_context_version,
 )
-from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot,
     AgentRun,
-    ApprovalRecord,
-    ApprovalStatus,
-    ContextCompactionScope,
-    HistoryContextSnapshot,
-    HistoryMessageSnapshot,
-    InitialContextSnapshot,
     JSONMap,
-    JSONValue,
     MessageRole,
     RunCheckpoint,
     RunMessage,
     RunMessageKind,
-    RunStatistics,
     RunStatus,
-    SystemContextSlot,
-    SystemContextSlotScope,
-    SystemContextSlotStatus,
-    SystemContextSnapshot,
     require_json_map,
 )
-from dotclaw.runtime.application.context_compaction import (
-    ContextCompactionRequest,
-    ContextCompactionResult,
-    ContextFragment,
-)
-from dotclaw.session.session import Session, SessionManager
 
 
-def _build_running_run() -> AgentRun:
-    """构造仓储测试所需的最小运行摘要。"""
-    policy: AgentPolicySnapshot = AgentPolicySnapshot(
-        agent_id="agent-1",
-        identity_version="identity-v1",
-        model_id="model-v1",
-        max_iterations=8,
-    )
+class ContextVersionRepository(Protocol):
+    """E1 Context Version 契约测试需要的最小仓储操作。"""
+
+    async def create_run(self, run: AgentRun) -> None:
+        """创建测试 Run。"""
+
+    async def append_context_version(self, session_id: str, run_id: str, context_version: ContextVersion) -> None:
+        """追加上下文版本。"""
+
+    async def load_context_versions(self, session_id: str, run_id: str) -> tuple[ContextVersion, ...]:
+        """读取上下文版本。"""
+
+
+def _run() -> AgentRun:
+    """构造 v3 仓储测试所需的最小 Run。"""
     return AgentRun(
         run_id="run-1",
         session_id="session-1",
         agent_id="agent-1",
         status=RunStatus.RUNNING,
-        started_at="2026-07-16T00:00:00+00:00",
-        policy=policy,
-        input_message_id="message-user-1",
-        statistics=RunStatistics(),
+        started_at="2026-07-20T00:00:00+00:00",
+        policy=AgentPolicySnapshot("agent-1", "identity-v1", "model-v1", 8),
+        input_message_id="user-1",
     )
 
 
-def _build_messages() -> tuple[RunMessage, RunMessage]:
-    """构造一条用户消息和一条最终助手消息。"""
-    user_message: RunMessage = RunMessage(
-        message_id="message-user-1",
-        sequence=1,
-        kind=RunMessageKind.USER_INPUT,
-        role=MessageRole.USER,
-        content="你好",
-    )
-    final_message: RunMessage = RunMessage(
-        message_id="message-assistant-1",
-        sequence=2,
-        kind=RunMessageKind.FINAL_RESPONSE,
-        role=MessageRole.ASSISTANT,
-        content="你好，我可以帮助你。",
-    )
-    return user_message, final_message
-
-
-def _build_initial_context() -> InitialContextSnapshot:
-    """构造包含按 Slot 记录 system 内容的 v2 初始上下文。"""
-    return InitialContextSnapshot(
-        system_context=SystemContextSnapshot(
-            version=1,
-            slot_order=("identity",),
-            slots=(SystemContextSlot(
-                name="identity",
-                scope=SystemContextSlotScope.STATIC,
-                status=SystemContextSlotStatus.INCLUDED,
+def _context_version(version: int) -> ContextVersion:
+    """构造一个包含 Agent、Session 与 Run 贡献的完整版本。"""
+    return new_context_version(
+        version=version,
+        slots=(
+            ContextSlotSnapshot(
+                slot_id="identity",
+                owner=ContextOwner.AGENT,
+                contribution_kind=ContextContributionKind.SYSTEM_CONTENT,
+                status=ContextSlotStatus.INCLUDED,
+                injection_order=0,
                 content="你是测试助手。",
-                content_hash="system-slot-hash",
-            ),),
-            rendered_content_hash="system-rendered-hash",
+                content_hash="identity-hash",
+            ),
+            ContextSlotSnapshot(
+                slot_id="history",
+                owner=ContextOwner.SESSION,
+                contribution_kind=ContextContributionKind.HISTORY,
+                status=ContextSlotStatus.EMPTY,
+                injection_order=1,
+            ),
+            ContextSlotSnapshot(
+                slot_id="run_messages",
+                owner=ContextOwner.RUN,
+                contribution_kind=ContextContributionKind.RUN_MESSAGE_REFERENCES,
+                status=ContextSlotStatus.INCLUDED,
+                injection_order=2,
+                message_ids=("user-1",),
+            ),
         ),
-        history=HistoryContextSnapshot(
-            source_session_id="session-1",
-            source_conversation_version=1,
-            recent_messages=(HistoryMessageSnapshot(
-                conversation_id="conversation-1",
-                role=MessageRole.USER,
-                content="历史问题",
-                created_at="2026-07-16T00:00:00+00:00",
-            ),),
-            content_hash="history-hash",
-        ),
+        content_hash=f"context-hash-{version}",
+        tool_schema_hash="tool-schema-hash",
     )
 
 
-def _completed_event(run: AgentRun, final_message: RunMessage, sequence: int) -> RunEvent:
-    """构造与最终 assistant 消息绑定的成功终态事件。"""
-    return RunEvent(
-        run_id=run.run_id,
-        sequence=sequence,
-        event_type=RunEventType.RUN_COMPLETED,
-        occurred_at="2026-07-16T00:00:03+00:00",
-        message_ids=(final_message.message_id,),
-    )
-
-
-async def test_run_repository_adapter_preserves_message_event_order(tmp_path: Path) -> None:
-    """事件只能引用已原子保存的消息，且序号必须连续。"""
-    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    run: AgentRun = _build_running_run()
-    user_message: RunMessage
-    final_message: RunMessage
-    user_message, final_message = _build_messages()
+async def _assert_context_version_contract(repository: ContextVersionRepository) -> None:
+    """验证 Fake 与文件仓储共享的追加不可变契约。"""
+    run: AgentRun = _run()
+    version_one: ContextVersion = _context_version(1)
+    version_two: ContextVersion = _context_version(2)
     await repository.create_run(run)
-
-    missing_message_event: RunEvent = RunEvent(
-        run_id=run.run_id,
-        sequence=1,
-        event_type=RunEventType.RUN_STARTED,
-        occurred_at="2026-07-16T00:00:01+00:00",
-        message_ids=(user_message.message_id,),
-    )
-    with pytest.raises(ValueError, match="尚未保存"):
-        await repository.append_event(run.session_id, missing_message_event)
-
-    await repository.save_messages(run.session_id, run.run_id, (user_message, final_message))
-    await repository.append_event(run.session_id, missing_message_event)
-    completed_event: RunEvent = RunEvent(
-        run_id=run.run_id,
-        sequence=2,
-        event_type=RunEventType.RUN_COMPLETED,
-        occurred_at="2026-07-16T00:00:02+00:00",
-        message_ids=(final_message.message_id,),
-    )
-    await repository.append_event(run.session_id, completed_event)
-
-    loaded_messages: tuple[RunMessage, ...] = await repository.load_messages(run.session_id, run.run_id)
-    assert loaded_messages == (user_message, final_message)
-    events_path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "events.jsonl"
-    assert len(events_path.read_text(encoding="utf-8").splitlines()) == 2
-    assert not tuple(tmp_path.rglob("*.tmp"))
+    await repository.append_context_version(run.session_id, run.run_id, version_one)
+    await repository.append_context_version(run.session_id, run.run_id, version_two)
+    assert await repository.load_context_versions(run.session_id, run.run_id) == (version_one, version_two)
+    with pytest.raises(ValueError, match="连续递增"):
+        await repository.append_context_version(run.session_id, run.run_id, version_two)
 
 
-async def test_messages_v2_persists_immutable_initial_context_and_incremental_messages(tmp_path: Path) -> None:
-    """v2 将初始上下文与 Run 增量消息分开保存，且冻结后不可被不同内容覆盖。"""
-    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    run: AgentRun = _build_running_run()
-    user_message: RunMessage
-    final_message: RunMessage
-    user_message, final_message = _build_messages()
-    initial_context: InitialContextSnapshot = _build_initial_context()
-    await repository.create_run(run)
-
-    await repository.save_initial_context(run.session_id, run.run_id, initial_context)
-    await repository.save_messages(run.session_id, run.run_id, (user_message, final_message))
-
-    assert await repository.load_initial_context(run.session_id, run.run_id) == initial_context
-    assert await repository.load_messages(run.session_id, run.run_id) == (user_message, final_message)
-    payload_path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "messages.json"
-    payload: JSONMap = require_json_map(json.loads(payload_path.read_text(encoding="utf-8")))
-    assert payload["version"] == 2
-    assert payload["initial_context"] == initial_context.to_dict()
-    raw_messages: JSONValue = payload["messages"]
-    assert isinstance(raw_messages, list)
-    serialized_messages: list[JSONMap] = [require_json_map(message) for message in raw_messages]
-    assert [message["kind"] for message in serialized_messages] == ["user_input", "final_response"]
-
-    changed_context: InitialContextSnapshot = replace(
-        initial_context,
-        system_context=replace(initial_context.system_context, rendered_content_hash="changed-hash"),
-    )
-    with pytest.raises(ValueError, match="初始上下文已冻结"):
-        await repository.save_initial_context(run.session_id, run.run_id, changed_context)
+async def test_in_memory_run_repository_satisfies_context_version_contract() -> None:
+    """内存 Fake 必须与真实 Adapter 共享 v3 版本语义。"""
+    await _assert_context_version_contract(InMemoryRunRepository())
 
 
-async def test_messages_v1_is_read_only_until_explicit_migration(tmp_path: Path) -> None:
-    """旧格式可读取，但禁止由运行仓储直接覆写为缺失快照的伪 v2 格式。"""
-    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    run: AgentRun = _build_running_run()
-    user_message: RunMessage
-    final_message: RunMessage
-    user_message, final_message = _build_messages()
-    await repository.create_run(run)
-    message_path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "messages.json"
-    message_path.write_text(json.dumps({
-        "run_id": run.run_id,
-        "version": 1,
-        "messages": [user_message.to_dict()],
-    }, ensure_ascii=False), encoding="utf-8")
-
-    assert await repository.load_initial_context(run.session_id, run.run_id) is None
-    assert await repository.load_messages(run.session_id, run.run_id) == (user_message,)
-
-    with pytest.raises(ValueError, match="migrate_messages_v1_to_v2"):
-        await repository.save_messages(run.session_id, run.run_id, (user_message, final_message))
-    preserved_payload: JSONMap = require_json_map(json.loads(message_path.read_text(encoding="utf-8")))
-    assert preserved_payload["version"] == 1
-    assert await repository.load_messages(run.session_id, run.run_id) == (user_message,)
+async def test_file_run_repository_satisfies_context_version_contract(tmp_path: Path) -> None:
+    """文件 Adapter 必须与内存 Fake 共享 v3 版本语义。"""
+    await _assert_context_version_contract(RunRepositoryAdapter(tmp_path))
 
 
-async def test_llm_started_event_audits_call_without_llm_request_message(tmp_path: Path) -> None:
-    """模型调用由 LLM_STARTED 事件审计，事件只引用已保存的增量消息。"""
-    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    run: AgentRun = _build_running_run()
-    user_message: RunMessage
-    user_message, _ = _build_messages()
-    await repository.create_run(run)
-    await repository.save_messages(run.session_id, run.run_id, (user_message,))
-
-    event: RunEvent = RunEvent(
-        run_id=run.run_id,
-        sequence=1,
-        event_type=RunEventType.LLM_STARTED,
-        occurred_at="2026-07-16T00:00:01+00:00",
-        message_ids=(user_message.message_id,),
-        data={
-            "call_index": 1,
-            "model_id": "model-v1",
-            "system_context_version": 1,
-            "history_version": 1,
-            "incremental_message_ids": [user_message.message_id],
-            "context_hash": "context-hash",
-            "tool_schema_hash": "tool-schema-hash",
-        },
-    )
-    await repository.append_event(run.session_id, event)
-
-    event_path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "events.jsonl"
-    event_data: JSONMap = require_json_map(json.loads(event_path.read_text(encoding="utf-8")))
-    assert event_data["event_type"] == RunEventType.LLM_STARTED.value
-    assert event_data["message_ids"] == [user_message.message_id]
-
-
-def test_context_compaction_contract_supports_session_and_run_scopes() -> None:
-    """通用压缩 DTO 从阶段 A 起支持 Session 与 Run 两个作用域。"""
-    fragment: ContextFragment = ContextFragment("fragment-1", MessageRole.USER, "需要压缩的内容")
-    session_request: ContextCompactionRequest = ContextCompactionRequest(
-        scope=ContextCompactionScope.SESSION_HISTORY,
-        source_version=3,
-        target_token_budget=1200,
-        fragments=(fragment,),
-    )
-    run_result: ContextCompactionResult = ContextCompactionResult(
-        scope=ContextCompactionScope.RUN_CONTEXT,
-        version=1,
-        covered_through_fragment_id=fragment.fragment_id,
-        content="压缩摘要",
-        content_hash="content-hash",
+async def _assert_run_control_contract(repository: RunRepository) -> None:
+    """验证活动版本、候选和成功意图均由 run.json 控制面保存。"""
+    run: AgentRun = _run()
+    candidate: StagedHistoryCompression = StagedHistoryCompression(
+        candidate_id="candidate-1",
+        status=StagedHistoryCompressionStatus.STAGED,
+        session_baseline_version=1,
+        covered_through_conversation_id="conversation-1",
         source_hash="source-hash",
+        summary_hash="summary-hash",
+        context_version=1,
     )
-
-    assert session_request.scope is ContextCompactionScope.SESSION_HISTORY
-    assert run_result.scope is ContextCompactionScope.RUN_CONTEXT
-
-
-async def test_success_projection_and_checkpoint_are_isolated_by_run(tmp_path: Path) -> None:
-    """成功投影、检查点与审批记录分别按职责写入独立容器。"""
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    checkpoint_repository: CheckpointRepositoryAdapter = CheckpointRepositoryAdapter(tmp_path)
-    approval_repository: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(tmp_path)
-    running_run: AgentRun = _build_running_run()
-    user_message: RunMessage
-    final_message: RunMessage
-    user_message, final_message = _build_messages()
-    await run_repository.create_run(running_run)
-    await run_repository.save_messages(running_run.session_id, running_run.run_id, (user_message, final_message))
-
-    checkpoint: RunCheckpoint = RunCheckpoint(
-        checkpoint_id="checkpoint-1",
-        run_id=running_run.run_id,
-        session_id=running_run.session_id,
-        checkpoint_sequence=1,
-        event_sequence=1,
-        message_sequence=1,
-        agent_state={"phase": "waiting_approval", "iteration": 1},
-        next_action=AgentAction.EXECUTE_TOOLS,
-        pending={"kind": "approval", "approval_id": "approval-1"},
-        budget={"max_iterations": 8, "tokens_in": 10, "tokens_out": 2},
+    intent: SuccessCommitIntent = SuccessCommitIntent(
+        conversation_id="conversation-2",
+        latest_candidate_id=candidate.candidate_id,
+        target_status=RunStatus.COMPLETED,
     )
-    await checkpoint_repository.save(checkpoint)
-    assert await checkpoint_repository.load(running_run.session_id, running_run.run_id) == checkpoint
+    await repository.create_run(run)
+    await repository.append_context_version(run.session_id, run.run_id, _context_version(1))
+    await repository.set_active_context_version(run.session_id, run.run_id, 1)
+    await repository.save_staged_history_compressions(run.session_id, run.run_id, (candidate,))
+    await repository.save_success_commit_intent(run.session_id, run.run_id, intent)
+    persisted: AgentRun | None = await repository.load_run(run.session_id, run.run_id)
+    assert persisted is not None
+    assert persisted.active_context_version == 1
+    assert persisted.staged_history_compressions == (candidate,)
+    assert persisted.success_commit_intent == intent
 
-    approval: ApprovalRecord = ApprovalRecord(
-        approval_id="approval-1",
-        run_id=running_run.run_id,
-        session_id=running_run.session_id,
-        status=ApprovalStatus.PENDING,
-        created_at="2026-07-16T00:00:01+00:00",
+
+async def test_in_memory_run_repository_satisfies_run_control_contract() -> None:
+    """内存 Fake 必须保存与文件 Adapter 相同的控制面事实。"""
+    await _assert_run_control_contract(InMemoryRunRepository())
+
+
+async def test_file_run_repository_satisfies_run_control_contract(tmp_path: Path) -> None:
+    """文件 Adapter 必须保存与内存 Fake 相同的控制面事实。"""
+    await _assert_run_control_contract(RunRepositoryAdapter(tmp_path))
+
+
+async def test_v3_messages_payload_keeps_context_versions_and_messages_separate(tmp_path: Path) -> None:
+    """摘要候选正文不得进入 run.json，完整版本只写 messages.json。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run: AgentRun = _run()
+    candidate: StagedHistoryCompression = StagedHistoryCompression(
+        candidate_id="candidate-1",
+        status=StagedHistoryCompressionStatus.STAGED,
+        session_baseline_version=4,
+        covered_through_conversation_id="conversation-3",
+        source_hash="source-hash",
+        summary_hash="summary-hash",
+        context_version=1,
     )
-    await approval_repository.create(approval)
-    consumed_approval: ApprovalRecord | None = await approval_repository.consume(approval.approval_id)
-    assert consumed_approval is not None
-    assert consumed_approval.status is ApprovalStatus.CONSUMED
-    assert await approval_repository.consume(approval.approval_id) is None
+    run = replace(run, staged_history_compressions=(candidate,))
+    message: RunMessage = RunMessage("user-1", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "你好")
+    await repository.create_run(run)
+    await repository.save_messages(run.session_id, run.run_id, (message,))
+    await repository.append_context_version(run.session_id, run.run_id, _context_version(1))
 
-    completed_run: AgentRun = replace(
-        running_run,
-        status=RunStatus.COMPLETED,
-        ended_at="2026-07-16T00:00:02+00:00",
-        final_message_id=final_message.message_id,
-    )
-    await run_repository.commit_success(completed_run, final_message, _completed_event(completed_run, final_message, 1))
-    conversation = await run_repository.load_conversation(running_run.session_id)
-    assert conversation[0].content == final_message.content
-    assert conversation[0].role is MessageRole.ASSISTANT
-
-    await checkpoint_repository.delete(running_run.session_id, running_run.run_id)
-    assert await checkpoint_repository.load(running_run.session_id, running_run.run_id) is None
-
-
-async def test_success_projection_uses_existing_session_and_is_idempotent(tmp_path: Path) -> None:
-    """只有成功运行会通过既有 SessionManager 生成一条可见 Conversation。"""
-    session_manager: SessionManager = SessionManager(tmp_path)
-    session: Session = Session(id="session-1")
-    await session_manager.save(session)
-    projector: SessionConversationProjector = SessionConversationProjector(session_manager)
-    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, projector)
-    running_run: AgentRun = _build_running_run()
-    user_message: RunMessage
-    final_message: RunMessage
-    user_message, final_message = _build_messages()
-
-    failed_run: AgentRun = replace(running_run, run_id="run-failed", status=RunStatus.FAILED)
-    await repository.create_run(failed_run)
-    await repository.save_messages(failed_run.session_id, failed_run.run_id, (user_message, final_message))
-    await repository.save_run(failed_run)
-    loaded_before_success: Session | None = await session_manager.load(running_run.session_id)
-    assert loaded_before_success is not None
-    assert loaded_before_success.conversations == []
-
-    await repository.create_run(running_run)
-    await repository.save_messages(running_run.session_id, running_run.run_id, (user_message, final_message))
-    completed_run: AgentRun = replace(
-        running_run,
-        status=RunStatus.COMPLETED,
-        ended_at="2026-07-16T00:00:02+00:00",
-        final_message_id=final_message.message_id,
-    )
-    completed_event: RunEvent = _completed_event(completed_run, final_message, 1)
-    await repository.commit_success(completed_run, final_message, completed_event)
-    await repository.commit_success(completed_run, final_message, completed_event)
-
-    loaded_session: Session | None = await session_manager.load(running_run.session_id)
-    assert loaded_session is not None
-    assert len(loaded_session.conversations) == 1
-    assert loaded_session.conversations[0].user_query == user_message.content
-    assert loaded_session.conversations[0].final_answer == final_message.content
-    assert loaded_session.conversations[0].agent_run_ids == [running_run.run_id]
-    assert not (tmp_path / running_run.session_id / "conversation.json").exists()
+    run_payload: JSONMap = require_json_map(json.loads(
+        (tmp_path / run.session_id / "agent_runs" / run.run_id / "run.json").read_text(encoding="utf-8"),
+    ))
+    messages_payload: JSONMap = require_json_map(json.loads(
+        (tmp_path / run.session_id / "agent_runs" / run.run_id / "messages.json").read_text(encoding="utf-8"),
+    ))
+    assert run_payload["version"] == 3
+    assert messages_payload["version"] == 3
+    assert len(messages_payload["context_versions"]) == 1
+    raw_candidates = run_payload["staged_history_compressions"]
+    assert isinstance(raw_candidates, list)
+    candidate_payload: JSONMap = require_json_map(raw_candidates[0])
+    assert set(candidate_payload) == {
+        "candidate_id",
+        "status",
+        "session_baseline_version",
+        "covered_through_conversation_id",
+        "source_hash",
+        "summary_hash",
+        "context_version",
+    }
+    assert set(messages_payload) == {"run_id", "version", "context_versions", "messages"}
 
 
-class FailingConversationProjector:
-    """模拟 Conversation 投影失败，用于验证 run.json 不会抢先提交完成态。"""
-
-    async def project_success(
-        self,
-        run: AgentRun,
-        user_message: RunMessage,
-        final_message: RunMessage,
-    ) -> None:
-        """始终中断投影，使调用方可验证可恢复提交边界。"""
-        raise RuntimeError("Conversation 投影失败")
-
-
-async def test_success_commit_uses_run_completion_as_last_visibility_marker(tmp_path: Path) -> None:
-    """成功事件或 Conversation 投影失败时，不得暴露已完成但不完整的 AgentRun。"""
-    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, FailingConversationProjector())
-    running_run: AgentRun = _build_running_run()
-    user_message: RunMessage
-    final_message: RunMessage
-    user_message, final_message = _build_messages()
-    await repository.create_run(running_run)
-    await repository.save_messages(running_run.session_id, running_run.run_id, (user_message, final_message))
-    completed_run: AgentRun = replace(
-        running_run,
-        status=RunStatus.COMPLETED,
-        ended_at="2026-07-16T00:00:02+00:00",
-        final_message_id=final_message.message_id,
-    )
-
-    with pytest.raises(RuntimeError, match="投影失败"):
-        await repository.commit_success(
-            completed_run,
-            final_message,
-            _completed_event(completed_run, final_message, 1),
-        )
-
-    pending_run: AgentRun | None = await asyncio.to_thread(
-        repository._load_run_sync,
-        running_run.session_id,
-        running_run.run_id,
-    )
-    assert pending_run is not None
-    assert pending_run.status is RunStatus.RUNNING
-    assert (tmp_path / running_run.session_id / "agent_runs" / running_run.run_id / "success_commit.json").is_file()
-
-    recovered_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    await recovered_repository.recover_pending_success_commits()
-    recovered_run: AgentRun | None = await recovered_repository.load_run(
-        running_run.session_id,
-        running_run.run_id,
-    )
-    assert recovered_run is not None
-    assert recovered_run.status is RunStatus.COMPLETED
-    assert (await recovered_repository.load_conversation(running_run.session_id))[0].content == final_message.content
-    assert not (tmp_path / running_run.session_id / "agent_runs" / running_run.run_id / "success_commit.json").exists()
+async def test_v1_and_v2_messages_are_rejected_without_conversion(tmp_path: Path) -> None:
+    """任何历史 messages.json 读取都必须明确失败，禁止隐式迁移。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run: AgentRun = _run()
+    await repository.create_run(run)
+    path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "messages.json"
+    for version in (1, 2):
+        path.write_text(json.dumps({"run_id": run.run_id, "version": version, "messages": []}), encoding="utf-8")
+        with pytest.raises(ValueError, match="仅支持 v3"):
+            await repository.load_messages(run.session_id, run.run_id)
 
 
-async def test_checkpoint_rejects_full_prompt_and_tool_result_payloads(tmp_path: Path) -> None:
-    """恢复检查点只能保存最小控制数据，不能夹带完整上下文或工具执行结果。"""
+async def test_checkpoint_writes_and_reads_v3_control_fields(tmp_path: Path) -> None:
+    """checkpoint.json 必须使用 v3，且只保存活动版本与候选引用。"""
     repository: CheckpointRepositoryAdapter = CheckpointRepositoryAdapter(tmp_path)
     checkpoint: RunCheckpoint = RunCheckpoint(
-        checkpoint_id="checkpoint-guard-1",
-        run_id="run-guard-1",
-        session_id="session-guard-1",
+        checkpoint_id="checkpoint-1",
+        run_id="run-1",
+        session_id="session-1",
         checkpoint_sequence=1,
-        event_sequence=1,
-        message_sequence=1,
-        agent_state={"phase": "waiting_tools"},
-        next_action=AgentAction.EXECUTE_TOOLS,
-        pending={"call_id": "call-1"},
+        event_sequence=2,
+        message_sequence=3,
+        agent_state={"phase": "waiting_llm"},
+        next_action=AgentAction.INVOKE_LLM,
+        pending={},
         budget={"max_iterations": 8},
+        active_context_version=2,
+        staged_history_compression_ids=("candidate-1",),
     )
-
-    with pytest.raises(ValueError, match="prompt"):
-        await repository.save(replace(checkpoint, agent_state={"prompt": "完整系统提示词"}))
-    with pytest.raises(ValueError, match="tool_result"):
-        await repository.save(replace(checkpoint, pending={"tool_result": {"content": "完整工具输出"}}))
-
     await repository.save(checkpoint)
-    checkpoint_path: Path = tmp_path / checkpoint.session_id / "agent_runs" / checkpoint.run_id / "checkpoint.json"
-    assert checkpoint_path.is_file()
+    assert await repository.load(checkpoint.session_id, checkpoint.run_id) == checkpoint
+    payload: JSONMap = require_json_map(json.loads(
+        (tmp_path / checkpoint.session_id / "agent_runs" / checkpoint.run_id / "checkpoint.json").read_text(encoding="utf-8"),
+    ))
+    assert payload["version"] == 3
+    assert payload["active_context_version"] == 2
+    assert payload["staged_history_compression_ids"] == ["candidate-1"]
 
 
-async def test_migration_converts_legacy_agent_run_sample(tmp_path: Path) -> None:
-    """旧 AgentRun 样例可迁移为消息、事件、检查点和 Conversation 容器。"""
-    project_root: Path = Path(__file__).resolve().parents[2]
-    legacy_run_path: Path = project_root / "tests" / "fixtures" / "runtime" / "legacy_agent_run_v1.json"
-    report = await migrate_agent_run(legacy_run_path, tmp_path, "1a8d087e")
-
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    checkpoint_repository: CheckpointRepositoryAdapter = CheckpointRepositoryAdapter(tmp_path)
-    migrated_run: AgentRun | None = await run_repository.load_run("1a8d087e", "5a6a8ae0")
-    migrated_messages: tuple[RunMessage, ...] = await run_repository.load_messages("1a8d087e", "5a6a8ae0")
-    checkpoint: RunCheckpoint | None = await checkpoint_repository.load("1a8d087e", "5a6a8ae0")
-    conversation = await run_repository.load_conversation("1a8d087e")
-
-    assert report.message_count == 5
-    assert report.event_count == 2
-    assert report.checkpoint_created
-    assert migrated_run is not None
-    assert migrated_run.status is RunStatus.COMPLETED
-    assert migrated_messages[-1].kind is RunMessageKind.FINAL_RESPONSE
-    assert checkpoint is not None
-    assert "messages" not in checkpoint.agent_state
-    assert "tool_results" not in checkpoint.agent_state
-    assert conversation[0].content == migrated_messages[-1].content
-
-
-async def test_migration_reports_missing_legacy_run_with_actionable_error(tmp_path: Path) -> None:
-    """迁移命令遇到缺失旧文件时必须给出可行动错误信息。"""
-    missing_source: Path = tmp_path / "missing-agent-run.json"
-
-    with pytest.raises(FileNotFoundError, match="找不到旧 AgentRun 文件"):
-        await migrate_agent_run(missing_source, tmp_path, "session-1")
+async def test_file_repository_uses_atomic_replacement_for_v3_payload(tmp_path: Path) -> None:
+    """v3 多次写入后不得遗留临时文件，证明文件替换路径原子收口。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run: AgentRun = _run()
+    await repository.create_run(run)
+    await repository.save_messages(
+        run.session_id,
+        run.run_id,
+        (RunMessage("user-1", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "第一条"),),
+    )
+    await repository.save_messages(
+        run.session_id,
+        run.run_id,
+        (RunMessage("user-1", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "第二条"),),
+    )
+    assert not tuple(tmp_path.rglob("*.tmp"))

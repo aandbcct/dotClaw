@@ -1,4 +1,4 @@
-"""仅依赖 Ports 的 Runtime v2 执行引擎。"""
+"""仅依赖 Ports 的 Runtime v3 执行引擎。"""
 
 from __future__ import annotations
 
@@ -19,13 +19,19 @@ from ..domain.events import (
     ToolCompleted,
     ToolCompletionKind,
 )
+from ..domain.context import (
+    ContextContributionKind,
+    ContextOwner,
+    ContextSlotSnapshot,
+    ContextSlotStatus,
+    ContextVersion,
+    new_context_version,
+)
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
 from ..domain.facts import (
     AgentRun,
     ApprovalRecord,
-    HistoryContextSnapshot,
-    HistoryMessageSnapshot,
-    InitialContextSnapshot,
+    HistoryCompressionSnapshot,
     JSONMap,
     JSONValue,
     MessageRole,
@@ -37,8 +43,6 @@ from ..domain.facts import (
     RunStatistics,
     RunStatus,
     SystemContextSlot,
-    SystemContextSlotScope,
-    SystemContextSlotStatus,
     SystemContextSnapshot,
     ToolCall,
     utc_now_iso,
@@ -122,29 +126,30 @@ class RuntimeEngine:
         pending_record: ApprovalRecord | None = await self._approval_service.find_pending(approval_id)
         if pending_record is None:
             return RunResult("", RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在或已消费"))
-        if await self._run_repository.requires_messages_migration(
-            pending_record.session_id,
-            pending_record.run_id,
-        ):
-            return RunResult(
-                pending_record.run_id,
-                RunStatus.FAILED,
-                error=RunError(
-                    RunErrorCode.PERSISTENCE_FAILURE,
-                    "该 Run 使用 messages.json v1，请先执行 scripts/migrate_messages_v1_to_v2.py 后再处理审批",
-                ),
-            )
-        initial_context: InitialContextSnapshot | None = await self._run_repository.load_initial_context(
+        context_versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(
             pending_record.session_id,
             pending_record.run_id,
         )
-        if initial_context is None:
+        run: AgentRun | None = await self._run_repository.load_run(
+            pending_record.session_id,
+            pending_record.run_id,
+        )
+        if run is None or run.active_context_version is None:
             return RunResult(
                 pending_record.run_id,
                 RunStatus.FAILED,
-                error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "Run 缺少冻结 initial_context，拒绝恢复审批"),
+                error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "Run 缺少活动 Context Version，拒绝恢复审批"),
             )
-        frozen_initial_context: InitialContextSnapshot = initial_context
+        active_context_version: ContextVersion | None = next(
+            (item for item in context_versions if item.version == run.active_context_version),
+            None,
+        )
+        if active_context_version is None:
+            return RunResult(
+                pending_record.run_id,
+                RunStatus.FAILED,
+                error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "Run 活动 Context Version 不存在"),
+            )
         record: ApprovalRecord | None = await self._approval_service.consume(approval_id)
         if record is None:
             return RunResult("", RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在或已消费"))
@@ -161,7 +166,7 @@ class RuntimeEngine:
             lease_id="approval-resume",
             agent_id=run.agent_id,
             user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
-            conversation=_conversation_from_initial_context(frozen_initial_context),
+            conversation=_conversation_from_context_version(active_context_version),
         )
         state: AgentState = _state_from_checkpoint(checkpoint)
         transition = state.transition(ApprovalResolved(approval_id, approved))
@@ -173,7 +178,7 @@ class RuntimeEngine:
             budget=RunBudget(max_iterations=run.policy.max_iterations),
             message_cursor=checkpoint.message_sequence,
             run_messages=messages,
-            initial_context=frozen_initial_context,
+            active_context_version=active_context_version,
         )
         pending_calls: tuple[ToolCall, ...] = _calls_from_checkpoint(checkpoint)
         event_sequence: int = await self._event(
@@ -335,6 +340,10 @@ class RuntimeEngine:
                                 "tool_calls": [call.to_dict() for call in remaining_calls],
                             },
                             execution.budget.to_dict(),
+                            active_context_version=(
+                                execution.active_context_version.version
+                                if execution.active_context_version is not None else None
+                            ),
                         )
                         await self._checkpoint_repository.save(checkpoint)
                         waiting_run: AgentRun = replace(run, status=RunStatus.WAITING_APPROVAL, latest_checkpoint_id=checkpoint.checkpoint_id)
@@ -360,25 +369,26 @@ class RuntimeEngine:
                     event_number,
                     "Runtime 不允许在 Run 内静默裁剪上下文，请在创建 Run 前压缩 Session 历史",
                 )
-            initial_context: InitialContextSnapshot | None = await self._run_repository.load_initial_context(
+            context_version: ContextVersion = await self._append_context_version(
+                run,
+                execution,
+                context,
+                messages,
+            )
+            execution.activate_context_version(context_version)
+            await self._run_repository.set_active_context_version(
                 run.session_id,
                 run.run_id,
+                context_version.version,
             )
-            if initial_context is None:
-                initial_context = _initial_context_from_request(execution.request, context)
-                await self._run_repository.save_initial_context(
-                    run.session_id,
-                    run.run_id,
-                    initial_context,
-                )
-            execution.freeze_initial_context(initial_context)
+            run = replace(run, active_context_version=context_version.version)
             event_number = await self._event(
                 run,
                 event_number,
                 RunEventType.LLM_STARTED,
                 tuple(message.message_id for message in messages),
                 "模型调用开始",
-                _llm_started_data(run, initial_context, messages, context),
+                _llm_started_data(run, context_version, messages, context),
             )
             try:
                 response = await self._llm_port.complete(context, execution.view())
@@ -588,6 +598,36 @@ class RuntimeEngine:
         await self._run_repository.append_event(run.session_id, event)
         return next_sequence
 
+    async def _append_context_version(
+        self,
+        run: AgentRun,
+        execution: RunExecution,
+        context: ContextBundle,
+        messages: list[RunMessage],
+    ) -> ContextVersion:
+        """以实际模型输入和引用消息构造并追加下一版上下文事实。"""
+        existing_versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(
+            run.session_id,
+            run.run_id,
+        )
+        slots: tuple[ContextSlotSnapshot, ...] = _context_slots_from_bundle(
+            execution.request,
+            context,
+            messages,
+        )
+        context_version: ContextVersion = new_context_version(
+            version=len(existing_versions) + 1,
+            slots=slots,
+            content_hash=_hash_json_value([message.to_dict() for message in context.messages]),
+            tool_schema_hash=_hash_json_value([tool.to_dict() for tool in context.tools]),
+        )
+        await self._run_repository.append_context_version(
+            run.session_id,
+            run.run_id,
+            context_version,
+        )
+        return context_version
+
     async def _finish_cancelled(self, execution: RunExecution, run: AgentRun, messages: tuple[RunMessage, ...], event_sequence: int, reason: str) -> RunResult:
         """持久化取消终态、删除检查点且不投影 Conversation。"""
         cancelled = replace(run, status=RunStatus.CANCELLED, ended_at=utc_now_iso(), error=RunError(RunErrorCode.CANCELLED, reason))
@@ -646,114 +686,144 @@ def _calls_from_checkpoint(checkpoint: RunCheckpoint) -> tuple[ToolCall, ...]:
     return (ToolCall(call_id, call_name, arguments),)
 
 
-def _initial_context_from_request(
-    request: RunRequest,
-    context: ContextBundle,
-) -> InitialContextSnapshot:
-    """将首次实际注入的 system 和 Session 历史冻结为 Run 的顶层快照。"""
-    system_context: SystemContextSnapshot = context.metadata.system_context or _fallback_system_context(context)
-    recent_messages: list[HistoryMessageSnapshot] = []
-    conversation_message: ConversationMessage
-    for conversation_message in request.conversation.messages:
-        if _is_compression_summary_message(conversation_message):
-            continue
-        recent_messages.append(HistoryMessageSnapshot(
-            conversation_id=conversation_message.message_id,
-            role=conversation_message.role,
-            content=conversation_message.content,
-            created_at=conversation_message.created_at,
-        ))
-    history: HistoryContextSnapshot = HistoryContextSnapshot(
-        source_session_id=request.conversation.session_id,
-        source_conversation_version=request.conversation.version,
-        recent_messages=tuple(recent_messages),
-        content_hash=_hash_json_value({
-            "compressed_history": (
-                None
-                if request.conversation.compressed_history is None
-                else request.conversation.compressed_history.to_dict()
-            ),
-            "recent_messages": [message.to_dict() for message in recent_messages],
-        }),
-        compressed_history=request.conversation.compressed_history,
-        truncation_applied=context.metadata.truncation_applied,
-    )
-    return InitialContextSnapshot(system_context=system_context, history=history)
-
-
-def _fallback_system_context(context: ContextBundle) -> SystemContextSnapshot:
-    """为旧 ContextPort 生成兼容快照，确保新运行不再持久化 LLM_REQUEST。"""
-    system_content: str = "\n\n".join(
-        message.content for message in context.messages if message.role is MessageRole.SYSTEM
-    )
-    slot: SystemContextSlot = SystemContextSlot(
-        name="legacy_context_port",
-        scope=SystemContextSlotScope.DYNAMIC,
-        status=SystemContextSlotStatus.INCLUDED if system_content else SystemContextSlotStatus.EMPTY,
-        content=system_content,
-        content_hash=_hash_text(system_content) if system_content else "",
-    )
-    return SystemContextSnapshot(
-        version=1,
-        slot_order=(slot.name,),
-        slots=(slot,),
-        rendered_content_hash=_hash_text(system_content),
-    )
-
-
 def _llm_started_data(
     run: AgentRun,
-    initial_context: InitialContextSnapshot,
+    context_version: ContextVersion,
     messages: list[RunMessage],
     context: ContextBundle,
 ) -> JSONMap:
     """构造可复原模型输入的审计字段，而不将完整输入重复写入消息流。"""
-    history_version: int = (
-        initial_context.history.compressed_history.compression_version
-        if initial_context.history.compressed_history is not None
-        else initial_context.history.source_conversation_version
-    )
     return {
         "call_index": run.statistics.llm_call_count + 1,
         "model_id": run.policy.model_id,
-        "system_context_version": initial_context.system_context.version,
-        "history_version": history_version,
+        "context_version": context_version.version,
         "incremental_message_ids": [message.message_id for message in messages],
-        "context_hash": _hash_json_value([message.to_dict() for message in context.messages]),
-        "tool_schema_hash": _hash_json_value([tool.to_dict() for tool in context.tools]),
+        "context_hash": context_version.content_hash,
+        "tool_schema_hash": context_version.tool_schema_hash,
     }
 
 
-def _conversation_from_initial_context(initial_context: InitialContextSnapshot) -> ConversationSnapshot:
-    """由冻结快照重建审批恢复所需的历史，不查询当前 Session 可变状态。"""
-    messages: list[ConversationMessage] = []
-    compression = initial_context.history.compressed_history
-    if compression is not None:
-        messages.append(ConversationMessage(
-            message_id=f"history-compression-{compression.compression_version}",
-            role=MessageRole.SYSTEM,
-            content=f"以下是此前对话的压缩摘要：\n{compression.content}",
-            created_at="",
+def _context_slots_from_bundle(
+    request: RunRequest,
+    context: ContextBundle,
+    run_messages: list[RunMessage],
+) -> tuple[ContextSlotSnapshot, ...]:
+    """将当前有效 system、Session 和 Run 贡献转换为可审计 Slot 快照。"""
+    snapshots: list[ContextSlotSnapshot] = []
+    system_context: SystemContextSnapshot | None = context.metadata.system_context
+    if system_context is not None:
+        system_slot: SystemContextSlot
+        for system_slot in system_context.slots:
+            snapshots.append(ContextSlotSnapshot(
+                slot_id=system_slot.name,
+                owner=ContextOwner.AGENT,
+                contribution_kind=ContextContributionKind.SYSTEM_CONTENT,
+                status=ContextSlotStatus(system_slot.status.value),
+                injection_order=len(snapshots),
+                content=system_slot.content,
+                content_hash=system_slot.content_hash,
+                attributes={"scope": system_slot.scope.value},
+                error_code=system_slot.error_code,
+            ))
+    else:
+        system_content: str = "\n\n".join(
+            message.content for message in context.messages if message.role is MessageRole.SYSTEM
+        )
+        snapshots.append(ContextSlotSnapshot(
+            slot_id="legacy_context_port",
+            owner=ContextOwner.AGENT,
+            contribution_kind=ContextContributionKind.SYSTEM_CONTENT,
+            status=ContextSlotStatus.INCLUDED if system_content else ContextSlotStatus.EMPTY,
+            injection_order=len(snapshots),
+            content=system_content,
+            content_hash=_hash_text(system_content) if system_content else "",
         ))
-    history_message: HistoryMessageSnapshot
-    for history_message in initial_context.history.recent_messages:
-        messages.append(ConversationMessage(
-            message_id=history_message.conversation_id,
-            role=history_message.role,
-            content=history_message.content,
-            created_at=history_message.created_at,
-        ))
-    return ConversationSnapshot(
-        session_id=initial_context.history.source_session_id,
-        messages=tuple(messages),
-        version=initial_context.history.source_conversation_version,
-        compressed_history=compression,
+    conversation_payload: JSONMap = request.conversation.to_dict()
+    snapshots.append(ContextSlotSnapshot(
+        slot_id="session_history",
+        owner=ContextOwner.SESSION,
+        contribution_kind=ContextContributionKind.HISTORY,
+        status=ContextSlotStatus.INCLUDED if request.conversation.messages else ContextSlotStatus.EMPTY,
+        injection_order=len(snapshots),
+        content_hash=_hash_json_value(conversation_payload),
+        attributes={"conversation": conversation_payload},
+    ))
+    snapshots.append(ContextSlotSnapshot(
+        slot_id="run_messages",
+        owner=ContextOwner.RUN,
+        contribution_kind=ContextContributionKind.RUN_MESSAGE_REFERENCES,
+        status=ContextSlotStatus.INCLUDED if run_messages else ContextSlotStatus.EMPTY,
+        injection_order=len(snapshots),
+        message_ids=tuple(message.message_id for message in run_messages),
+    ))
+    return tuple(snapshots)
+
+
+def _conversation_from_context_version(context_version: ContextVersion) -> ConversationSnapshot:
+    """从 v3 Session Slot 载荷重建审批恢复所需的历史视图。"""
+    history_slot: ContextSlotSnapshot | None = next(
+        (
+            slot for slot in context_version.slots
+            if slot.owner is ContextOwner.SESSION
+            and slot.contribution_kind is ContextContributionKind.HISTORY
+        ),
+        None,
     )
+    if history_slot is None:
+        raise ValueError("Context Version 缺少 Session History Slot")
+    raw_conversation: JSONValue | None = history_slot.attributes.get("conversation")
+    if not isinstance(raw_conversation, dict):
+        raise ValueError("Session History Slot 缺少 Conversation 载荷")
+    return _conversation_snapshot_from_dict(raw_conversation)
 
 
-def _is_compression_summary_message(message: ConversationMessage) -> bool:
-    """识别历史准备服务生成的摘要占位消息，避免在初始快照中重复保存。"""
-    return message.message_id.startswith("history-compression-") and message.role is MessageRole.SYSTEM
+def _conversation_snapshot_from_dict(data: JSONMap) -> ConversationSnapshot:
+    """从 Context Version 的严格 JSON 载荷恢复 ConversationSnapshot。"""
+    raw_messages: JSONValue | None = data.get("messages")
+    if not isinstance(raw_messages, list):
+        raise ValueError("Conversation 载荷缺少 messages 数组")
+    messages: list[ConversationMessage] = []
+    raw_message: JSONValue
+    for raw_message in raw_messages:
+        if not isinstance(raw_message, dict):
+            raise ValueError("Conversation 消息必须是对象")
+        message_id: JSONValue | None = raw_message.get("id")
+        role: JSONValue | None = raw_message.get("role")
+        content: JSONValue | None = raw_message.get("content")
+        created_at: JSONValue | None = raw_message.get("created_at")
+        if not all(isinstance(value, str) for value in (message_id, role, content, created_at)):
+            raise ValueError("Conversation 消息字段必须是字符串")
+        messages.append(ConversationMessage(
+            message_id=message_id,
+            role=MessageRole(role),
+            content=content,
+            created_at=created_at,
+        ))
+    raw_compression: JSONValue | None = data.get("compressed_history")
+    compression: HistoryCompressionSnapshot | None = None
+    if raw_compression is not None:
+        if not isinstance(raw_compression, dict):
+            raise ValueError("compressed_history 必须是对象或 null")
+        raw_version: JSONValue | None = raw_compression.get("compression_version")
+        raw_covered: JSONValue | None = raw_compression.get("covered_through_conversation_id")
+        raw_content: JSONValue | None = raw_compression.get("content")
+        raw_hash: JSONValue | None = raw_compression.get("content_hash")
+        if (
+            not isinstance(raw_version, int)
+            or isinstance(raw_version, bool)
+            or not all(isinstance(value, str) for value in (raw_covered, raw_content, raw_hash))
+        ):
+            raise ValueError("compressed_history 字段无效")
+        compression = HistoryCompressionSnapshot(raw_version, raw_covered, raw_content, raw_hash)
+    raw_session_id: JSONValue | None = data.get("session_id")
+    raw_version: JSONValue | None = data.get("version")
+    if (
+        not isinstance(raw_session_id, str)
+        or not isinstance(raw_version, int)
+        or isinstance(raw_version, bool)
+    ):
+        raise ValueError("Conversation 载荷缺少 session_id 或 version")
+    return ConversationSnapshot(raw_session_id, tuple(messages), raw_version, compression)
 
 
 def _hash_text(content: str) -> str:

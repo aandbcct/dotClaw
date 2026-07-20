@@ -1,4 +1,4 @@
-"""Runtime v2 的本地文件 CheckpointRepository 实现。"""
+"""Runtime v3 的本地文件 CheckpointRepository 实现。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..domain.control import AgentAction
 from ..domain.facts import JSONMap, JSONValue, RunCheckpoint, get_integer, get_string
+from ._file_support import StorageFormatVersion
 from ._file_support import RunStorageFileName, load_json_map, validate_path_segment, write_json_atomic
 
 
@@ -49,7 +50,9 @@ class CheckpointRepositoryAdapter:
     def _save_sync(self, checkpoint: RunCheckpoint) -> None:
         _validate_checkpoint_payload(checkpoint)
         path: Path = self._checkpoint_path(checkpoint.session_id, checkpoint.run_id)
-        write_json_atomic(path, checkpoint.to_dict())
+        payload: JSONMap = checkpoint.to_dict()
+        payload["version"] = int(StorageFormatVersion.CONTEXT_VERSIONS)
+        write_json_atomic(path, payload)
 
     def _load_sync(self, session_id: str, run_id: str) -> RunCheckpoint | None:
         path: Path = self._checkpoint_path(session_id, run_id)
@@ -72,6 +75,7 @@ class CheckpointRepositoryAdapter:
 
 def _checkpoint_from_dict(data: JSONMap) -> RunCheckpoint:
     """将 checkpoint.json 反序列化为领域检查点。"""
+    _require_v3_format(data, "checkpoint.json")
     return RunCheckpoint(
         checkpoint_id=get_string(data, "checkpoint_id"),
         run_id=get_string(data, "run_id"),
@@ -83,6 +87,8 @@ def _checkpoint_from_dict(data: JSONMap) -> RunCheckpoint:
         next_action=AgentAction(get_string(data, "next_action")),
         pending=_json_map_or_empty(data.get("pending")),
         budget=_json_map_or_empty(data.get("budget")),
+        active_context_version=_optional_positive_integer(data.get("active_context_version")),
+        staged_history_compression_ids=_string_tuple(data.get("staged_history_compression_ids")),
     )
 
 
@@ -96,6 +102,31 @@ def _validate_checkpoint_payload(checkpoint: RunCheckpoint) -> None:
     _validate_json_value(checkpoint.agent_state, "agent_state")
     _validate_json_value(checkpoint.pending, "pending")
     _validate_json_value(checkpoint.budget, "budget")
+
+
+def _require_v3_format(data: JSONMap, file_name: str) -> None:
+    """拒绝 v1/v2 文件，避免隐式迁移产生第二套事实。"""
+    version: int = get_integer(data, "version")
+    if version != int(StorageFormatVersion.CONTEXT_VERSIONS):
+        raise ValueError(f"不支持的 {file_name} 格式版本：{version}；仅支持 v3")
+
+
+def _optional_positive_integer(value: JSONValue | None) -> int | None:
+    """读取可选正整数版本号。"""
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("active_context_version 必须为正整数或 null")
+    return value
+
+
+def _string_tuple(value: JSONValue | None) -> tuple[str, ...]:
+    """读取严格字符串数组。"""
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("staged_history_compression_ids 必须是字符串数组")
+    return tuple(value)
 
 
 def _validate_json_value(value: JSONValue, path: str) -> None:

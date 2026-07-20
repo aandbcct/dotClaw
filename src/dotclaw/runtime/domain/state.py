@@ -1,4 +1,4 @@
-"""不依赖外部实现的 Runtime v2 Agent 状态机。"""
+"""不依赖外部实现的 Runtime v3 Agent 状态机。"""
 
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ class AgentPhase(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+    ABANDONED = "abandoned"
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,8 @@ class AgentState:
             AgentPhase.COMPLETED,
             AgentPhase.FAILED,
             AgentPhase.CANCELLED,
+            AgentPhase.INTERRUPTED,
+            AgentPhase.ABANDONED,
         })
         return self.phase in terminal_phases
 

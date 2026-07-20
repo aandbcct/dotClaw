@@ -1,4 +1,4 @@
-"""将 Runtime v2 成功运行投影到既有 Session 的适配器。"""
+"""将 Runtime v3 成功运行投影到既有 Session 的适配器。"""
 
 from __future__ import annotations
 

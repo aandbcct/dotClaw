@@ -1,4 +1,4 @@
-"""从既有 Session 快照创建 Runtime v2 的冻结 RunRequest。"""
+"""从既有 Session 快照创建 Runtime v3 的冻结 RunRequest。"""
 
 from __future__ import annotations
 
