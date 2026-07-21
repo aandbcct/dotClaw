@@ -1,6 +1,6 @@
 # LLM_STARTED 前上下文压缩与上下文槽重构开发计划
 
-> 状态：E1–E5 已验收；E6（上下文快照语义与工具审计收口）待开发。
+> 状态：E1–E6 已验收；上下文快照语义与工具审计已收口。
 > 实施方式：E1–E5 为已完成基线；E6 独立提交和验收，不与既有阶段混成无法定位回归的大爆炸改动。
 > 关联设计：[整体设计](LLM_STARTED前上下文压缩与上下文槽重构整体设计.md)
 
@@ -363,11 +363,11 @@ git diff --check
 
 ### 上下文与持久化
 
-- [ ] 每个 `LLM_STARTED` 都可由 `context_version + incremental_message_ids + tool_schema_hash` 重建实际输入；事实引用型 Slot 不会写入 Context Version。
-- [ ] Snapshot 只包含有效的快照型 Plan Slot；每个绑定 Slot 的 `INCLUDED/EMPTY/FAILED` 状态和按 kind 的直接内容完整可审计。
-- [ ] Context Version 只在快照型 Slot 内容变化时追加；普通 Run Message 只更新 `incremental_message_ids`；摘要正文只出现于 Context Version，候选控制信息只出现于 Run。
-- [ ] `history_compressions` 与 `conversation` 分别按 Session/Run 生命周期持有内容；staged 摘要覆盖已提交摘要，绝不重复注入。
-- [ ] tools Slot 记录 Agent 裁剪后的实际 Schema，`content_hash` 与 `tool_schema_hash` 的输入范围符合 E6 定义。
+- [x] 每个 `LLM_STARTED` 都可由 `context_version + incremental_message_ids + tool_schema_hash` 重建实际输入；事实引用型 Slot 不会写入 Context Version。
+- [x] Snapshot 只包含有效的快照型 Plan Slot；每个绑定 Slot 的 `INCLUDED/EMPTY/FAILED` 状态和按 kind 的直接内容完整可审计。
+- [x] Context Version 只在快照型 Slot 内容变化时追加；普通 Run Message 只更新 `incremental_message_ids`；摘要正文只出现于 Context Version，候选控制信息只出现于 Run。
+- [x] `history_compressions` 与 `conversation` 分别按 Session/Run 生命周期持有内容；staged 摘要覆盖已提交摘要，绝不重复注入。
+- [x] tools Slot 记录 Agent 裁剪后的实际 Schema，`content_hash` 与 `tool_schema_hash` 的输入范围符合 E6 定义。
 - [x] 取消、失败、审批等待、中断和放弃均不向 Session 提交候选。
 
 ### 压缩与模型调用
@@ -375,12 +375,12 @@ git diff --check
 - [x] Token 统计包含所有实际输入内容和工具 Schema；未知 tokenizer 写 `WARNING` 后拒绝，不使用字符数估算。
 - [x] 超限只压缩最旧 75% 完整 Conversation；摘要分批不拆 Conversation；压缩后仍超限明确失败。
 - [x] 压缩使用 `CONTEXT_COMPACTION` 用途路由；代理重试耗尽时 Run 为 `INTERRUPTED`。
-- [ ] 工具结果会进入下一次 LLM 调用；审批恢复能看到原 Conversation 与 Run Message。
-- [ ] 每个工具调用（含委派、审批与异常）均有完整的 `TOOL_STARTED` / `TOOL_COMPLETED` 审计事件，正文不重复写入事件。
+- [x] 工具结果会进入下一次 LLM 调用；审批恢复能看到原 Conversation 与 Run Message。
+- [x] 每个工具调用（含委派、审批与异常）均有完整的 `TOOL_STARTED` / `TOOL_COMPLETED` 审计事件，正文不重复写入事件。
 
 ### 一致性、迁移与质量
 
 - [x] 一个 Session 同时至多一个未终态 Run；重启后遗留 `RUNNING` 可恢复或放弃，不会永久阻塞。
 - [x] SuccessCommitIntent 失败注入恢复后，Run 终态、Session Conversation、压缩候选和事件一致且幂等。
-- [ ] v1/v2/v3、`initial_context`、`RUN_CONTEXT`、Run 前压缩、旧 Slot API、旧 HistorySlot、泛用 Snapshot 载荷、Runtime 预算中的旧 token 估算及迁移脚本完成物理删除。
-- [ ] `python -m pytest -q`、针对性集成测试、`git diff --check` 和第 4 节搜索验证全部通过。
+- [x] v1/v2/v3、`initial_context`、`RUN_CONTEXT`、Run 前压缩、旧 Slot API、旧 HistorySlot、泛用 Snapshot 载荷、Runtime 预算中的旧 token 估算及迁移脚本完成物理删除。
+- [x] `python -m pytest -q`、针对性集成测试、`git diff --check` 和第 4 节搜索验证全部通过。

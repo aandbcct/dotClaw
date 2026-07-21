@@ -425,6 +425,7 @@ class RuntimeEngine:
                             sequence,
                             event_number,
                             delegation_request,
+                            tool_call,
                             manage_state=False,
                         )
                         if delegation_result.error is not None:
@@ -433,7 +434,6 @@ class RuntimeEngine:
                         sequence = delegation_result.message_sequence
                         event_number = delegation_result.event_sequence
                         completed_message_ids.append(messages[-1].message_id)
-                        event_number = await self._tool_completed_event(run, event_number, tool_call, messages[-1].message_id, ToolResultStatus.COMPLETED)
                         continue
                     event_number = await self._tool_started_event(run, event_number, messages, tool_call)
                     try:
@@ -445,6 +445,14 @@ class RuntimeEngine:
                         event_number = await self._tool_completed_event(run, event_number, tool_call, None, ToolResultStatus.FAILED, _safe_error_summary(error))
                         return await self._fail(execution, run, tuple(messages), event_number, f"工具调用失败：{error}", RunErrorCode.TOOL_FAILURE)
                     if execution.cancellation.cancelled:
+                        event_number = await self._tool_completed_event(
+                            run,
+                            event_number,
+                            tool_call,
+                            None,
+                            ToolResultStatus.FAILED,
+                            "工具执行后已取消",
+                        )
                         return await self._finish_cancelled(
                             execution,
                             run,
@@ -728,10 +736,13 @@ class RuntimeEngine:
         sequence: int,
         event_sequence: int,
         request: DelegationRequest,
+        audit_tool_call: ToolCall | None = None,
         manage_state: bool = True,
     ) -> "DelegationDriveResult":
         """提交、获取并持久化一次 delegation 结果，可选择是否推进独立 delegation 状态。"""
         if self._delegation_port is None:
+            if audit_tool_call is not None:
+                event_sequence = await self._tool_completed_event(run, event_sequence, audit_tool_call, None, ToolResultStatus.FAILED, "未装配 DelegationPort")
             failed: RunResult = await self._fail(
                 execution,
                 run,
@@ -763,6 +774,8 @@ class RuntimeEngine:
             )
             child_result: DelegationResult | None = await self._delegation_port.result(child_run_id)
         except Exception as error:
+            if audit_tool_call is not None:
+                event_sequence = await self._tool_completed_event(run, event_sequence, audit_tool_call, None, ToolResultStatus.FAILED, _safe_error_summary(error))
             failed = await self._fail(
                 execution,
                 run,
@@ -776,6 +789,8 @@ class RuntimeEngine:
             if 'child_run_id' in locals():
                 self._cancellation_service.clear_delegated_run(execution.run_id, child_run_id)
         if execution.cancellation.cancelled:
+            if audit_tool_call is not None:
+                next_event_sequence = await self._tool_completed_event(run, next_event_sequence, audit_tool_call, None, ToolResultStatus.FAILED, "委派执行期间已取消")
             cancelled: RunResult = await self._finish_cancelled(
                 execution,
                 run,
@@ -785,6 +800,8 @@ class RuntimeEngine:
             )
             return DelegationDriveResult(error=cancelled)
         if child_result is None:
+            if audit_tool_call is not None:
+                next_event_sequence = await self._tool_completed_event(run, next_event_sequence, audit_tool_call, None, ToolResultStatus.FAILED, "委派未返回子运行结果")
             failed = await self._fail(
                 execution,
                 run,
@@ -836,6 +853,8 @@ class RuntimeEngine:
             ))
             execution.update_state(transition.state, transition.action)
         if not succeeded:
+            if audit_tool_call is not None:
+                next_event_sequence = await self._tool_completed_event(delegated_run, next_event_sequence, audit_tool_call, result_message.message_id, ToolResultStatus.FAILED, child_result.error.message if child_result.error is not None else "委派子运行失败")
             failed = await self._fail(
                 execution,
                 delegated_run,
@@ -845,6 +864,8 @@ class RuntimeEngine:
                 RunErrorCode.TOOL_FAILURE,
             )
             return DelegationDriveResult(error=failed)
+        if audit_tool_call is not None:
+            next_event_sequence = await self._tool_completed_event(delegated_run, next_event_sequence, audit_tool_call, result_message.message_id, ToolResultStatus.COMPLETED)
         return DelegationDriveResult(
             run=delegated_run,
             message_sequence=next_sequence,
