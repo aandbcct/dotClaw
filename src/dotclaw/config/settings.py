@@ -112,8 +112,8 @@ class ToolsConfig:
     mcp_enabled: bool = True       # Phase 5 预留，暂不消费
     skill_enabled: bool = True      # Phase 5 预留，暂不消费
 
-    # 危险命令审批列表
-    approval_commands: list[str] = field(default_factory=lambda: ["exec", "python"])
+    # 危险命令审批列表（默认使用阶段二迁移后的新规范名）
+    approval_commands: list[str] = field(default_factory=lambda: ["builtin.process.execute"])
 
     # 单工具禁用列表（向后兼容旧 config.exec.enabled=false）
     disabled_tools: list[str] = field(default_factory=list)

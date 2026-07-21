@@ -41,7 +41,6 @@ tools:
   # 危险工具审批命令列表（Tool v1 阶段二：使用新规范名）
   approval_commands:
     - builtin.process.execute
-    - python
 
   # 单工具禁用列表（向后兼容旧 config.exec.enabled: false）
   disabled_tools: []

@@ -104,6 +104,9 @@ class ToolDiscovery:
 
             handler = FunctionToolHandler(func, meta)
             if handler.name in handlers:
+                # 先记入观测报告的冲突列表（计划 §4 要求显式记录冲突），
+                # 再按 §4.2「启动失败」抛错，绝不覆盖已有定义。
+                report.conflicts.append(handler.name)
                 existing = handlers[handler.name]
                 raise DuplicateToolError(
                     handler.name,
