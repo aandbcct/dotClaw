@@ -162,13 +162,16 @@ def _build_tools(config, skill_registry):
     from dotclaw.tools.registry import ToolRegistry
     from dotclaw.tools.executor import ToolExecutor
     from dotclaw.tools.approval import ApprovalManager
-    from dotclaw.tools.builtin import register_all
+    from dotclaw.tools.discovery import ToolDiscovery
     from dotclaw.tools.parser import SkillParser
 
     registry = ToolRegistry()
 
+    # 阶段二：通过可信包 Discovery 自动发现并注册 builtin，不再手工 register_all。
+    # Discovery 完成后才应用 disabled_tools（使用迁移后的新规范名）。
     if config.tools.builtin_enabled:
-        register_all(registry)
+        for handler in ToolDiscovery.discover_builtin():
+            registry.register(handler)
 
     for tool_name in config.tools.disabled_tools:
         registry.unregister(tool_name)

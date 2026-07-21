@@ -35,6 +35,11 @@ class ToolMeta:
 
     仅描述工具自身，不持有全局状态。FunctionToolHandler 依据它构造
     ToolDefinition 并调用被装饰函数。
+
+    args_style 决定已验证参数如何传入被装饰函数：
+    - "model"：函数第一个非上下文形参接收整个 args_model 实例（显式模型场景）。
+    - "fields"：函数各业务形参直接对应 args_model 的字段，由 Discovery 从签名
+      推导后拆包传入（签名推导场景）。
     """
 
     name: str
@@ -45,6 +50,7 @@ class ToolMeta:
     needs_approval: bool = False
     timeout: float = 60.0
     metadata: dict = field(default_factory=dict)
+    args_style: str = "model"
 
     def build_definition(self) -> ToolDefinition:
         """由元数据构造面向 LLM 的 ToolDefinition。

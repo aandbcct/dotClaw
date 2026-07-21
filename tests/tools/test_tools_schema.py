@@ -8,7 +8,14 @@ from typing import Optional
 import pytest
 from pydantic import BaseModel, Field
 
-from dotclaw.tools.base import ToolErrorCode, ToolErrorType
+from dotclaw.tools.base import (
+    ToolErrorCode,
+    ToolErrorType,
+    ToolExecutionContext,
+    ToolResult,
+)
+from dotclaw.tools.decorator import get_tool_meta, tool
+from dotclaw.tools.function_handler import FunctionToolHandler
 from dotclaw.tools.schema import (
     ToolValidationError,
     to_json_schema,
@@ -36,14 +43,14 @@ class EnumArgs(BaseModel):
     color: Color
 
 
-class _Spy:
-    """记录函数是否被调用的桩。"""
+# 调用计数，用于验证校验失败时工具函数不会被执行。
+_CALL_COUNT = {"n": 0}
 
-    def __init__(self) -> None:
-        self.calls: list[int] = []
 
-    def __call__(self) -> None:
-        self.calls.append(1)
+@tool(name="demo.spy", args_model=SampleArgs, description="调用探针")
+async def _spy_tool(args: SampleArgs) -> str:
+    _CALL_COUNT["n"] += 1
+    return "ran"
 
 
 def test_json_schema_basic_structure() -> None:
@@ -94,14 +101,44 @@ def test_validate_wrong_type_raises_invalid_arguments() -> None:
     assert exc.value.error_code == ToolErrorCode.INVALID_ARGUMENTS
 
 
-def test_validate_unknown_field_rejected_and_function_not_called() -> None:
-    """未知字段应被严格拒绝，且校验发生在调用之前（函数未被调用）。"""
-    spy = _Spy()
+def test_validate_unknown_field_rejected() -> None:
+    """未知字段应被严格拒绝，错误信息包含字段名，错误码为 INVALID_ARGUMENTS。"""
     with pytest.raises(ToolValidationError) as exc:
         validate_args(SampleArgs, {"name": "x", "unknown_field": 1})
     assert exc.value.error_code == ToolErrorCode.INVALID_ARGUMENTS
     assert "unknown_field" in str(exc.value)
-    assert spy.calls == []
+
+
+async def test_validation_failure_blocks_tool_execution() -> None:
+    """校验失败时必须短路：工具函数（handler）绝不执行；只有校验通过才执行。
+
+    模拟 Executor 的固定顺序：先校验，失败直接返回 INVALID_ARGUMENTS，
+    绝不进入 handler；校验通过才调用被装饰函数。
+    """
+    handler = FunctionToolHandler(_spy_tool, get_tool_meta(_spy_tool))
+
+    # 失败路径：错型 + 未知字段。
+    _CALL_COUNT["n"] = 0
+    raw_bad = {"name": 123, "unknown_field": 1}
+    result = None
+    try:
+        validated = validate_args(SampleArgs, raw_bad)
+    except ToolValidationError as exc:
+        result = ToolResult.from_error(
+            code=exc.error_code, message=str(exc), error_type=exc.error_type
+        )
+    else:
+        result = await handler.execute(validated, ToolExecutionContext())
+
+    assert result is not None and result.is_error
+    assert result.error_code == ToolErrorCode.INVALID_ARGUMENTS.value
+    assert _CALL_COUNT["n"] == 0  # 工具函数从未执行
+
+    # 成功路径：校验通过，工具函数应当执行一次。
+    _CALL_COUNT["n"] = 0
+    validated_ok = validate_args(SampleArgs, {"name": "ok"})
+    await handler.execute(validated_ok, ToolExecutionContext())
+    assert _CALL_COUNT["n"] == 1
 
 
 def test_validate_success_returns_instance_with_defaults() -> None:

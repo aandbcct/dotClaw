@@ -19,8 +19,9 @@ from dotclaw.runtime.domain.facts import (
 from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.runtime.domain.state import AgentState
 from dotclaw.tools.approval import ApprovalManager
+from dotclaw.tools.decorator import get_tool_meta, tool
 from dotclaw.tools.executor import ToolExecutor
-from dotclaw.tools.handler import BuiltinToolHandler
+from dotclaw.tools.function_handler import FunctionToolHandler
 from dotclaw.tools.registry import ToolRegistry
 from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
@@ -34,12 +35,13 @@ async def test_tool_executor_adapter_requires_approval_without_channel_and_execu
     """审批前不执行工具；同一调用恢复后仅执行一次且不访问 Channel。"""
     executions: list[str] = []
 
+    @tool(name="dangerous", description="危险操作", needs_approval=True)
     async def dangerous() -> str:
         executions.append("done")
         return "完成"
 
     registry = ToolRegistry()
-    registry.register(BuiltinToolHandler("dangerous", "危险操作", {}, dangerous, needs_approval=True))
+    registry.register(FunctionToolHandler(dangerous, get_tool_meta(dangerous)))
     executor = ToolExecutor(registry, ApprovalManager())
     port: ToolExecutorAdapter = ToolExecutorAdapter(executor)
     invocation = ToolInvocation("run-1", ToolCall("call-1", "dangerous", {}))
@@ -119,12 +121,13 @@ async def test_tool_executor_adapter_drives_engine_approval_resume_with_same_run
     """真实 ToolExecutor bridge 经 Engine 等待、批准恢复且工具只执行一次。"""
     executions: list[str] = []
 
+    @tool(name="dangerous", description="危险操作", needs_approval=True)
     async def dangerous() -> str:
         executions.append("done")
         return "工具输出"
 
     registry = ToolRegistry()
-    registry.register(BuiltinToolHandler("dangerous", "危险操作", {}, dangerous, needs_approval=True))
+    registry.register(FunctionToolHandler(dangerous, get_tool_meta(dangerous)))
     bridge: ToolExecutorAdapter = ToolExecutorAdapter(ToolExecutor(registry, ApprovalManager()))
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     engine = RuntimeEngine(

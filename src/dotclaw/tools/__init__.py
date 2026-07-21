@@ -1,7 +1,7 @@
-"""工具模块（Tool v1 阶段一）— 导出新架构。
+"""工具模块（Tool v1 阶段二）— 导出新架构。
 
-新增契约符号与处理函数；旧 BuiltinToolHandler / register_all 仍保留，
-待阶段二迁移完成后删除（不在此阶段移除）。
+旧 BuiltinToolHandler / register_all / get_*_handler 已在阶段二迁移中删除；
+新架构仅依赖 @tool 声明 + ToolDiscovery 自动发现。所有新增注释使用中文。
 """
 
 from .base import (
@@ -16,8 +16,9 @@ from .base import (
 from .decorator import ToolPolicy, ToolMeta, tool, get_tool_meta
 from .schema import to_json_schema, validate_args, ToolValidationError
 from .function_handler import FunctionToolHandler
-from .handler import ToolHandler, BuiltinToolHandler
+from .handler import ToolHandler
 from .registry import ToolRegistry, DuplicateToolError
+from .discovery import ToolDiscovery, ToolDeclarationError
 from .executor import ToolExecutor
 from .approval import ApprovalManager
 from .provider import ToolProvider
@@ -39,9 +40,10 @@ __all__ = [
     "ToolValidationError",
     "FunctionToolHandler",
     "ToolHandler",
-    "BuiltinToolHandler",
     "ToolRegistry",
     "DuplicateToolError",
+    "ToolDiscovery",
+    "ToolDeclarationError",
     "ToolExecutor",
     "ApprovalManager",
     "ToolProvider",

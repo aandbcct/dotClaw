@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -9,6 +10,47 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger("dotclaw.config")
+
+
+# ── Tool v1 阶段二：旧 builtin 工具名 → 新规范名的一次性迁移映射 ──
+_BUILTIN_NAME_MIGRATION: dict[str, str] = {
+    "read_file": "builtin.files.read_text",
+    "write_file": "builtin.files.write_text",
+    "list_dir": "builtin.files.list_directory",
+    "exec": "builtin.process.execute",
+    "memory_read": "builtin.memory.read",
+    "memory_write": "builtin.memory.write",
+    "system_info": "builtin.system.get_info",
+    "get_time": "builtin.system.get_time",
+}
+
+
+def _migrate_tool_names(names: list[str]) -> list[str]:
+    """将旧工具名迁移为新规范名，返回去重后的新列表。
+
+    规则（开发计划阶段二·兼容与配置迁移）：
+    - 旧名按映射表转换为新名；未命中映射的名称原样保留（如 'python'）。
+    - 同一旧名/新名同时出现时，以新名设置为准（旧名丢弃）并记录警告。
+    - 不新增代码读取旧名；迁移仅在加载时发生。
+    """
+    migrated: list[str] = [
+        _BUILTIN_NAME_MIGRATION.get(name, name) for name in names
+    ]
+    seen: set[str] = set()
+    result: list[str] = []
+    for old, new in zip(names, migrated):
+        if new in seen:
+            logger.warning(
+                "工具名 '%s' 与已迁移名 '%s' 冲突，已以新名为准", old, new
+            )
+            continue
+        seen.add(new)
+        if new != old:
+            logger.warning("工具名 '%s' 已迁移为 '%s'，请更新配置", old, new)
+        result.append(new)
+    return result
 
 
 def _find_project_root() -> Path:
@@ -482,6 +524,10 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         if not tools_raw.get(tool_name, {}).get("enabled", True):
             if tool_name not in disabled_tools:
                 disabled_tools.append(tool_name)
+
+    # Tool v1 阶段二：旧工具名 → 新规范名一次性迁移（带弃用警告）。
+    approval_commands = _migrate_tool_names(approval_commands)
+    disabled_tools = _migrate_tool_names(disabled_tools)
 
     tools = ToolsConfig(
         builtin_enabled=tools_raw.get("builtin_enabled", True),

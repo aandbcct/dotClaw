@@ -38,9 +38,9 @@ tools:
   mcp_enabled: true
   skill_enabled: true
 
-  # 危险工具审批命令列表（Phase 5 新增）
+  # 危险工具审批命令列表（Tool v1 阶段二：使用新规范名）
   approval_commands:
-    - exec
+    - builtin.process.execute
     - python
 
   # 单工具禁用列表（向后兼容旧 config.exec.enabled: false）

@@ -1,4 +1,9 @@
-"""系统信息工具（builtin 子包 — Phase 5 迁移）"""
+"""系统信息工具（builtin 子包 — Tool v1 阶段二 @tool 迁移）。
+
+工具名：builtin.system.get_info / get_time。
+这两个工具不访问受保护资源，policy 留空（None），由阶段三 Broker 视为 passthrough。
+所有新增注释使用中文。
+"""
 
 from __future__ import annotations
 
@@ -6,11 +11,17 @@ import datetime
 import os
 import platform
 
-from dotclaw.tools.handler import BuiltinToolHandler
+from dotclaw.tools.base import ToolContext
+from dotclaw.tools.decorator import tool
 
 
-async def system_info() -> str:
-    """返回系统时间、当前目录、环境变量概要"""
+@tool(
+    name="builtin.system.get_info",
+    description="获取系统基本信息，当用户提到系统信息详细内容，你需要根据系统信息回复时调用",
+    timeout=10.0,
+)
+async def get_info(context: ToolContext) -> str:
+    """返回系统时间、当前目录、环境变量概要。"""
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cwd = os.getcwd()
     os_info = platform.system()
@@ -32,28 +43,11 @@ async def system_info() -> str:
     )
 
 
+@tool(
+    name="builtin.system.get_time",
+    description="获取当前日期和时间,当用户问到任何与当前时间相关的内容时，先调用该tool获取当前时间",
+    timeout=5.0,
+)
 async def get_time() -> str:
-    """返回当前时间字符串"""
+    """返回当前时间字符串。"""
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def get_system_info_handler() -> BuiltinToolHandler:
-    return BuiltinToolHandler(
-        name="system_info",
-        description="获取系统基本信息，当用户提到系统信息详细内容，你需要根据系统信息回复时调用",
-        parameters={"type": "object", "properties": {}, "required": []},
-        handler_fn=system_info,
-        needs_approval=False,
-        timeout=10.0,
-    )
-
-
-def get_time_handler() -> BuiltinToolHandler:
-    return BuiltinToolHandler(
-        name="get_time",
-        description="获取当前日期和时间,当用户问到任何与当前时间相关的内容时，先调用该tool获取当前时间",
-        parameters={"type": "object", "properties": {}, "required": []},
-        handler_fn=get_time,
-        needs_approval=False,
-        timeout=5.0,
-    )
