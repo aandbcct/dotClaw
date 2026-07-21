@@ -21,9 +21,9 @@ dotClaw 是一个面向 AI Agent 应用开发的 Python 框架。它既提供 Ag
 项目把 Agent 系统拆成两类关注点：
 
 - **能力平面**回答“Agent 能做什么、此刻应该看到什么”：声明式角色、模型路由、工具与 MCP、Skills、Memory、Workspace；
-- **执行平面**回答“这次请求如何可靠地完成”：Session、Runtime v2、运行仓储、审批、取消与多 Agent 委派。
+- **执行平面**回答“这次请求如何可靠地完成”：Session、Runtime v4、运行仓储、审批、取消与多 Agent 委派。
 
-Runtime v2 是 dotClaw 的关键执行底座，而不是项目的全部。它将每条用户输入处理为独立 `AgentRun`，让运行中的上下文、状态机、取消令牌与消息证据都归属于该 Run，而不是挂在全局 Runtime 或 Agent 实例上。
+Runtime v4 是 dotClaw 的关键执行底座，而不是项目的全部。它将每条用户输入处理为独立 `AgentRun`，让运行中的上下文、状态机、取消令牌与消息证据都归属于该 Run，而不是挂在全局 Runtime 或 Agent 实例上。
 
 ```mermaid
 flowchart TB
@@ -34,7 +34,7 @@ flowchart TB
         Identity["AgentIdentity\n角色、模型、工具约束"]
         Router["LLM\nRouter / Proxy / 熔断 / 限流"]
         Tools["Tools + MCP\nRegistry / Executor / Handler"]
-        Context["Context\nSlots / Budget / Scoped Cache"]
+        Context["Context\n多 Owner Slots / Version / Budget"]
         Knowledge["Memory / Skills / Workspace\n项目与知识来源"]
         Identity --> Context
         Knowledge --> Context
@@ -69,11 +69,13 @@ flowchart TB
 | 声明式角色 | `AgentIdentity` + YAML Agent 配置 | 角色、模型偏好、工具约束与执行基础设施解耦 |
 | 模型调用韧性 | `ModelRouter` + `LLMProxy` + 限流/熔断/降级 | 将模型选择与失败编排从 Agent 逻辑中移出 |
 | 工具与 MCP | Registry / Executor / Handler 三层，统一适配 MCP | 工具定义、执行边界和具体业务逻辑可独立扩展 |
-| 上下文工程 | Slots、作用域缓存、token budget、降级元数据 | 将 Identity、Memory、Skills、项目上下文按边界组合为模型输入 |
+| 上下文工程 | 多 Owner Slot、Context Version、动态事实引用、精确 Token 预算 | 稳定上下文可审计，多轮工具 ReAct 不产生冗余快照 |
 | 记忆与技能 | Memory、Knowledge、Skill Registry 作为 Context 来源 | 不让 Runtime 直接耦合检索和提示词细节 |
 | 会话与执行分离 | Conversation 与 AgentRun / RunMessage / RunEvent 分容器 | 对话语义保持干净，执行细节可审计、可排障 |
 | Run 级隔离 | 每个请求创建独立 `RunExecution` | 多个 Session 可并行，不会共享“当前 Agent / 当前消息 / 当前状态” |
-| 可恢复提交 | `success_commit.json` 记录临时提交意图并幂等补偿 | 防止 Run 已完成但 Conversation 缺少最终回答的半提交状态 |
+| 可恢复提交 | `run.json.SuccessCommitIntent` + 幂等补偿 | 防止 Run 已完成但 Conversation 缺少最终回答的半提交状态 |
+| 历史压缩 | 调用前精确计数、最旧 75% Conversation、Run 内 staged 候选 | 超限不静默裁剪；取消/失败/中断不污染 Session 历史 |
+| 工具审计 | `TOOL_STARTED` / `TOOL_COMPLETED` 成对事件 | 成功、审批、失败、取消与委派工具调用均可追溯 |
 | 安全控制协议 | `approval_id → run_id`、checkpoint、run 级取消 | 审批在原 Run 恢复；有副作用工具不盲目重放 |
 | 多 Agent 解耦 | `RuntimeDelegationAdapter` 封装 Dispatcher/Broker | Runtime 只处理提交、结果和取消，不重新耦合编排细节 |
 
@@ -89,7 +91,7 @@ flowchart LR
     Identity --> Agent["Agent 门面"]
     Session["Session\nConversation 历史"] --> Request["冻结 RunRequest"]
     Agent --> Request
-    Request --> Runtime["Runtime v2"]
+    Request --> Runtime["Runtime v4"]
 ```
 
 ### 模型、工具、上下文与知识
@@ -114,7 +116,7 @@ sequenceDiagram
     participant U as 用户
     participant A as Agent / Channel
     participant S as Session
-    participant R as Runtime v2
+    participant R as Runtime v4
     participant C as Context
     participant L as LLM 路由与模型
     participant T as 工具 / MCP
@@ -145,19 +147,19 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-    Bootstrap["bootstrap/runtime_factory.py\nRuntime v2 组合根：装配具体 Adapter"]
+    Bootstrap["bootstrap/runtime_factory.py\nRuntime v4 组合根：装配具体 Adapter"]
 
     subgraph Runtime["runtime/"]
         subgraph Domain["domain：事实与规则"]
-            Facts["facts.py\nAgentRun / RunMessage / Checkpoint"]
-            Events["events.py\nDomainEvent / RunEvent"]
+            Facts["facts.py / context.py\nAgentRun / RunMessage / ContextVersion"]
+            Events["events.py\nDomainEvent / RunEvent / ToolAuditStatus"]
             Machine["state.py\nAgentState"]
         end
         subgraph App["application：用例与编排"]
             Engine["RuntimeEngine"]
             Execution["RunExecution"]
             Coordinator["SessionRunCoordinator"]
-            Port["Ports / DTO / Approval / Cancellation"]
+            Port["Ports / DTO / Budget / Approval / Cancellation"]
         end
         subgraph Adapter["adapters：具体接入"]
             Store["文件仓储 Adapter"]
@@ -179,7 +181,7 @@ flowchart TB
 - `domain`：稳定运行事实、领域事件、状态枚举与状态机规则；不依赖外部技术实现。
 - `application`：一次执行如何创建、循环、恢复、取消和提交；不直接调用具体 SDK，也不读写具体文件。
 - `adapters`：将文件仓储、LLMProxy、ToolExecutor、SessionManager 和既有编排系统翻译为 Application Port。
-- `bootstrap/runtime_factory.py`：Runtime v2 组合根，负责将具体能力装配进抽象执行内核。
+- `bootstrap/runtime_factory.py`：Runtime v4 组合根，负责将具体能力装配进抽象执行内核。
 
 ### 状态机与运行控制
 
@@ -214,30 +216,31 @@ stateDiagram-v2
 flowchart TB
     Session["Session"] --> Conversation["Conversation\n用户可见的成功语义历史"]
     Session --> Run["AgentRun\n运行摘要与索引"]
-    Run --> Message["RunMessage\n完整模型/工具证据"]
+    Run --> Message["RunMessage\n动态模型/工具证据"]
+    Run --> Version["ContextVersion\n稳定 Slot 快照"]
     Run --> Event["RunEvent\n追加式审计事实"]
     Run --> Checkpoint["Checkpoint\n安全恢复点"]
     Message -. "message_id 引用" .-> Event
+    Version -. "context_version 引用" .-> Event
     Run -. "成功后才投影" .-> Conversation
-    Intent["success_commit.json\n临时可恢复提交意图"] -. "仅成功提交期间" .-> Run
+    Intent["run.json.SuccessCommitIntent\n临时可恢复提交意图"] -. "仅成功提交期间" .-> Run
 ```
 
 ```text
 data/sessions/{session_id}/
-├── conversation.json
+├── session.json              # Conversation 与已提交 history_compressions
 └── agent_runs/{run_id}/
-    ├── run.json                 # AgentRun：状态、归属、统计、引用、错误摘要
-    ├── messages.json            # RunMessage：完整 LLM 请求/响应和工具结果
+    ├── run.json                 # AgentRun、活动版本、staged 候选与成功意图
+    ├── messages.json            # v4：RunMessage 与 ContextVersion
     ├── events.jsonl             # RunEvent：按 sequence 追加的事实
     ├── checkpoint.json          # 审批等待等安全边界的最小恢复快照
-    └── success_commit.json      # 成功提交未完成时的临时补偿意图
 ```
 
 这里有三个重要的工程约束：
 
-1. **消息先于事件落盘**：先原子保存 `messages.json`，再追加引用消息 ID 的 `RunEvent`；任一已持久化事件都可追溯到完整消息。
-2. **成功提交可补偿**：`RUN_COMPLETED`、Conversation 投影和 `run.json=COMPLETED` 通过 `success_commit.json` 组成可恢复提交协议。启动、读取 Run、查找 Run 或读取 Conversation 时都会补偿未决意图。
-3. **只从安全边界恢复**：Checkpoint 保存状态、游标、预算和 pending 控制引用，不复制完整 prompt 或工具结果。正在执行且有副作用的工具不会被 Runtime 盲目重放。
+1. **快照与事实分离**：`ContextVersion` 只保存 Snapshot Slot；Run Message 由 `LLM_STARTED.incremental_message_ids` 引用，工具结果会进入下一轮输入而不会不断创建版本。
+2. **成功提交可补偿**：`RUN_COMPLETED`、Conversation/历史摘要投影和 `run.json=COMPLETED` 由 `SuccessCommitIntent` 组成可恢复提交协议；恢复器会幂等补齐未完成步骤。
+3. **只从安全边界恢复**：Checkpoint 保存状态、游标、预算、活动版本和 pending 控制引用，不复制完整 prompt 或工具结果。正在执行且有副作用的工具不会被 Runtime 盲目重放。
 
 成功才写入 Conversation；失败、取消和等待审批只保存运行事实。`Journal` 可以提供诊断和观测，但不再作为 Runtime 的状态恢复来源。
 
@@ -245,16 +248,9 @@ data/sessions/{session_id}/
 
 ### Context Slot：隔离、降级与预算
 
-`SlotContextProvider` 是 `ContextPort` 的实现。Runtime 只消费最终 `ContextBundle`，不参与 system prompt、Memory、Skill、工具定义或历史裁剪的拼装。
+`ContextProvider` 是 `ContextPort` 的实现。它以 `ContextPlan` 组合 Agent、Session、Run、Global 四类 Owner 的 Slot；Snapshot Slot 形成可审计的 `ContextVersion`，`run_messages` 作为事实引用型 Slot 注入动态 ReAct 证据。
 
-| Scope | 缓存键 | 适合内容 |
-|---|---|---|
-| `STATIC` | `agent_id + identity_version` | Identity、稳定工具说明 |
-| `SESSION` | `agent_id + identity_version + session_id` | 会话级稳定内容 |
-| `CONDITIONAL` | `run_id` | 单 Run 条件内容 |
-| `DYNAMIC` | 不缓存 | 即时 Memory、环境状态 |
-
-单个 Slot 失败会记录在 Context 元数据中，其他 Slot 仍可继续；上下文超出预算时裁剪最旧历史，必要内容仍放不下时明确失败。模型先前的 tool call 和 tool result 会作为 RunMessage 重新进入下一轮上下文，保持 ReAct 证据连续。
+每次业务 LLM 调用前由 tiktoken 精确统计实际输入。超限时压缩最旧 75% 完整 Conversation，候选先暂存当前 Run，只有 Run 成功才提交到 Session；取消、失败或中断不会污染长期历史。更多设计见[上下文工程说明](docs/wiki/上下文工程说明.md)。
 
 ### 工具审批、取消与委派
 
@@ -287,8 +283,8 @@ sequenceDiagram
 dotClaw/
 ├── src/dotclaw/
 │   ├── agent/           # AgentIdentity、Agent 门面、工厂
-│   ├── runtime/         # Runtime v2：domain / application / adapters
-│   ├── context/         # Slot 上下文、作用域缓存、token 预算
+│   ├── runtime/         # Runtime v4：domain / application / adapters
+│   ├── context/         # 多 Owner Slot、Context Version、Token 预算
 │   ├── llm/             # ModelRouter、LLMProxy、熔断与限流
 │   ├── tools/           # Registry、Executor、Handler、审批与工具定义
 │   ├── mcp/             # MCP 提供者与工具适配
@@ -299,7 +295,7 @@ dotClaw/
 │   ├── journal/         # 可选诊断、报告与观测数据
 │   ├── channel/         # CLI 等交互通道
 │   ├── config/          # YAML 配置与环境变量展开
-│   ├── bootstrap/       # Runtime v2 组合根
+│   ├── bootstrap/       # Runtime v4 组合根
 │   └── scheduler/       # 调度能力
 ├── .dotclaw/agentConfig/# Agent 角色 YAML 定义
 ├── config.yaml          # 全局配置
@@ -336,19 +332,20 @@ dotclaw
 # 默认运行当前架构测试；自动跳过 legacy 测试
 .\.venv\Scripts\python.exe -m pytest
 
-# Runtime v2 架构边界与物理删除护栏
+# Runtime v4 架构边界与持久化护栏
 .\.venv\Scripts\python.exe -m pytest tests/runtime_v2/test_architecture_contract.py tests/runtime_v2/test_phase6_finalization.py
 ```
 
 ## 可靠性与演进边界
 
-当前 Runtime v2 已提供运行隔离、成功提交补偿、审批恢复、消息/事件审计、上下文降级和 Port 解耦。这是可靠单进程运行与可演进架构的基础。
+当前 Runtime v4 已提供运行隔离、成功提交补偿、审批恢复、Context Version 与动态事实审计、调用前历史压缩和 Port 解耦。这是可靠单进程运行与可演进架构的基础。
 
 当前 Session 租约是进程内 `asyncio.Lock`，运行仓储是本地文件；它**不是多节点分布式高可用实现**。后续可在既有 Port 边界替换为分布式 Session 租约、PostgreSQL/对象存储、后台 Worker、OpenTelemetry 投影等能力，而无需让 `RuntimeEngine` 直接依赖数据库、队列或监控 SDK。
 
 ## 文档导航
 
-- [Runtime 模块总体说明](docs/wiki/Runtime%20模块总体说明.md)：Runtime v2 的分层、状态机、提交协议、可靠性与排障
+- [Runtime 模块总体说明](docs/wiki/Runtime%20模块总体说明.md)：Runtime v4 的分层、状态机、提交协议、可靠性与排障
+- [上下文工程说明](docs/wiki/上下文工程说明.md)：多 Owner Slot、Context Version、动态事实引用与历史压缩
 
 
 ---
