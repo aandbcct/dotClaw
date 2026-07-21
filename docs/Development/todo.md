@@ -1,5 +1,21 @@
 # 各模块todo列表
 
+## runtime
+
+- [ ] 顶层组合根还是mian->agent->runtime的形式，agent和runtime应该都是一等公民，需要理清楚层级关系
+
+  ```
+  Q：
+  agent/factory.py 实际负责整个应用装配，却放在 agent/ 内。
+  runtime_factory.py 只装配 Runtime 内核及其 Adapter，但其名字和文档又暗示它是唯一组合根。
+  main.py 虽然拿到了 runtime_services，但正常路径实际只用 agent 和 session_mgr；这也说明返回三元组是装配边界泄漏。
+  Agent 已经是轻量门面，运行过程交给 SessionRunCoordinator；它不应再承担“创建所有基础设施”的语义。
+  ```
+
+- [ ] 
+
+
+
 ## multi-agent
 
 - [ ] 重启后恢复未完成任务；
