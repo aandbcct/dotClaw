@@ -1,4 +1,4 @@
-"""Runtime v3 的多 Owner 结构化上下文实现。"""
+"""Runtime v4 的多 Owner 结构化上下文实现。"""
 
 from dotclaw.runtime.application.dto import ContextMetadata
 from dotclaw.runtime.application.ports import ContextPort
@@ -23,7 +23,8 @@ from .signals import ContextRefreshReason, ContextRefreshSignal, ContextSignalBu
 from .slot_manager import ContextSlotManager
 from .slots import (
     AvailableAgentsSlot,
-    HistorySlot,
+    ConversationSlot,
+    HistoryCompressionsSlot,
     IdentitySlot,
     KnowledgeSlot,
     MemorySlot,
@@ -57,7 +58,8 @@ __all__ = [
     "ContextSlotManager",
     "ContextSlotRegistry",
     "InMemoryContextPlanConfiguration",
-    "HistorySlot",
+    "ConversationSlot",
+    "HistoryCompressionsSlot",
     "IdentitySlot",
     "KnowledgeSlot",
     "MemorySlot",

@@ -1,10 +1,11 @@
-"""Runtime v3 的本地文件 RunRepository 实现。"""
+"""Runtime v4 的本地文件 RunRepository 实现。"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+from hashlib import sha256
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from ..domain.events import RunEvent, RunEventType
 from ..domain.context import (
     ContextContributionKind,
     ContextOwner,
+    TextSlotContent,
     ContextVersion,
     SuccessCommitFaultPoint,
     StagedHistoryCompression,
@@ -194,7 +196,7 @@ class RunRepositoryAdapter:
         if not path.is_file():
             return None
         payload: JSONMap = load_json_map(path)
-        _require_v3_format(payload, "run.json")
+        _require_v4_format(payload, "run.json")
         return _agent_run_from_dict(payload)
 
     def _find_run_sync(self, run_id: str) -> AgentRun | None:
@@ -208,7 +210,7 @@ class RunRepositoryAdapter:
         if not run_paths:
             return None
         payload: JSONMap = load_json_map(run_paths[0])
-        _require_v3_format(payload, "run.json")
+        _require_v4_format(payload, "run.json")
         return _agent_run_from_dict(payload)
 
     def _save_run_sync(self, run: AgentRun) -> None:
@@ -361,35 +363,13 @@ class RunRepositoryAdapter:
         )
         if version is None:
             raise ValueError("历史压缩候选引用的 Context Version 不存在")
-        history_slot = next(
-            (
-                slot for slot in version.slots
-                if slot.owner is ContextOwner.SESSION
-                and slot.contribution_kind is ContextContributionKind.HISTORY
-            ),
-            None,
-        )
-        if history_slot is None:
-            raise ValueError("历史压缩候选引用的 Context Version 缺少 History Slot")
-        raw_conversation: JSONValue | None = history_slot.attributes.get("conversation")
-        if not isinstance(raw_conversation, dict):
-            raise ValueError("History Slot 缺少 Conversation 载荷")
-        raw_compression: JSONValue | None = raw_conversation.get("compressed_history")
-        if not isinstance(raw_compression, dict):
-            raise ValueError("History Slot 缺少压缩摘要载荷")
-        raw_version: JSONValue | None = raw_compression.get("compression_version")
-        raw_covered: JSONValue | None = raw_compression.get("covered_through_conversation_id")
-        raw_content: JSONValue | None = raw_compression.get("content")
-        raw_hash: JSONValue | None = raw_compression.get("content_hash")
-        if (
-            not isinstance(raw_version, int)
-            or isinstance(raw_version, bool)
-            or not all(isinstance(value, str) for value in (raw_covered, raw_content, raw_hash))
-        ):
-            raise ValueError("History Slot 的压缩摘要载荷无效")
-        if raw_hash != candidate.summary_hash:
+        history_slot = next((slot for slot in version.slots if slot.contribution_kind is ContextContributionKind.HISTORY_COMPRESSIONS), None)
+        if history_slot is None or not isinstance(history_slot.content, TextSlotContent):
+            raise ValueError("历史压缩候选引用的 Context Version 缺少摘要 Slot")
+        raw_content: str = history_slot.content.text
+        if _hash_text(raw_content) != candidate.summary_hash:
             raise ValueError("历史压缩候选与 Context Version 摘要 hash 不一致")
-        return HistoryCompressionSnapshot(raw_version, raw_covered, raw_content, raw_hash), candidate.source_hash
+        return HistoryCompressionSnapshot(candidate.context_version, candidate.covered_through_conversation_id, raw_content, candidate.summary_hash), candidate.source_hash
 
     def _delete_checkpoint_sync(self, session_id: str, run_id: str) -> None:
         """在终态 Run 已落盘后清理恢复 checkpoint。"""
@@ -463,11 +443,11 @@ class RunRepositoryAdapter:
         return self._load_messages_from_path_sync(path)
 
     def _load_messages_from_path_sync(self, path: Path) -> tuple[RunMessage, ...]:
-        """读取 v3 的增量 RunMessage 数组。"""
+        """读取 v4 的增量 RunMessage 数组。"""
         if not path.is_file():
             return ()
         payload: JSONMap = load_json_map(path)
-        _require_v3_format(payload, "messages.json")
+        _require_v4_format(payload, "messages.json")
         raw_messages: JSONValue | None = payload.get("messages")
         if not isinstance(raw_messages, list):
             raise ValueError("messages.json 的 messages 字段必须是数组")
@@ -500,11 +480,11 @@ class RunRepositoryAdapter:
         return tuple(runs)
 
     def _load_context_versions_from_path_sync(self, path: Path) -> tuple[ContextVersion, ...]:
-        """读取并校验 v3 的全部 Context Version。"""
+        """读取并校验 v4 的全部 Context Version。"""
         if not path.is_file():
             return ()
         payload: JSONMap = load_json_map(path)
-        _require_v3_format(payload, "messages.json")
+        _require_v4_format(payload, "messages.json")
         raw_context_versions: JSONValue | None = payload.get("context_versions")
         if not isinstance(raw_context_versions, list):
             raise ValueError("messages.json 的 context_versions 字段必须是数组")
@@ -525,7 +505,7 @@ class RunRepositoryAdapter:
         messages: tuple[RunMessage, ...],
         context_versions: tuple[ContextVersion, ...],
     ) -> None:
-        """以 v3 格式原子写入上下文版本和增量消息。"""
+        """以 v4 格式原子写入上下文版本和增量消息。"""
         payload: JSONMap = {
             "run_id": run_id,
             "version": int(StorageFormatVersion.CONTEXT_VERSIONS),
@@ -798,15 +778,15 @@ def _run_message_from_dict(data: JSONMap) -> RunMessage:
     )
 
 
-def _require_v3_format(payload: JSONMap, file_name: str) -> None:
+def _require_v4_format(payload: JSONMap, file_name: str) -> None:
     """拒绝历史容器格式，禁止以隐式转换掩盖数据版本差异。"""
     version: int = get_integer(payload, "version")
     if version != int(StorageFormatVersion.CONTEXT_VERSIONS):
-        raise ValueError(f"不支持的 {file_name} 格式版本：{version}；仅支持 v3")
+        raise ValueError(f"不支持的 {file_name} 格式版本：{version}；仅支持 v4")
 
 
 def _run_payload(run: AgentRun) -> JSONMap:
-    """生成唯一支持的 v3 run.json 载荷。"""
+    """生成唯一支持的 v4 run.json 载荷。"""
     payload: JSONMap = run.to_dict()
     payload["version"] = int(StorageFormatVersion.CONTEXT_VERSIONS)
     return payload
@@ -819,6 +799,11 @@ def _optional_positive_integer(value: JSONValue | None) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError("active_context_version 必须是正整数或 null")
     return value
+
+
+def _hash_text(content: str) -> str:
+    """计算摘要正文的稳定 SHA-256。"""
+    return sha256(content.encode("utf-8")).hexdigest()
 
 
 def _staged_history_compressions_from_value(value: JSONValue | None) -> tuple[StagedHistoryCompression, ...]:

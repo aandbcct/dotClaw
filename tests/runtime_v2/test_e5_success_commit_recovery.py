@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,8 +13,10 @@ from dotclaw.runtime.application.ports import SuccessCommitFaultPort
 from dotclaw.runtime.domain.context import (
     ContextContributionKind,
     ContextOwner,
+    ContextPersistenceMode,
     ContextSlotSnapshot,
     ContextSlotStatus,
+    TextSlotContent,
     StagedHistoryCompression,
     StagedHistoryCompressionStatus,
     SuccessCommitFaultPoint,
@@ -166,25 +169,17 @@ async def test_success_commit_projects_only_latest_history_candidate(tmp_path: P
         1,
         history_conversation.conversation_id,
         "latest-source",
-        "latest-summary",
+        sha256("最新压缩摘要".encode("utf-8")).hexdigest(),
         1,
     )
     history_slot: ContextSlotSnapshot = ContextSlotSnapshot(
-        "history",
+        "history_compressions",
         ContextOwner.SESSION,
-        ContextContributionKind.HISTORY,
+        ContextContributionKind.HISTORY_COMPRESSIONS,
+        ContextPersistenceMode.SNAPSHOT,
         status=ContextSlotStatus.INCLUDED,
         injection_order=0,
-        attributes={
-            "conversation": {
-                "compressed_history": {
-                    "compression_version": 1,
-                    "covered_through_conversation_id": history_conversation.conversation_id,
-                    "content": "最新压缩摘要",
-                    "content_hash": "latest-summary",
-                },
-            },
-        },
+        content=TextSlotContent("最新压缩摘要"),
     )
     await repository.append_context_version(
         completed.session_id,

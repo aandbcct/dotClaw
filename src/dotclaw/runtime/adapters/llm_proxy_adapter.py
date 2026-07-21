@@ -1,4 +1,4 @@
-"""将旧 LLMProxy 适配为 Runtime v3 的 LLMPort。"""
+"""将旧 LLMProxy 适配为 Runtime v4 的 LLMPort。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from ..domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 
 
 class LLMProxyAdapter(LLMPort):
-    """聚合旧流式响应并转换为 Runtime v3 完整 RunMessage 的适配器。"""
+    """聚合旧流式响应并转换为 Runtime v4 完整 RunMessage 的适配器。"""
 
     def __init__(self, proxy: LLMProxy, text_stream_port: TextStreamPort | None = None) -> None:
         """绑定既有 LLM 代理与可选的入口文本流端口。"""

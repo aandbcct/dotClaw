@@ -130,6 +130,7 @@ class ContextMetadata:
     truncation_applied: bool = False
     details: JSONMap = field(default_factory=dict)
     slot_snapshots: tuple[ContextSlotSnapshot, ...] = ()
+    fact_reference_message_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -139,6 +140,7 @@ class ContextMetadata:
             "truncation_applied": self.truncation_applied,
             "details": self.details,
             "slot_snapshots": [snapshot.to_dict() for snapshot in self.slot_snapshots],
+            "fact_reference_message_ids": list(self.fact_reference_message_ids),
         }
 
 

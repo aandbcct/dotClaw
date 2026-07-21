@@ -1,4 +1,4 @@
-"""Runtime v3 的本地文件 ApprovalRepository 实现。"""
+"""Runtime v4 的本地文件 ApprovalRepository 实现。"""
 
 from __future__ import annotations
 

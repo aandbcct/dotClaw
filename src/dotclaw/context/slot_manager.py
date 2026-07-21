@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from dotclaw.runtime.domain.context import ContextOwner, ContextSlotStatus
+from dotclaw.runtime.domain.context import (
+    ContextContributionKind,
+    ContextOwner,
+    ContextSlotStatus,
+    ConversationMessagesSlotContent,
+    RunMessageReferencesSlotContent,
+    TextSlotContent,
+    ToolDefinitionsSlotContent,
+)
 
 from .contracts import ContextCacheScope, ContextContribution, ContextPlan, ContextSlot, ContextSlotBinding
 from .registry import ContextSlotRegistry
@@ -39,6 +47,7 @@ class ContextSlotManager:
                 results.append(ContextContribution(
                     binding.descriptor.contribution_kind,
                     status=ContextSlotStatus.FAILED,
+                    content=_empty_content(binding.descriptor.contribution_kind),
                     error_code=type(error).__name__,
                 ))
             finally:
@@ -95,3 +104,14 @@ class ContextSlotManager:
 def _binding_key(binding: ContextSlotBinding) -> tuple[str, ContextOwner, str]:
     """以 Slot、Owner 类型和精确 Owner 标识隔离实例及失效状态。"""
     return binding.descriptor.slot_id, binding.descriptor.owner, binding.owner_key
+
+
+def _empty_content(kind: ContextContributionKind) -> TextSlotContent | ToolDefinitionsSlotContent | ConversationMessagesSlotContent | RunMessageReferencesSlotContent:
+    """为失败 Slot 构造与其 kind 一致的空 DTO。"""
+    if kind is ContextContributionKind.TOOL_DEFINITIONS:
+        return ToolDefinitionsSlotContent(())
+    if kind is ContextContributionKind.CONVERSATION_MESSAGES:
+        return ConversationMessagesSlotContent(())
+    if kind is ContextContributionKind.RUN_MESSAGE_REFERENCES:
+        return RunMessageReferencesSlotContent(())
+    return TextSlotContent("")

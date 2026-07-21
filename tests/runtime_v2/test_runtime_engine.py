@@ -36,12 +36,12 @@ from dotclaw.context import (
     ContextSlotDescriptor,
     ContextSlotManager,
     ContextSlotRegistry,
-    HistorySlot,
+    HistoryCompressionsSlot,
     InMemoryContextPlanConfiguration,
     RunMessagesSlot,
     build_context_provider,
 )
-from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextSlotStatus
+from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent
 from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
 
@@ -232,7 +232,7 @@ class ChangingSystemSlot:
     async def load(self, binding: ContextSlotBinding) -> ContextContribution:
         """返回带调用序号的 system 内容。"""
         self.calls += 1
-        return ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, f"system-{self.calls}")
+        return ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, TextSlotContent(f"system-{self.calls}"))
 
     async def refresh(self, binding: ContextSlotBinding) -> None:
         """测试 Slot 不保存缓存。"""
@@ -252,30 +252,33 @@ def _changing_context_port(slot: ChangingSystemSlot) -> ContextProvider:
         "changing",
         ContextOwner.AGENT,
         ContextContributionKind.SYSTEM_CONTENT,
+        ContextPersistenceMode.SNAPSHOT,
         ContextCacheScope.AGENT,
         ContextRefreshPolicy.SIGNAL,
         10,
     )
     registry.register(descriptor, lambda: slot)
     registry.register(ContextSlotDescriptor(
-        "history",
+        "history_compressions",
         ContextOwner.SESSION,
-        ContextContributionKind.HISTORY,
+        ContextContributionKind.HISTORY_COMPRESSIONS,
+        ContextPersistenceMode.SNAPSHOT,
         ContextCacheScope.SESSION,
         ContextRefreshPolicy.SIGNAL,
         20,
-    ), HistorySlot)
+    ), HistoryCompressionsSlot)
     registry.register(ContextSlotDescriptor(
         "run_messages",
         ContextOwner.RUN,
         ContextContributionKind.RUN_MESSAGE_REFERENCES,
+        ContextPersistenceMode.FACT_REFERENCE,
         ContextCacheScope.RUN,
         ContextRefreshPolicy.SIGNAL,
         30,
     ), RunMessagesSlot)
     configuration: InMemoryContextPlanConfiguration = InMemoryContextPlanConfiguration((
         ContextOwnerPlanConfiguration(ContextOwner.AGENT, ("changing",)),
-        ContextOwnerPlanConfiguration(ContextOwner.SESSION, ("history",)),
+        ContextOwnerPlanConfiguration(ContextOwner.SESSION, ("history_compressions",)),
         ContextOwnerPlanConfiguration(ContextOwner.RUN, ("run_messages",)),
     ))
     return ContextProvider(
@@ -419,7 +422,7 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
 
 
 async def test_engine_appends_context_versions_and_audits_llm_calls_without_request_message_copies(tmp_path: Path) -> None:
-    """每次 LLM 调用前追加 v3 Context Version，并仅保存增量 Run Message。"""
+    """动态 Run Message 不改变快照版本，事件仍精确引用全部动态输入。"""
     llm: ReActLLM = ReActLLM()
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
@@ -441,16 +444,14 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
     payload: JSONMap = require_json_map(json.loads(messages_path.read_text(encoding="utf-8")))
     raw_versions: JSONValue | None = payload.get("context_versions")
     assert isinstance(raw_versions, list)
-    assert [require_json_map(item)["version"] for item in raw_versions] == [1, 2]
+    assert [require_json_map(item)["version"] for item in raw_versions] == [1]
     first_version: JSONMap = require_json_map(raw_versions[0])
     raw_slots: JSONValue | None = first_version.get("slots")
     assert isinstance(raw_slots, list)
     history_slot: JSONMap = next(
-        require_json_map(item) for item in raw_slots if require_json_map(item)["slot_id"] == "history"
+        require_json_map(item) for item in raw_slots if require_json_map(item)["slot_id"] == "conversation"
     )
-    attributes: JSONMap = require_json_map(history_slot["attributes"])
-    conversation: JSONMap = require_json_map(attributes["conversation"])
-    raw_history_messages: JSONValue | None = conversation.get("messages")
+    raw_history_messages: JSONValue | None = history_slot.get("content")
     assert isinstance(raw_history_messages, list)
     assert require_json_map(raw_history_messages[0])["content"] == "这是之前的回答。"
     raw_stored_messages: JSONValue | None = payload.get("messages")
@@ -480,7 +481,7 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
     first_data: JSONMap = raw_first_data
     second_data: JSONMap = raw_second_data
     assert first_data["context_version"] == 1
-    assert second_data["context_version"] == 2
+    assert second_data["context_version"] == 1
     assert first_data["incremental_message_ids"] == ["user-1"]
     assert second_data["incremental_message_ids"] == [
         "user-1",
@@ -488,6 +489,9 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
         f"tool-{result.run_id}-3",
         f"tool-{result.run_id}-4",
     ]
+    tool_events: list[JSONMap] = [event for event in events if event["event_type"] in {"tool_started", "tool_completed"}]
+    assert [event["event_type"] for event in tool_events] == ["tool_started", "tool_completed", "tool_started", "tool_completed"]
+    assert [require_json_map(event["data"])["call_id"] for event in tool_events] == ["call-1", "call-1", "call-2", "call-2"]
     assert all(event["event_type"] != "context_built" for event in events)
 
 

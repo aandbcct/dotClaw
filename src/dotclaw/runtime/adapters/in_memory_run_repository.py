@@ -1,4 +1,4 @@
-"""用于 Runtime v3 契约测试的内存 RunRepository 适配器。"""
+"""用于 Runtime v4 契约测试的内存 RunRepository 适配器。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from ..domain.facts import AgentRun, MessageRole, RunMessage, RunStatus
 
 
 class InMemoryRunRepository:
-    """以精确领域事实模拟 v3 Run 仓储，不参与生产持久化。"""
+    """以精确领域事实模拟 v4 Run 仓储，不参与生产持久化。"""
 
     def __init__(self) -> None:
         """初始化隔离的内存事实表。"""

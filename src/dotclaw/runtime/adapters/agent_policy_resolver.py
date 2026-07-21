@@ -1,4 +1,4 @@
-"""从既有 AgentIdentity 和配置冻结 Runtime v3 执行策略。"""
+"""从既有 AgentIdentity 和配置冻结 Runtime v4 执行策略。"""
 
 from __future__ import annotations
 

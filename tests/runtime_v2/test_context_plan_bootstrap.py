@@ -18,6 +18,6 @@ def test_agent_identity_overrides_only_its_own_context_slots() -> None:
 
     assert configuration is not None
     assert configuration.enabled_slot_ids(ContextOwner.AGENT, identity.agent_id) == ("identity", "skills")
-    assert configuration.enabled_slot_ids(ContextOwner.SESSION, "session-1") == ("user_info", "history")
-    assert configuration.enabled_slot_ids(ContextOwner.RUN, "run-1") == ("memory", "knowledge", "run_messages")
+    assert configuration.enabled_slot_ids(ContextOwner.SESSION, "session-1") == ("user_info", "history_compressions")
+    assert configuration.enabled_slot_ids(ContextOwner.RUN, "run-1") == ("conversation", "memory", "knowledge", "run_messages")
     assert configuration.enabled_slot_ids(ContextOwner.GLOBAL, "global") == ("available_agents",)

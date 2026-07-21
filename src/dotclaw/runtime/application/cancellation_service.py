@@ -1,4 +1,4 @@
-"""Runtime v3 的 run 级取消令牌管理。"""
+"""Runtime v4 的 run 级取消令牌管理。"""
 
 from __future__ import annotations
 

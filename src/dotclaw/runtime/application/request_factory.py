@@ -1,4 +1,4 @@
-"""从既有 Session 快照创建 Runtime v3 的冻结 RunRequest。"""
+"""从既有 Session 快照创建 Runtime v4 的冻结 RunRequest。"""
 
 from __future__ import annotations
 
@@ -42,13 +42,6 @@ def create_run_request(session: SessionSnapshotSource, agent_id: str, user_messa
     """复制已有 Conversation 并创建不携带可变 Session 的运行请求。"""
     compressed_history: HistoryCompressionSnapshot | None = _active_compression_snapshot(session)
     history: list[ConversationMessage] = []
-    if compressed_history is not None:
-        history.append(ConversationMessage(
-            message_id=f"history-compression-{compressed_history.compression_version}",
-            role=MessageRole.SYSTEM,
-            content=_history_summary_message(compressed_history.content),
-            created_at=utc_now_iso(),
-        ))
     conversation: ConversationSnapshotSource
     for conversation in _uncovered_conversations(session.conversations, compressed_history):
         history.append(ConversationMessage(
@@ -129,8 +122,3 @@ def _uncovered_conversations(
     if boundary_index is None:
         raise ValueError("活动历史压缩边界不属于当前 Session")
     return tuple(conversations[boundary_index + 1:])
-
-
-def _history_summary_message(summary: str) -> str:
-    """构造与 Engine 压缩路径完全一致的摘要注入文本。"""
-    return f"以下是此前对话的压缩摘要：\n{summary}"

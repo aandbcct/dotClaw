@@ -1,4 +1,4 @@
-"""Runtime E1 的 v3 RunRepository 格式与契约测试。"""
+"""Runtime E6 的 v4 RunRepository 格式与契约测试。"""
 
 from __future__ import annotations
 
@@ -14,8 +14,10 @@ from dotclaw.runtime.application.ports import RunRepository
 from dotclaw.runtime.domain.context import (
     ContextContributionKind,
     ContextOwner,
+    ContextPersistenceMode,
     ContextSlotSnapshot,
     ContextSlotStatus,
+    TextSlotContent,
     ContextVersion,
     StagedHistoryCompression,
     StagedHistoryCompressionStatus,
@@ -50,7 +52,7 @@ class ContextVersionRepository(Protocol):
 
 
 def _run() -> AgentRun:
-    """构造 v3 仓储测试所需的最小 Run。"""
+    """构造 v4 仓储测试所需的最小 Run。"""
     return AgentRun(
         run_id="run-1",
         session_id="session-1",
@@ -63,7 +65,7 @@ def _run() -> AgentRun:
 
 
 def _context_version(version: int) -> ContextVersion:
-    """构造一个包含 Agent、Session 与 Run 贡献的完整版本。"""
+    """构造只包含稳定快照型 Slot 的完整版本。"""
     return new_context_version(
         version=version,
         slots=(
@@ -71,25 +73,20 @@ def _context_version(version: int) -> ContextVersion:
                 slot_id="identity",
                 owner=ContextOwner.AGENT,
                 contribution_kind=ContextContributionKind.SYSTEM_CONTENT,
+                persistence_mode=ContextPersistenceMode.SNAPSHOT,
                 status=ContextSlotStatus.INCLUDED,
                 injection_order=0,
-                content="你是测试助手。",
+                content=TextSlotContent("你是测试助手。"),
                 content_hash="identity-hash",
             ),
             ContextSlotSnapshot(
-                slot_id="history",
+                slot_id="history_compressions",
                 owner=ContextOwner.SESSION,
-                contribution_kind=ContextContributionKind.HISTORY,
+                contribution_kind=ContextContributionKind.HISTORY_COMPRESSIONS,
+                persistence_mode=ContextPersistenceMode.SNAPSHOT,
                 status=ContextSlotStatus.EMPTY,
                 injection_order=1,
-            ),
-            ContextSlotSnapshot(
-                slot_id="run_messages",
-                owner=ContextOwner.RUN,
-                contribution_kind=ContextContributionKind.RUN_MESSAGE_REFERENCES,
-                status=ContextSlotStatus.INCLUDED,
-                injection_order=2,
-                message_ids=("user-1",),
+                content=TextSlotContent(""),
             ),
         ),
         content_hash=f"context-hash-{version}",
@@ -111,12 +108,12 @@ async def _assert_context_version_contract(repository: ContextVersionRepository)
 
 
 async def test_in_memory_run_repository_satisfies_context_version_contract() -> None:
-    """内存 Fake 必须与真实 Adapter 共享 v3 版本语义。"""
+    """内存 Fake 必须与真实 Adapter 共享 v4 版本语义。"""
     await _assert_context_version_contract(InMemoryRunRepository())
 
 
 async def test_file_run_repository_satisfies_context_version_contract(tmp_path: Path) -> None:
-    """文件 Adapter 必须与内存 Fake 共享 v3 版本语义。"""
+    """文件 Adapter 必须与内存 Fake 共享 v4 版本语义。"""
     await _assert_context_version_contract(RunRepositoryAdapter(tmp_path))
 
 
@@ -159,7 +156,7 @@ async def test_file_run_repository_satisfies_run_control_contract(tmp_path: Path
     await _assert_run_control_contract(RunRepositoryAdapter(tmp_path))
 
 
-async def test_v3_messages_payload_keeps_context_versions_and_messages_separate(tmp_path: Path) -> None:
+async def test_v4_messages_payload_keeps_context_versions_and_messages_separate(tmp_path: Path) -> None:
     """摘要候选正文不得进入 run.json，完整版本只写 messages.json。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     run: AgentRun = _run()
@@ -184,8 +181,8 @@ async def test_v3_messages_payload_keeps_context_versions_and_messages_separate(
     messages_payload: JSONMap = require_json_map(json.loads(
         (tmp_path / run.session_id / "agent_runs" / run.run_id / "messages.json").read_text(encoding="utf-8"),
     ))
-    assert run_payload["version"] == 3
-    assert messages_payload["version"] == 3
+    assert run_payload["version"] == 4
+    assert messages_payload["version"] == 4
     assert len(messages_payload["context_versions"]) == 1
     raw_candidates = run_payload["staged_history_compressions"]
     assert isinstance(raw_candidates, list)
@@ -208,14 +205,14 @@ async def test_v1_and_v2_messages_are_rejected_without_conversion(tmp_path: Path
     run: AgentRun = _run()
     await repository.create_run(run)
     path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "messages.json"
-    for version in (1, 2):
+    for version in (1, 2, 3):
         path.write_text(json.dumps({"run_id": run.run_id, "version": version, "messages": []}), encoding="utf-8")
-        with pytest.raises(ValueError, match="仅支持 v3"):
+        with pytest.raises(ValueError, match="仅支持 v4"):
             await repository.load_messages(run.session_id, run.run_id)
 
 
-async def test_checkpoint_writes_and_reads_v3_control_fields(tmp_path: Path) -> None:
-    """checkpoint.json 必须使用 v3，且只保存活动版本与候选引用。"""
+async def test_checkpoint_writes_and_reads_v4_control_fields(tmp_path: Path) -> None:
+    """checkpoint.json 必须使用 v4，且只保存活动版本与候选引用。"""
     repository: CheckpointRepositoryAdapter = CheckpointRepositoryAdapter(tmp_path)
     checkpoint: RunCheckpoint = RunCheckpoint(
         checkpoint_id="checkpoint-1",
@@ -236,13 +233,13 @@ async def test_checkpoint_writes_and_reads_v3_control_fields(tmp_path: Path) -> 
     payload: JSONMap = require_json_map(json.loads(
         (tmp_path / checkpoint.session_id / "agent_runs" / checkpoint.run_id / "checkpoint.json").read_text(encoding="utf-8"),
     ))
-    assert payload["version"] == 3
+    assert payload["version"] == 4
     assert payload["active_context_version"] == 2
     assert payload["staged_history_compression_ids"] == ["candidate-1"]
 
 
-async def test_file_repository_uses_atomic_replacement_for_v3_payload(tmp_path: Path) -> None:
-    """v3 多次写入后不得遗留临时文件，证明文件替换路径原子收口。"""
+async def test_file_repository_uses_atomic_replacement_for_v4_payload(tmp_path: Path) -> None:
+    """v4 多次写入后不得遗留临时文件，证明文件替换路径原子收口。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     run: AgentRun = _run()
     await repository.create_run(run)

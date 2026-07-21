@@ -1,4 +1,4 @@
-"""Runtime v3 领域事件与审计事件模型。"""
+"""Runtime v4 领域事件与审计事件模型。"""
 
 from __future__ import annotations
 

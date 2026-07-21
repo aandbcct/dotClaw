@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextSlotStatus
+from dotclaw.runtime.domain.context import (
+    ContextContributionKind,
+    ContextOwner,
+    ContextPersistenceMode,
+    ContextSlotContent,
+    ContextSlotStatus,
+    TextSlotContent,
+)
 from dotclaw.runtime.domain.facts import JSONMap
 
 from .signals import ContextRefreshSignal
@@ -31,10 +38,9 @@ class ContextContribution:
     """Slot 对本次模型上下文的结构化贡献。"""
     kind: ContextContributionKind
     status: ContextSlotStatus
-    content: str = ""
-    message_ids: tuple[str, ...] = ()
-    attributes: JSONMap = field(default_factory=dict)
+    content: ContextSlotContent = TextSlotContent("")
     error_code: str = ""
+
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,7 @@ class ContextSlotDescriptor:
     slot_id: str
     owner: ContextOwner
     contribution_kind: ContextContributionKind
+    persistence_mode: ContextPersistenceMode
     cache_scope: ContextCacheScope
     refresh_policy: ContextRefreshPolicy
     order: int

@@ -1,4 +1,4 @@
-"""仅依赖 Ports 的 Runtime v3 执行引擎。"""
+"""仅依赖 Ports 的 Runtime v4 执行引擎。"""
 
 from __future__ import annotations
 
@@ -22,8 +22,12 @@ from ..domain.events import (
 from ..domain.context import (
     ContextContributionKind,
     ContextOwner,
+    ContextPersistenceMode,
     ContextSlotSnapshot,
     ContextSlotStatus,
+    ConversationMessagesSlotContent,
+    ConversationSlotMessage,
+    TextSlotContent,
     ContextVersion,
     StagedHistoryCompression,
     StagedHistoryCompressionStatus,
@@ -413,6 +417,7 @@ class RuntimeEngine:
                         tool_call,
                     )
                     if delegation_request is not None:
+                        event_number = await self._tool_started_event(run, event_number, messages, tool_call)
                         delegation_result: DelegationDriveResult = await self._delegate(
                             execution,
                             run,
@@ -428,13 +433,16 @@ class RuntimeEngine:
                         sequence = delegation_result.message_sequence
                         event_number = delegation_result.event_sequence
                         completed_message_ids.append(messages[-1].message_id)
+                        event_number = await self._tool_completed_event(run, event_number, tool_call, messages[-1].message_id, ToolResultStatus.COMPLETED)
                         continue
+                    event_number = await self._tool_started_event(run, event_number, messages, tool_call)
                     try:
                         tool_result: ToolResult = await self._tool_port.execute(
                             ToolInvocation(execution.run_id, tool_call),
                             execution.view(),
                         )
                     except Exception as error:
+                        event_number = await self._tool_completed_event(run, event_number, tool_call, None, ToolResultStatus.FAILED, _safe_error_summary(error))
                         return await self._fail(execution, run, tuple(messages), event_number, f"工具调用失败：{error}", RunErrorCode.TOOL_FAILURE)
                     if execution.cancellation.cancelled:
                         return await self._finish_cancelled(
@@ -456,6 +464,7 @@ class RuntimeEngine:
                     )
                     messages.append(tool_message)
                     await self._save_messages(run, execution, messages)
+                    event_number = await self._tool_completed_event(run, event_number, tool_call, tool_message.message_id, tool_result.status, _tool_error_summary(tool_result))
                     if tool_result.status is ToolResultStatus.FAILED:
                         error = tool_result.error.message if tool_result.error is not None else tool_result.output or "工具执行失败"
                         return await self._fail(execution, run, tuple(messages), event_number, error, RunErrorCode.TOOL_FAILURE)
@@ -584,6 +593,8 @@ class RuntimeEngine:
                     completed_event,
                     success_intent,
                 )
+                if success_intent.latest_candidate_id is not None:
+                    self._context_port.request_refresh("history_compressions", ContextOwner.SESSION, run.session_id)
                 return RunResult(
                     run.run_id,
                     RunStatus.COMPLETED,
@@ -863,6 +874,17 @@ class RuntimeEngine:
         await self._run_repository.append_event(run.session_id, event)
         return next_sequence
 
+    async def _tool_started_event(self, run: AgentRun, event_sequence: int, messages: list[RunMessage], tool_call: ToolCall) -> int:
+        """在任何 ToolPort 或委派调用前写入无参数正文的开始审计事件。"""
+        source_id: str = _source_response_message_id(messages, tool_call.call_id)
+        ids: tuple[str, ...] = (source_id,) if source_id else ()
+        return await self._event(run, event_sequence, RunEventType.TOOL_STARTED, ids, "工具调用开始", {"source_response_message_id": source_id, "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": "started"})
+
+    async def _tool_completed_event(self, run: AgentRun, event_sequence: int, tool_call: ToolCall, result_message_id: str | None, status: ToolResultStatus, error_summary: str = "") -> int:
+        """为成功、审批和异常路径写入唯一的完成审计事件。"""
+        ids: tuple[str, ...] = (result_message_id,) if result_message_id is not None else ()
+        return await self._event(run, event_sequence, RunEventType.TOOL_COMPLETED, ids, "工具调用完成", {"result_message_id": result_message_id or "", "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": status.value, "error_summary": error_summary})
+
     async def _append_context_version(
         self,
         run: AgentRun,
@@ -875,13 +897,9 @@ class RuntimeEngine:
             run.session_id,
             run.run_id,
         )
-        slots: tuple[ContextSlotSnapshot, ...] = _context_slots_from_bundle(
-            execution.request,
-            context,
-            messages,
-        )
-        content_hash: str = _hash_json_value([message.to_dict() for message in context.messages])
-        tool_schema_hash: str = _hash_json_value([tool.to_dict() for tool in context.tools])
+        slots: tuple[ContextSlotSnapshot, ...] = _context_slots_from_bundle(execution.request, context, messages)
+        content_hash: str = _snapshot_content_hash(slots)
+        tool_schema_hash: str = _tool_schema_hash(slots)
         active_version: ContextVersion | None = execution.active_context_version
         if active_version is not None and _is_same_context_version(
             active_version,
@@ -998,7 +1016,7 @@ def _llm_started_data(
         "call_index": run.statistics.llm_call_count + 1,
         "model_id": run.policy.model_id,
         "context_version": context_version.version,
-        "incremental_message_ids": [message.message_id for message in messages],
+        "incremental_message_ids": list(context.metadata.fact_reference_message_ids),
         "context_hash": context_version.content_hash,
         "tool_schema_hash": context_version.tool_schema_hash,
     }
@@ -1184,15 +1202,9 @@ def _request_with_compressed_history(
         content=summary,
         content_hash=_hash_text(summary),
     )
-    summary_message: ConversationMessage = ConversationMessage(
-        message_id=f"history-compression-{compression_version}",
-        role=MessageRole.SYSTEM,
-        content=_history_summary_message(summary),
-        created_at=utc_now_iso(),
-    )
     conversation: ConversationSnapshot = ConversationSnapshot(
         request.session_id,
-        (summary_message, *remaining),
+        tuple(remaining),
         request.conversation.version,
         compressed,
     )
@@ -1210,40 +1222,33 @@ def _context_slots_from_bundle(
     run_messages: list[RunMessage],
 ) -> tuple[ContextSlotSnapshot, ...]:
     """将当前有效 system、Session 和 Run 贡献转换为可审计 Slot 快照。"""
-    if context.metadata.slot_snapshots:
-        return context.metadata.slot_snapshots
-    snapshots: list[ContextSlotSnapshot] = []
-    system_content: str = "\n\n".join(
-        message.content for message in context.messages if message.role is MessageRole.SYSTEM
-    )
-    snapshots.append(ContextSlotSnapshot(
-        slot_id="context_port",
-        owner=ContextOwner.AGENT,
-        contribution_kind=ContextContributionKind.SYSTEM_CONTENT,
-        status=ContextSlotStatus.INCLUDED if system_content else ContextSlotStatus.EMPTY,
-        injection_order=len(snapshots),
-        content=system_content,
-        content_hash=_hash_text(system_content) if system_content else "",
-    ))
-    conversation_payload: JSONMap = request.conversation.to_dict()
-    snapshots.append(ContextSlotSnapshot(
-        slot_id="session_history",
-        owner=ContextOwner.SESSION,
-        contribution_kind=ContextContributionKind.HISTORY,
-        status=ContextSlotStatus.INCLUDED if request.conversation.messages else ContextSlotStatus.EMPTY,
-        injection_order=len(snapshots),
-        content_hash=_hash_json_value(conversation_payload),
-        attributes={"conversation": conversation_payload},
-    ))
-    snapshots.append(ContextSlotSnapshot(
-        slot_id="run_messages",
-        owner=ContextOwner.RUN,
-        contribution_kind=ContextContributionKind.RUN_MESSAGE_REFERENCES,
-        status=ContextSlotStatus.INCLUDED if run_messages else ContextSlotStatus.EMPTY,
-        injection_order=len(snapshots),
-        message_ids=tuple(message.message_id for message in run_messages),
-    ))
-    return tuple(snapshots)
+    if not context.metadata.slot_snapshots:
+        system_content: str = "\n\n".join(message.content for message in context.messages if message.role is MessageRole.SYSTEM)
+        history_text: str = request.conversation.compressed_history.content if request.conversation.compressed_history is not None else ""
+        conversation_content: ConversationMessagesSlotContent = ConversationMessagesSlotContent(tuple(ConversationSlotMessage(message.message_id, message.role, message.content, message.created_at) for message in request.conversation.messages if message.role is not MessageRole.SYSTEM))
+        return (
+            ContextSlotSnapshot("context_port", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextPersistenceMode.SNAPSHOT, ContextSlotStatus.INCLUDED if system_content else ContextSlotStatus.EMPTY, 0, TextSlotContent(system_content), _hash_text(system_content) if system_content else ""),
+            ContextSlotSnapshot("history_compressions", ContextOwner.SESSION, ContextContributionKind.HISTORY_COMPRESSIONS, ContextPersistenceMode.SNAPSHOT, ContextSlotStatus.INCLUDED if history_text else ContextSlotStatus.EMPTY, 1, TextSlotContent(history_text), _hash_text(history_text) if history_text else ""),
+            ContextSlotSnapshot("conversation", ContextOwner.RUN, ContextContributionKind.CONVERSATION_MESSAGES, ContextPersistenceMode.SNAPSHOT, ContextSlotStatus.INCLUDED if conversation_content.messages else ContextSlotStatus.EMPTY, 2, conversation_content, _hash_json_value([message.to_dict() for message in conversation_content.messages]) if conversation_content.messages else ""),
+        )
+    return context.metadata.slot_snapshots
+
+
+def _snapshot_content_hash(slots: tuple[ContextSlotSnapshot, ...]) -> str:
+    """只哈希有序快照型 Slot 的稳定审计字段与规范化正文。"""
+    normalized: list[JSONMap] = []
+    for slot in slots:
+        if slot.persistence_mode is not ContextPersistenceMode.SNAPSHOT:
+            continue
+        record: JSONMap = slot.to_dict()
+        normalized.append({"slot_id": slot.slot_id, "owner": slot.owner.value, "contribution_kind": slot.contribution_kind.value, "injection_order": slot.injection_order, "status": slot.status.value, "content": record["content"]})
+    return _hash_json_value(normalized)
+
+
+def _tool_schema_hash(slots: tuple[ContextSlotSnapshot, ...]) -> str:
+    """只哈希 tools Slot 中实际筛选后的工具 Schema。"""
+    tools: ContextSlotSnapshot | None = next((slot for slot in slots if slot.slot_id == "tools"), None)
+    return _hash_json_value([] if tools is None else tools.to_dict()["content"])
 
 
 def _is_same_context_version(
@@ -1261,21 +1266,15 @@ def _is_same_context_version(
 
 
 def _conversation_from_context_version(context_version: ContextVersion) -> ConversationSnapshot:
-    """从 v3 Session Slot 载荷重建审批恢复所需的历史视图。"""
-    history_slot: ContextSlotSnapshot | None = next(
-        (
-            slot for slot in context_version.slots
-            if slot.owner is ContextOwner.SESSION
-            and slot.contribution_kind is ContextContributionKind.HISTORY
-        ),
-        None,
-    )
-    if history_slot is None:
-        raise ValueError("Context Version 缺少 Session History Slot")
-    raw_conversation: JSONValue | None = history_slot.attributes.get("conversation")
-    if not isinstance(raw_conversation, dict):
-        raise ValueError("Session History Slot 缺少 Conversation 载荷")
-    return _conversation_snapshot_from_dict(raw_conversation)
+    """从 v4 的 Conversation 与摘要 Slot 重建审批恢复历史视图。"""
+    conversation_slot: ContextSlotSnapshot | None = next((slot for slot in context_version.slots if slot.contribution_kind is ContextContributionKind.CONVERSATION_MESSAGES), None)
+    if conversation_slot is None or not isinstance(conversation_slot.content, ConversationMessagesSlotContent):
+        return ConversationSnapshot("", (), 0)
+    history_slot: ContextSlotSnapshot | None = next((slot for slot in context_version.slots if slot.contribution_kind is ContextContributionKind.HISTORY_COMPRESSIONS), None)
+    summary: str = history_slot.content.text if history_slot is not None and isinstance(history_slot.content, TextSlotContent) else ""
+    messages: tuple[ConversationMessage, ...] = tuple(ConversationMessage(message.message_id, message.role, message.content, message.created_at) for message in conversation_slot.content.messages)
+    compression: HistoryCompressionSnapshot | None = HistoryCompressionSnapshot(1, "", summary, _hash_text(summary)) if summary else None
+    return ConversationSnapshot("", messages, 0, compression)
 
 
 def _conversation_snapshot_from_dict(data: JSONMap) -> ConversationSnapshot:
@@ -1346,6 +1345,26 @@ def _latest_staged_candidate_id(run: AgentRun) -> str | None:
         if candidate.status is StagedHistoryCompressionStatus.STAGED
     )
     return candidates[-1].candidate_id if candidates else None
+
+
+def _source_response_message_id(messages: list[RunMessage], call_id: str) -> str:
+    """定位产生指定 ToolCall 的唯一 LLM 响应消息。"""
+    for message in reversed(messages):
+        if any(call.call_id == call_id for call in message.tool_calls):
+            return message.message_id
+    return ""
+
+
+def _safe_error_summary(error: Exception) -> str:
+    """生成不包含异常栈或敏感参数的短错误摘要。"""
+    return f"{type(error).__name__}: {str(error)[:200]}"
+
+
+def _tool_error_summary(result: ToolResult) -> str:
+    """提取工具失败结果的安全错误摘要，不复制完整工具正文。"""
+    if result.error is not None:
+        return result.error.message[:200]
+    return result.output[:200] if result.status is ToolResultStatus.FAILED else ""
 
 
 def _with_llm_statistics(run: AgentRun, response: RunMessage) -> AgentRun:

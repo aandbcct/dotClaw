@@ -1,4 +1,4 @@
-"""Runtime v3 依赖的外部能力协议。"""
+"""Runtime v4 依赖的外部能力协议。"""
 
 from __future__ import annotations
 

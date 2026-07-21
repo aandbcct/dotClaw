@@ -123,11 +123,10 @@ async def test_real_session_history_compression_commits_and_is_injected_on_next_
     assert next_request.conversation.compressed_history is not None
     assert next_request.conversation.compressed_history.covered_through_conversation_id == second.conversation_id
     assert [message.message_id for message in next_request.conversation.messages] == [
-        "history-compression-1",
         third.conversation_id,
         f"{third.conversation_id}:assistant",
         persisted.conversations[-1].conversation_id,
         f"{persisted.conversations[-1].conversation_id}:assistant",
     ]
-    assert next_request.conversation.messages[0].content == "以下是此前对话的压缩摘要：\n已归纳最早两轮对话"
+    assert next_request.conversation.messages[0].content == "最新旧问题"
     assert next_request.conversation.version == persisted.conversation_version

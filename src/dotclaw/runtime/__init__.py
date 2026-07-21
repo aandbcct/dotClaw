@@ -1,4 +1,4 @@
-"""Runtime v3 的公开执行 API。"""
+"""Runtime v4 的公开执行 API。"""
 
 from .application.dto import RunRequest, RunResult
 from .domain.facts import AgentRun, RunStatus

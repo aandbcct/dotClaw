@@ -12,9 +12,9 @@ from ..domain.facts import JSONMap, JSONValue, require_json_map
 
 
 class StorageFormatVersion(IntEnum):
-    """Runtime v3 文件容器的唯一支持格式版本。"""
+    """Runtime v4 文件容器的唯一支持格式版本。"""
 
-    CONTEXT_VERSIONS = 3
+    CONTEXT_VERSIONS = 4
 
 
 class RunStorageFileName(StrEnum):

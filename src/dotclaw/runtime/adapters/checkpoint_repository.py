@@ -1,4 +1,4 @@
-"""Runtime v3 的本地文件 CheckpointRepository 实现。"""
+"""Runtime v4 的本地文件 CheckpointRepository 实现。"""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ class CheckpointRepositoryAdapter:
 
 def _checkpoint_from_dict(data: JSONMap) -> RunCheckpoint:
     """将 checkpoint.json 反序列化为领域检查点。"""
-    _require_v3_format(data, "checkpoint.json")
+    _require_v4_format(data, "checkpoint.json")
     return RunCheckpoint(
         checkpoint_id=get_string(data, "checkpoint_id"),
         run_id=get_string(data, "run_id"),
@@ -104,11 +104,11 @@ def _validate_checkpoint_payload(checkpoint: RunCheckpoint) -> None:
     _validate_json_value(checkpoint.budget, "budget")
 
 
-def _require_v3_format(data: JSONMap, file_name: str) -> None:
+def _require_v4_format(data: JSONMap, file_name: str) -> None:
     """拒绝 v1/v2 文件，避免隐式迁移产生第二套事实。"""
     version: int = get_integer(data, "version")
     if version != int(StorageFormatVersion.CONTEXT_VERSIONS):
-        raise ValueError(f"不支持的 {file_name} 格式版本：{version}；仅支持 v3")
+        raise ValueError(f"不支持的 {file_name} 格式版本：{version}；仅支持 v4")
 
 
 def _optional_positive_integer(value: JSONValue | None) -> int | None:

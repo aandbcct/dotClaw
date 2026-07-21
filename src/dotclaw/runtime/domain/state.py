@@ -1,4 +1,4 @@
-"""不依赖外部实现的 Runtime v3 Agent 状态机。"""
+"""不依赖外部实现的 Runtime v4 Agent 状态机。"""
 
 from __future__ import annotations
 

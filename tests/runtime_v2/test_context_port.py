@@ -24,7 +24,7 @@ from dotclaw.context import (
 )
 from dotclaw.runtime.application.dto import ContextBundle, ConversationMessage, ConversationSnapshot, RunRequest
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
-from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextSlotStatus
+from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent, ToolDefinitionsSlotContent
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
 from dotclaw.runtime.domain.state import AgentState
 
@@ -112,7 +112,8 @@ class PayloadFilteringSlot:
 
 def _descriptor(slot_id: str, owner: ContextOwner, kind: ContextContributionKind, scope: ContextCacheScope, order: int) -> ContextSlotDescriptor:
     """构造测试使用的精确 Slot 描述符。"""
-    return ContextSlotDescriptor(slot_id, owner, kind, scope, ContextRefreshPolicy.SIGNAL, order)
+    mode: ContextPersistenceMode = ContextPersistenceMode.FACT_REFERENCE if kind is ContextContributionKind.RUN_MESSAGE_REFERENCES else ContextPersistenceMode.SNAPSHOT
+    return ContextSlotDescriptor(slot_id, owner, kind, mode, scope, ContextRefreshPolicy.SIGNAL, order)
 
 
 def _request() -> RunRequest:
@@ -160,7 +161,7 @@ def _execution(request: RunRequest, run_messages: tuple[RunMessage, ...] = ()) -
 async def test_bound_slots_are_snapshotted_and_unenabled_slot_is_absent() -> None:
     """已绑定 Slot 全部写入 INCLUDED、EMPTY 或 FAILED；未启用的不出现。"""
     registry = ContextSlotRegistry()
-    included = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "自定义内容"))
+    included = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, TextSlotContent("自定义内容")))
     empty = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.EMPTY))
     registry.register(_descriptor("custom", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 10), lambda: included)
     registry.register(_descriptor("empty", ContextOwner.SESSION, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.SESSION, 20), lambda: empty)
@@ -178,7 +179,7 @@ async def test_bound_slots_are_snapshotted_and_unenabled_slot_is_absent() -> Non
     assert [snapshot.slot_id for snapshot in bundle.metadata.slot_snapshots] == ["custom", "empty", "failed"]
     assert [snapshot.status for snapshot in bundle.metadata.slot_snapshots] == [ContextSlotStatus.INCLUDED, ContextSlotStatus.EMPTY, ContextSlotStatus.FAILED]
     assert "unenabled" not in bundle.metadata.source_names
-    assert [message.content for message in bundle.messages] == ["自定义内容", "历史回答", "当前问题"]
+    assert [message.content for message in bundle.messages] == ["自定义内容"]
 
 
 async def test_run_messages_slot_only_snapshots_identifiers_and_tools_stay_structured() -> None:
@@ -187,11 +188,12 @@ async def test_run_messages_slot_only_snapshots_identifiers_and_tools_stay_struc
     run_message = RunMessage("tool-result-1", 2, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "私有工具输出", tool_call_id="call-1")
     bundle = await build_context_provider(ContextDependencies()).build(request, _execution(request, (run_message,)).view())
 
-    run_snapshot = next(snapshot for snapshot in bundle.metadata.slot_snapshots if snapshot.slot_id == "run_messages")
     tools_snapshot = next(snapshot for snapshot in bundle.metadata.slot_snapshots if snapshot.slot_id == "tools")
-    assert run_snapshot.message_ids == ("tool-result-1",)
-    assert run_snapshot.content == ""
-    assert tools_snapshot.status is ContextSlotStatus.EMPTY
+    assert all(snapshot.slot_id != "run_messages" for snapshot in bundle.metadata.slot_snapshots)
+    assert bundle.metadata.fact_reference_message_ids == ("tool-result-1",)
+    assert tools_snapshot.status is ContextSlotStatus.INCLUDED
+    assert isinstance(tools_snapshot.content, ToolDefinitionsSlotContent)
+    assert [item.to_dict() for item in tools_snapshot.content.tools] == [tool.to_dict() for tool in bundle.tools]
     assert bundle.tools[0].name == "lookup"
     assert all("lookup" not in message.content for message in bundle.messages if message.role is MessageRole.SYSTEM)
     assert bundle.messages[-1].content == "私有工具输出"
@@ -200,7 +202,7 @@ async def test_run_messages_slot_only_snapshots_identifiers_and_tools_stay_struc
 async def test_signal_and_direct_refresh_take_effect_at_next_build() -> None:
     """外部只能请求刷新或发布信号，具体 Slot 在下一个安全点刷新。"""
     registry = ContextSlotRegistry()
-    slot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "内容"))
+    slot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, TextSlotContent("内容")))
     registry.register(_descriptor("refreshable", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 10), lambda: slot)
     signals = ContextSignalBus()
     manager = ContextSlotManager(registry, signals)
@@ -284,10 +286,10 @@ async def test_cache_instance_isolated_by_exact_owner_key() -> None:
 async def test_owner_plan_configuration_composes_all_owner_scopes_without_global_slot_tuple() -> None:
     """Agent、Session、Run、Global 的有效配置独立组合，新增 Slot 只需写入配置。"""
     registry = ContextSlotRegistry()
-    global_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "全局"))
-    agent_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "Agent"))
-    session_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "Session"))
-    run_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, "Run"))
+    global_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, TextSlotContent("全局")))
+    agent_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, TextSlotContent("Agent")))
+    session_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, TextSlotContent("Session")))
+    run_slot: RecordingSlot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, TextSlotContent("Run")))
     registry.register(_descriptor("global_extra", ContextOwner.GLOBAL, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.NONE, 10), lambda: global_slot)
     registry.register(_descriptor("agent_extra", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 20), lambda: agent_slot)
     registry.register(_descriptor("session_extra", ContextOwner.SESSION, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.SESSION, 30), lambda: session_slot)

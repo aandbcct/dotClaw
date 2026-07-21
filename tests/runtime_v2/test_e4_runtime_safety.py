@@ -268,8 +268,8 @@ async def test_over_budget_compresses_oldest_conversations_then_recounts_and_sta
     assert run is not None
     assert len(run.staged_history_compressions) == 1
     assert run.staged_history_compressions[0].context_version == 1
-    history_slot = next(slot for slot in versions[0].slots if slot.contribution_kind.value == "history")
-    assert "已压缩的历史事实" in str(history_slot.attributes)
+    history_slot = next(slot for slot in versions[0].slots if slot.contribution_kind.value == "history_compressions")
+    assert "已压缩的历史事实" in history_slot.content.text
 
 
 async def test_within_budget_does_not_create_history_compression_candidate(tmp_path: Path) -> None:
@@ -419,11 +419,11 @@ async def test_repeated_compression_replaces_prior_summary_in_context_version(tm
 
     result: RunResult = await engine.execute(request)
     versions = await repository.load_context_versions(request.session_id, result.run_id)
-    history_slot = next(slot for slot in versions[0].slots if slot.contribution_kind.value == "history")
+    history_slot = next(slot for slot in versions[0].slots if slot.contribution_kind.value == "history_compressions")
 
     assert result.status is RunStatus.COMPLETED
-    assert "history-compression-2" in str(history_slot.attributes)
-    assert "history-compression-1" not in str(history_slot.attributes)
+    assert "已压缩的历史事实" in history_slot.content.text
+    assert "旧摘要" not in history_slot.content.text
 
 
 async def test_invalid_context_window_fails_deterministically_without_checkpoint(tmp_path: Path) -> None:
