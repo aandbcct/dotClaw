@@ -17,6 +17,7 @@ from ..domain.events import (
     RunEventType,
     RunStarted,
     ToolCompleted,
+    ToolAuditStatus,
     ToolCompletionKind,
 )
 from ..domain.context import (
@@ -442,7 +443,7 @@ class RuntimeEngine:
                             execution.view(),
                         )
                     except Exception as error:
-                        event_number = await self._tool_completed_event(run, event_number, tool_call, None, ToolResultStatus.FAILED, _safe_error_summary(error))
+                        event_number = await self._tool_completed_event(run, event_number, tool_call, None, ToolAuditStatus.FAILED, _safe_error_summary(error))
                         return await self._fail(execution, run, tuple(messages), event_number, f"工具调用失败：{error}", RunErrorCode.TOOL_FAILURE)
                     if execution.cancellation.cancelled:
                         event_number = await self._tool_completed_event(
@@ -450,7 +451,7 @@ class RuntimeEngine:
                             event_number,
                             tool_call,
                             None,
-                            ToolResultStatus.FAILED,
+                            ToolAuditStatus.CANCELLED,
                             "工具执行后已取消",
                         )
                         return await self._finish_cancelled(
@@ -472,7 +473,7 @@ class RuntimeEngine:
                     )
                     messages.append(tool_message)
                     await self._save_messages(run, execution, messages)
-                    event_number = await self._tool_completed_event(run, event_number, tool_call, tool_message.message_id, tool_result.status, _tool_error_summary(tool_result))
+                    event_number = await self._tool_completed_event(run, event_number, tool_call, tool_message.message_id, _tool_audit_status(tool_result.status), _tool_error_summary(tool_result))
                     if tool_result.status is ToolResultStatus.FAILED:
                         error = tool_result.error.message if tool_result.error is not None else tool_result.output or "工具执行失败"
                         return await self._fail(execution, run, tuple(messages), event_number, error, RunErrorCode.TOOL_FAILURE)
@@ -742,7 +743,7 @@ class RuntimeEngine:
         """提交、获取并持久化一次 delegation 结果，可选择是否推进独立 delegation 状态。"""
         if self._delegation_port is None:
             if audit_tool_call is not None:
-                event_sequence = await self._tool_completed_event(run, event_sequence, audit_tool_call, None, ToolResultStatus.FAILED, "未装配 DelegationPort")
+                event_sequence = await self._tool_completed_event(run, event_sequence, audit_tool_call, None, ToolAuditStatus.FAILED, "未装配 DelegationPort")
             failed: RunResult = await self._fail(
                 execution,
                 run,
@@ -775,7 +776,7 @@ class RuntimeEngine:
             child_result: DelegationResult | None = await self._delegation_port.result(child_run_id)
         except Exception as error:
             if audit_tool_call is not None:
-                event_sequence = await self._tool_completed_event(run, event_sequence, audit_tool_call, None, ToolResultStatus.FAILED, _safe_error_summary(error))
+                event_sequence = await self._tool_completed_event(run, event_sequence, audit_tool_call, None, ToolAuditStatus.FAILED, _safe_error_summary(error))
             failed = await self._fail(
                 execution,
                 run,
@@ -790,7 +791,7 @@ class RuntimeEngine:
                 self._cancellation_service.clear_delegated_run(execution.run_id, child_run_id)
         if execution.cancellation.cancelled:
             if audit_tool_call is not None:
-                next_event_sequence = await self._tool_completed_event(run, next_event_sequence, audit_tool_call, None, ToolResultStatus.FAILED, "委派执行期间已取消")
+                next_event_sequence = await self._tool_completed_event(run, next_event_sequence, audit_tool_call, None, ToolAuditStatus.CANCELLED, "委派执行期间已取消")
             cancelled: RunResult = await self._finish_cancelled(
                 execution,
                 run,
@@ -801,7 +802,7 @@ class RuntimeEngine:
             return DelegationDriveResult(error=cancelled)
         if child_result is None:
             if audit_tool_call is not None:
-                next_event_sequence = await self._tool_completed_event(run, next_event_sequence, audit_tool_call, None, ToolResultStatus.FAILED, "委派未返回子运行结果")
+                next_event_sequence = await self._tool_completed_event(run, next_event_sequence, audit_tool_call, None, ToolAuditStatus.FAILED, "委派未返回子运行结果")
             failed = await self._fail(
                 execution,
                 run,
@@ -854,7 +855,7 @@ class RuntimeEngine:
             execution.update_state(transition.state, transition.action)
         if not succeeded:
             if audit_tool_call is not None:
-                next_event_sequence = await self._tool_completed_event(delegated_run, next_event_sequence, audit_tool_call, result_message.message_id, ToolResultStatus.FAILED, child_result.error.message if child_result.error is not None else "委派子运行失败")
+                next_event_sequence = await self._tool_completed_event(delegated_run, next_event_sequence, audit_tool_call, result_message.message_id, ToolAuditStatus.FAILED, child_result.error.message if child_result.error is not None else "委派子运行失败")
             failed = await self._fail(
                 execution,
                 delegated_run,
@@ -865,7 +866,7 @@ class RuntimeEngine:
             )
             return DelegationDriveResult(error=failed)
         if audit_tool_call is not None:
-            next_event_sequence = await self._tool_completed_event(delegated_run, next_event_sequence, audit_tool_call, result_message.message_id, ToolResultStatus.COMPLETED)
+            next_event_sequence = await self._tool_completed_event(delegated_run, next_event_sequence, audit_tool_call, result_message.message_id, ToolAuditStatus.COMPLETED)
         return DelegationDriveResult(
             run=delegated_run,
             message_sequence=next_sequence,
@@ -899,9 +900,9 @@ class RuntimeEngine:
         """在任何 ToolPort 或委派调用前写入无参数正文的开始审计事件。"""
         source_id: str = _source_response_message_id(messages, tool_call.call_id)
         ids: tuple[str, ...] = (source_id,) if source_id else ()
-        return await self._event(run, event_sequence, RunEventType.TOOL_STARTED, ids, "工具调用开始", {"source_response_message_id": source_id, "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": "started"})
+        return await self._event(run, event_sequence, RunEventType.TOOL_STARTED, ids, "工具调用开始", {"source_response_message_id": source_id, "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": ToolAuditStatus.STARTED.value})
 
-    async def _tool_completed_event(self, run: AgentRun, event_sequence: int, tool_call: ToolCall, result_message_id: str | None, status: ToolResultStatus, error_summary: str = "") -> int:
+    async def _tool_completed_event(self, run: AgentRun, event_sequence: int, tool_call: ToolCall, result_message_id: str | None, status: ToolAuditStatus, error_summary: str = "") -> int:
         """为成功、审批和异常路径写入唯一的完成审计事件。"""
         ids: tuple[str, ...] = (result_message_id,) if result_message_id is not None else ()
         return await self._event(run, event_sequence, RunEventType.TOOL_COMPLETED, ids, "工具调用完成", {"result_message_id": result_message_id or "", "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": status.value, "error_summary": error_summary})
@@ -1386,6 +1387,15 @@ def _tool_error_summary(result: ToolResult) -> str:
     if result.error is not None:
         return result.error.message[:200]
     return result.output[:200] if result.status is ToolResultStatus.FAILED else ""
+
+
+def _tool_audit_status(status: ToolResultStatus) -> ToolAuditStatus:
+    """将 ToolPort 结果类别映射为不混淆 Run 取消语义的审计终态。"""
+    if status is ToolResultStatus.COMPLETED:
+        return ToolAuditStatus.COMPLETED
+    if status is ToolResultStatus.APPROVAL_REQUIRED:
+        return ToolAuditStatus.APPROVAL_REQUIRED
+    return ToolAuditStatus.FAILED
 
 
 def _with_llm_statistics(run: AgentRun, response: RunMessage) -> AgentRun:

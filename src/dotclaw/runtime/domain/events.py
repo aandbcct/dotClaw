@@ -48,6 +48,16 @@ class ToolCompletionKind(StrEnum):
     APPROVAL_REQUIRED = "approval_required"
 
 
+class ToolAuditStatus(StrEnum):
+    """单个工具调用审计事件的终态，独立于 ToolPort 返回类别。"""
+
+    STARTED = "started"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    APPROVAL_REQUIRED = "approval_required"
+    CANCELLED = "cancelled"
+
+
 @dataclass(frozen=True)
 class RunEvent:
     """按运行序号追加的审计事实。"""
