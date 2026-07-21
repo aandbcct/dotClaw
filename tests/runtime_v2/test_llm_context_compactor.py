@@ -17,6 +17,7 @@ class CompressionProxy:
         self.messages: list[Message] = []
         self.tools: list[ToolDefinition] | None = None
         self.stream: bool = True
+        self.purpose: str = ""
 
     async def chat(
         self,
@@ -30,6 +31,7 @@ class CompressionProxy:
         self.messages = messages
         self.tools = tools
         self.stream = stream
+        self.purpose = purpose
         yield ChatChunk(content="保留目标和约束。")
         yield ChatChunk(content="保留工具结论。", is_final=True)
 
@@ -52,6 +54,7 @@ async def test_llm_context_compactor_uses_non_streaming_tool_free_call() -> None
 
     assert proxy.tools is None
     assert proxy.stream is False
+    assert proxy.purpose == "context_compaction"
     assert proxy.messages[0].role == "system"
     assert result.scope is ContextCompactionScope.SESSION_HISTORY
     assert result.version == 1

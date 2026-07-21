@@ -1,4 +1,4 @@
-"""将旧 ToolExecutor 适配为无 Channel 副作用的 Runtime v2 ToolPort。"""
+"""将旧 ToolExecutor 适配为无 Channel 副作用的 Runtime v4 ToolPort。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Runtime v2 领域事件与审计事件模型。"""
+"""Runtime v4 领域事件与审计事件模型。"""
 
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ class RunEventType(StrEnum):
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
     RUN_CANCELLED = "run_cancelled"
+    RUN_INTERRUPTED = "run_interrupted"
+    RUN_ABANDONED = "run_abandoned"
 
 
 class LLMCompletionKind(StrEnum):
@@ -44,6 +46,16 @@ class ToolCompletionKind(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     APPROVAL_REQUIRED = "approval_required"
+
+
+class ToolAuditStatus(StrEnum):
+    """单个工具调用审计事件的终态，独立于 ToolPort 返回类别。"""
+
+    STARTED = "started"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    APPROVAL_REQUIRED = "approval_required"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)

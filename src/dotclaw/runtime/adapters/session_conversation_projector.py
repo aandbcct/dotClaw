@@ -1,8 +1,8 @@
-"""将 Runtime v2 成功运行投影到既有 Session 的适配器。"""
+"""将 Runtime v4 成功运行投影到既有 Session 的适配器。"""
 
 from __future__ import annotations
 
-from ..domain.facts import AgentRun, RunMessage
+from ..domain.facts import AgentRun, HistoryCompressionSnapshot, RunMessage
 from ...session.session import Session, SessionManager
 
 
@@ -18,8 +18,10 @@ class SessionConversationProjector:
         run: AgentRun,
         user_message: RunMessage,
         final_message: RunMessage,
+        history_compression: HistoryCompressionSnapshot | None,
+        source_conversation_hash: str,
     ) -> None:
-        """将用户输入和最终回复写入同一条 Session Conversation。"""
+        """将 Conversation 和最新压缩候选在同一次 Session 保存中原子写入。"""
         session: Session | None = await self._session_manager.load(run.session_id)
         if session is None:
             raise FileNotFoundError(f"Session {run.session_id} 不存在，无法投影成功运行")
@@ -30,6 +32,15 @@ class SessionConversationProjector:
             final_answer=final_message.content,
             agent_run_ids=[run.run_id],
         )
+        if history_compression is not None:
+            session.append_history_compression(
+                history_compression.compression_version,
+                history_compression.covered_through_conversation_id,
+                history_compression.content,
+                history_compression.content_hash,
+                source_conversation_hash,
+                history_compression.compression_version - 1,
+            )
         await self._session_manager.save(session)
 
     def _contains_run(self, session: Session, run_id: str) -> bool:

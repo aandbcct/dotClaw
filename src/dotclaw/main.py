@@ -120,6 +120,18 @@ async def _run_cli() -> None:
                         channel.print_info(f"已提交取消请求: {args}")
                     else:
                         channel.print_error("用法: /cancel <run_id>")
+                elif cmd == "/retry":
+                    if args:
+                        retry_result: str = await agent.retry_interrupted(args)
+                        await channel.print_markdown(retry_result)
+                    else:
+                        channel.print_error("用法: /retry <run_id>")
+                elif cmd == "/abandon":
+                    if args:
+                        abandon_result: str = await agent.abandon_interrupted(args)
+                        await channel.print_markdown(abandon_result)
+                    else:
+                        channel.print_error("用法: /abandon <run_id>")
                 elif cmd == "/tools":
                     _cmd_tools(channel, agent.tool_executor)
                 elif cmd == "/mcp":
@@ -165,6 +177,8 @@ dotClaw 命令:
   /skills          列出已加载技能
   /dream           触发记忆蒸馏
   /cancel <run_id>  取消指定运行
+  /retry <run_id>   重试中断运行
+  /abandon <run_id> 放弃中断运行
   /model           查看当前模型
   /help            显示帮助
   /quit            退出

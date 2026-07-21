@@ -8,6 +8,8 @@ from pathlib import Path
 from dotclaw.agent.agent import Agent
 from dotclaw.agent.identity import AgentIdentity
 from dotclaw.bootstrap.runtime_factory import build_runtime_services
+from dotclaw.channel.base import Channel
+from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
 from dotclaw.config.settings import Config
 from dotclaw.llm.base import ChatChunk
 from dotclaw.orchestration.registry import AgentRegistry
@@ -27,12 +29,36 @@ class FinalProxy:
         yield ChatChunk(content="已通过新版入口", is_final=True, input_tokens=2, output_tokens=2)
 
 
+class ChannelCollector(Channel):
+    """验证 Runtime 到 Channel 的文本流转发，不依赖真实终端。"""
+
+    def __init__(self) -> None:
+        """初始化收集到的文本块。"""
+        self.chunks: list[str] = []
+
+    async def receive(self) -> str:
+        """本测试不读取用户输入。"""
+        return ""
+
+    async def send(self, message: str) -> None:
+        """本测试不使用非流式发送。"""
+
+    async def stream(self, chunk: str) -> None:
+        """记录 Runtime 转发的文本块。"""
+        self.chunks.append(chunk)
+
+    async def ask_user(self, prompt: str) -> str:
+        """本测试不触发交互式审批。"""
+        return ""
+
+
 async def test_agent_process_submits_to_coordinator_and_projector_writes_conversation(tmp_path: Path) -> None:
     """普通消息经 Coordinator/Engine 执行，Agent 本身不直接写 Session。"""
     config = Config()
     config.session.directory = str(tmp_path)
-    identity = AgentIdentity(agent_id="agent-1", agent_name="测试 Agent")
+    identity = AgentIdentity(agent_id="agent-1", agent_name="测试 Agent", model="qwen3.7-max")
     session_manager = SessionManager(tmp_path)
+    channel: ChannelCollector = ChannelCollector()
     services = build_runtime_services(
         config=config,
         project_root=PROJECT_ROOT,
@@ -44,6 +70,7 @@ async def test_agent_process_submits_to_coordinator_and_projector_writes_convers
         memory_manager=None,
         agent_registry=AgentRegistry(),
         mcp_provider=None,
+        text_stream_port=ChannelTextStreamAdapter(channel),
     )
     agent = Agent(identity, coordinator=services.coordinator, config=config)
     session = await session_manager.create(agent_id=identity.agent_id)
@@ -52,6 +79,8 @@ async def test_agent_process_submits_to_coordinator_and_projector_writes_convers
     projected = await session_manager.load(session.id)
 
     assert answer == "已通过新版入口"
+    assert agent.has_streamed_final_answer is True
+    assert channel.chunks == ["已通过新版入口"]
     assert projected is not None
     assert [(item.user_query, item.final_answer) for item in projected.conversations] == [("你好", "已通过新版入口")]
 

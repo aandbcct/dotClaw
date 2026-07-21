@@ -70,6 +70,9 @@ class AgentIdentity:
     """支持的输出模式。对标 A2A AgentCard.defaultOutputModes。
     示例：["text", "file", "structured_data"]。"""
 
+    context_slot_ids: tuple[str, ...] | None = None
+    """Agent Owner 显式启用的 Context Slot；None 时使用 Context 组合根的默认计划。"""
+
     # ── 方法 ──
 
     def resolve_system_prompt(self) -> str:
@@ -152,6 +155,12 @@ def load_agent_config(
     from ..common.utils import expand_env_vars
     raw = expand_env_vars(raw) if raw else {}
 
+    raw_context_slot_ids = raw.get("context_slot_ids")
+    context_slot_ids: tuple[str, ...] | None = (
+        tuple(item for item in raw_context_slot_ids if isinstance(item, str))
+        if isinstance(raw_context_slot_ids, list) and all(isinstance(item, str) for item in raw_context_slot_ids)
+        else None
+    )
     return AgentIdentity(
         agent_id=raw.get("agent_id", agent_id),
         agent_name=str(raw.get("agent_name", "DotClaw")),
@@ -165,4 +174,5 @@ def load_agent_config(
         capabilities=list(raw.get("capabilities", [])),
         input_modes=list(raw.get("input_modes", ["text"])),
         output_modes=list(raw.get("output_modes", ["text"])),
+        context_slot_ids=context_slot_ids,
     )

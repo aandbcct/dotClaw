@@ -248,6 +248,7 @@ class ModelConfig:
     provider: str = "qwen"
     model_id: str = "qwen-plus"
     context_window: int = 32000
+    tokenizer_encoding: str = ""
     capabilities: list[str] = field(default_factory=lambda: ["chat"])
     status: str = "active"
 
@@ -336,6 +337,7 @@ def load_router_config(path: str | Path | None = None) -> RouterConfig:
             provider=cfg.get("provider", "qwen"),
             model_id=cfg.get("model_id", name),
             context_window=cfg.get("context_window", 32000),
+            tokenizer_encoding=cfg.get("tokenizer_encoding", ""),
             capabilities=cfg.get("capabilities", ["chat"]),
             status=cfg.get("status", "active"),
         )

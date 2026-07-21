@@ -12,9 +12,9 @@ from ..domain.facts import (
     RunError,
     RunMessage,
     RunStatus,
-    SystemContextSnapshot,
     ToolCall,
 )
+from ..domain.context import ContextOwner, ContextRefreshReason, ContextSlotSnapshot
 
 
 @dataclass(frozen=True)
@@ -129,7 +129,8 @@ class ContextMetadata:
     source_names: tuple[str, ...] = ()
     truncation_applied: bool = False
     details: JSONMap = field(default_factory=dict)
-    system_context: SystemContextSnapshot | None = None
+    slot_snapshots: tuple[ContextSlotSnapshot, ...] = ()
+    fact_reference_message_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -138,9 +139,8 @@ class ContextMetadata:
             "source_names": list(self.source_names),
             "truncation_applied": self.truncation_applied,
             "details": self.details,
-            "system_context": (
-                None if self.system_context is None else self.system_context.to_dict()
-            ),
+            "slot_snapshots": [snapshot.to_dict() for snapshot in self.slot_snapshots],
+            "fact_reference_message_ids": list(self.fact_reference_message_ids),
         }
 
 
@@ -159,6 +159,17 @@ class ContextBundle:
             "tools": [tool.to_dict() for tool in self.tools],
             "metadata": self.metadata.to_dict(),
         }
+
+
+@dataclass(frozen=True)
+class ContextRefreshSignal:
+    """通过 ContextPort 发布的定向 Slot 刷新事件 DTO。"""
+
+    slot_id: str
+    owner: ContextOwner
+    owner_key: str
+    reason: ContextRefreshReason
+    payload: JSONMap
 
 
 class ToolResultStatus(StrEnum):

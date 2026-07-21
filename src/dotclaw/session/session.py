@@ -16,6 +16,7 @@ import hashlib
 import os
 import tempfile
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -220,6 +221,11 @@ class SessionManager:
         project_root: Path = module_path.parent.parent  # 项目根目录
         self._data_dir: Path = (project_root / data_dir).resolve()
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._deletion_handler: Callable[[str], Awaitable[None]] | None = None
+
+    def set_deletion_handler(self, handler: Callable[[str], Awaitable[None]]) -> None:
+        """设置 Session 删除完成后调用的资源释放处理器。"""
+        self._deletion_handler = handler
 
     def _session_path(self, session_id: str) -> Path:
         """获取 Session 文件路径。"""
@@ -287,6 +293,8 @@ class SessionManager:
         path: Path = self._session_path(session_id)
         if path.exists():
             path.unlink()
+            if self._deletion_handler is not None:
+                await self._deletion_handler(session_id)
             return True
         return False
 

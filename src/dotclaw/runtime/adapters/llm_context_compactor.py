@@ -8,7 +8,11 @@ from collections.abc import AsyncIterator
 from typing import Protocol
 
 from ...llm.base import ChatChunk, Message, ToolDefinition
-from ..application.context_compaction import ContextCompactionRequest, ContextCompactionResult
+from ...llm.base import LLMUsage
+from ..application.context_compaction import ContextCompactionRequest, ContextCompactionResult, ContextFragment
+from ..application.dto import ConversationMessage
+from ..application.history_compaction import ConversationBatch, HistoryCompactionRequest, HistoryCompactionResult, HistoryCompactorUnavailable
+from ..domain.facts import ContextCompactionScope
 
 
 class LLMCompactionClient(Protocol):
@@ -35,11 +39,22 @@ class LLMContextCompactor:
     async def compact(self, request: ContextCompactionRequest) -> ContextCompactionResult:
         """生成下一版摘要；空摘要视为压缩失败，避免丢失原始历史。"""
         messages: list[Message] = _build_compaction_messages(request)
-        chunks: AsyncIterator[ChatChunk] = self._llm_proxy.chat(messages=messages, tools=None, stream=False)
+        try:
+            chunks: AsyncIterator[ChatChunk] = self._llm_proxy.chat(
+                messages=messages,
+                tools=None,
+                purpose=LLMUsage.CONTEXT_COMPACTION,
+                stream=False,
+            )
+        except Exception as error:
+            raise HistoryCompactorUnavailable("上下文压缩服务不可用") from error
         content_parts: list[str] = []
-        async for chunk in chunks:
-            if chunk.content:
-                content_parts.append(chunk.content)
+        try:
+            async for chunk in chunks:
+                if chunk.content:
+                    content_parts.append(chunk.content)
+        except Exception as error:
+            raise HistoryCompactorUnavailable("上下文压缩服务不可用") from error
         summary: str = "".join(content_parts).strip()
         if not summary:
             raise RuntimeError("上下文压缩模型未返回有效摘要")
@@ -53,6 +68,23 @@ class LLMContextCompactor:
             content_hash=_hash_text(summary),
             source_hash=source_hash,
         )
+
+    async def compact_history(self, request: HistoryCompactionRequest) -> HistoryCompactionResult:
+        """实现 HistoryCompactorPort，使用真实压缩路由处理完整 Conversation 批次。"""
+        fragments: list[ContextFragment] = []
+        batch: ConversationBatch
+        for batch in request.batches:
+            message: ConversationMessage
+            for message in batch.messages:
+                fragments.append(ContextFragment(f"{batch.conversation_id}:{message.message_id}", message.role, message.content))
+        result: ContextCompactionResult = await self.compact(ContextCompactionRequest(
+            scope=ContextCompactionScope.SESSION_HISTORY,
+            source_version=0,
+            target_token_budget=request.source_context_window,
+            fragments=tuple(fragments),
+            previous_summary=request.previous_summary,
+        ))
+        return HistoryCompactionResult(result.content)
 
 
 def _build_compaction_messages(request: ContextCompactionRequest) -> list[Message]:

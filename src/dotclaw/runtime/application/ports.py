@@ -1,4 +1,4 @@
-"""Runtime v2 依赖的外部能力协议。"""
+"""Runtime v4 依赖的外部能力协议。"""
 
 from __future__ import annotations
 
@@ -6,16 +6,23 @@ from typing import Protocol
 
 from ..domain.events import RunEvent
 from dotclaw.runtime.application.execution import RunExecutionView
+from ..domain.context import ContextOwner, ContextVersion, StagedHistoryCompression, SuccessCommitFaultPoint, SuccessCommitIntent
 from ..domain.facts import (
     AgentRun,
     ApprovalRecord,
-    InitialContextSnapshot,
+    HistoryCompressionSnapshot,
     RunCheckpoint,
     RunMessage,
     AgentPolicySnapshot,
 )
+from .context_budget import TokenCountRequest, TokenCountResult
 from .context_compaction import ContextCompactionRequest, ContextCompactionResult
-from .dto import ContextBundle, DelegationRequest, DelegationResult, DelegationSubmission, RunRequest, ToolInvocation, ToolResult
+from .history_compaction import HistoryCompactionRequest, HistoryCompactionResult
+from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, RunRequest, ToolInvocation, ToolResult
+
+
+class LLMUnavailableError(RuntimeError):
+    """业务模型代理重试耗尽后的可恢复外部错误。"""
 
 
 class TextStreamPort(Protocol):
@@ -32,6 +39,18 @@ class ContextCompactionPort(Protocol):
         """基于已有摘要与待覆盖片段生成新的摘要。"""
 
 
+class TokenCounterPort(Protocol):
+    """统计结构化 LLM 输入 Token 的精确应用端口。"""
+    async def count(self, request: TokenCountRequest) -> TokenCountResult:
+        """返回精确数量或明确 Tokenizer 错误。"""
+
+
+class HistoryCompactorPort(Protocol):
+    """按完整 Conversation 批次生成滚动历史摘要。"""
+    async def compact_history(self, request: HistoryCompactionRequest) -> HistoryCompactionResult:
+        """压缩一批完整 Conversation，失败时不产生候选。"""
+
+
 class ConversationProjectionPort(Protocol):
     """将成功运行投影到既有 Session Conversation 的协议。"""
 
@@ -40,8 +59,17 @@ class ConversationProjectionPort(Protocol):
         run: AgentRun,
         user_message: RunMessage,
         final_message: RunMessage,
+        history_compression: HistoryCompressionSnapshot | None,
+        source_conversation_hash: str,
     ) -> None:
-        """仅在运行成功后追加一条可见对话记录。"""
+        """原子投影成功 Conversation 与可选最新历史压缩。"""
+
+
+class SuccessCommitFaultPort(Protocol):
+    """仅供恢复测试在持久化边界模拟进程中断的端口。"""
+
+    async def inject(self, point: SuccessCommitFaultPoint) -> None:
+        """在指定成功提交边界抛出测试定义的中断异常。"""
 
 
 class RunRepository(Protocol):
@@ -56,25 +84,44 @@ class RunRepository(Protocol):
     async def find_run(self, run_id: str) -> AgentRun | None:
         """按运行标识定位摘要，供取消和审批恢复使用。"""
 
+    async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
+        """读取指定 Session 的全部未终态 Run，作为串行占用的持久化真相。"""
+
     async def save_run(self, run: AgentRun) -> None:
         """原子更新运行摘要。"""
 
     async def save_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         """原子更新完整运行消息。"""
 
-    async def save_initial_context(
+    async def append_context_version(
         self,
         session_id: str,
         run_id: str,
-        initial_context: InitialContextSnapshot,
+        context_version: ContextVersion,
     ) -> None:
-        """原子保存 Run 的冻结初始上下文，禁止覆盖内容不同的既有快照。"""
+        """追加 Run 的不可变 Context Version，禁止覆盖既有版本。"""
 
-    async def load_initial_context(self, session_id: str, run_id: str) -> InitialContextSnapshot | None:
-        """加载 Run 的冻结初始上下文；旧格式或尚未保存时返回空。"""
+    async def load_context_versions(self, session_id: str, run_id: str) -> tuple[ContextVersion, ...]:
+        """加载按版本连续递增的上下文版本事实。"""
 
-    async def requires_messages_migration(self, session_id: str, run_id: str) -> bool:
-        """判断 Run 是否仍使用只读的 messages.json v1 格式。"""
+    async def set_active_context_version(self, session_id: str, run_id: str, version: int) -> None:
+        """保存 Run 当前活动的 Context Version 引用。"""
+
+    async def save_staged_history_compressions(
+        self,
+        session_id: str,
+        run_id: str,
+        candidates: tuple[StagedHistoryCompression, ...],
+    ) -> None:
+        """保存不含摘要正文的历史压缩候选控制信息。"""
+
+    async def save_success_commit_intent(
+        self,
+        session_id: str,
+        run_id: str,
+        intent: SuccessCommitIntent,
+    ) -> None:
+        """保存可恢复成功提交意图控制信息。"""
 
     async def load_messages(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         """加载完整运行消息。"""
@@ -87,8 +134,9 @@ class RunRepository(Protocol):
         run: AgentRun,
         final_message: RunMessage,
         completed_event: RunEvent,
+        success_intent: SuccessCommitIntent,
     ) -> None:
-        """以成功终态为提交标记，统一提交事件、Conversation 投影和 Run 摘要。"""
+        """以成功提交意图统一驱动 Conversation、事件和终态 Run 的恢复顺序。"""
 
 
 class CheckpointRepository(Protocol):
@@ -109,6 +157,15 @@ class ContextPort(Protocol):
 
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """构造完整模型消息、工具定义和上下文元数据。"""
+
+    async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """在指定 Owner 生命周期结束时释放其 Slot 实例缓存。"""
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """请求指定 Owner 的 Slot 在下一次安全点刷新。"""
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """发布携带载荷的定向刷新事件。"""
 
 
 class RunPolicyPort(Protocol):

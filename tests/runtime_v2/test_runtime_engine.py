@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
 from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
@@ -15,16 +16,33 @@ from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordi
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.dto import (
     ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot,
-    RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
+    ContextRefreshSignal, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, RunStatus, ToolCall,
     require_json_map,
 )
-from dotclaw.context import ContextDependencies, SlotContextProvider
-from dotclaw.context.scoped_cache import SlotCacheScope
-from dotclaw.context.slot_context import SlotContext
-from dotclaw.context.slots import ContextSlot
+from dotclaw.context import (
+    ContextCacheScope,
+    ContextContribution,
+    ContextDependencies,
+    ContextOwnerPlanConfiguration,
+    ContextPlanResolver,
+    ContextProvider,
+    ContextRefreshPolicy,
+    ContextRefreshSignal,
+    ContextSignalBus,
+    ContextSlotBinding,
+    ContextSlotDescriptor,
+    ContextSlotManager,
+    ContextSlotRegistry,
+    HistoryCompressionsSlot,
+    InMemoryContextPlanConfiguration,
+    RunMessagesSlot,
+    build_context_provider,
+)
+from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent
+from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
 
 class PolicyPort(RunPolicyPort):
@@ -32,16 +50,35 @@ class PolicyPort(RunPolicyPort):
 
     async def resolve(self, request: RunRequest) -> AgentPolicySnapshot:
         """构造最小策略快照。"""
-        return AgentPolicySnapshot(request.agent_id, "identity-v1", "model-v1", 8)
+        return AgentPolicySnapshot(
+            request.agent_id,
+            "identity-v1",
+            "model-v1",
+            8,
+            policy_data={"context_window": 128, "tokenizer_encoding": "cl100k_base"},
+        )
 
 
 class ContextFake(ContextPort):
     """返回一条固定 system 消息的上下文替身。"""
 
+    def __init__(self) -> None:
+        self.released_scopes: list[tuple[ContextOwner, str]] = []
+
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """构造完整模型请求的最小上下文。"""
         message = RunMessage("context", 1, RunMessageKind.LLM_REQUEST, MessageRole.SYSTEM, "系统提示")
         return ContextBundle((message,), (), ContextMetadata(estimated_tokens=1))
+
+    async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身不缓存 Slot 实例。"""
+        self.released_scopes.append((owner, owner_key))
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身不维护独立 Slot 刷新状态。"""
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """测试替身不消费外部刷新信号。"""
 
 
 class FinalLLM(LLMPort):
@@ -85,7 +122,24 @@ def _engine(root: Path) -> RuntimeEngine:
         PolicyPort(),
         ApprovalService(approval_repository),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
+
+
+def test_engine_rejects_missing_context_budget_ports(tmp_path: Path) -> None:
+    """Engine 未装配精确计数和摘要 Port 时必须在启动前明确失败。"""
+    with pytest.raises(ValueError, match="TokenCounterPort 和 HistoryCompactorPort"):
+        RuntimeEngine(
+            RunRepositoryAdapter(tmp_path),
+            CheckpointRepositoryAdapter(tmp_path),
+            ContextFake(),
+            FinalLLM(),
+            ToolFake(),
+            PolicyPort(),
+            ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+            CancellationService(),
+        )
 
 
 async def test_engine_completes_clarification_as_normal_conversation(tmp_path: Path) -> None:
@@ -99,6 +153,27 @@ async def test_engine_completes_clarification_as_normal_conversation(tmp_path: P
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     conversation = await run_repository.load_conversation("session-1")
     assert conversation[0].content == "请补充信息"
+
+
+async def test_engine_releases_run_scope_only_after_terminal_result(tmp_path: Path) -> None:
+    """Run 完成后 Engine 必须通过 ContextPort 释放对应 Run Owner 缓存。"""
+    context_port = ContextFake()
+    engine = RuntimeEngine(
+        RunRepositoryAdapter(tmp_path),
+        CheckpointRepositoryAdapter(tmp_path),
+        context_port,
+        FinalLLM(),
+        ToolFake(),
+        PolicyPort(),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+        CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
+    )
+
+    result = await engine.execute(_request("session-release"))
+
+    assert context_port.released_scopes == [(ContextOwner.RUN, result.run_id)]
 
 
 async def test_engine_runs_different_sessions_concurrently(tmp_path: Path) -> None:
@@ -148,19 +223,69 @@ class ApprovalTool(ToolPort):
         """测试替身无需远程取消。"""
 
 
-class ChangingSystemSlot(ContextSlot):
+class ChangingSystemSlot:
     """每次生成不同文本，用于验证恢复路径必须重放首次冻结 Slot。"""
-
-    name: str = "changing"
-    scope: SlotCacheScope = SlotCacheScope.DYNAMIC
 
     def __init__(self) -> None:
         self.calls: int = 0
 
-    async def produce(self, context: SlotContext) -> str | None:
+    async def load(self, binding: ContextSlotBinding) -> ContextContribution:
         """返回带调用序号的 system 内容。"""
         self.calls += 1
-        return f"system-{self.calls}"
+        return ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.INCLUDED, TextSlotContent(f"system-{self.calls}"))
+
+    async def refresh(self, binding: ContextSlotBinding) -> None:
+        """测试 Slot 不保存缓存。"""
+
+    def should_refresh(self, binding: ContextSlotBinding, signal: ContextRefreshSignal) -> bool:
+        """测试不发布事件，始终拒绝刷新。"""
+        return False
+
+    async def release(self) -> None:
+        """测试 Slot 不持有资源。"""
+
+
+def _changing_context_port(slot: ChangingSystemSlot) -> ContextProvider:
+    """通过 Registry 装配可验证冻结语义的自定义 Slot。"""
+    registry = ContextSlotRegistry()
+    descriptor = ContextSlotDescriptor(
+        "changing",
+        ContextOwner.AGENT,
+        ContextContributionKind.SYSTEM_CONTENT,
+        ContextPersistenceMode.SNAPSHOT,
+        ContextCacheScope.AGENT,
+        ContextRefreshPolicy.SIGNAL,
+        10,
+    )
+    registry.register(descriptor, lambda: slot)
+    registry.register(ContextSlotDescriptor(
+        "history_compressions",
+        ContextOwner.SESSION,
+        ContextContributionKind.HISTORY_COMPRESSIONS,
+        ContextPersistenceMode.SNAPSHOT,
+        ContextCacheScope.SESSION,
+        ContextRefreshPolicy.SIGNAL,
+        20,
+    ), HistoryCompressionsSlot)
+    registry.register(ContextSlotDescriptor(
+        "run_messages",
+        ContextOwner.RUN,
+        ContextContributionKind.RUN_MESSAGE_REFERENCES,
+        ContextPersistenceMode.FACT_REFERENCE,
+        ContextCacheScope.RUN,
+        ContextRefreshPolicy.SIGNAL,
+        30,
+    ), RunMessagesSlot)
+    configuration: InMemoryContextPlanConfiguration = InMemoryContextPlanConfiguration((
+        ContextOwnerPlanConfiguration(ContextOwner.AGENT, ("changing",)),
+        ContextOwnerPlanConfiguration(ContextOwner.SESSION, ("history_compressions",)),
+        ContextOwnerPlanConfiguration(ContextOwner.RUN, ("run_messages",)),
+    ))
+    return ContextProvider(
+        ContextPlanResolver(registry, configuration),
+        ContextSlotManager(registry, ContextSignalBus()),
+        ContextDependencies(),
+    )
 
 
 async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: Path) -> None:
@@ -175,6 +300,8 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-approval"))
     completed = await engine.resolve_approval("approval-1", approved=True)
@@ -189,43 +316,6 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
     ]
     assert event_types.index("approval_resolved") < event_types.index("run_resumed")
     assert event_types.index("run_resumed") < event_types.index("run_completed")
-
-
-async def test_approval_refuses_v1_messages_without_consuming_pending_record(tmp_path: Path) -> None:
-    """v1 Run 必须先迁移；恢复入口不得消费审批或改变等待中的 Run。"""
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    approval_service: ApprovalService = ApprovalService(ApprovalRepositoryAdapter(tmp_path))
-    engine: RuntimeEngine = RuntimeEngine(
-        run_repository,
-        CheckpointRepositoryAdapter(tmp_path),
-        ContextFake(),
-        ApprovalLLM(),
-        ApprovalTool(),
-        PolicyPort(),
-        approval_service,
-        CancellationService(),
-    )
-    waiting: RunResult = await engine.execute(_request("session-v1-approval"))
-    messages_path: Path = tmp_path / "session-v1-approval" / "agent_runs" / waiting.run_id / "messages.json"
-    current_payload: JSONMap = require_json_map(json.loads(messages_path.read_text(encoding="utf-8")))
-    raw_messages: JSONValue | None = current_payload.get("messages")
-    assert isinstance(raw_messages, list)
-    legacy_payload: JSONMap = {
-        "run_id": waiting.run_id,
-        "version": 1,
-        "messages": raw_messages,
-    }
-    messages_path.write_text(json.dumps(legacy_payload, ensure_ascii=False), encoding="utf-8")
-
-    result: RunResult = await engine.resolve_approval(waiting.approval_id or "", approved=True)
-
-    assert result.status is RunStatus.FAILED
-    assert result.error is not None
-    assert "migrate_messages_v1_to_v2" in result.error.message
-    assert await approval_service.find_pending(waiting.approval_id or "") is not None
-    run: AgentRun | None = await run_repository.load_run("session-v1-approval", waiting.run_id)
-    assert run is not None
-    assert run.status is RunStatus.WAITING_APPROVAL
 
 
 class ReActLLM(LLMPort):
@@ -302,12 +392,14 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
         CheckpointRepositoryAdapter(tmp_path),
-        SlotContextProvider((), ContextDependencies()),
+        build_context_provider(ContextDependencies()),
         llm,
         tool_port,
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     result: RunResult = await engine.execute(_request_with_history("session-react"))
@@ -316,51 +408,52 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
     assert [invocation.call.call_id for invocation in tool_port.calls] == ["call-1", "call-2"]
     second_context: ContextBundle = llm.contexts[1]
     assert [message.content for message in second_context.messages] == [
-        "",
         "这是之前的回答。",
         "请查询资料。",
         "我将查询两个来源。",
         "结果-call-1",
         "结果-call-2",
     ]
-    assert second_context.messages[3].tool_calls == (
+    assert second_context.messages[2].tool_calls == (
         ToolCall("call-1", "lookup", {"source": "first"}),
         ToolCall("call-2", "lookup", {"source": "second"}),
     )
-    assert [message.tool_call_id for message in second_context.messages[4:]] == ["call-1", "call-2"]
+    assert [message.tool_call_id for message in second_context.messages[3:]] == ["call-1", "call-2"]
 
 
-async def test_engine_freezes_initial_context_and_audits_llm_calls_without_request_message_copies(tmp_path: Path) -> None:
-    """新 Run 只保存增量事实，LLM 调用通过事件引用冻结上下文和消息序列。"""
+async def test_engine_appends_context_versions_and_audits_llm_calls_without_request_message_copies(tmp_path: Path) -> None:
+    """动态 Run Message 不改变快照版本，事件仍精确引用全部动态输入。"""
     llm: ReActLLM = ReActLLM()
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
         CheckpointRepositoryAdapter(tmp_path),
-        SlotContextProvider((), ContextDependencies()),
+        build_context_provider(ContextDependencies()),
         llm,
         CompletedTool(),
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
-    result: RunResult = await engine.execute(_request_with_history("session-initial-context"))
+    result: RunResult = await engine.execute(_request_with_history("session-context-version"))
 
-    messages_path: Path = tmp_path / "session-initial-context" / "agent_runs" / result.run_id / "messages.json"
-    events_path: Path = tmp_path / "session-initial-context" / "agent_runs" / result.run_id / "events.jsonl"
+    messages_path: Path = tmp_path / "session-context-version" / "agent_runs" / result.run_id / "messages.json"
+    events_path: Path = tmp_path / "session-context-version" / "agent_runs" / result.run_id / "events.jsonl"
     payload: JSONMap = require_json_map(json.loads(messages_path.read_text(encoding="utf-8")))
-    raw_initial_context: JSONValue | None = payload.get("initial_context")
-    assert isinstance(raw_initial_context, dict)
-    initial_context: JSONMap = raw_initial_context
-    raw_history: JSONValue | None = initial_context.get("history")
-    assert isinstance(raw_history, dict)
-    history: JSONMap = raw_history
-    assert history["recent_messages"] == [{
-        "conversation_id": "history-1",
-        "role": "assistant",
-        "content": "这是之前的回答。",
-        "created_at": "2026-07-16T00:00:00+00:00",
-    }]
+    raw_versions: JSONValue | None = payload.get("context_versions")
+    assert isinstance(raw_versions, list)
+    assert [require_json_map(item)["version"] for item in raw_versions] == [1]
+    first_version: JSONMap = require_json_map(raw_versions[0])
+    raw_slots: JSONValue | None = first_version.get("slots")
+    assert isinstance(raw_slots, list)
+    history_slot: JSONMap = next(
+        require_json_map(item) for item in raw_slots if require_json_map(item)["slot_id"] == "conversation"
+    )
+    raw_history_messages: JSONValue | None = history_slot.get("content")
+    assert isinstance(raw_history_messages, list)
+    assert require_json_map(raw_history_messages[0])["content"] == "这是之前的回答。"
     raw_stored_messages: JSONValue | None = payload.get("messages")
     assert isinstance(raw_stored_messages, list)
     stored_messages: list[JSONValue] = raw_stored_messages
@@ -387,6 +480,8 @@ async def test_engine_freezes_initial_context_and_audits_llm_calls_without_reque
     assert isinstance(raw_second_data, dict)
     first_data: JSONMap = raw_first_data
     second_data: JSONMap = raw_second_data
+    assert first_data["context_version"] == 1
+    assert second_data["context_version"] == 1
     assert first_data["incremental_message_ids"] == ["user-1"]
     assert second_data["incremental_message_ids"] == [
         "user-1",
@@ -394,6 +489,9 @@ async def test_engine_freezes_initial_context_and_audits_llm_calls_without_reque
         f"tool-{result.run_id}-3",
         f"tool-{result.run_id}-4",
     ]
+    tool_events: list[JSONMap] = [event for event in events if event["event_type"] in {"tool_started", "tool_completed"}]
+    assert [event["event_type"] for event in tool_events] == ["tool_started", "tool_completed", "tool_started", "tool_completed"]
+    assert [require_json_map(event["data"])["call_id"] for event in tool_events] == ["call-1", "call-1", "call-2", "call-2"]
     assert all(event["event_type"] != "context_built" for event in events)
 
 
@@ -404,12 +502,14 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
         CheckpointRepositoryAdapter(tmp_path),
-        SlotContextProvider((), ContextDependencies()),
+        build_context_provider(ContextDependencies()),
         llm,
         approval_tool,
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     waiting: RunResult = await engine.execute(_request_with_history("session-approval-context"))
@@ -418,7 +518,6 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
     assert completed.status is RunStatus.COMPLETED
     second_context: ContextBundle = llm.contexts[1]
     assert [message.content for message in second_context.messages] == [
-        "",
         "这是之前的回答。",
         "请查询资料。",
         "我将查询两个来源。",
@@ -426,7 +525,7 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
         "已执行",
         "已执行",
     ]
-    assert second_context.messages[3].tool_calls == (
+    assert second_context.messages[2].tool_calls == (
         ToolCall("call-1", "lookup", {"source": "first"}),
         ToolCall("call-2", "lookup", {"source": "second"}),
     )
@@ -439,12 +538,14 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
     engine: RuntimeEngine = RuntimeEngine(
         RunRepositoryAdapter(tmp_path),
         CheckpointRepositoryAdapter(tmp_path),
-        SlotContextProvider((changing_slot,), ContextDependencies()),
+        _changing_context_port(changing_slot),
         llm,
         ApprovalTool(),
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     waiting: RunResult = await engine.execute(_request_with_history("session-frozen-slots"))
@@ -468,6 +569,8 @@ async def test_rejected_approval_records_decision_and_cancels_without_conversati
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     waiting: RunResult = await engine.execute(_request("session-rejected"))
@@ -497,6 +600,8 @@ async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) ->
         PolicyPort(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-cancel"))
     await engine.cancel(waiting.run_id, "用户取消")
@@ -521,6 +626,21 @@ class OrderedEngine:
         if request.lease_id == "lease-fifo-1":
             await self.release.wait()
         return RunResult(request.lease_id, RunStatus.COMPLETED)
+
+    async def recover_session(self, session_id: str) -> None:
+        """测试替身没有持久化遗留运行。"""
+
+    async def active_run(self, session_id: str) -> AgentRun | None:
+        """测试替身不占用 Session。"""
+        return None
+
+    async def retry_interrupted(self, run_id: str) -> RunResult:
+        """测试替身不支持中断重试。"""
+        return RunResult(run_id, RunStatus.FAILED)
+
+    async def abandon_interrupted(self, run_id: str) -> RunResult:
+        """测试替身不支持中断放弃。"""
+        return RunResult(run_id, RunStatus.FAILED)
 
 
 async def test_session_coordinator_serializes_same_session_fifo() -> None:
@@ -570,6 +690,21 @@ class ControlOrderedEngine:
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """测试替身不需要取消行为。"""
+
+    async def recover_session(self, session_id: str) -> None:
+        """测试替身没有持久化遗留运行。"""
+
+    async def active_run(self, session_id: str) -> AgentRun | None:
+        """测试替身不占用 Session。"""
+        return None
+
+    async def retry_interrupted(self, run_id: str) -> RunResult:
+        """测试替身不支持中断重试。"""
+        return RunResult(run_id, RunStatus.FAILED)
+
+    async def abandon_interrupted(self, run_id: str) -> RunResult:
+        """测试替身不支持中断放弃。"""
+        return RunResult(run_id, RunStatus.FAILED)
 
 
 async def test_session_coordinator_serializes_approval_resume_with_new_message() -> None:

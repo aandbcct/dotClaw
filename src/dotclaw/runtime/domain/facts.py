@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Mapping, TypeAlias
+from typing import TYPE_CHECKING, Mapping, TypeAlias
 
 from .control import AgentAction
+
+if TYPE_CHECKING:
+    from .context import StagedHistoryCompression, SuccessCommitIntent
 
 
 JSONPrimitive: TypeAlias = str | int | float | bool | None
@@ -41,24 +44,6 @@ class ContextCompactionScope(StrEnum):
     """版本化上下文摘要的持久化归属范围。"""
 
     SESSION_HISTORY = "session_history"
-    RUN_CONTEXT = "run_context"
-
-
-class SystemContextSlotStatus(StrEnum):
-    """单个 system Slot 在冻结上下文中的产出状态。"""
-
-    INCLUDED = "included"
-    EMPTY = "empty"
-    FAILED = "failed"
-
-
-class SystemContextSlotScope(StrEnum):
-    """冻结 system Slot 的缓存与变化边界。"""
-
-    STATIC = "static"
-    SESSION = "session"
-    CONDITIONAL = "conditional"
-    DYNAMIC = "dynamic"
 
 
 class RunStatus(StrEnum):
@@ -69,6 +54,8 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     WAITING_APPROVAL = "waiting_approval"
+    INTERRUPTED = "interrupted"
+    ABANDONED = "abandoned"
 
 
 class RunErrorCode(StrEnum):
@@ -80,6 +67,10 @@ class RunErrorCode(StrEnum):
     CANCELLED = "cancelled"
     INVALID_STATE = "invalid_state"
     PERSISTENCE_FAILURE = "persistence_failure"
+    CONTEXT_BUDGET = "context_budget"
+    TOKENIZER_UNAVAILABLE = "tokenizer_unavailable"
+    SESSION_BUSY = "session_busy"
+    PROCESS_RESTART = "process_restart"
 
 
 class ApprovalStatus(StrEnum):
@@ -130,48 +121,6 @@ class RunMessage:
             "name": self.name,
             "tool_calls": [tool_call.to_dict() for tool_call in self.tool_calls],
             "metadata": self.metadata,
-        }
-
-
-@dataclass(frozen=True)
-class SystemContextSlot:
-    """一次 Run 冻结的单个 system Slot 产物。"""
-
-    name: str
-    scope: SystemContextSlotScope
-    status: SystemContextSlotStatus
-    content: str = ""
-    content_hash: str = ""
-    error_code: str = ""
-
-    def to_dict(self) -> JSONMap:
-        """转换为 messages.json 可持久化的 Slot 记录。"""
-        return {
-            "name": self.name,
-            "scope": self.scope.value,
-            "status": self.status.value,
-            "content": self.content,
-            "content_hash": self.content_hash,
-            "error_code": self.error_code,
-        }
-
-
-@dataclass(frozen=True)
-class SystemContextSnapshot:
-    """Run 开始时冻结的结构化 system context。"""
-
-    version: int
-    slot_order: tuple[str, ...]
-    slots: tuple[SystemContextSlot, ...]
-    rendered_content_hash: str
-
-    def to_dict(self) -> JSONMap:
-        """转换为 messages.json 的 system_context 区域。"""
-        return {
-            "version": self.version,
-            "slot_order": list(self.slot_order),
-            "slots": [slot.to_dict() for slot in self.slots],
-            "rendered_content_hash": self.rendered_content_hash,
         }
 
 
@@ -233,21 +182,6 @@ class HistoryContextSnapshot:
             "recent_messages": [message.to_dict() for message in self.recent_messages],
             "truncation_applied": self.truncation_applied,
             "content_hash": self.content_hash,
-        }
-
-
-@dataclass(frozen=True)
-class InitialContextSnapshot:
-    """一次 AgentRun 在任何增量消息发生前的冻结上下文。"""
-
-    system_context: SystemContextSnapshot
-    history: HistoryContextSnapshot
-
-    def to_dict(self) -> JSONMap:
-        """转换为 messages.json 顶层 initial_context 区域。"""
-        return {
-            "system_context": self.system_context.to_dict(),
-            "history": self.history.to_dict(),
         }
 
 
@@ -323,6 +257,9 @@ class AgentRun:
     resume_count: int = 0
     final_message_id: str | None = None
     latest_checkpoint_id: str | None = None
+    active_context_version: int | None = None
+    staged_history_compressions: tuple[StagedHistoryCompression, ...] = ()
+    success_commit_intent: SuccessCommitIntent | None = None
     statistics: RunStatistics = field(default_factory=RunStatistics)
     error: RunError | None = None
 
@@ -341,6 +278,11 @@ class AgentRun:
             "input_message_id": self.input_message_id,
             "final_message_id": self.final_message_id,
             "latest_checkpoint_id": self.latest_checkpoint_id,
+            "active_context_version": self.active_context_version,
+            "staged_history_compressions": [candidate.to_dict() for candidate in self.staged_history_compressions],
+            "success_commit_intent": (
+                None if self.success_commit_intent is None else self.success_commit_intent.to_dict()
+            ),
             "policy": self.policy.to_dict(),
             "statistics": self.statistics.to_dict(),
             "error": None if self.error is None else self.error.to_dict(),
@@ -361,6 +303,8 @@ class RunCheckpoint:
     next_action: AgentAction
     pending: JSONMap
     budget: JSONMap
+    active_context_version: int | None = None
+    staged_history_compression_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -375,6 +319,8 @@ class RunCheckpoint:
             "next_action": self.next_action.value,
             "pending": self.pending,
             "budget": self.budget,
+            "active_context_version": self.active_context_version,
+            "staged_history_compression_ids": list(self.staged_history_compression_ids),
         }
 
 

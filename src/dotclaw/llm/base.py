@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import AsyncIterator, Literal
+
+
+class LLMUsage(StrEnum):
+    """模型路由用途。"""
+    CHAT = "chat"
+    CONTEXT_COMPACTION = "context_compaction"
 
 
 @dataclass

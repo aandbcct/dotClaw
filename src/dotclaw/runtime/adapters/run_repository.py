@@ -1,23 +1,32 @@
-"""Runtime v2 的本地文件 RunRepository 实现。"""
+"""Runtime v4 的本地文件 RunRepository 实现。"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-from dataclasses import dataclass
+from hashlib import sha256
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..application.ports import ConversationProjectionPort
+from ..application.ports import ConversationProjectionPort, SuccessCommitFaultPort
 from ..application.dto import ConversationMessage
 from ..domain.events import RunEvent, RunEventType
+from ..domain.context import (
+    ContextContributionKind,
+    ContextOwner,
+    TextSlotContent,
+    ContextVersion,
+    SuccessCommitFaultPoint,
+    StagedHistoryCompression,
+    StagedHistoryCompressionStatus,
+    SuccessCommitIntent as RunSuccessCommitIntent,
+    context_version_from_dict,
+)
 from ..domain.facts import (
     AgentPolicySnapshot,
     AgentRun,
     HistoryCompressionSnapshot,
-    HistoryContextSnapshot,
-    HistoryMessageSnapshot,
-    InitialContextSnapshot,
     JSONMap,
     JSONValue,
     MessageRole,
@@ -27,10 +36,6 @@ from ..domain.facts import (
     RunMessageKind,
     RunStatistics,
     RunStatus,
-    SystemContextSlot,
-    SystemContextSlotScope,
-    SystemContextSlotStatus,
-    SystemContextSnapshot,
     ToolCall,
     get_integer,
     get_string,
@@ -53,13 +58,15 @@ class SuccessCommitIntent:
 
     run: AgentRun
     completed_event: RunEvent
+    success_intent: RunSuccessCommitIntent
 
     def to_dict(self) -> JSONMap:
         """转换为可原子保存的事务意图记录。"""
         return {
-            "version": StorageFormatVersion.INITIAL,
+            "version": int(StorageFormatVersion.CONTEXT_VERSIONS),
             "run": self.run.to_dict(),
             "completed_event": self.completed_event.to_dict(),
+            "success_intent": self.success_intent.to_dict(),
         }
 
 
@@ -70,10 +77,12 @@ class RunRepositoryAdapter:
         self,
         root_directory: str | Path,
         conversation_projector: ConversationProjectionPort | None = None,
+        success_commit_fault_port: SuccessCommitFaultPort | None = None,
     ) -> None:
         """初始化仓储根目录和可选的既有 Session 投影器。"""
         self._root_directory: Path = Path(root_directory).resolve()
         self._conversation_projector: ConversationProjectionPort | None = conversation_projector
+        self._success_commit_fault_port: SuccessCommitFaultPort | None = success_commit_fault_port
 
     async def create_run(self, run: AgentRun) -> None:
         """创建新的 run.json，禁止意外覆盖既有运行。"""
@@ -89,6 +98,10 @@ class RunRepositoryAdapter:
         await self.recover_pending_success_commits()
         return await asyncio.to_thread(self._find_run_sync, run_id)
 
+    async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
+        """扫描指定 Session 的 run.json，返回持久化的未终态占用。"""
+        return await asyncio.to_thread(self._list_active_runs_sync, session_id)
+
     async def save_run(self, run: AgentRun) -> None:
         """原子更新已存在运行的摘要。"""
         await asyncio.to_thread(self._save_run_sync, run)
@@ -97,22 +110,40 @@ class RunRepositoryAdapter:
         """原子保存完整消息，并保证消息序号与标识唯一。"""
         await asyncio.to_thread(self._save_messages_sync, session_id, run_id, messages)
 
-    async def save_initial_context(
+    async def append_context_version(
         self,
         session_id: str,
         run_id: str,
-        initial_context: InitialContextSnapshot,
+        context_version: ContextVersion,
     ) -> None:
-        """原子保存 Run 的初始上下文，不允许不同内容覆盖已冻结快照。"""
-        await asyncio.to_thread(self._save_initial_context_sync, session_id, run_id, initial_context)
+        """追加不可变 Context Version，禁止覆盖或跳过版本编号。"""
+        await asyncio.to_thread(self._append_context_version_sync, session_id, run_id, context_version)
 
-    async def load_initial_context(self, session_id: str, run_id: str) -> InitialContextSnapshot | None:
-        """读取 Run 的初始上下文；旧格式文件没有该区域时返回空。"""
-        return await asyncio.to_thread(self._load_initial_context_sync, session_id, run_id)
+    async def load_context_versions(self, session_id: str, run_id: str) -> tuple[ContextVersion, ...]:
+        """读取按版本连续递增的上下文版本事实。"""
+        return await asyncio.to_thread(self._load_context_versions_sync, session_id, run_id)
 
-    async def requires_messages_migration(self, session_id: str, run_id: str) -> bool:
-        """判断消息文件是否仍为只能读取的 v1 格式。"""
-        return await asyncio.to_thread(self._requires_messages_migration_sync, session_id, run_id)
+    async def set_active_context_version(self, session_id: str, run_id: str, version: int) -> None:
+        """保存 Run 当前活动版本引用，引用必须已经存在。"""
+        await asyncio.to_thread(self._set_active_context_version_sync, session_id, run_id, version)
+
+    async def save_staged_history_compressions(
+        self,
+        session_id: str,
+        run_id: str,
+        candidates: tuple[StagedHistoryCompression, ...],
+    ) -> None:
+        """保存不含摘要正文的候选控制信息。"""
+        await asyncio.to_thread(self._save_staged_history_compressions_sync, session_id, run_id, candidates)
+
+    async def save_success_commit_intent(
+        self,
+        session_id: str,
+        run_id: str,
+        intent: RunSuccessCommitIntent,
+    ) -> None:
+        """保存 run.json 内的成功提交意图控制信息。"""
+        await asyncio.to_thread(self._save_success_commit_intent_sync, session_id, run_id, intent)
 
     async def load_messages(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         """读取完整消息；尚未写入时返回空元组。"""
@@ -127,12 +158,16 @@ class RunRepositoryAdapter:
         run: AgentRun,
         final_message: RunMessage,
         completed_event: RunEvent,
+        success_intent: RunSuccessCommitIntent,
     ) -> None:
-        """创建可恢复事务意图，并在完成全部成功事实后清理该意图。"""
+        """以领域成功意图驱动可恢复事务，禁止分散写入成功事实。"""
         await asyncio.to_thread(self._validate_success_and_get_input_sync, run, final_message)
         await asyncio.to_thread(self._validate_completed_event_sync, run, final_message, completed_event)
-        intent: SuccessCommitIntent = SuccessCommitIntent(run, completed_event)
+        if success_intent.run_id != run.run_id or success_intent.session_id != run.session_id:
+            raise ValueError("成功提交意图必须属于当前运行")
+        intent: SuccessCommitIntent = SuccessCommitIntent(run, completed_event, success_intent)
         await asyncio.to_thread(self._prepare_success_commit_sync, intent)
+        await self.save_success_commit_intent(run.session_id, run.run_id, success_intent)
         await self._recover_success_commit(run.session_id, run.run_id)
 
     async def load_conversation(self, session_id: str) -> tuple[ConversationMessage, ...]:
@@ -154,13 +189,15 @@ class RunRepositoryAdapter:
         path: Path = self._run_path(run.session_id, run.run_id)
         if path.exists():
             raise FileExistsError(f"运行 {run.run_id} 已存在")
-        write_json_atomic(path, run.to_dict())
+        write_json_atomic(path, _run_payload(run))
 
     def _load_run_sync(self, session_id: str, run_id: str) -> AgentRun | None:
         path: Path = self._run_path(session_id, run_id)
         if not path.is_file():
             return None
-        return _agent_run_from_dict(load_json_map(path))
+        payload: JSONMap = load_json_map(path)
+        _require_v4_format(payload, "run.json")
+        return _agent_run_from_dict(payload)
 
     def _find_run_sync(self, run_id: str) -> AgentRun | None:
         """扫描受控运行目录并定位唯一 run.json。"""
@@ -172,61 +209,81 @@ class RunRepositoryAdapter:
             raise ValueError(f"运行 {run_id} 在多个 Session 中重复出现")
         if not run_paths:
             return None
-        return _agent_run_from_dict(load_json_map(run_paths[0]))
+        payload: JSONMap = load_json_map(run_paths[0])
+        _require_v4_format(payload, "run.json")
+        return _agent_run_from_dict(payload)
 
     def _save_run_sync(self, run: AgentRun) -> None:
         path: Path = self._run_path(run.session_id, run.run_id)
         if not path.is_file():
             raise FileNotFoundError(f"运行 {run.run_id} 尚未创建")
-        write_json_atomic(path, run.to_dict())
+        write_json_atomic(path, _run_payload(run))
 
     def _save_messages_sync(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         self._validate_messages(messages)
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
-        self._reject_legacy_messages_write_sync(path)
-        initial_context: InitialContextSnapshot | None = self._load_initial_context_from_path_sync(path)
-        self._write_messages_payload_sync(path, run_id, messages, initial_context)
+        context_versions: tuple[ContextVersion, ...] = self._load_context_versions_from_path_sync(path)
+        self._write_messages_payload_sync(path, run_id, messages, context_versions)
 
-    def _save_initial_context_sync(
+    def _append_context_version_sync(
         self,
         session_id: str,
         run_id: str,
-        initial_context: InitialContextSnapshot,
+        context_version: ContextVersion,
     ) -> None:
-        """冻结初始上下文，并保留可能已写入的增量消息。"""
+        """追加连续版本并保留已保存的 Run Message 事实。"""
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
-        self._reject_legacy_messages_write_sync(path)
-        existing_initial_context: InitialContextSnapshot | None = self._load_initial_context_from_path_sync(path)
-        if existing_initial_context is not None:
-            if existing_initial_context != initial_context:
-                raise ValueError("Run 初始上下文已冻结，禁止覆盖为不同内容")
-            return
+        context_versions: tuple[ContextVersion, ...] = self._load_context_versions_from_path_sync(path)
+        expected_version: int = len(context_versions) + 1
+        if context_version.version != expected_version:
+            raise ValueError(f"Context Version 必须连续递增；期望 {expected_version}")
         messages: tuple[RunMessage, ...] = self._load_messages_from_path_sync(path)
-        self._write_messages_payload_sync(path, run_id, messages, initial_context)
+        self._write_messages_payload_sync(path, run_id, messages, context_versions + (context_version,))
 
-    def _reject_legacy_messages_write_sync(self, path: Path) -> None:
-        """禁止原地改写 v1 消息，避免将重复请求错误伪装成 v2 增量事实。"""
-        if not path.is_file():
-            return
-        payload: JSONMap = load_json_map(path)
-        version: int = _validate_messages_format_version(payload)
-        if version < StorageFormatVersion.INITIAL_CONTEXT:
-            raise ValueError(
-                "messages.json v1 仅支持读取，请先执行 scripts/migrate_messages_v1_to_v2.py",
-            )
-
-    def _load_initial_context_sync(self, session_id: str, run_id: str) -> InitialContextSnapshot | None:
-        """从 messages.json 读取格式 v2 的 initial_context。"""
+    def _load_context_versions_sync(self, session_id: str, run_id: str) -> tuple[ContextVersion, ...]:
+        """读取 messages.json 中有序且不可变的上下文版本。"""
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
-        return self._load_initial_context_from_path_sync(path)
+        return self._load_context_versions_from_path_sync(path)
 
-    def _requires_messages_migration_sync(self, session_id: str, run_id: str) -> bool:
-        """读取格式版本；不存在消息文件时不要求迁移。"""
-        path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
-        if not path.is_file():
-            return False
-        payload: JSONMap = load_json_map(path)
-        return _validate_messages_format_version(payload) < StorageFormatVersion.INITIAL_CONTEXT
+    def _set_active_context_version_sync(self, session_id: str, run_id: str, version: int) -> None:
+        """校验版本存在后原子更新 run.json 中的活动引用。"""
+        if version not in {item.version for item in self._load_context_versions_sync(session_id, run_id)}:
+            raise ValueError("活动 Context Version 必须引用已保存版本")
+        run: AgentRun | None = self._load_run_sync(session_id, run_id)
+        if run is None:
+            raise FileNotFoundError(f"运行 {run_id} 尚未创建")
+        self._save_run_sync(replace(run, active_context_version=version))
+
+    def _save_staged_history_compressions_sync(
+        self,
+        session_id: str,
+        run_id: str,
+        candidates: tuple[StagedHistoryCompression, ...],
+    ) -> None:
+        """保存候选前校验正文不进入 Run 控制面。"""
+        if len({candidate.candidate_id for candidate in candidates}) != len(candidates):
+            raise ValueError("历史压缩候选标识必须唯一")
+        run: AgentRun | None = self._load_run_sync(session_id, run_id)
+        if run is None:
+            raise FileNotFoundError(f"运行 {run_id} 尚未创建")
+        self._save_run_sync(replace(run, staged_history_compressions=candidates))
+
+    def _save_success_commit_intent_sync(
+        self,
+        session_id: str,
+        run_id: str,
+        intent: RunSuccessCommitIntent,
+    ) -> None:
+        """保存成功意图前校验候选引用属于当前 Run。"""
+        run: AgentRun | None = self._load_run_sync(session_id, run_id)
+        if run is None:
+            raise FileNotFoundError(f"运行 {run_id} 尚未创建")
+        candidate_ids: frozenset[str] = frozenset(
+            candidate.candidate_id for candidate in run.staged_history_compressions
+        )
+        if intent.latest_candidate_id is not None and intent.latest_candidate_id not in candidate_ids:
+            raise ValueError("成功提交意图引用了未知历史压缩候选")
+        self._save_run_sync(replace(run, success_commit_intent=intent))
 
     async def _recover_session_success_commits(self, session_id: str) -> None:
         """补偿指定 Session 下的所有未决成功提交，避免读取到互相矛盾的事实。"""
@@ -239,7 +296,7 @@ class RunRepositoryAdapter:
             await self._recover_success_commit(session_id, run_id)
 
     async def _recover_success_commit(self, session_id: str, run_id: str) -> None:
-        """以事务意图为准幂等补齐成功提交；只有三类事实齐备后才删除意图文件。"""
+        """按 Session、事件、Run、checkpoint 顺序幂等补齐成功提交。"""
         intent: SuccessCommitIntent | None = await asyncio.to_thread(
             self._load_success_commit_intent_sync,
             session_id,
@@ -253,13 +310,72 @@ class RunRepositoryAdapter:
             intent.run,
             final_message,
         )
-        await asyncio.to_thread(self._ensure_event_sync, intent.run.session_id, intent.completed_event)
+        history_compression, source_hash = await asyncio.to_thread(
+            self._history_compression_for_intent_sync,
+            intent.run,
+            intent.success_intent,
+        )
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.BEFORE_SESSION_PROJECTION)
         if self._conversation_projector is not None:
-            await self._conversation_projector.project_success(intent.run, user_message, final_message)
+            await self._conversation_projector.project_success(
+                intent.run,
+                user_message,
+                final_message,
+                history_compression,
+                source_hash,
+            )
         else:
             await asyncio.to_thread(self._append_standalone_conversation_sync, intent.run, final_message)
-        await asyncio.to_thread(self._save_run_sync, intent.run)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.AFTER_SESSION_PROJECTION)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.BEFORE_COMPLETED_EVENT)
+        await asyncio.to_thread(self._ensure_event_sync, intent.run.session_id, intent.completed_event)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.AFTER_COMPLETED_EVENT)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.BEFORE_RUN_FINALIZATION)
+        completed_run: AgentRun = _completed_run_from_intent(intent.run, intent.success_intent)
+        await asyncio.to_thread(self._save_run_sync, completed_run)
+        await self._inject_success_commit_fault(SuccessCommitFaultPoint.AFTER_RUN_FINALIZATION)
+        await asyncio.to_thread(self._delete_checkpoint_sync, intent.run.session_id, intent.run.run_id)
         await asyncio.to_thread(self._delete_success_commit_intent_sync, session_id, run_id)
+
+    async def _inject_success_commit_fault(self, point: SuccessCommitFaultPoint) -> None:
+        """仅在测试装配故障 Port 时于精确提交边界中断。"""
+        if self._success_commit_fault_port is not None:
+            await self._success_commit_fault_port.inject(point)
+
+    def _history_compression_for_intent_sync(
+        self,
+        run: AgentRun,
+        intent: RunSuccessCommitIntent,
+    ) -> tuple[HistoryCompressionSnapshot | None, str]:
+        """从候选引用的 Context Version 读取唯一保存的摘要正文。"""
+        if intent.latest_candidate_id is None:
+            return None, ""
+        candidate: StagedHistoryCompression | None = next(
+            (item for item in run.staged_history_compressions if item.candidate_id == intent.latest_candidate_id),
+            None,
+        )
+        if candidate is None:
+            raise ValueError("成功提交意图引用的历史压缩候选不存在")
+        versions: tuple[ContextVersion, ...] = self._load_context_versions_sync(run.session_id, run.run_id)
+        version: ContextVersion | None = next(
+            (item for item in versions if item.version == candidate.context_version),
+            None,
+        )
+        if version is None:
+            raise ValueError("历史压缩候选引用的 Context Version 不存在")
+        history_slot = next((slot for slot in version.slots if slot.contribution_kind is ContextContributionKind.HISTORY_COMPRESSIONS), None)
+        if history_slot is None or not isinstance(history_slot.content, TextSlotContent):
+            raise ValueError("历史压缩候选引用的 Context Version 缺少摘要 Slot")
+        raw_content: str = history_slot.content.text
+        if _hash_text(raw_content) != candidate.summary_hash:
+            raise ValueError("历史压缩候选与 Context Version 摘要 hash 不一致")
+        return HistoryCompressionSnapshot(candidate.context_version, candidate.covered_through_conversation_id, raw_content, candidate.summary_hash), candidate.source_hash
+
+    def _delete_checkpoint_sync(self, session_id: str, run_id: str) -> None:
+        """在终态 Run 已落盘后清理恢复 checkpoint。"""
+        path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.CHECKPOINT.value)
+        if path.is_file():
+            path.unlink()
 
     def _prepare_success_commit_sync(self, intent: SuccessCommitIntent) -> None:
         """原子创建或校验既有成功提交意图，保证重试不会覆盖另一笔提交。"""
@@ -327,11 +443,11 @@ class RunRepositoryAdapter:
         return self._load_messages_from_path_sync(path)
 
     def _load_messages_from_path_sync(self, path: Path) -> tuple[RunMessage, ...]:
-        """兼容读取格式 v1 和 v2 的增量 RunMessage 数组。"""
+        """读取 v4 的增量 RunMessage 数组。"""
         if not path.is_file():
             return ()
         payload: JSONMap = load_json_map(path)
-        _validate_messages_format_version(payload)
+        _require_v4_format(payload, "messages.json")
         raw_messages: JSONValue | None = payload.get("messages")
         if not isinstance(raw_messages, list):
             raise ValueError("messages.json 的 messages 字段必须是数组")
@@ -343,31 +459,57 @@ class RunRepositoryAdapter:
         self._validate_messages(result)
         return result
 
-    def _load_initial_context_from_path_sync(self, path: Path) -> InitialContextSnapshot | None:
-        """读取 v2 初始上下文；v1 或未初始化文件均视为没有快照。"""
+    def _list_active_runs_sync(self, session_id: str) -> tuple[AgentRun, ...]:
+        """读取 Session 下的所有运行摘要并过滤终态。"""
+        safe_session_id: str = validate_path_segment(session_id, "session_id")
+        directory: Path = self._root_directory / safe_session_id / "agent_runs"
+        if not directory.is_dir():
+            return ()
+        terminal: frozenset[RunStatus] = frozenset({
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+            RunStatus.ABANDONED,
+        })
+        runs: list[AgentRun] = []
+        path: Path
+        for path in directory.glob(f"*/{RunStorageFileName.RUN.value}"):
+            run: AgentRun = _agent_run_from_dict(load_json_map(path))
+            if run.status not in terminal:
+                runs.append(run)
+        return tuple(runs)
+
+    def _load_context_versions_from_path_sync(self, path: Path) -> tuple[ContextVersion, ...]:
+        """读取并校验 v4 的全部 Context Version。"""
         if not path.is_file():
-            return None
+            return ()
         payload: JSONMap = load_json_map(path)
-        version: int = _validate_messages_format_version(payload)
-        if version < StorageFormatVersion.INITIAL_CONTEXT:
-            return None
-        raw_initial_context: JSONValue | None = payload.get("initial_context")
-        if raw_initial_context is None:
-            return None
-        return _initial_context_from_dict(require_json_map(raw_initial_context))
+        _require_v4_format(payload, "messages.json")
+        raw_context_versions: JSONValue | None = payload.get("context_versions")
+        if not isinstance(raw_context_versions, list):
+            raise ValueError("messages.json 的 context_versions 字段必须是数组")
+        versions: list[ContextVersion] = []
+        raw_context_version: JSONValue
+        for raw_context_version in raw_context_versions:
+            versions.append(context_version_from_dict(require_json_map(raw_context_version)))
+        expected_versions: tuple[int, ...] = tuple(range(1, len(versions) + 1))
+        actual_versions: tuple[int, ...] = tuple(item.version for item in versions)
+        if actual_versions != expected_versions:
+            raise ValueError("Context Version 必须从 1 连续递增")
+        return tuple(versions)
 
     def _write_messages_payload_sync(
         self,
         path: Path,
         run_id: str,
         messages: tuple[RunMessage, ...],
-        initial_context: InitialContextSnapshot | None,
+        context_versions: tuple[ContextVersion, ...],
     ) -> None:
-        """以当前 v2 格式原子写入初始上下文和增量消息。"""
+        """以 v4 格式原子写入上下文版本和增量消息。"""
         payload: JSONMap = {
             "run_id": run_id,
-            "version": StorageFormatVersion.INITIAL_CONTEXT,
-            "initial_context": None if initial_context is None else initial_context.to_dict(),
+            "version": int(StorageFormatVersion.CONTEXT_VERSIONS),
+            "context_versions": [context_version.to_dict() for context_version in context_versions],
             "messages": [message.to_dict() for message in messages],
         }
         write_json_atomic(path, payload)
@@ -475,7 +617,7 @@ class RunRepositoryAdapter:
         existing_messages.append(message.to_dict())
         payload: JSONMap = {
             "session_id": session_id,
-            "version": StorageFormatVersion.INITIAL,
+            "version": int(StorageFormatVersion.CONTEXT_VERSIONS),
             "messages": existing_messages,
         }
         write_json_atomic(path, payload)
@@ -538,6 +680,8 @@ def _agent_run_from_dict(data: JSONMap) -> AgentRun:
     policy_data: JSONMap = require_json_map(raw_policy) if raw_policy is not None else {}
     statistics_data: JSONMap = require_json_map(raw_statistics) if raw_statistics is not None else {}
     raw_error: JSONValue | None = data.get("error")
+    raw_candidates: JSONValue | None = data.get("staged_history_compressions")
+    raw_success_intent: JSONValue | None = data.get("success_commit_intent")
     error: RunError | None = _run_error_from_dict(require_json_map(raw_error)) if raw_error is not None else None
     return AgentRun(
         run_id=get_string(data, "run_id"),
@@ -559,6 +703,13 @@ def _agent_run_from_dict(data: JSONMap) -> AgentRun:
         resume_count=get_integer(data, "resume_count"),
         final_message_id=_optional_string(data.get("final_message_id")),
         latest_checkpoint_id=_optional_string(data.get("latest_checkpoint_id")),
+        active_context_version=_optional_positive_integer(data.get("active_context_version")),
+        staged_history_compressions=_staged_history_compressions_from_value(raw_candidates),
+        success_commit_intent=(
+            None if raw_success_intent is None else _run_success_commit_intent_from_dict(
+                require_json_map(raw_success_intent),
+            )
+        ),
         statistics=RunStatistics(
             duration_ms=get_integer(statistics_data, "duration_ms"),
             llm_call_count=get_integer(statistics_data, "llm_call_count"),
@@ -574,11 +725,13 @@ def _success_commit_intent_from_dict(data: JSONMap) -> SuccessCommitIntent:
     """将临时成功提交意图反序列化为严格领域模型。"""
     raw_run: JSONValue | None = data.get("run")
     raw_completed_event: JSONValue | None = data.get("completed_event")
-    if raw_run is None or raw_completed_event is None:
-        raise ValueError("成功提交意图缺少 run 或 completed_event")
+    raw_success_intent: JSONValue | None = data.get("success_intent")
+    if raw_run is None or raw_completed_event is None or raw_success_intent is None:
+        raise ValueError("成功提交意图缺少 run、completed_event 或领域意图")
     return SuccessCommitIntent(
         run=_agent_run_from_dict(require_json_map(raw_run)),
         completed_event=_run_event_from_dict(require_json_map(raw_completed_event)),
+        success_intent=_run_success_commit_intent_from_dict(require_json_map(raw_success_intent)),
     )
 
 
@@ -625,105 +778,90 @@ def _run_message_from_dict(data: JSONMap) -> RunMessage:
     )
 
 
-def _validate_messages_format_version(payload: JSONMap) -> int:
-    """校验 messages.json 支持的格式版本并返回其整数值。"""
-    version: int = get_integer(payload, "version", int(StorageFormatVersion.INITIAL))
-    supported_versions: frozenset[int] = frozenset({
-        int(StorageFormatVersion.INITIAL),
-        int(StorageFormatVersion.INITIAL_CONTEXT),
-    })
-    if version not in supported_versions:
-        raise ValueError(f"不支持的 messages.json 格式版本：{version}")
-    return version
+def _require_v4_format(payload: JSONMap, file_name: str) -> None:
+    """拒绝历史容器格式，禁止以隐式转换掩盖数据版本差异。"""
+    version: int = get_integer(payload, "version")
+    if version != int(StorageFormatVersion.CONTEXT_VERSIONS):
+        raise ValueError(f"不支持的 {file_name} 格式版本：{version}；仅支持 v4")
 
 
-def _initial_context_from_dict(data: JSONMap) -> InitialContextSnapshot:
-    """将 messages.json v2 的 initial_context 反序列化为领域事实。"""
-    raw_system_context: JSONValue | None = data.get("system_context")
-    raw_history: JSONValue | None = data.get("history")
-    if raw_system_context is None or raw_history is None:
-        raise ValueError("initial_context 必须包含 system_context 和 history")
-    return InitialContextSnapshot(
-        system_context=_system_context_snapshot_from_dict(require_json_map(raw_system_context)),
-        history=_history_context_snapshot_from_dict(require_json_map(raw_history)),
-    )
+def _run_payload(run: AgentRun) -> JSONMap:
+    """生成唯一支持的 v4 run.json 载荷。"""
+    payload: JSONMap = run.to_dict()
+    payload["version"] = int(StorageFormatVersion.CONTEXT_VERSIONS)
+    return payload
 
 
-def _system_context_snapshot_from_dict(data: JSONMap) -> SystemContextSnapshot:
-    """反序列化按 Slot 记录的冻结 system context。"""
-    raw_slot_order: JSONValue | None = data.get("slot_order")
-    raw_slots: JSONValue | None = data.get("slots")
-    if not isinstance(raw_slot_order, list) or not all(isinstance(name, str) for name in raw_slot_order):
-        raise ValueError("system_context.slot_order 必须是字符串数组")
-    if not isinstance(raw_slots, list):
-        raise ValueError("system_context.slots 必须是数组")
-    slots: list[SystemContextSlot] = []
-    raw_slot: JSONValue
-    for raw_slot in raw_slots:
-        slot_data: JSONMap = require_json_map(raw_slot)
-        slots.append(SystemContextSlot(
-            name=get_string(slot_data, "name"),
-            scope=SystemContextSlotScope(get_string(slot_data, "scope")),
-            status=SystemContextSlotStatus(get_string(slot_data, "status")),
-            content=get_string(slot_data, "content"),
-            content_hash=get_string(slot_data, "content_hash"),
-            error_code=get_string(slot_data, "error_code"),
-        ))
-    slot_order: tuple[str, ...] = tuple(raw_slot_order)
-    slot_names: frozenset[str] = frozenset(slot.name for slot in slots)
-    if len(slot_order) != len(set(slot_order)) or set(slot_order) != slot_names:
-        raise ValueError("system_context.slot_order 必须与 slots 一一对应且不重复")
-    return SystemContextSnapshot(
-        version=get_integer(data, "version"),
-        slot_order=slot_order,
-        slots=tuple(slots),
-        rendered_content_hash=get_string(data, "rendered_content_hash"),
-    )
-
-
-def _history_context_snapshot_from_dict(data: JSONMap) -> HistoryContextSnapshot:
-    """反序列化冻结的压缩历史和近期原始历史。"""
-    raw_recent_messages: JSONValue | None = data.get("recent_messages")
-    if not isinstance(raw_recent_messages, list):
-        raise ValueError("history.recent_messages 必须是数组")
-    recent_messages: list[HistoryMessageSnapshot] = []
-    raw_message: JSONValue
-    for raw_message in raw_recent_messages:
-        message_data: JSONMap = require_json_map(raw_message)
-        recent_messages.append(HistoryMessageSnapshot(
-            conversation_id=get_string(message_data, "conversation_id"),
-            role=MessageRole(get_string(message_data, "role")),
-            content=get_string(message_data, "content"),
-            created_at=get_string(message_data, "created_at"),
-        ))
-    raw_compressed_history: JSONValue | None = data.get("compressed_history")
-    compressed_history: HistoryCompressionSnapshot | None = None
-    if raw_compressed_history is not None:
-        compressed_data: JSONMap = require_json_map(raw_compressed_history)
-        compressed_history = HistoryCompressionSnapshot(
-            compression_version=get_integer(compressed_data, "compression_version"),
-            covered_through_conversation_id=get_string(compressed_data, "covered_through_conversation_id"),
-            content=get_string(compressed_data, "content"),
-            content_hash=get_string(compressed_data, "content_hash"),
-        )
-    return HistoryContextSnapshot(
-        source_session_id=get_string(data, "source_session_id"),
-        source_conversation_version=get_integer(data, "source_conversation_version"),
-        recent_messages=tuple(recent_messages),
-        content_hash=get_string(data, "content_hash"),
-        compressed_history=compressed_history,
-        truncation_applied=_get_boolean(data, "truncation_applied"),
-    )
-
-
-def _get_boolean(data: JSONMap, field_name: str, default: bool = False) -> bool:
-    """读取严格布尔字段，缺失时使用调用方给出的默认值。"""
-    value: JSONValue | None = data.get(field_name)
+def _optional_positive_integer(value: JSONValue | None) -> int | None:
+    """读取可选正整数。"""
     if value is None:
-        return default
-    if not isinstance(value, bool):
-        raise ValueError(f"{field_name} 必须是布尔值")
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("active_context_version 必须是正整数或 null")
     return value
+
+
+def _hash_text(content: str) -> str:
+    """计算摘要正文的稳定 SHA-256。"""
+    return sha256(content.encode("utf-8")).hexdigest()
+
+
+def _staged_history_compressions_from_value(value: JSONValue | None) -> tuple[StagedHistoryCompression, ...]:
+    """从 run.json 读取不含摘要正文的候选控制信息。"""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("staged_history_compressions 必须是数组")
+    candidates: list[StagedHistoryCompression] = []
+    raw_candidate: JSONValue
+    for raw_candidate in value:
+        candidate: JSONMap = require_json_map(raw_candidate)
+        if "summary" in candidate or "content" in candidate:
+            raise ValueError("staged_history_compressions 不得保存摘要正文")
+        candidates.append(StagedHistoryCompression(
+            candidate_id=get_string(candidate, "candidate_id"),
+            status=StagedHistoryCompressionStatus(get_string(candidate, "status")),
+            session_baseline_version=get_integer(candidate, "session_baseline_version"),
+            covered_through_conversation_id=get_string(candidate, "covered_through_conversation_id"),
+            source_hash=get_string(candidate, "source_hash"),
+            summary_hash=get_string(candidate, "summary_hash"),
+            context_version=get_integer(candidate, "context_version"),
+        ))
+    return tuple(candidates)
+
+
+def _run_success_commit_intent_from_dict(data: JSONMap) -> RunSuccessCommitIntent:
+    """从 run.json 控制字段恢复成功提交意图。"""
+    raw_candidate_id: JSONValue | None = data.get("latest_candidate_id")
+    latest_candidate_id: str | None = raw_candidate_id if isinstance(raw_candidate_id, str) else None
+    return RunSuccessCommitIntent(
+        conversation_id=get_string(data, "conversation_id"),
+        latest_candidate_id=latest_candidate_id,
+        target_status=RunStatus(get_string(data, "target_status")),
+        run_id=get_string(data, "run_id"),
+        session_id=get_string(data, "session_id"),
+    )
+
+
+def _completed_run_from_intent(run: AgentRun, intent: RunSuccessCommitIntent) -> AgentRun:
+    """以成功意图收敛终态 Run，并只提交最新的 staged 候选。"""
+    candidates: tuple[StagedHistoryCompression, ...] = tuple(
+        replace(
+            candidate,
+            status=(
+                StagedHistoryCompressionStatus.COMMITTED
+                if candidate.candidate_id == intent.latest_candidate_id
+                else candidate.status
+            ),
+        )
+        for candidate in run.staged_history_compressions
+    )
+    return replace(
+        run,
+        status=intent.target_status,
+        staged_history_compressions=candidates,
+        success_commit_intent=None,
+    )
 
 
 def _conversation_message_from_dict(data: JSONMap) -> ConversationMessage:

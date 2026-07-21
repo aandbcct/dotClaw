@@ -10,17 +10,19 @@ from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, RunPolicyPort
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.application.dto import (
-    ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot,
+    ContextBundle, ContextMetadata, ContextRefreshSignal, ConversationMessage, ConversationSnapshot,
     RunRequest, ToolInvocation, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, ToolCall,
 )
+from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.runtime.domain.state import AgentState
 from dotclaw.tools.approval import ApprovalManager
 from dotclaw.tools.executor import ToolExecutor
 from dotclaw.tools.handler import BuiltinToolHandler
 from dotclaw.tools.registry import ToolRegistry
+from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
 
 def _execution() -> RunExecutionView:
@@ -59,7 +61,13 @@ class FixedPolicy(RunPolicyPort):
 
     async def resolve(self, request: RunRequest) -> AgentPolicySnapshot:
         """返回最小运行策略。"""
-        return AgentPolicySnapshot(request.agent_id, "v1", "model", 4)
+        return AgentPolicySnapshot(
+            request.agent_id,
+            "v1",
+            "model",
+            4,
+            policy_data={"context_window": 128, "tokenizer_encoding": "cl100k_base"},
+        )
 
 
 class EmptyContext(ContextPort):
@@ -72,6 +80,15 @@ class EmptyContext(ContextPort):
             (),
             ContextMetadata(1),
         )
+
+    async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身不缓存 Slot 实例。"""
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身没有可刷新的 Slot。"""
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """测试替身不消费刷新信号。"""
 
 
 class ToolThenFinalLLM(LLMPort):
@@ -119,6 +136,8 @@ async def test_tool_executor_adapter_drives_engine_approval_resume_with_same_run
         FixedPolicy(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     waiting = await engine.execute(_request())

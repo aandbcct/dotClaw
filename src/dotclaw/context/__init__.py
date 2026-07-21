@@ -1,38 +1,72 @@
-"""Runtime v2 的上下文构建实现。"""
+"""Runtime v4 的多 Owner 结构化上下文实现。"""
 
-from .ports import ContextDependencies, ContextMetadata, ContextPort
-from .scoped_cache import ScopedCache, SlotCacheScope
-from .slot_context import ContextProfile, SlotContext
-from .slot_context_provider import ContextBudgetPolicy, SlotContextProvider
+from dotclaw.runtime.application.dto import ContextMetadata
+from dotclaw.runtime.application.ports import ContextPort
+
+from .contracts import (
+    ContextCacheScope,
+    ContextContribution,
+    ContextOwnerSnapshot,
+    ContextPlan,
+    ContextRefreshPolicy,
+    ContextSlot,
+    ContextSlotBinding,
+    ContextSlotDescriptor,
+)
+from .defaults import build_context_provider, default_context_plan_configuration
+from .plan_configuration import ContextOwnerPlanConfiguration, InMemoryContextPlanConfiguration
+from .ports import ContextDependencies, ContextPlanConfigurationPort
+from .plan_resolver import ContextPlanResolver
+from .provider import ContextProvider
+from .registry import ContextSlotRegistry
+from .signals import ContextRefreshReason, ContextRefreshSignal, ContextSignalBus, ContextSignalSubscription
+from .slot_manager import ContextSlotManager
 from .slots import (
     AvailableAgentsSlot,
+    ConversationSlot,
+    HistoryCompressionsSlot,
     IdentitySlot,
     KnowledgeSlot,
     MemorySlot,
-    ProjectSlot,
+    RunMessagesSlot,
     SkillsSlot,
     ToolsSlot,
     UserInfoSlot,
-    WorkspaceSlot,
 )
 
 __all__ = [
     "AvailableAgentsSlot",
+    "ContextCacheScope",
+    "ContextContribution",
     "ContextDependencies",
-    "ContextBudgetPolicy",
+    "ContextOwnerPlanConfiguration",
+    "ContextPlanConfigurationPort",
     "ContextMetadata",
+    "ContextOwnerSnapshot",
+    "ContextPlan",
+    "ContextPlanResolver",
     "ContextPort",
-    "ContextProfile",
+    "ContextProvider",
+    "ContextRefreshPolicy",
+    "ContextRefreshReason",
+    "ContextRefreshSignal",
+    "ContextSignalBus",
+    "ContextSignalSubscription",
+    "ContextSlot",
+    "ContextSlotBinding",
+    "ContextSlotDescriptor",
+    "ContextSlotManager",
+    "ContextSlotRegistry",
+    "InMemoryContextPlanConfiguration",
+    "ConversationSlot",
+    "HistoryCompressionsSlot",
     "IdentitySlot",
     "KnowledgeSlot",
     "MemorySlot",
-    "ProjectSlot",
-    "ScopedCache",
+    "RunMessagesSlot",
     "SkillsSlot",
-    "SlotCacheScope",
-    "SlotContext",
-    "SlotContextProvider",
     "ToolsSlot",
     "UserInfoSlot",
-    "WorkspaceSlot",
+    "build_context_provider",
+    "default_context_plan_configuration",
 ]

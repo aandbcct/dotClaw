@@ -22,6 +22,7 @@ from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.dto import (
     ContextBundle,
     ContextMetadata,
+    ContextRefreshSignal,
     ConversationMessage,
     ConversationSnapshot,
     DelegationRequest,
@@ -42,7 +43,9 @@ from dotclaw.runtime.domain.facts import (
     RunStatus,
     ToolCall,
 )
+from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.session.session import SessionManager
+from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
 
 class FixedPolicy(RunPolicyPort):
@@ -50,7 +53,13 @@ class FixedPolicy(RunPolicyPort):
 
     async def resolve(self, request: RunRequest) -> AgentPolicySnapshot:
         """返回最小可执行策略。"""
-        return AgentPolicySnapshot(request.agent_id, "policy-v1", "model", 5)
+        return AgentPolicySnapshot(
+            request.agent_id,
+            "policy-v1",
+            "model",
+            5,
+            policy_data={"context_window": 128, "tokenizer_encoding": "cl100k_base"},
+        )
 
 
 class MinimalContext(ContextPort):
@@ -66,6 +75,15 @@ class MinimalContext(ContextPort):
             "system",
         )
         return ContextBundle((system_message,), (), ContextMetadata(1))
+
+    async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身不缓存 Slot 实例。"""
+
+    def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
+        """测试替身没有可刷新的 Slot。"""
+
+    def publish_signal(self, signal: ContextRefreshSignal) -> None:
+        """测试替身不消费刷新信号。"""
 
 
 class DelegatingLLM(LLMPort):
@@ -231,7 +249,9 @@ async def test_engine_records_delegation_parent_child_events_without_dispatcher(
         FixedPolicy(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
-        delegation,
+        delegation_port=delegation,
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
 
     result: RunResult = await engine.execute(_request())
@@ -325,7 +345,9 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
         FixedPolicy(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
-        adapter,
+        delegation_port=adapter,
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
     coordinator = SessionRunCoordinator(engine)
     adapter.bind_coordinator(coordinator)
@@ -366,7 +388,9 @@ async def test_parent_cancellation_propagates_to_real_delegated_child_run(tmp_pa
         FixedPolicy(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
-        adapter,
+        delegation_port=adapter,
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
     coordinator = SessionRunCoordinator(engine)
     adapter.bind_coordinator(coordinator)
@@ -402,6 +426,8 @@ async def test_child_run_persists_parent_and_root_relationship(tmp_path: Path) -
         FixedPolicy(),
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
     )
     child_request = RunRequest(
         "child-session",

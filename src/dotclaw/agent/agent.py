@@ -10,14 +10,15 @@ import asyncio
 from typing import TYPE_CHECKING
 
 from ..mcp.provider import MCPToolProvider
+from ..runtime.domain.facts import RunErrorCode, RunStatus
 from .identity import AgentIdentity
 
 if TYPE_CHECKING:
     from ..config import Config
     from ..memory.dream import DeepDream
     from ..runtime.application.session_run_coordinator import SessionRunCoordinator
-    from ..runtime.application.session_history_preparation import SessionHistoryPreparationService
     from ..runtime.application.dto import RunRequest, RunResult
+    from ..runtime.application.ports import ContextPort
     from ..session.session import Session
     from ..skills.registry import SkillRegistry
     from ..tools.executor import ToolExecutor
@@ -36,7 +37,7 @@ class Agent:
         skill_registry: SkillRegistry | None = None,
         memory_dream: DeepDream | None = None,
         mcp_task: asyncio.Task[None] | None = None,
-        history_preparation_service: SessionHistoryPreparationService | None = None,
+        context_port: ContextPort | None = None,
     ) -> None:
         """绑定执行协调器与仅供展示或关闭的基础设施依赖。"""
         self._identity: AgentIdentity = identity
@@ -48,7 +49,7 @@ class Agent:
         self._last_run_result: RunResult | None = None
         self._memory_dream: DeepDream | None = memory_dream
         self._mcp_task: asyncio.Task[None] | None = mcp_task
-        self._history_preparation_service: SessionHistoryPreparationService | None = history_preparation_service
+        self._context_port: ContextPort | None = context_port
 
     @property
     def identity(self) -> AgentIdentity:
@@ -116,16 +117,17 @@ class Agent:
                 pass
         if self._mcp_provider is not None:
             await self._mcp_provider.shutdown()
+        if self._context_port is not None:
+            from ..runtime.domain.context import ContextOwner
+
+            await self._context_port.release_scope(ContextOwner.AGENT, self.agent_id)
 
     async def process(self, session: Session, user_message: str) -> str:
         """提交普通用户消息，并将标准 RunResult 转换为 Channel 文本。"""
-        from ..runtime.application.request_factory import create_run_request, create_run_request_from_snapshot
+        from ..runtime.application.request_factory import create_run_request
 
         async def create_request() -> RunRequest:
-            if self._history_preparation_service is None:
-                return create_run_request(session, self.agent_id, user_message)
-            snapshot = await self._history_preparation_service.prepare(session.id)
-            return create_run_request_from_snapshot(session.id, self.agent_id, user_message, snapshot)
+            return create_run_request(session, self.agent_id, user_message)
 
         result: RunResult = await self._coordinator.submit_prepared(session.id, create_request)
         self._last_run_result = result
@@ -141,13 +143,31 @@ class Agent:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
+    async def retry_interrupted(self, run_id: str) -> str:
+        """重试可恢复中断 Run，并返回 Channel 可展示的结果。"""
+        result: RunResult = await self._coordinator.retry_interrupted(run_id)
+        self._last_run_result = result
+        return _display_result(result)
+
+    async def abandon_interrupted(self, run_id: str) -> str:
+        """放弃可恢复中断 Run，并返回 Channel 可展示的结果。"""
+        result: RunResult = await self._coordinator.abandon_interrupted(run_id)
+        self._last_run_result = result
+        return _display_result(result)
+
 
 def _display_result(result: RunResult) -> str:
     """将 Runtime 领域结果收敛为 Channel 可直接展示的文本。"""
     if result.final_message is not None:
         return result.final_message.content
-    if result.error is not None:
-        return f"执行失败：{result.error.message}"
-    if result.status.value == "waiting_approval":
+    if result.status is RunStatus.WAITING_APPROVAL:
         return f"运行等待审批：{result.run_id}"
+    if result.status is RunStatus.INTERRUPTED:
+        return f"运行已中断，可重试：{result.run_id}"
+    if result.status is RunStatus.ABANDONED:
+        return f"运行已放弃：{result.run_id}"
+    if result.error is not None:
+        if result.error.code is RunErrorCode.SESSION_BUSY:
+            return "当前会话仍有未完成运行，请先完成审批、重试或取消后再发送消息。"
+        return f"执行失败：{result.error.message}"
     return f"执行未完成：{result.status.value}"
