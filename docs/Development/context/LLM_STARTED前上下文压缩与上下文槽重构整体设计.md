@@ -1,7 +1,7 @@
 # LLM_STARTED 前上下文压缩与上下文槽重构整体设计
 
-> 状态：已完成（E1–E5）
-> 范围：Runtime v3 的上下文版本、Session 历史压缩、Context Slot 生命周期、严格 Session 串行与可恢复模型中断。
+> 状态：E1–E5 已完成；E6（上下文快照语义与工具审计收口）待开发。
+> 范围：Runtime 上下文版本、Session 历史压缩、Context Slot 生命周期、严格 Session 串行、可恢复模型中断，以及快照与动态事实的审计边界。
 > 关联文档：[详细开发计划](LLM_STARTED前上下文压缩与上下文槽重构开发计划.md)
 
 ## 1. 背景、问题与范围
@@ -11,7 +11,7 @@
 | 问题 | 当前表现 | 目标状态 |
 |---|---|---|
 | 历史超限 | Run 创建前直接压缩并写入 Session，无法覆盖工具调用后的上下文增长 | 每次业务模型调用的 `LLM_STARTED` 前按实际输入检查，并将候选延迟到 Run 成功时提交 |
-| 上下文审计 | `initial_context` 只能描述初始输入，无法还原多轮工具调用后的上下文演化 | `messages.json.context_versions` 保存完整、有序、不可变的上下文版本 |
+| 上下文审计 | `Context Version` 当前会把每轮 Run Message 一并快照，普通 ReAct 循环也不断生成版本 | 版本仅保存稳定 Slot 快照；动态 Run Message 由事件引用，二者组合还原一次真实输入 |
 | Slot 生命周期 | Runtime 组合根创建固定 Slot 元组，缓存范围与真实数据 Owner 混在一起 | Slot 统一注入接口，但数据仍归 Agent、Session、Run、Global 等实体所有 |
 | 失败恢复 | 模型不可用会使 Run 失败或留下运行态 | 调用前保存 checkpoint；代理重试耗尽后转为可恢复的 `INTERRUPTED` |
 | Session 一致性 | 审批等待后可能释放调度权，导致同一 Session 的上下文分叉 | 一个 Session 同时仅允许一个未终态 Run，包含等待审批和中断状态 |
@@ -26,9 +26,9 @@
 | Run Message | 单次 AgentRun 内追加的用户输入、LLM 请求/响应、工具调用与工具结果等审计事实。 |
 | Context Slot | 将某个 Owner 的内容转换为可注入 LLM 请求的结构化贡献的适配单元，不拥有领域数据。 |
 | Context Plan | 某次 Run 实际启用、排序后的 Slot 绑定集合。 |
-| Context Version | 一个 Context Plan 的完整、不可变快照；版本从 1 连续递增。 |
+| Context Version | 一个 Context Plan 中所有**快照型 Slot**的完整、不可变快照；版本从 1 连续递增，不因普通 Run Message 追加而新增。 |
 | Staged History Compression | 已生成但尚未提交到 Session 的历史压缩候选；其控制信息归 Run，摘要正文归 Context Version。 |
-| Incremental Messages | 当前 LLM 请求中除 Context Version 外，由 Run Message 事实引用带入的消息集合。 |
+| Incremental Messages | 当前 LLM 请求中除 Context Version 外，由事实引用型 Slot 带入的 Run Message 集合；其 ID 写入 `LLM_STARTED`。 |
 
 ## 2. 已确认的架构决策与不变量
 
@@ -37,10 +37,10 @@
 3. **检查发生在每次业务 LLM 调用前。** 统计当前真实输入：系统内容、压缩摘要、未压缩历史、当次用户输入、Run Message、工具 Schema 与协议开销；不为未来输出或下一轮预留空间。
 4. **超过窗口时压缩最旧 75%。** 从当前压缩边界后的完整 Conversation 选择最旧 75%，至少保留一条最新 Conversation 原文；摘要输入过大时按完整 Conversation 分批滚动摘要。压缩后仍超限即以确定性错误失败，禁止静默裁剪。
 5. **候选只在 Run 成功时提交。** `session.json` 只保存已提交的 Conversation 与历史压缩；取消、审批等待、失败与中断都不改写它。
-6. **Context Version 是 Run 内不可变审计事实。** 内容变化追加新版本，不更新旧版本；不使用 `previous_version`。快照只包含本次 Context Plan 已绑定的 Slot。
+6. **Context Version 是 Run 内不可变审计事实。** 内容变化追加新版本，不更新旧版本；不使用 `previous_version`。版本只包含本次 Context Plan 的快照型 Slot，事实引用型 Slot 不写入版本。
 7. **Slot 是统一的注入抽象，Owner 才是数据真相。** Slot 不直接写 Session、Run 或 Agent 配置；它们通过明确的 Port 读取各 Owner 的数据。
 8. **模型代理负责单次调用重试。** 重试耗尽且服务不可用时，Runtime 保存 checkpoint 并转为 `INTERRUPTED`；参数、Token 计数器和不可满足的预算等确定性问题转为 `FAILED`。
-9. **本次直接采用 v3。** 现有 Session 数据视为测试数据；不读、不写 v1/v2，也不提供迁移脚本或兼容分支。
+9. **E6 直接采用 v4。** 现有 Session 和 Run 数据视为测试数据；不读、不写 v3 及更早格式，也不提供迁移脚本或兼容分支。
 
 ## 3. 目标分层与依赖方向
 
@@ -100,7 +100,7 @@ src/dotclaw/
 | `ContextSlotRegistry` | 消除启动时固定元组 → 注册 Descriptor 与构造器 → 新 Slot 可声明式接入 | Slot Descriptor 与工厂 | 注册、查询、构造 | 不组装请求、不缓存内容 |
 | `ContextPlanResolver` | 将不同生命周期内容组合为一次调用的有效计划 → 根据 Owner 配置解析 Binding → 只快照已启用 Slot | 无业务内容 | `resolve(agent, session, run) -> ContextPlan` | 不加载 Slot 内容；替代固定 Slot 元组 |
 | `ContextSlotManager` | 统一缓存刷新与释放 → 按 Binding 管理实例、处理定向刷新和信号 → Slot 与外部变更解耦 | 实例缓存、失效标记、订阅关系 | `request_refresh`、`drain_signals`、`load_plan`、`release_scope` | 外部不得直接调用具体 Slot 的 `refresh` |
-| `ContextPort` | 将 Plan 物化为 LLM 实际输入 → 组装 Contribution、工具定义、Run 消息引用 → Engine 不依赖 Slot 实现 | 无持久化真相 | `build_context(...) -> ContextBundle` | 不决定预算、不写版本；演进自 `SlotContextProvider` |
+| `ContextPort` | 将 Plan 物化为 LLM 实际输入 → 组装快照型 Contribution、工具定义与动态 Run Message 引用 → Engine 不依赖 Slot 实现 | 无持久化真相 | `build_context(...) -> ContextBundle` | 不决定预算、不写版本；演进自 `SlotContextProvider` |
 | `ContextBudgetPlanner` | 防止真实输入超窗口 → TokenCounter 计数、75% 选择与分批摘要 → 不丢当前输入 | 无长期状态 | `plan(context) -> ContextBudgetDecision` | 不直接写 Session/Run；不做字符数估算 |
 | `RuntimeEngine` | 建立可恢复 LLM 安全点 → checkpoint、版本保存、事件、状态迁移 → 可审计可重试 | `RunExecution` 为内存控制状态 | 执行、恢复、重试、完成 | 不持有 Slot、Session 或文件实现 |
 | `SessionRunCoordinator` | 保证 Session 一致上下文 → 未终态 Run 占有 Session → 无分支竞争 | 活动 Run 占用关系 | 创建、控制、重试、放弃 | 不解释 Slot 与压缩算法 |
@@ -112,23 +112,57 @@ src/dotclaw/
 | Owner | 代表性 Slot | Owner 的数据真相 | 刷新来源 |
 |---|---|---|---|
 | Agent | identity、skills、tools | `AgentContextProfile`、启用 Tool/Skill 配置 | 配置/注册表显式变更 |
-| Session | history、user_info、文件内容 | `session.json`、Session 绑定资源 | Session 写入、文件版本变化或定向刷新 |
-| Run | run_messages、memory、knowledge | `messages.json.messages`、本次检索结果 | 新 Run Message、Tool 完成、显式刷新 |
+| Session | history_compressions、user_info、文件内容 | `session.json`、Session 绑定资源 | Session 写入、文件版本变化或定向刷新 |
+| Run | conversation、run_messages、memory、knowledge | Run 创建时的 Conversation 视图、`messages.json.messages`、本次检索结果 | Run 创建、Tool 完成、显式刷新 |
 | Global | available_agents | Agent 注册表/全局服务 | 注册表变更 |
 
-`Agent` 在本文特指可注入能力的 `AgentContextProfile`，既不是 `AgentIdentity`，也不是运行中的 `AgentRun`。Tools Slot 只将工具策略或简短说明贡献给系统内容；实际工具 Schema 必须从 Agent 的启用工具 ID 经 `ToolAvailabilityResolver/ToolCatalog` 解析，唯一进入 `ContextBundle.tools`。
+`Agent` 在本文特指可注入能力的 `AgentContextProfile`，既不是 `AgentIdentity`，也不是运行中的 `AgentRun`。`tools` 是 `AGENT` Owner 的快照型 Slot：它必须把当前 Agent 筛选后的实际 `ToolDefinition` 列表直接写入 Slot `content`，并以同一列表构造 `ContextBundle.tools`。工具 Schema 不复制到 system text。
+
+### 4.2 Slot 持久化模式、载荷与历史拆分
+
+每个 `ContextSlotDescriptor` 必须显式声明 `ContextPersistenceMode`，仅有下列两个值：
+
+| 模式 | 是否进入实际 LLM 输入 | 是否写入 `context_versions` | 当前 Slot |
+|---|---|---|---|
+| `SNAPSHOT` | 是 | 是 | identity、skills、tools、history_compressions、conversation、user_info、memory、knowledge、available_agents 等 |
+| `FACT_REFERENCE` | 是 | 否 | run_messages |
+
+`FACT_REFERENCE` 不是“未注入”。它仍由 Plan 管理并参与实际请求，只是正文已经作为 Run Message 事实保存；`LLM_STARTED.incremental_message_ids` 保存本次采用的精确消息 ID。普通工具调用、工具结果、LLM 响应追加只会改变该引用集合，不能因此新增 `Context Version`。
+
+Slot 快照只有一个 `content` 载荷，其精确形状由 `ContextContributionKind` 决定：系统类内容为字符串、`TOOL_DEFINITIONS` 为有序 `ToolDefinition` 列表、`CONVERSATION_MESSAGES` 为有序 Conversation Message 列表、`RUN_MESSAGE_REFERENCES` 为有序 Run Message ID 列表。禁止再以泛用 `attributes` 塞入 history 或工具正文，也禁止保留泛用 `message_ids` 字段。序列化必须按 kind 使用显式 DTO，禁止 `Any`、`object` 或无类型 JSON 包。
+
+历史拆为两个语义和生命周期不同的 Slot：
+
+| Slot | Owner / 模式 | `content` | 规则 |
+|---|---|---|---|
+| `history_compressions` | `SESSION` / `SNAPSHOT` | 当前有效的历史摘要字符串 | 默认读取已提交 Session 摘要；当前 Run 存在 staged 候选时由候选摘要覆盖。 |
+| `conversation` | `RUN` / `SNAPSHOT` | 压缩边界之后的完整 Conversation Message 列表 | Run 创建时构建；普通 Run Message 追加不改变它。 |
+| `run_messages` | `RUN` / `FACT_REFERENCE` | 当前请求所需的 Run Message ID 列表 | 不进入 Context Version；由 `LLM_STARTED` 保存本次实际引用。 |
+
+因此每次 LLM 输入最多只会注入一个历史摘要：staged 候选覆盖已提交摘要，绝不把二者并排注入。
 
 ## 5. 数据容器与唯一真相
 
 | 物理文件 | 保存内容 | 不保存内容 | 唯一写入者 | 读取者与生命周期 |
 |---|---|---|---|---|
-| `messages.json` v3 | `context_versions` 完整快照、Run Message 事实 | Session 最终 Conversation、候选控制状态 | Run Repository | 审计、恢复、LLM 输入重建；Run 保留期内存在 |
+| `messages.json` v4 | `context_versions` 的快照型 Slot、Run Message 事实 | Session 最终 Conversation、候选控制状态、事实引用型 Slot 正文副本 | Run Repository | 审计、恢复、LLM 输入重建；Run 保留期内存在 |
 | `events.jsonl` | `LLM_STARTED`、状态迁移、审批与恢复事件 | 大段上下文正文 | Run Repository | 审计和恢复；与 Run 同生命周期 |
 | `run.json` | Run 状态、`active_context_version`、候选元数据/引用、成功提交意图 | 摘要正文、重复 Message 内容 | Run Repository | 协调器、Engine、恢复；与 Run 同生命周期 |
 | `checkpoint.json` | 下一动作、消息/事件序号、Context Version、预算决策、候选引用 | 最终 Session 投影 | Run Repository | 中断恢复；终态或放弃后删除 |
 | `session.json` | 已提交 Conversation、`history_compressions`、压缩边界及版本 | Run 中间消息、未提交候选 | Session Repository / Projector | 下一 Run 的 History Slot；Session 删除时清理 |
 
-`messages.json` 的顶层版本固定为 `3`。每个 `context_versions` 元素包含连续 `version`、创建时间、完整 Slot 快照、有序注入序号、内容 hash 与整体 hash。每个计划内 Slot 必须出现，状态为 `INCLUDED`、`EMPTY` 或 `FAILED`；仅注册但未启用的 Slot 不写入。`RunMessagesSlot` 仅产生 Message ID 引用，消息正文仍只存在 `messages.json.messages`。
+E6 后，Runtime 持久化格式直接切换为 `v4`；当前本地 Run/Session 数据均为可清空的测试数据，故只读写 v4，不提供 v3 或更早版本的兼容分支、迁移脚本或混读。每个 `context_versions` 元素包含连续 `version`、创建时间、全部快照型 Slot 的有序快照、`content_hash` 与 `tool_schema_hash`。每个计划内快照型 Slot 必须出现，状态为 `INCLUDED`、`EMPTY` 或 `FAILED`；仅注册但未启用的 Slot 和全部事实引用型 Slot 均不写入。
+
+`content_hash` 只能规范化哈希有序快照型 Slot 的 `slot_id`、Owner、kind、注入顺序、状态和 `content`，不得包含 Run Message、`context-{run}-{seq}` 等生成 ID 或本轮用户输入。`tool_schema_hash` 只能规范化哈希 `tools` Slot 中筛选后的实际 `ToolDefinition` 列表，用于独立审计工具能力是否变化。由 `Context Version + LLM_STARTED.incremental_message_ids` 可以精确重建一次调用；消息正文仍只存在 `messages.json.messages`。
+
+工具调用的事实正文仍由 LLM Response、Tool Call 与 Tool Result 三类 Run Message 保存；`events.jsonl` 只保存控制流和引用，且每个 ToolCall 必须成对出现下列事件：
+
+| 事件 | 写入时机 | 必填引用/数据 | 禁止重复的数据 |
+|---|---|---|---|
+| `TOOL_STARTED` | 即将调用 `ToolPort` 前 | 来源 LLM Response Message ID、`call_id`、工具名 | 完整 arguments、工具定义正文 |
+| `TOOL_COMPLETED` | 成功、审批等待或异常后 | Tool Result/审批相关 Message ID、`call_id`、工具名、明确执行状态、安全错误摘要（如有） | 完整结果正文、完整异常堆栈 |
+
+委派工具同样写这一对工具事件；`DELEGATION_SUBMITTED`、`DELEGATION_COMPLETED` 只补充委派语义，不能替代工具事件。多工具调用按模型返回顺序分别闭环；异常也必须写对应的 `TOOL_COMPLETED`，避免审计出现悬空开始事件。
 
 `run.json.staged_history_compressions` 包含候选 ID、状态、Session 基线、覆盖至的 Conversation ID、源 hash、摘要 hash 与 Context Version 引用。摘要正文只能在对应 Context Version 的 History Slot 载荷中出现一次。同一 Run 可保留多个候选以审计，但成功路径仅提交最新候选。
 
@@ -190,7 +224,9 @@ sequenceDiagram
 
 隔离单位是 Session，而非单次 LLM 调用。`SessionRunCoordinator` 必须以持久化的活动 Run 状态判定占用，进程内锁只用于缩小同进程竞争窗口，不能作为唯一真相。所有未终态状态均不释放占用；因此本期没有同 Session 的 Run A/Run B 并发、摘要合并或 Conversation 分支问题。
 
-文件持久化使用临时文件加原子替换。所有恢复动作以 `run_id`、候选 ID、Conversation ID 与事件 ID 幂等：重复恢复不得追加重复 Conversation、重复摘要或重复终态事件。`Context Version` 只能追加，且只有 Slot 载荷 hash 变化时生成新版本，确保审计引用稳定。
+文件持久化使用临时文件加原子替换。所有恢复动作以 `run_id`、候选 ID、Conversation ID 与事件 ID 幂等：重复恢复不得追加重复 Conversation、重复摘要或重复终态事件。`Context Version` 只能追加，且只有快照型 Slot 规范化 hash 变化时生成新版本；仅 Run Message 事实追加时复用活动版本，确保审计引用稳定。
+
+`history_compressions` 的 staged 更新是本期唯一的 Slot 暂存语义：候选控制信息仍在 `run.json.staged_history_compressions`，摘要正文在候选所引用 Context Version 的同名 Slot `content`。构造上下文时候选覆盖 Session 已提交摘要；Run 成功时仅提交最新候选，取消、失败、中断、放弃均丢弃候选。严格 Session 串行使同 Session Run 间不存在竞争；基线 Session 摘要版本仍用于外部修改或恢复时的校验。Session 成功写入后通过 `ContextSlotManager.request_refresh()` 使同名 Session Slot 失效并重建。
 
 ## 9. 扩展点与后续演进
 
@@ -201,11 +237,15 @@ sequenceDiagram
 | `ContextSignalBus` | 发布与消费进程内类型化信号 | 跨进程队列、排序、重放、持久化 | 仅订阅 Slot 收到、未订阅 Slot 不刷新 |
 | `ContextSlotRegistry` | 注册 Descriptor 与构造器，按 Slot ID 构建 | 插件发现和热卸载 | 新 Slot 不修改 Engine/Provider 即可加入 Plan |
 
+新增 Slot 的固定接入流程是：定义精确 `ContextContributionKind` 与 `ContextPersistenceMode` → 实现只负责读取 Owner 的 Slot → 注册 Descriptor/构造器 → 在对应 Owner 配置启用并指定顺序 → 为载荷序列化、快照/事实引用语义和刷新写契约测试。该流程不修改 Engine、全局固定 Slot 元组或 Slot Manager 的分支。
+
+本期不建立“所有 Slot 通用暂存区”或每种 Slot 的通用事务版本系统。只有 `history_compressions` 因为需要跨 Run 成功边界写 Session 而具备 staged 候选。未来某个状态型 Slot 确实需要延迟提交时，必须先定义其事实源、覆盖优先级、成功/失败语义、恢复和幂等契约，再新增专用 staged 机制或经评审抽取通用 Port；不得提前以泛化缓存替代领域事实。
+
 后续若需要跨进程或持久化信号总线，必须新增事件顺序、去重键、重放窗口和崩溃恢复设计，不得将当前进程内 SignalBus 直接宣称为可靠消息队列。后续如开放同 Session 并行 Run，必须先引入 Session Branch、Conversation merge 与压缩冲突策略；本期不具备此能力。
 
 ## 10. 迁移、删除、风险与限制
 
-本次是破坏性 v3 切换：本地 Session 均可删除，不做在线数据迁移、旧读兼容或回滚到 v2。回滚边界是代码版本回退并清空测试 Session 目录，不能混读同一份旧数据。
+本次 E6 是破坏性 v4 切换：本地 Session 和 Run 数据均可删除，不做在线数据迁移、旧读兼容或回滚到 v3。回滚边界是代码版本回退并清空测试数据目录，不能混读同一份旧数据。
 
 | 旧项 | 替代关系 | 物理删除条件 |
 |---|---|---|
@@ -217,5 +257,8 @@ sequenceDiagram
 | `SlotCacheScope` 混合枚举 | Owner、刷新策略、缓存范围三个独立枚举 | 不再存在 `STATIC/SESSION/CONDITIONAL/DYNAMIC` 混用 |
 | Workspace/Project 默认 Slot | 不纳入默认 Plan | 无生产引用及针对默认注入的测试 |
 | 字符数除以 4 的 token 估算/静默裁剪 | `TokenCounterPort` + 明确预算失败 | 所有预算路径和测试改为 TokenCounter |
+| `HistorySlot` | `history_compressions` + `conversation` 两个 Slot | 新 Slot 直载荷、摘要覆盖和输入重建测试通过；生产搜索无引用 |
+| `ContextSlotSnapshot.attributes`、泛用 `message_ids` | 按 kind 的 `content`；`LLM_STARTED.incremental_message_ids` | v4 序列化、审计展示和回放测试通过；生产搜索无引用 |
+| `ContextBundle.messages` 的整体 hash | 仅快照型 Slot 的 `content_hash` | 多轮工具 ReAct 复用版本测试通过；生产搜索无旧 hash 路径 |
 
 风险主要在于 tokenizer 编码与模型实际分词可能不完全一致。首期对 Qwen 压缩路由显式配置 `cl100k_base` 兼容编码，并将编码随策略冻结；若没有明确编码则记录不含 prompt 内容的 `WARNING` 并拒绝调用，而不是静默低估。成功提交恢复仅承诺单个工作目录内的原子替换与幂等补偿，不承诺跨主机分布式事务。

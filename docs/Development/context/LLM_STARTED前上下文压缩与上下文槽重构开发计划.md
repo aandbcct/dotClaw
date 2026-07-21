@@ -1,7 +1,7 @@
 # LLM_STARTED 前上下文压缩与上下文槽重构开发计划
 
-> 状态：已完成（E1–E5 已验收）
-> 实施方式：同一分支、同一开发窗口内完成完整目标；按以下 E1–E5 阶段提交和验收，不采用无法定位回归的大爆炸改动。
+> 状态：E1–E5 已验收；E6（上下文快照语义与工具审计收口）待开发。
+> 实施方式：E1–E5 为已完成基线；E6 独立提交和验收，不与既有阶段混成无法定位回归的大爆炸改动。
 > 关联设计：[整体设计](LLM_STARTED前上下文压缩与上下文槽重构整体设计.md)
 
 ## 1. 开发范围、前提与完成定义
@@ -12,7 +12,7 @@
 
 1. 每次业务 LLM 调用的 `LLM_STARTED` 前，按真实请求 token 判断是否需要压缩 Session Conversation；
 2. 超限时只压缩最旧的 75% 完整 Conversation，候选先写 Run，成功后才提交 Session；
-3. `messages.json` 使用仅支持的 v3 `context_versions` 格式，精确审计每次模型调用的上下文演化；
+3. `messages.json` 使用仅支持的 v4 `context_versions` 格式，稳定快照与动态事实引用共同精确审计每次模型调用；
 4. 将现有 Context Slot 改为多 Owner、可注册、可刷新、可释放的上下文注入机制；
 5. 同 Session 严格串行，模型服务不可用时可中断、可重试、可放弃；
 6. 将最终 Conversation 投影、最新压缩候选、终态事件和 `run.json` 收敛到可恢复成功提交。
@@ -43,7 +43,7 @@
 
 只有同时满足以下条件才可宣布本计划完成：
 
-- E1–E5 的新增、修改、废弃和删除项均完成；
+- E1–E6 的新增、修改、废弃和删除项均完成；
 - 全部新旧相关测试、契约测试和全量回归通过；
 - `git diff --check` 通过；
 - 删除前搜索验证没有生产源码遗留引用；
@@ -61,6 +61,8 @@
 | `RunRepositoryPort` | 追加 Context Version、候选、事件、checkpoint 与成功提交意图 | Context Version 只追加；重复恢复幂等；文件原子替换 | 临时目录 Adapter；崩溃点恢复测试 |
 | `SessionProjectionPort` | 原子应用最终 Conversation 与最新候选 | 未成功 Run 永不写入；重复应用无重复 Conversation/摘要 | InMemory Session；幂等投影测试 |
 | `SessionRunCoordinator` | 创建、控制、重试、放弃 Run | 一个 Session 仅一个未终态 Run；重启状态可恢复 | InMemory 活动 Run 表；并发请求和状态迁移测试 |
+| `ContextVersionReuse` | 基于快照型 Slot 创建或复用 Context Version | 事实引用型 Slot 的变化不得新增版本；快照型 Slot 变化必须追加版本 | Scripted Slot + InMemory Run Repository；版本复用、摘要覆盖与刷新测试 |
+| `ToolEventWriter` | 按每个 LLM ToolCall 追加开始/完成事件 | 所有工具调用都有成对事件；失败也必须完成闭环；不得重复大段参数/结果正文 | Scripted ToolPort；单工具、多工具、审批、异常和委派测试 |
 
 ## 3. 分阶段实施
 
@@ -261,6 +263,60 @@
 
 **风险**：文件系统不能提供跨文件 ACID 事务。解决方式是可恢复意图日志与幂等投影；适用边界是单个工作目录内的原子替换，不承诺多主机分布式事务。
 
+### E6：上下文快照语义与工具审计收口
+
+**阶段目标**：消除“每轮 Run Message 都创建 Context Version”的伪快照，令 `context_versions` 只保存稳定上下文；同时补齐工具调用事件，并让 tools/history 的审计内容可直接、无歧义地阅读。
+
+**前置依赖**：E1–E5 已通过。E6 是破坏性 `v4` 格式切换：当前 Run/Session 数据可清空，真实实现只读写 v4，不保留 v3 或更早格式的读取、迁移或兼容分支。
+
+**新增**：
+
+- `ContextPersistenceMode` 枚举：只允许 `SNAPSHOT` 与 `FACT_REFERENCE`；每个 `ContextSlotDescriptor` 必须显式声明；
+- `ContextContributionKind.TOOL_DEFINITIONS`、`CONVERSATION_MESSAGES` 等精确 kind，以及按 kind 序列化 `content` 的显式 DTO；不得以 `Any`、`object` 或无类型字典承载载荷；
+- `HistoryCompressionsSlot`（`SESSION` / `SNAPSHOT`）与 `ConversationSlot`（`RUN` / `SNAPSHOT`）；前者读取已提交摘要或当前 Run 的 staged 覆盖摘要，后者保存压缩边界后的完整 Conversation；
+- `ContextVersionReuse` 过程服务或等价原子方法：以快照型 Slot 的规范化内容判断追加或复用活动 Context Version；
+- `ToolEventWriter` 或等价的 Engine 私有原子方法，统一生成 `TOOL_STARTED`、`TOOL_COMPLETED` 事件与精确引用；
+- v4 Run 持久化 fixture、Fake、回放/展示 DTO 与契约测试。
+
+**修改**：
+
+- `runtime/domain/context.py`、`context/contracts.py` 及对应序列化模型：`ContextSlotSnapshot` 仅保留 Slot 标识、Owner、kind、持久化模式所需元数据、状态、顺序和按 kind 的 `content`；删除泛用 `attributes`、`message_ids`；
+- `context/slots/`、Registry、Plan Resolver、Slot Manager、Provider：
+  - `run_messages` 改为 `FACT_REFERENCE`，仍参与实际 LLM 输入，但不写入 `context_versions`；
+  - `tools` 改为 `AGENT` / `SNAPSHOT`，`content` 写入当前 Agent 配置裁剪后的实际 `ToolDefinition` 列表，并用同一列表构造 `ContextBundle.tools`；
+  - 删除旧 `HistorySlot`，由 `history_compressions` 与 `conversation` 取代；
+  - `history_compressions` 读取优先级固定为“当前 Run 最新 staged 候选 > 已提交 Session 摘要”，不得生成并排摘要 Slot；
+  - `conversation` 在 Run 创建时按 Session 压缩边界构建，普通 Run Message 追加不刷新它；
+- `runtime/application/engine.py`、Context Version 构建和 Run Repository：
+  - `content_hash` 仅哈希有序快照型 Slot 的 `slot_id`、Owner、kind、顺序、状态和规范化 `content`；不得包含 `ContextBundle.messages`、Run Message、生成 ID 或本轮用户输入；
+  - `tool_schema_hash` 仅哈希 tools Slot 的实际筛选后 Schema；
+  - 普通 ReAct 的用户输入、LLM 响应、工具调用/结果只通过 `LLM_STARTED.incremental_message_ids` 引用并复用活动版本；快照型 Slot 变更（候选摘要覆盖、显式刷新、Agent 配置变化等）才追加版本；
+  - 每一个 LLM `ToolCall`，包括委派工具，执行前写 `TOOL_STARTED`，完成、审批等待或异常后写对应的 `TOOL_COMPLETED`；事件仅保存 `call_id`、工具名、状态、必要的 Message ID 和安全错误摘要，参数及结果正文继续以 Run Message 为唯一真相；
+  - 候选提交成功后，写 Session 并通过 `ContextSlotManager.request_refresh()` 失效 `history_compressions`；取消、失败、中断、放弃绝不把 staged 候选提交 Session；
+- 审计 CLI/Markdown/导出显示（若存在）：按 Slot `content` 直接展示 tools、压缩摘要和 Conversation，事实引用型 Run Messages 通过 `LLM_STARTED` 跳转到对应 Message，禁止再显示空 `attributes` 或泛用 `message_ids`。
+
+**废弃与物理删除**：
+
+| 废弃项 | 删除条件 | 搜索验证 |
+|---|---|---|
+| v3 Run 持久化读写、fixture 和版本分支 | v4 序列化、重建与全量回归通过 | `rg -n '"version": 3|V3|v3' src tests` 仅允许历史文档说明 |
+| `HistorySlot` | 两个新 History Slot 的载荷、覆盖与恢复测试通过 | `rg -n "HistorySlot" src tests` 无生产引用 |
+| `ContextSlotSnapshot.attributes`、泛用 `message_ids` | v4 Snapshot、审计展示和回放测试通过 | `rg -n "attributes|message_ids" src/dotclaw/context src/dotclaw/runtime tests` 仅允许明确的事件 `incremental_message_ids` |
+| 对完整 `ContextBundle.messages` 或 Run Message 的 Context Version hash | 多轮工具循环复用版本测试通过 | `rg -n "context\.messages|content_hash" src/dotclaw/runtime src/dotclaw/context` 人工确认无旧 hash 路径 |
+| `ToolsSlot` 的空字符串/空贡献实现 | Agent 裁剪 Schema 的快照与实际调用测试通过 | `rg -n "ToolsSlot|tools" src/dotclaw/context` 人工确认不再硬编码 EMPTY |
+
+**验收与门槛**：
+
+- 首次 LLM 调用创建一个 Context Version；同一 Run 的多轮工具 ReAct 中，仅新增用户/LLM/工具 Run Message 时 `active_context_version` 不变，但每个 `LLM_STARTED` 的 `incremental_message_ids` 都能还原本轮动态输入；
+- 候选压缩使 `history_compressions` 内容改变时恰好追加一个新版本；它覆盖旧摘要，任意一次请求都不同时注入旧摘要与 staged 摘要；成功后 Session 仅保留最新候选，取消/失败/中断/放弃不写 Session；
+- `tools` Slot 快照内容与实际传入 LLM 的 Schema 完全一致，`tool_schema_hash` 仅在该列表变化时改变；`content_hash` 不因 Run Message 或生成 ID 改变；
+- `conversation` Slot 直接保存可审计的完整 Conversation；不再借助 `attributes`；`run_messages` 不出现在 Context Version 中；
+- 单工具、多工具、需要审批的工具、工具异常和委派工具均产生顺序正确、成对且不重复的工具事件；工具结果正文仍只存在 Run Message；
+- v4 新建、读取、审批恢复、Interrupted 重试、成功提交恢复和 CLI/Markdown 审计均通过；旧格式明确拒绝；
+- 所有 Fake/真实 Adapter 契约测试、端到端 ReAct 测试、`python -m pytest -q`、`git diff --check` 和删除搜索验证通过。
+
+**风险与控制**：v4 不兼容会使遗留测试数据不可读；开发前清空测试 Run/Session 数据目录，并禁止为了读取旧数据回添兼容分支。Slot 载荷直接化可能使序列化分支变多；以封闭 `ContextContributionKind`、精确 DTO 与 round-trip 测试控制。工具事件在异常路径最易遗漏；所有 ToolPort 调用必须经同一私有包装方法，并用失败注入测试覆盖。
+
 ## 4. 最终删除清单与验证顺序
 
 物理删除必须放在替代实现和测试都通过之后，禁止仅停止调用而留下兼容层。
@@ -270,6 +326,7 @@
 3. 删除固定 Slot 元组、旧 `produce()`、混合 `SlotCacheScope` 以及 Workspace/Project 默认 Slot；执行 Slot API 与组合根搜索验证。
 4. 删除字符数估算、Provider 静默裁剪和旧压缩默认路由；执行 TokenCounter/用途路由搜索验证。
 5. 删除不可恢复的成功提交路径与过时 CLI 输出旁路；执行提交意图和入口搜索验证。
+6. 删除 v3 Run 持久化、`HistorySlot`、Snapshot 泛用 `attributes/message_ids`、ContextBundle 全量消息 hash 和 ToolsSlot 空载荷路径；执行 E6 的版本复用、工具事件和审计展示搜索验证。
 
 建议在删除前运行：
 
@@ -277,6 +334,8 @@
 rg -n "InitialContextSnapshot|initial_context|requires_messages_migration|RUN_CONTEXT|SessionHistoryPreparationService" src tests scripts
 rg -n "def produce|\.produce\(|SlotCacheScope|WorkspaceSlot|ProjectSlot" src tests
 rg -n "_estimate_tokens|context_compaction|SuccessCommitIntent" src tests config
+rg -n '"version": 3|HistorySlot|ContextBundle\.messages' src tests
+rg -n "attributes|message_ids|TOOL_STARTED|TOOL_COMPLETED" src/dotclaw/context src/dotclaw/runtime tests
 python -m pytest -q
 git diff --check
 ```
@@ -290,6 +349,7 @@ git diff --check
 3. `context-slot-owner-lifecycle`：E3 Slot 合约、Registry、Resolver、Manager、SignalBus 与组合根。
 4. `runtime-dynamic-context-compaction`：E4 Engine 安全点、候选、严格串行、审批恢复、中断/重试。
 5. `runtime-success-recovery-and-cleanup`：E5 成功恢复、CLI/Channel、删除旧实现、全量回归和文档收口。
+6. `context-snapshot-semantics-and-tool-audit`：E6 v4 格式、快照/事实引用分离、历史 Slot 拆分、工具事件与审计收口。
 
 每个提交必须独立通过其阶段测试；若实际开发需要拆分为更小提交，仍应保持先契约、后 Adapter、再入口的依赖顺序。
 
@@ -303,9 +363,11 @@ git diff --check
 
 ### 上下文与持久化
 
-- [x] 每个 `LLM_STARTED` 都可由 `context_version + incremental_message_ids + tool_schema_hash` 重建实际输入。
-- [x] Snapshot 只包含有效 Plan Slot；每个绑定 Slot 的 `INCLUDED/EMPTY/FAILED` 状态完整可审计。
-- [x] Context Version 只追加；摘要正文只出现于 Context Version，候选控制信息只出现于 Run。
+- [ ] 每个 `LLM_STARTED` 都可由 `context_version + incremental_message_ids + tool_schema_hash` 重建实际输入；事实引用型 Slot 不会写入 Context Version。
+- [ ] Snapshot 只包含有效的快照型 Plan Slot；每个绑定 Slot 的 `INCLUDED/EMPTY/FAILED` 状态和按 kind 的直接内容完整可审计。
+- [ ] Context Version 只在快照型 Slot 内容变化时追加；普通 Run Message 只更新 `incremental_message_ids`；摘要正文只出现于 Context Version，候选控制信息只出现于 Run。
+- [ ] `history_compressions` 与 `conversation` 分别按 Session/Run 生命周期持有内容；staged 摘要覆盖已提交摘要，绝不重复注入。
+- [ ] tools Slot 记录 Agent 裁剪后的实际 Schema，`content_hash` 与 `tool_schema_hash` 的输入范围符合 E6 定义。
 - [x] 取消、失败、审批等待、中断和放弃均不向 Session 提交候选。
 
 ### 压缩与模型调用
@@ -313,11 +375,12 @@ git diff --check
 - [x] Token 统计包含所有实际输入内容和工具 Schema；未知 tokenizer 写 `WARNING` 后拒绝，不使用字符数估算。
 - [x] 超限只压缩最旧 75% 完整 Conversation；摘要分批不拆 Conversation；压缩后仍超限明确失败。
 - [x] 压缩使用 `CONTEXT_COMPACTION` 用途路由；代理重试耗尽时 Run 为 `INTERRUPTED`。
-- [x] 工具结果会进入下一次 LLM 调用；审批恢复能看到原 Conversation 与 Run Message。
+- [ ] 工具结果会进入下一次 LLM 调用；审批恢复能看到原 Conversation 与 Run Message。
+- [ ] 每个工具调用（含委派、审批与异常）均有完整的 `TOOL_STARTED` / `TOOL_COMPLETED` 审计事件，正文不重复写入事件。
 
 ### 一致性、迁移与质量
 
 - [x] 一个 Session 同时至多一个未终态 Run；重启后遗留 `RUNNING` 可恢复或放弃，不会永久阻塞。
 - [x] SuccessCommitIntent 失败注入恢复后，Run 终态、Session Conversation、压缩候选和事件一致且幂等。
-- [x] v1/v2、`initial_context`、`RUN_CONTEXT`、Run 前压缩、旧 Slot API、Runtime 预算中的旧 token 估算及迁移脚本完成物理删除。
-- [x] `python -m pytest -q`、针对性集成测试、`git diff --check` 和第 4 节搜索验证全部通过。
+- [ ] v1/v2/v3、`initial_context`、`RUN_CONTEXT`、Run 前压缩、旧 Slot API、旧 HistorySlot、泛用 Snapshot 载荷、Runtime 预算中的旧 token 估算及迁移脚本完成物理删除。
+- [ ] `python -m pytest -q`、针对性集成测试、`git diff --check` 和第 4 节搜索验证全部通过。
