@@ -39,6 +39,7 @@ from ..llm.proxy import LLMProxy
 from ..tools.executor import ToolExecutor
 from ..skills.registry import SkillRegistry
 from ..memory.manager import MemoryManager
+from ..memory.dream import DeepDream
 from ..orchestration.registry import AgentRegistry
 from ..orchestration.dispatcher import AgentDispatcher
 from ..orchestration.message_broker import TaskMessageBroker
@@ -58,6 +59,10 @@ class RuntimeServices:
     tool_executor: ToolExecutor
     mcp_provider: MCPToolProvider | None
     skill_registry: SkillRegistry | None
+    memory_dream: DeepDream | None
+    """仅供 CLI 诊断展示的记忆蒸馏服务（阶段 2 起由 Host 统一持有）。"""
+    agent_registry: AgentRegistry
+    """所有可用 Identity 的目录，供 SessionInteractionService 路由与校验。"""
 
 
 def build_runtime_services(
@@ -72,6 +77,7 @@ def build_runtime_services(
     memory_manager: MemoryManager | None,
     agent_registry: AgentRegistry,
     mcp_provider: MCPToolProvider | None,
+    memory_dream: DeepDream | None = None,
     text_stream_port: TextStreamPort | None = None,
 ) -> RuntimeServices:
     """按 Port 边界装配 RuntimeEngine 与 SessionRunCoordinator。"""
@@ -126,6 +132,8 @@ def build_runtime_services(
         tool_executor=tool_executor,
         mcp_provider=mcp_provider,
         skill_registry=skill_registry,
+        memory_dream=memory_dream,
+        agent_registry=agent_registry,
     )
 
 

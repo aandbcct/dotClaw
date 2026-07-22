@@ -118,7 +118,6 @@ def _make_execution_view(run_id: str, agent_id: str) -> RunExecutionView:
 # ============================================================================
 
 @pytest.mark.phase0_contract
-@pytest.mark.xfail(strict=True, reason="阶段0契约：待阶段1实现 Session.agent_id 必填校验")
 async def test_session_creation_requires_non_empty_agent_id(tmp_path: Path) -> None:
     """新 Session 必须持久化非空 agent_id；未指定时必须被拒绝。
 
@@ -143,29 +142,26 @@ async def test_session_creation_requires_non_empty_agent_id(tmp_path: Path) -> N
 # ============================================================================
 
 @pytest.mark.phase0_contract
-@pytest.mark.xfail(strict=True, reason="阶段0契约：待阶段1实现 SessionInteractionService 的 Identity 路由校验")
 async def test_unknown_identity_submission_is_rejected(tmp_path: Path) -> None:
     """绑定未知 Identity 的 Session 不得经入口提交，必须返回明确错误。
 
     目标（开发计划阶段1）：SessionInteractionService 读取 session.agent_id，
     在 AgentRegistry 中验证 Identity；未知或空 Identity 必须返回明确错误，
-    不能回退到默认 Identity。当前实现尚无 SessionInteractionService。
+    不能回退到默认 Identity。
     """
-    # 延迟导入：目标组件在阶段1新增。
     from dotclaw.bootstrap.session_interaction import SessionInteractionService
 
     session_manager: SessionManager = SessionManager(tmp_path)
     registry: AgentRegistry = AgentRegistry()
     registry.register(AgentIdentity(agent_id="agent-1", agent_name="已知 Agent"))
 
-    # 以下为阶段1实现后的预期装配形态（待目标组件落地后校准）。
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
         coordinator=None,  # type: ignore[arg-type]
     )
 
-    # 创建绑定未知 Identity 的 Session（当前 SessionManager 允许任意字符串）。
+    # 创建绑定未知 Identity 的 Session。
     session = await session_manager.create(agent_id="ghost-agent")
 
     # 入口必须在提交前校验 session.agent_id 属于已注册 Identity，拒绝未知身份。
@@ -314,7 +310,10 @@ async def test_active_session_deletion_is_rejected(tmp_path: Path) -> None:
 
     当前实现：SessionManager.delete 不感知 Run 状态，任何情况下都直接删。
     """
-    from dotclaw.bootstrap.session_interaction import SessionInteractionService
+    from dotclaw.bootstrap.session_interaction import (
+        SessionDeletionRejected,
+        SessionInteractionService,
+    )
 
     session_manager: SessionManager = SessionManager(tmp_path)
     registry: AgentRegistry = AgentRegistry()
@@ -328,8 +327,9 @@ async def test_active_session_deletion_is_rejected(tmp_path: Path) -> None:
 
     session = await session_manager.create(agent_id="agent-1")
     # 启动一个活动（非终态）Run 后，删除必须被明确拒绝。
-    # SessionDeletionRejected 为阶段5新增的异常类型（名称以最终实现为准）。
-    with pytest.raises(Exception):  # noqa: PT011 阶段5将收敛为具体异常类型
+    # 阶段5前 delete_session 尚未实现（属性缺失），本契约因此 xfail；
+    # 阶段5实现后须抛出 SessionDeletionRejected，届时移除 xfail 即可收敛。
+    with pytest.raises(SessionDeletionRejected):
         await service.delete_session(session.id)
 
 

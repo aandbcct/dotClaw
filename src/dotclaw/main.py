@@ -28,6 +28,7 @@ from dotclaw.channel.cli import CLIChannel
 from dotclaw.agent import Agent, build_agent
 from dotclaw.session import Session, SessionManager
 from dotclaw.bootstrap import RuntimeServices
+from dotclaw.bootstrap.session_interaction import SessionInteractionService
 from dotclaw.cli.banner import build_banner, console as rich_console
 from dotclaw.mcp.provider import MCPToolProvider
 from dotclaw.memory.dream import DeepDream
@@ -48,11 +49,22 @@ async def _run_cli() -> None:
     if agent.config is not None:
         logging.getLogger().setLevel(agent.config.debug.level)
 
+    # 阶段 1：SessionInteractionService 按 Session 绑定的 Identity 路由交互。
+    service: SessionInteractionService = SessionInteractionService(
+        session_manager=session_mgr,
+        agent_registry=runtime_services.agent_registry,
+        coordinator=runtime_services.coordinator,
+        config=agent.config,
+    )
+
     sessions: list[Session] = await session_mgr.list_all()
     if sessions:
         current_session: Session = sessions[0]
     else:
-        current_session = await session_mgr.create("主对话")
+        current_session = await service.create_session(title="主对话")
+
+    # 按当前 Session 绑定的 Identity 取得路由 Agent 门面（用于 Banner 展示）。
+    agent = await service.get_agent(current_session)
 
     from dotclaw.config import _find_project_root
     rich_console.print(build_banner(
@@ -68,19 +80,22 @@ async def _run_cli() -> None:
             if not user_input.strip():
                 continue
 
+            # 每次交互前按当前 Session 绑定的 Identity 路由到对应 Agent 门面，
+            # 确保提交严格由 Session 权威驱动，内部构造的 Agent 无法绕过。
+            agent = await service.get_agent(current_session)
+
             if user_input.startswith("/"):
                 cmd: str = user_input.split()[0].lower()
                 args: str = user_input[len(cmd):].strip()
 
                 if cmd == "/quit":
-                    await agent.shutdown()
                     channel.print_info("再见！👋")
                     break
                 elif cmd == "/help":
                     _print_help(channel)
                 elif cmd == "/new":
                     title: str = args or "新对话"
-                    current_session = await session_mgr.create(title)
+                    current_session = await service.create_session(title=title)
                     channel.print_info(f"已创建并切换到新对话: [{current_session.id}] {title}")
                 elif cmd == "/list":
                     await _cmd_list(channel, session_mgr, current_session)
@@ -109,7 +124,7 @@ async def _run_cli() -> None:
                     else:
                         channel.print_error("用法: /delete <对话ID>")
                 elif cmd == "/dream":
-                    dream = agent.memory_dream
+                    dream = runtime_services.memory_dream
                     if dream and hasattr(dream, 'run'):
                         await _cmd_dream_async(channel, dream)
                     else:
@@ -133,11 +148,11 @@ async def _run_cli() -> None:
                     else:
                         channel.print_error("用法: /abandon <run_id>")
                 elif cmd == "/tools":
-                    _cmd_tools(channel, agent.tool_executor)
+                    _cmd_tools(channel, runtime_services.tool_executor)
                 elif cmd == "/mcp":
-                    _cmd_mcp(channel, agent.mcp_provider)
+                    _cmd_mcp(channel, runtime_services.mcp_provider)
                 elif cmd == "/skills":
-                    _cmd_skills(channel, agent.skill_registry)
+                    _cmd_skills(channel, runtime_services.skill_registry)
                 elif cmd == "/model":
                     channel.print_info(f"当前模型: {agent.model_id}")
                 else:

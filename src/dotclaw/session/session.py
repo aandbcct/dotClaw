@@ -138,6 +138,9 @@ class Session:
         session.history_compressions = [HistoryCompression(**item) for item in compression_data]
         if session.conversation_version <= 0:
             session.conversation_version = len(session.conversations)
+        # 阶段 1：Session 必须持久化绑定有效 Identity，缺失兼容读取（计划 §5.1）。
+        if not session.agent_id:
+            raise ValueError("Session 反序列化缺少有效 agent_id")
         return session
 
     def add_conversation(self, user_query: str, final_answer: str,
@@ -233,9 +236,20 @@ class SessionManager:
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir / "session.json"
 
-    async def create(self, title: str = "新对话", model: str = "",
-                     agent_id: str = "") -> Session:
-        """创建新 Session 并持久化。"""
+    async def create(self, agent_id: str, title: str = "新对话",
+                     model: str = "") -> Session:
+        """创建新 Session 并持久化。
+
+        Args:
+            agent_id: 绑定的 Identity 标识，必填且非空（阶段 1：Session 持久化绑定 Identity）。
+            title: 会话标题。
+            model: 创建时使用的模型名。
+
+        Raises:
+            ValueError: agent_id 为空或仅空白。
+        """
+        if not agent_id or not agent_id.strip():
+            raise ValueError("创建 Session 必须指定非空 agent_id")
         import uuid
         now: str = datetime.now().isoformat()
         session: Session = Session(

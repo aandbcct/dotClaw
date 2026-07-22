@@ -410,19 +410,15 @@ async def build_agent(
         memory_manager=memory_mgr,
         agent_registry=agent_registry,
         mcp_provider=mcp_provider,
+        memory_dream=memory_dream,
         text_stream_port=text_stream_port,
     )
     await runtime_services.run_repository.recover_pending_success_commits()
+    # 阶段 1：Agent 已收缩为 Identity + Coordinator 门面，不再接收基础设施。
     agent: AgentCls = AgentCls(
         identity=identity,
         coordinator=runtime_services.coordinator,
         config=config,
-        tool_executor=tool_executor,
-        mcp_provider=mcp_provider,
-        skill_registry=skill_registry,
-        memory_dream=memory_dream,
-        mcp_task=mcp_task,
-        context_port=runtime_services.context_port,
     )
     logger.info("Agent [%s] 的 Runtime v2 服务已就绪", agent.agent_id)
     return agent, runtime_services, session_mgr

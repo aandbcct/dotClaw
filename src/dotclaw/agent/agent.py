@@ -2,26 +2,22 @@
 
 模块只保存 Agent 身份与展示所需依赖，将普通执行、审批恢复和取消委托给
 SessionRunCoordinator，禁止持有旧 Runtime、Session 级状态或 delegation runner。
+（阶段 1）Agent 已收缩为 Identity + Coordinator 的轻量门面，不再暴露或关闭任何
+基础设施；工具/MCP/Skill/Dream 等诊断展示依赖由 RuntimeServices 提供（总体设计 §5.3）。
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
-from ..mcp.provider import MCPToolProvider
 from ..runtime.domain.facts import RunErrorCode, RunStatus
 from .identity import AgentIdentity
 
 if TYPE_CHECKING:
     from ..config import Config
-    from ..memory.dream import DeepDream
     from ..runtime.application.session_run_coordinator import SessionRunCoordinator
     from ..runtime.application.dto import RunRequest, RunResult
-    from ..runtime.application.ports import ContextPort
     from ..session.session import Session
-    from ..skills.registry import SkillRegistry
-    from ..tools.executor import ToolExecutor
 
 
 class Agent:
@@ -32,24 +28,17 @@ class Agent:
         identity: AgentIdentity,
         coordinator: SessionRunCoordinator,
         config: Config,
-        tool_executor: ToolExecutor | None = None,
-        mcp_provider: MCPToolProvider | None = None,
-        skill_registry: SkillRegistry | None = None,
-        memory_dream: DeepDream | None = None,
-        mcp_task: asyncio.Task[None] | None = None,
-        context_port: ContextPort | None = None,
     ) -> None:
-        """绑定执行协调器与仅供展示或关闭的基础设施依赖。"""
+        """仅绑定身份与共享协调器。
+
+        Agent 不持有或关闭任何基础设施（总体设计 §5.3）：后台 MCP 任务与
+        Context 缓存的生命周期由 ApplicationHost 在阶段 2 统一拥有；工具/MCP/
+        Skill/Dream 等诊断展示依赖改由 RuntimeServices 提供。
+        """
         self._identity: AgentIdentity = identity
         self._coordinator: SessionRunCoordinator = coordinator
         self._config: Config = config
-        self._tool_executor: ToolExecutor | None = tool_executor
-        self._mcp_provider: MCPToolProvider | None = mcp_provider
-        self._skill_registry: SkillRegistry | None = skill_registry
         self._last_run_result: RunResult | None = None
-        self._memory_dream: DeepDream | None = memory_dream
-        self._mcp_task: asyncio.Task[None] | None = mcp_task
-        self._context_port: ContextPort | None = context_port
 
     @property
     def identity(self) -> AgentIdentity:
@@ -86,41 +75,6 @@ class Agent:
         """判断最近成功回复是否已在执行期间流式呈现。"""
         result: RunResult | None = self._last_run_result
         return result is not None and result.final_message is not None and result.has_streamed_text
-
-    @property
-    def tool_executor(self) -> ToolExecutor | None:
-        """返回仅供 CLI 展示的工具执行器。"""
-        return self._tool_executor
-
-    @property
-    def mcp_provider(self) -> MCPToolProvider | None:
-        """返回仅供 CLI 展示和关闭的 MCP 提供者。"""
-        return self._mcp_provider
-
-    @property
-    def skill_registry(self) -> SkillRegistry | None:
-        """返回仅供 CLI 展示的技能目录。"""
-        return self._skill_registry
-
-    @property
-    def memory_dream(self) -> DeepDream | None:
-        """返回可选的记忆蒸馏服务。"""
-        return self._memory_dream
-
-    async def shutdown(self) -> None:
-        """关闭 Agent 持有的后台 MCP 初始化任务和提供者。"""
-        if self._mcp_task is not None and not self._mcp_task.done():
-            self._mcp_task.cancel()
-            try:
-                await self._mcp_task
-            except asyncio.CancelledError:
-                pass
-        if self._mcp_provider is not None:
-            await self._mcp_provider.shutdown()
-        if self._context_port is not None:
-            from ..runtime.domain.context import ContextOwner
-
-            await self._context_port.release_scope(ContextOwner.AGENT, self.agent_id)
 
     async def process(self, session: Session, user_message: str) -> str:
         """提交普通用户消息，并将标准 RunResult 转换为 Channel 文本。"""
