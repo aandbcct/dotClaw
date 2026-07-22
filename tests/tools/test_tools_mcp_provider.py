@@ -255,3 +255,28 @@ def test_invalid_mcp_args_blocks_tools_call():
     out = asyncio.run(run())
     assert out.error_code == "INVALID_ARGUMENTS"
     assert calls == []  # tools/call 从未发送
+
+
+def test_factory_pattern_awaited_discovery_populates_snapshot():
+    # 回归：MCP 发现必须以可 await 任务完成（fire-and-forget 会导致首个 Run
+    # 快照早于发现完成而漏掉 MCP 工具）。模拟 factory 的 create_task + await 模式。
+    from dotclaw.tools.executor import ToolExecutor
+
+    registry = ToolRegistry()
+    tool_map = {"s1": [_tool("foo")]}
+    provider = MCPToolProvider(
+        global_config=None,
+        server_configs=[FakeServerConfig("s1")],
+        registry=registry,
+        client_factory=_factory(tool_map),
+    )
+    executor = ToolExecutor(registry)
+
+    async def run():
+        task = asyncio.create_task(provider.start())
+        await task  # factory 在 Agent 启动阶段必须 await，否则首次发现未完成
+        return executor.snapshot_definitions()
+
+    snap = asyncio.run(run())
+    names = [d.name for d in snap]
+    assert "mcp.s1.foo" in names

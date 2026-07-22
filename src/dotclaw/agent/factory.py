@@ -350,6 +350,16 @@ async def build_agent(
         "MCP", _build_mcp(config, tool_registry)
     ) or (None, None)
 
+    # 阶段四修复：Agent 启动阶段必须 await 首次 MCP 发现（开发计划阶段四·新增/修改④）。
+    # 若仅 fire-and-forget 而不 await，首个 Run 在创建工具快照时会早于发现完成，
+    # 从而漏掉 MCP 工具。client.connect 自带 startup_timeout，失败 server 已在 provider
+    # 内降级为 failed_servers，因此 await 不会无限阻塞 Agent 启动。
+    if mcp_task is not None:
+        try:
+            await mcp_task
+        except Exception as e:  # 防御：发现异常不应拖垮 Agent 启动
+            logger.warning("MCP 首次发现异常（已忽略）: %s", e)
+
     # ── AgentIdentity：直接从 YAML 加载 ──
     identity = load_id(agent_id=agent_id)
 
