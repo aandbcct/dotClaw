@@ -27,7 +27,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 from dotclaw.channel.cli import CLIChannel
 from dotclaw.agent import Agent
 from dotclaw.session import Session, SessionManager
-from dotclaw.bootstrap.application_host import ApplicationHost
+from dotclaw.bootstrap import ApplicationHost
 from dotclaw.bootstrap.session_interaction import SessionInteractionService
 from dotclaw.cli.banner import build_banner, console as rich_console
 from dotclaw.mcp.provider import MCPToolProvider
@@ -43,133 +43,138 @@ async def _run_cli() -> None:
     channel.print_info("组件初始化中...")
     # 阶段 2：ApplicationHost 作为唯一组合根，统一装配与持有全部资源。
     host: ApplicationHost = await ApplicationHost.build(channel=channel)
-    config = host.config
-    logging.getLogger().setLevel(config.debug.level)
+    try:
+        config = host.config
+        logging.getLogger().setLevel(config.debug.level)
 
-    service: SessionInteractionService = host.session_interaction
-    session_mgr: SessionManager = host.session_manager
+        service: SessionInteractionService = host.session_interaction
+        session_mgr: SessionManager = host.session_manager
 
-    sessions: list[Session] = await session_mgr.list_all()
-    if sessions:
-        current_session: Session = sessions[0]
-    else:
-        current_session = await service.create_session(title="主对话")
+        sessions: list[Session] = await session_mgr.list_all()
+        if sessions:
+            current_session: Session = sessions[0]
+        else:
+            current_session = await service.create_session(title="主对话")
 
-    # 按当前 Session 绑定的 Identity 取得路由 Agent 门面（用于 Banner 展示）。
-    agent: Agent = await service.get_agent(current_session)
+        # 按当前 Session 绑定的 Identity 取得路由 Agent 门面（用于 Banner 展示）。
+        agent: Agent = await service.get_agent(current_session)
 
-    from dotclaw.config import _find_project_root
-    rich_console.print(build_banner(
-        agent_name=agent.agent_name,
-        model=agent.model_id,
-        session_title=current_session.title,
-        workspace=str(_find_project_root()),
-    ))
+        from dotclaw.config import _find_project_root
+        rich_console.print(build_banner(
+            agent_name=agent.agent_name,
+            model=agent.model_id,
+            session_title=current_session.title,
+            workspace=str(_find_project_root()),
+        ))
 
-    while True:
-        try:
-            user_input: str = await channel.receive()
-            if not user_input.strip():
-                continue
+        while True:
+            try:
+                user_input: str = await channel.receive()
+                if not user_input.strip():
+                    continue
 
-            # 每次交互前按当前 Session 绑定的 Identity 路由到对应 Agent 门面，
-            # 确保提交严格由 Session 权威驱动，内部构造的 Agent 无法绕过。
-            agent = await service.get_agent(current_session)
+                # 每次交互前按当前 Session 绑定的 Identity 路由到对应 Agent 门面，
+                # 确保提交严格由 Session 权威驱动，内部构造的 Agent 无法绕过。
+                agent = await service.get_agent(current_session)
 
-            if user_input.startswith("/"):
-                cmd: str = user_input.split()[0].lower()
-                args: str = user_input[len(cmd):].strip()
+                if user_input.startswith("/"):
+                    cmd: str = user_input.split()[0].lower()
+                    args: str = user_input[len(cmd):].strip()
 
-                if cmd == "/quit":
-                    channel.print_info("再见！👋")
-                    break
-                elif cmd == "/help":
-                    _print_help(channel)
-                elif cmd == "/new":
-                    title: str = args or "新对话"
-                    current_session = await service.create_session(title=title)
-                    channel.print_info(f"已创建并切换到新对话: [{current_session.id}] {title}")
-                elif cmd == "/list":
-                    await _cmd_list(channel, session_mgr, current_session)
-                elif cmd == "/switch":
-                    if args:
-                        s: Session | None = await session_mgr.load(args)
-                        if s:
-                            current_session = s
-                            channel.print_info(f"已切换到 [{s.id}] {s.title}")
+                    if cmd == "/quit":
+                        channel.print_info("再见！👋")
+                        break
+                    elif cmd == "/help":
+                        _print_help(channel)
+                    elif cmd == "/new":
+                        title: str = args or "新对话"
+                        current_session = await service.create_session(title=title)
+                        channel.print_info(f"已创建并切换到新对话: [{current_session.id}] {title}")
+                    elif cmd == "/list":
+                        await _cmd_list(channel, session_mgr, current_session)
+                    elif cmd == "/switch":
+                        if args:
+                            s: Session | None = await session_mgr.load(args)
+                            if s:
+                                current_session = s
+                                channel.print_info(f"已切换到 [{s.id}] {s.title}")
+                            else:
+                                channel.print_error(f"未找到对话: {args}")
                         else:
-                            channel.print_error(f"未找到对话: {args}")
-                    else:
-                        channel.print_error("用法: /switch <对话ID>")
-                elif cmd == "/delete":
-                    if args:
-                        deleted: bool = await session_mgr.delete(args)
-                        if deleted:
-                            channel.print_info(f"已删除对话: {args}")
-                            if current_session.id == args:
-                                ss = await session_mgr.list_all()
-                                if ss:
-                                    current_session = ss[0]
-                                    channel.print_info(f"已切换到 [{current_session.id}] {current_session.title}")
+                            channel.print_error("用法: /switch <对话ID>")
+                    elif cmd == "/delete":
+                        if args:
+                            deleted: bool = await session_mgr.delete(args)
+                            if deleted:
+                                channel.print_info(f"已删除对话: {args}")
+                                if current_session.id == args:
+                                    ss = await session_mgr.list_all()
+                                    if ss:
+                                        current_session = ss[0]
+                                        channel.print_info(f"已切换到 [{current_session.id}] {current_session.title}")
+                            else:
+                                channel.print_error(f"未找到对话: {args}")
                         else:
-                            channel.print_error(f"未找到对话: {args}")
+                            channel.print_error("用法: /delete <对话ID>")
+                    elif cmd == "/dream":
+                        dream = host.memory_dream
+                        if dream and hasattr(dream, 'run'):
+                            await _cmd_dream_async(channel, dream)
+                        else:
+                            channel.print_error("Dream: 记忆系统未初始化")
+                    elif cmd == "/cancel":
+                        if args:
+                            await agent.cancel_run(args, "用户通过 CLI 取消")
+                            channel.print_info(f"已提交取消请求: {args}")
+                        else:
+                            channel.print_error("用法: /cancel <run_id>")
+                    elif cmd == "/retry":
+                        if args:
+                            retry_result: str = await agent.retry_interrupted(args)
+                            await channel.print_markdown(retry_result)
+                        else:
+                            channel.print_error("用法: /retry <run_id>")
+                    elif cmd == "/abandon":
+                        if args:
+                            abandon_result: str = await agent.abandon_interrupted(args)
+                            await channel.print_markdown(abandon_result)
+                        else:
+                            channel.print_error("用法: /abandon <run_id>")
+                    elif cmd == "/tools":
+                        _cmd_tools(channel, host.tool_executor)
+                    elif cmd == "/mcp":
+                        _cmd_mcp(channel, host.mcp_provider)
+                    elif cmd == "/skills":
+                        _cmd_skills(channel, host.skill_registry)
+                    elif cmd == "/model":
+                        channel.print_info(f"当前模型: {agent.model_id}")
                     else:
-                        channel.print_error("用法: /delete <对话ID>")
-                elif cmd == "/dream":
-                    dream = host.memory_dream
-                    if dream and hasattr(dream, 'run'):
-                        await _cmd_dream_async(channel, dream)
-                    else:
-                        channel.print_error("Dream: 记忆系统未初始化")
-                elif cmd == "/cancel":
-                    if args:
-                        await agent.cancel_run(args, "用户通过 CLI 取消")
-                        channel.print_info(f"已提交取消请求: {args}")
-                    else:
-                        channel.print_error("用法: /cancel <run_id>")
-                elif cmd == "/retry":
-                    if args:
-                        retry_result: str = await agent.retry_interrupted(args)
-                        await channel.print_markdown(retry_result)
-                    else:
-                        channel.print_error("用法: /retry <run_id>")
-                elif cmd == "/abandon":
-                    if args:
-                        abandon_result: str = await agent.abandon_interrupted(args)
-                        await channel.print_markdown(abandon_result)
-                    else:
-                        channel.print_error("用法: /abandon <run_id>")
-                elif cmd == "/tools":
-                    _cmd_tools(channel, host.tool_executor)
-                elif cmd == "/mcp":
-                    _cmd_mcp(channel, host.mcp_provider)
-                elif cmd == "/skills":
-                    _cmd_skills(channel, host.skill_registry)
-                elif cmd == "/model":
-                    channel.print_info(f"当前模型: {agent.model_id}")
+                        channel.print_error(f"未知命令: {cmd}")
+                    continue
+
+                # ── 正常对话 ──
+                final_answer: str = await agent.process(current_session, user_input)
+                final_answer = await _resolve_pending_approvals(channel, agent, final_answer)
+
+                if not final_answer:
+                    channel.print_error("执行异常：未返回有效回复")
+                elif agent.has_streamed_final_answer:
+                    # 文本增量已在运行期间输出，此处仅补齐终端换行，避免重复显示最终回复。
+                    await channel.stream("\n")
                 else:
-                    channel.print_error(f"未知命令: {cmd}")
-                continue
+                    # 最终回复由 CLI 入口负责呈现，Runtime 仅返回执行结果以保持边界解耦。
+                    await channel.print_markdown(final_answer)
 
-            # ── 正常对话 ──
-            final_answer: str = await agent.process(current_session, user_input)
-            final_answer = await _resolve_pending_approvals(channel, agent, final_answer)
+                sys.stdout.flush()
 
-            if not final_answer:
-                channel.print_error("执行异常：未返回有效回复")
-            elif agent.has_streamed_final_answer:
-                # 文本增量已在运行期间输出，此处仅补齐终端换行，避免重复显示最终回复。
-                await channel.stream("\n")
-            else:
-                # 最终回复由 CLI 入口负责呈现，Runtime 仅返回执行结果以保持边界解耦。
-                await channel.print_markdown(final_answer)
-
-            sys.stdout.flush()
-
-        except KeyboardInterrupt:
-            channel.print_info("\n(输入 /quit 退出)")
-        except Exception as e:
-            channel.print_error(f"错误: {e}")
+            except KeyboardInterrupt:
+                # 中断信号传播至外层 finally，确保 Host 按依赖逆序关闭后再退出。
+                raise
+            except Exception as e:
+                channel.print_error(f"错误: {e}")
+    finally:
+        # 阶段 2：Host 作为资源生命周期所有者，退出前释放 MCP Provider 与 Context 缓存。
+        await host.shutdown()
 
 
 def _print_help(channel: CLIChannel) -> None:

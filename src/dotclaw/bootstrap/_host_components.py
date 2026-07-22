@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
@@ -253,15 +252,18 @@ def _build_memory(config: Config, llm_proxy, project_root: Path):
 
 
 def _build_mcp(config: Config, tool_executor):
-    """构建 MCPToolProvider，MCP 未启用时返回 (None, None)。
+    """构建 MCPToolProvider 并完成首次发现；MCP 未启用或发现失败返回 None。
 
-    tool_executor 必须先行构建，Provider 复用其 registry / policy_engine /
+    启动就绪语义：直接 await ``provider.start()`` 完成首次发现（provider 内部可
+    并行发现各 server，失败 server 降级为 failed_servers），保证首个 Run 不遗漏
+    MCP 工具。MCP 为可降级依赖，整体发现异常由调用方 ``_init_async`` 降级为 None。
+    ``tool_executor`` 必须先行构建，Provider 复用其 registry / policy_engine /
     capability_broker，避免重复构造安全组件。
     """
 
     async def _init():
         if not (config.tools.mcp_enabled and config.tools.mcp_servers):
-            return None, None
+            return None
 
         from dotclaw.mcp import MCPToolProvider
 
@@ -272,16 +274,13 @@ def _build_mcp(config: Config, tool_executor):
             policy_engine=tool_executor.policy_engine,
             capability_broker=tool_executor.capability_broker,
         )
-
-        async def _load():
-            try:
-                tool_names = await provider.start()
-                logger.info("已加载 %d 个 MCP 工具", len(tool_names))
-            except Exception as e:
-                logger.warning("MCP 加载失败: %s", e)
-
-        task = asyncio.create_task(_load())
-        return provider, task
+        try:
+            tool_names = await provider.start()
+            logger.info("已加载 %d 个 MCP 工具", len(tool_names))
+        except Exception as e:
+            logger.warning("MCP 首次发现失败（已降级）: %s", e)
+            return None
+        return provider
 
     return _init()
 

@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import types
 from pathlib import Path
 
@@ -107,6 +106,11 @@ def _patch_registry(identities: list[AgentIdentity]):
     return _Registry
 
 
+async def _noop_mcp():
+    """可降级 MCP 构建桩：返回 None（未启用/发现失败）。"""
+    return None
+
+
 # ============================================================================
 # 测试
 # ============================================================================
@@ -127,20 +131,14 @@ def test_runtime_services_has_no_diagnostic_fields() -> None:
 
 
 async def test_application_host_shutdown_releases_context_and_closes_mcp(tmp_path: Path) -> None:
-    """Host 关闭：取消后台 MCP 任务、关闭 Provider、释放 Context 缓存。"""
+    """Host 关闭：关闭已就绪的 MCP Provider、释放 Context 缓存（启动就绪语义，幂等）。"""
     host = ApplicationHost(_fake_config(str(tmp_path / "sessions")), tmp_path)
 
     fake_context = _FakeContextPort()
     fake_mcp = _FakeMCP()
 
-    async def _never() -> None:
-        await asyncio.sleep(30)
-
-    mcp_task = asyncio.create_task(_never())
-
     host._context_port = fake_context
     host._mcp_provider = fake_mcp
-    host._mcp_task = mcp_task
     host._session_manager = SessionManager(str(tmp_path / "sessions"))
     host._agent_registry = _patch_registry([AgentIdentity(agent_id="default")])()
     host._session_interaction = object()  # type: ignore[assignment]
@@ -153,10 +151,11 @@ async def test_application_host_shutdown_releases_context_and_closes_mcp(tmp_pat
     )
 
     await host.shutdown()
-
-    assert mcp_task.cancelled() or mcp_task.done(), "后台 MCP 任务应被取消或结束"
     assert fake_mcp.shutdown_called, "MCP Provider 应被关闭"
     assert fake_context.released, "Context 缓存应被释放"
+
+    # 幂等：二次关闭不应报错，且已置空的资源不再重复操作。
+    await host.shutdown()
 
 
 async def test_application_host_build_fails_without_identities(tmp_path: Path, monkeypatch) -> None:
@@ -169,7 +168,7 @@ async def test_application_host_build_fails_without_identities(tmp_path: Path, m
     monkeypatch.setattr(app_host_mod, "_build_skills", lambda config, root: None)
     monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry: _FakeTools())
     monkeypatch.setattr(app_host_mod, "_build_memory", lambda config, llm_proxy, root: (None, None))
-    monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: (None, None))
+    monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
                                       session_manager, skill_registry, memory_manager, agent_registry,
@@ -199,7 +198,7 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
     monkeypatch.setattr(app_host_mod, "_build_skills", lambda config, root: None)
     monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry: _FakeTools())
     monkeypatch.setattr(app_host_mod, "_build_memory", lambda config, llm_proxy, root: (None, None))
-    monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: (None, None))
+    monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
                                       session_manager, skill_registry, memory_manager, agent_registry,
@@ -225,3 +224,40 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
         assert host.agent_registry.get("default") is not None
     finally:
         await host.shutdown()
+
+
+async def test_application_host_build_cleans_up_partial_resources_on_init_failure(tmp_path: Path, monkeypatch) -> None:
+    """initialize() 中途失败（空 Identity）时，build() 应先回收已建的 MCP Provider 再抛出。"""
+    import dotclaw.config as config_mod
+
+    monkeypatch.setattr(config_mod, "get_config", lambda: _fake_config(str(tmp_path / "sessions")))
+    monkeypatch.setattr(config_mod, "_find_project_root", lambda: tmp_path)
+    monkeypatch.setattr(app_host_mod, "_build_llm", lambda config, root: _FakeLLM())
+    monkeypatch.setattr(app_host_mod, "_build_skills", lambda config, root: None)
+    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry: _FakeTools())
+    monkeypatch.setattr(app_host_mod, "_build_memory", lambda config, llm_proxy, root: (None, None))
+
+    fake_mcp = _FakeMCP()
+
+    async def _fake_mcp():
+        return fake_mcp
+
+    monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _fake_mcp())
+
+    def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
+                                      session_manager, skill_registry, memory_manager, agent_registry,
+                                      text_stream_port=None):
+        return RuntimeServices(
+            engine=_FakeLLM(),
+            context_port=_FakeContextPort(),
+            coordinator=_FakeCoordinator(),
+            run_repository=_FakeRunRepository(),
+            agent_registry=agent_registry,
+        )
+
+    monkeypatch.setattr(app_host_mod, "build_runtime_services", _fake_build_runtime_services)
+    monkeypatch.setattr(app_host_mod, "AgentRegistry", _patch_registry([]))
+
+    with pytest.raises(RuntimeError):
+        await ApplicationHost.build()
+    assert fake_mcp.shutdown_called, "initialize 失败后应回收已构建的 MCP Provider"

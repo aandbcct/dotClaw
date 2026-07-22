@@ -74,14 +74,14 @@ flowchart TB
 
 ### 4.1 `bootstrap.ApplicationHost`
 
-`ApplicationHost` 是唯一公开启动对象。它负责：读取配置、加载所有 Identity、创建基础设施、装配 Runtime、启动必要的后台任务、执行启动恢复，并在 `shutdown()` 中按依赖逆序关闭资源。
+`ApplicationHost` 是唯一公开启动对象。它负责：读取配置、加载所有 Identity、创建基础设施、装配 Runtime、完成首次 MCP 发现、执行启动恢复，并在 `shutdown()` 中按依赖逆序关闭资源。
 
 它公开给入口层的最小能力为：
 
 - `session_interaction`：提交消息、审批、取消、重试、放弃；
 - `session_manager`：创建、查询和列举 Session；
 - 必要的只读诊断资源，暂供现有 CLI 的 `/tools`、`/mcp`、`/skills`、`/dream` 使用；
-- `shutdown()`：关闭 MCP 后台任务/Provider，并释放 Context Owner 缓存。
+- `shutdown()`：关闭已完成首次发现的 MCP Provider，并释放 Context Owner 缓存。
 
 Host 不得承载对话业务规则、渲染逻辑或 Runtime 状态机。`runtime_factory.py` 降为 Host 的内部组装器；`agent/factory.py` 删除。
 
@@ -133,7 +133,7 @@ Identity Registry 是所有可用 Identity 的唯一目录。Runtime Policy Reso
 
 关键依赖失败即启动失败：配置、默认/注册 Identity、LLM、ToolExecutor、Session/Runtime 存储。可降级依赖为 Skills、Memory 和 MCP；降级状态必须记录日志并被诊断入口读取。Host 启动时补偿未决成功提交；Run 中断保持按 Session 访问时恢复的本地单进程语义。
 
-Host 关闭顺序：停止/等待 MCP 初始化任务，关闭 MCP Provider，释放 Agent/Session/Run Context 缓存，再释放其他可关闭资源。Agent 不参与资源关闭。
+Host 关闭顺序：关闭已完成首次发现的 MCP Provider，释放 Agent/Session/Run Context 缓存，再释放其他可关闭资源。Agent 不参与资源关闭。Host 启动时在 `ApplicationHost.build()` 内 await 首次 MCP 发现（provider 内部并行发现各 server，失败 server 降级），MCP 为可降级依赖；`initialize()` 中途失败时 `build()` 先幂等 `shutdown()` 回收已创建的 MCP/Context 等部分资源再抛出。
 
 ## 6. 正常流程与关键分支
 

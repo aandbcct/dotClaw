@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -58,7 +57,6 @@ class ApplicationHost:
         self._agent_registry: AgentRegistry | None = None
         self._tool_executor: ToolExecutor | None = None
         self._mcp_provider: MCPToolProvider | None = None
-        self._mcp_task: "asyncio.Task | None" = None
         self._skill_registry: SkillRegistry | None = None
         self._memory_dream: DeepDream | None = None
         self._context_port: ContextPort | None = None
@@ -69,13 +67,21 @@ class ApplicationHost:
 
     @classmethod
     async def build(cls, channel: "Channel | None" = None) -> "ApplicationHost":
-        """读取配置与项目根，装配全部资源并返回就绪的 Host。"""
+        """读取配置与项目根，装配全部资源并返回就绪的 Host。
+
+        ``initialize()`` 中途失败时，先幂等 ``shutdown()`` 回收已创建的 MCP/Context
+        等部分资源，再向上抛出异常，避免半初始化资源泄漏（总体设计 §5.3）。
+        """
         from dotclaw.config import _find_project_root, get_config
 
         config = get_config()
         project_root = _find_project_root()
         host = cls(config, project_root, channel=channel)
-        await host.initialize()
+        try:
+            await host.initialize()
+        except Exception:
+            await host.shutdown()
+            raise
         return host
 
     async def initialize(self) -> None:
@@ -98,17 +104,12 @@ class ApplicationHost:
         ) or (None, None)
 
         # MCP 复用 tool_executor 的 registry / policy_engine / capability_broker。
-        self._mcp_provider, self._mcp_task = await _init_async(
+        # 启动就绪语义：直接 await 首次发现完成（provider.start() 内部可并行发现各
+        # server，失败 server 降级为 failed_servers），保证首个 Run 不遗漏 MCP 工具；
+        # MCP 为可降级依赖，整体发现异常由 ``_init_async`` 降级为 None。
+        self._mcp_provider = await _init_async(
             "MCP", _build_mcp(config, self._tool_executor)
-        ) or (None, None)
-
-        # 启动阶段 await 首次 MCP 发现，避免首个 Run 早于发现完成漏掉 MCP 工具。
-        # 失败 server 已在 provider 内降级为 failed_servers，await 不会无限阻塞。
-        if self._mcp_task is not None:
-            try:
-                await self._mcp_task
-            except Exception as e:  # 防御：发现异常不应拖垮 Host 启动
-                logger.warning("MCP 首次发现异常（已忽略）: %s", e)
+        ) or None
 
         # ── 关键组件：加载全部 Identity ──
         self._agent_registry = AgentRegistry()
@@ -213,29 +214,25 @@ class ApplicationHost:
     # ── 关闭 ──
 
     async def shutdown(self) -> None:
-        """按依赖逆序关闭资源（总体设计 §5.3）。
+        """按依赖逆序关闭资源（总体设计 §5.3，启动就绪语义）。
 
-        顺序：停止/等待 MCP 初始化任务 → 关闭 MCP Provider → 释放 Context 缓存
-        → 释放其他可关闭资源。Agent 不参与资源关闭。
+        顺序：关闭已完成首次发现的 MCP Provider → 释放 Context 缓存
+        → 释放其他可关闭资源。幂等：可重复调用，亦可在半初始化失败后回收部分资源。
+        Agent 不参与资源关闭。
         """
-        # 1) 停止/等待后台 MCP 初始化任务
-        if self._mcp_task is not None and not self._mcp_task.done():
-            self._mcp_task.cancel()
-            try:
-                await self._mcp_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        # 2) 关闭 MCP Provider
+        # 1) 关闭 MCP Provider（首次发现已在启动时完成；MCP 为可降级依赖）
         if self._mcp_provider is not None:
             try:
                 await self._mcp_provider.shutdown()
             except Exception as e:
                 logger.warning("MCP Provider 关闭异常: %s", e)
-        # 3) 释放 Agent/Session/Run Context 缓存
+            self._mcp_provider = None
+        # 2) 释放 Agent/Session/Run Context 缓存
         if self._context_port is not None:
             try:
                 await self._context_port.release_all()
             except Exception as e:
                 logger.warning("Context 缓存释放异常: %s", e)
-        # 4) 其他可关闭资源（当前无进程级资源需显式释放）
+            self._context_port = None
+        # 3) 其他可关闭资源（当前无进程级资源需显式释放）
         logger.info("ApplicationHost 已关闭")
