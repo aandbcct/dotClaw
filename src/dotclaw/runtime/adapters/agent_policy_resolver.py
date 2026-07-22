@@ -84,8 +84,12 @@ class AgentPolicyResolver(RunPolicyPort):
         return identity
 
     def _allowed_definitions(self, identity: AgentIdentity) -> list[LegacyToolDefinition]:
-        """按 Agent 白名单过滤工具，并排除 v2 未承载的旧 Task 协议工具。"""
-        definitions: list[LegacyToolDefinition] = self._executor.get_definitions()
+        """按 Agent 白名单过滤工具，并排除 v2 未承载的旧 Task 协议工具。
+
+        工具集在每次 Run 解析时通过 snapshot_definitions() 捕获一次不可变快照，
+        Run 内不再读取动态 Registry（总体设计 §9 / 开发计划阶段四）。
+        """
+        definitions: list[LegacyToolDefinition] = self._executor.snapshot_definitions()
         if not identity.allowed_tools:
             return [definition for definition in definitions if definition.name not in LEGACY_TASK_TOOL_NAMES]
         allowed: set[str] = set(identity.allowed_tools)

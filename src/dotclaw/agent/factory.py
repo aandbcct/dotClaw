@@ -271,7 +271,8 @@ def _build_mcp(config, tool_registry):
             global_config=config.tools.mcp_global,
             server_configs=config.tools.mcp_servers,
             registry=tool_registry,
-            approval_commands=config.tools.approval_commands,
+            policy_engine=tool_executor.policy_engine,
+            capability_broker=tool_executor.capability_broker,
         )
 
         async def _load():

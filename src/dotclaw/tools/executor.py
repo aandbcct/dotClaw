@@ -34,7 +34,7 @@ from .decorator import ToolPolicy
 from .handler import ToolHandler
 from .policy import PolicyDecision, PolicyEngine, PolicyScope, default_policy_scope
 from .registry import ToolRegistry
-from .schema import ToolValidationError, validate_args
+from .schema import ToolValidationError, validate_args, validate_json_schema
 from .approval import ApprovalManager
 from dotclaw.journal import Journal
 from typing import TYPE_CHECKING
@@ -72,9 +72,28 @@ class ToolExecutor:
         """工具注册表（供工厂/MCP 等需要直接操作注册表的场景）。"""
         return self._registry
 
+    @property
+    def policy_engine(self):
+        """策略引擎（供工厂装配 MCP Provider 的连接网关复用）。"""
+        return self._policy_engine
+
+    @property
+    def capability_broker(self):
+        """能力 Broker（供工厂装配 MCP Provider 复用）。"""
+        return self._broker
+
     def get_definitions(self) -> list:
         """返回所有工具定义（转发给 Registry）。"""
         return self._registry.get_definitions()
+
+    def snapshot_definitions(self) -> tuple:
+        """返回当前可用工具定义的不可变快照（Run 级隔离）。
+
+        Registry.snapshot() 已对每个定义做深拷贝，因此本次返回的元组不受后续
+        注册表增删影响（总体设计 §9 / 开发计划阶段四）。一次 Run 在创建时调用本
+        方法捕获固定工具集，Run 内不再读取动态 Registry。
+        """
+        return self._registry.snapshot()
 
     def get_handler(self, name: str) -> ToolHandler | None:
         """按名称获取 Handler（转发给 Registry）。"""
@@ -165,10 +184,23 @@ class ToolExecutor:
         definition = handler.definition()
 
         # ① 参数校验（失败不进入 Broker / Policy / Handler）。
+        # 本地工具走 Pydantic（args_model）；MCP 等外部工具走 JSON Schema（input_schema）。
+        # 校验失败在调用 tools/call 之前返回 INVALID_ARGUMENTS（开发计划阶段四）。
         model = handler.args_model
+        schema = handler.input_schema
         if model is not None and not isinstance(arguments, model):
             try:
                 validated = validate_args(model, arguments)
+            except ToolValidationError as exc:
+                result = ToolResult.from_error(
+                    code=ToolErrorCode.INVALID_ARGUMENTS,
+                    message=str(exc),
+                    error_type=ToolErrorType.VALIDATION,
+                )
+                return self._finish(result, name, journal, handler)
+        elif schema:
+            try:
+                validated = validate_json_schema(arguments, schema)
             except ToolValidationError as exc:
                 result = ToolResult.from_error(
                     code=ToolErrorCode.INVALID_ARGUMENTS,

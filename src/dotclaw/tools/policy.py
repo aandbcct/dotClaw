@@ -145,10 +145,14 @@ class PolicyEngine:
                 return PolicyOutcome(PolicyDecision.DENY, request.profile, "命中拒绝路径")
 
         if request.kind is ResourceKind.MCP_CALL:
-            if (
-                scope.allowed_mcp_servers
-                and request.server not in scope.allowed_mcp_servers
-            ):
+            # 默认拒绝：server 不在允许列表即拒绝（空列表亦视为 deny-all，fail-closed）。
+            if request.server not in scope.allowed_mcp_servers:
+                return PolicyOutcome(PolicyDecision.DENY, request.profile, "MCP server 不在允许列表")
+
+        if request.kind is ResourceKind.MCP_CONNECT:
+            # server 连接授权：同样受允许列表约束（开发计划阶段四）。
+            # 不在允许列表的 server 直接拒绝连接（Provider 据此降级，不阻塞 Agent）。
+            if request.server not in scope.allowed_mcp_servers:
                 return PolicyOutcome(PolicyDecision.DENY, request.profile, "MCP server 不在允许列表")
 
         return PolicyOutcome(effective, request.profile, "")

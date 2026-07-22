@@ -14,7 +14,12 @@ from .base import (
     ToolErrorType,
 )
 from .decorator import ToolPolicy, ToolMeta, tool, get_tool_meta
-from .schema import to_json_schema, validate_args, ToolValidationError
+from .schema import (
+    to_json_schema,
+    validate_args,
+    validate_json_schema,
+    ToolValidationError,
+)
 from .function_handler import FunctionToolHandler
 from .handler import ToolHandler
 from .registry import ToolRegistry, DuplicateToolError
@@ -50,6 +55,7 @@ __all__ = [
     "get_tool_meta",
     "to_json_schema",
     "validate_args",
+    "validate_json_schema",
     "ToolValidationError",
     "FunctionToolHandler",
     "ToolHandler",

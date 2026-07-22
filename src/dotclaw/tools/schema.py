@@ -179,3 +179,133 @@ def _safe_message(error_type: str, ctx: dict | None) -> str:
             values = ", ".join(str(v) for v in ctx["allowed_values"])
             message = f"{message}（允许: {values}）"
     return message
+
+
+# ---------------------------------------------------------------------------
+# MCP / 任意 JSON Schema 校验适配层（总体设计 §4.5）
+# ---------------------------------------------------------------------------
+
+# 支持的基础 JSON Schema 类型。其余类型（object 嵌套、array 等）做有限检查，
+# 不支持的组合子（$ref / allOf / anyOf / oneOf 等）降级为跳过对应子检查。
+_PRIMITIVE_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+}
+
+# 视为“无法校验、保守降级”的 JSON Schema 关键字。
+_UNSUPPORTED_SCHEMA_KEYWORDS = ("allOf", "anyOf", "oneOf", "$ref", "$defs")
+
+
+def validate_json_schema(raw_args: Any, schema: dict) -> dict:
+    """按 JSON Schema 校验 MCP 等外部工具的原始参数字典（与 Pydantic 严格语义对齐）。
+
+    覆盖范围（总体设计 §4.5 / 开发计划阶段四）：
+    - 参数必须是对象，否则 INVALID_ARGUMENTS。
+    - properties 中每个已知字段按声明的原始类型（string/integer/number/boolean）
+      与 enum 约束检查；未知类型关键字降级为跳过该项检查（不阻断调用）。
+    - required 字段缺失 → INVALID_ARGUMENTS。
+    - additionalProperties 缺省视为 false，拒绝未声明字段（与本地 extra='forbid' 对齐）。
+
+    不能校验的 schema（缺 properties / 含 $ref 等组合子）采取明确、保守的降级行为：
+    仅确认是对象且不强制未知字段（additionalProperties 未显式 true 时仍按 properties
+    拒绝已知之外的字段），不阻断调用、也不做深度类型校验。失败抛出 ToolValidationError，
+    错误码 INVALID_ARGUMENTS，且不暴露任何输入值。
+
+    Returns:
+        校验通过后的参数字典（可能已做最小类型规整）。
+    """
+    if not isinstance(raw_args, dict):
+        raise ToolValidationError("参数必须是对象")
+    if not isinstance(schema, dict):
+        # schema 自身非法：保守降级，原样接受（仅确认是 dict）。
+        return raw_args
+
+    props: dict = schema.get("properties") or {}
+    required: list = schema.get("required") or []
+    additional = schema.get("additionalProperties", False)
+
+    # 未知字段拒绝（总体设计 §4.1 extra='forbid' 语义）：
+    # - additionalProperties 显式为 true → 放行未知字段；
+    # - 否则（false 或省略）且 schema 声明了 properties → 拒绝未知字段；
+    # - 否则（无 properties，无法校验）→ 保守降级，放行未知字段（不阻断调用）。
+    reject_unknown = (additional is not True) and bool(props)
+    if reject_unknown:
+        allowed = set(props.keys())
+        extras = sorted(k for k in raw_args if k not in allowed)
+        if extras:
+            raise ToolValidationError(f"未知参数: {', '.join(extras)}", loc=extras)
+
+    # 必填字段检查。
+    missing = sorted(r for r in required if r not in raw_args)
+    if missing:
+        raise ToolValidationError(f"必填参数缺失: {', '.join(missing)}", loc=missing)
+
+    # 已知字段类型/枚举检查；不支持的组合子降级跳过。
+    for key, val in raw_args.items():
+        if key not in props:
+            continue
+        _check_json_field(key, val, props[key])
+
+    return raw_args
+
+
+def _check_json_field(key: str, val: Any, field_schema: Any) -> None:
+    """检查单个字段值是否满足其 JSON Schema 声明（不支持的组合子降级跳过）。"""
+    if not isinstance(field_schema, dict):
+        return
+    if any(k in field_schema for k in _UNSUPPORTED_SCHEMA_KEYWORDS):
+        return  # 组合子/引用：保守降级，不校验
+
+    enum_values = field_schema.get("enum")
+    if enum_values is not None:
+        if val not in enum_values:
+            raise ToolValidationError(f"{key}: 参数取值不在允许范围内", loc=[key])
+        return
+
+    declared = field_schema.get("type")
+    if declared is None:
+        return
+    if declared == "array":
+        _check_json_array(key, val, field_schema)
+        return
+    if declared == "object":
+        _check_json_object(key, val, field_schema)
+        return
+    if declared in _PRIMITIVE_TYPES:
+        if not isinstance(val, _PRIMITIVE_TYPES[declared]):
+            # bool 是 int 的子类，需排除布尔被误判为整数。
+            if declared in ("integer", "number") and isinstance(val, bool):
+                raise ToolValidationError(f"{key}: 应为数字", loc=[key])
+            raise ToolValidationError(f"{key}: 应为{declared}", loc=[key])
+        return
+    # 其他声明类型（如 null / 自定义格式）：降级跳过。
+
+
+def _check_json_array(key: str, val: Any, field_schema: dict) -> None:
+    """检查 array 类型：确认是列表，并对 items 做有限类型检查（组合子降级跳过）。"""
+    if not isinstance(val, list):
+        raise ToolValidationError(f"{key}: 应为数组", loc=[key])
+    items_schema = field_schema.get("items")
+    if not isinstance(items_schema, dict):
+        return
+    if any(k in items_schema for k in _UNSUPPORTED_SCHEMA_KEYWORDS):
+        return
+    item_type = items_schema.get("type")
+    if item_type in _PRIMITIVE_TYPES:
+        for idx, item in enumerate(val):
+            if not isinstance(item, _PRIMITIVE_TYPES[item_type]):
+                raise ToolValidationError(f"{key}[{idx}]: 应为{item_type}", loc=[key])
+
+
+def _check_json_object(key: str, val: Any, field_schema: dict) -> None:
+    """检查 object 类型：确认是字典，并对已知子属性做一层有限类型检查。"""
+    if not isinstance(val, dict):
+        raise ToolValidationError(f"{key}: 应为对象", loc=[key])
+    sub_props = field_schema.get("properties") or {}
+    for sub_key, sub_val in val.items():
+        if sub_key not in sub_props:
+            continue
+        _check_json_field(f"{key}.{sub_key}", sub_val, sub_props[sub_key])
+

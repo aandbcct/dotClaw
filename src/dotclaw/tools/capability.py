@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Any
 from urllib.parse import urlparse
 
+from .base import ToolSource
 from .decorator import ToolPolicy
 
 
@@ -102,6 +103,13 @@ class CapabilityBroker:
             workspace_root: workspace 根目录，用于文件类路径规范化与逃逸判定。
         """
         profile_value = getattr(definition, "policy_profile", None)
+
+        # MCP 工具：server 是注册期已知元数据，不来自运行参数。
+        # 直接形成 mcp.call 资源请求，避免依赖参数中的 server 字段。
+        if getattr(definition, "source", None) == ToolSource.MCP:
+            server = (definition.metadata or {}).get("server")
+            return [self._mcp_request(server or "")]
+
         if profile_value is None:
             return []
         try:
