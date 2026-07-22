@@ -109,11 +109,15 @@ class ToolExecutor:
         """按名称获取 Handler（转发给 Registry）。"""
         return self._registry.get(name)
 
-    def requires_approval(self, name: str) -> bool:
+    def requires_approval(
+        self, name: str, execution_context: ToolExecutionContext | None = None
+    ) -> bool:
         """查询工具是否可能触发交互审批（不访问 Channel、不执行工具）。
 
-        由声明式 needs_approval 或配置 approval_commands，或档案默认决策为 ask 推导；
-        供适配器做粗粒度预判。
+        由声明式 needs_approval 或配置 approval_commands，或档案有效决策为 ask 推导；
+        供适配器做粗粒度预判。Agent 级收窄通过 execution_context.agent_id 生效，与
+        _run_chain 共用 _effective_scope，避免 Adapter 预检遗漏受限 Agent 收窄后的 ask
+        策略（修复：预检只看全局规则导致收窄 Agent 的 ask 被直接 execute_approved 绕过）。
         """
         handler = self._registry.get(name)
         if handler is None:
@@ -127,7 +131,16 @@ class ToolExecutor:
                 ToolPolicy(profile)
             except ValueError:
                 return False
-            if self._policy_scope.global_rules.get(profile) is PolicyDecision.ASK:
+            scope = self._effective_scope(execution_context)
+            global_decision = scope.global_rules.get(profile, PolicyDecision.ASK)
+            agent_decision = scope.agent_rules.get(profile, global_decision)
+            # Agent 只能收窄：取更严格者（severity 大者为最终决策）。
+            effective = (
+                global_decision
+                if global_decision.severity >= agent_decision.severity
+                else agent_decision
+            )
+            if effective is PolicyDecision.ASK:
                 return True
         return False
 
