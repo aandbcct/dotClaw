@@ -54,6 +54,12 @@ class CapabilityRequest:
     host: str | None = None             # 网络类：主机名
     server: str | None = None           # MCP 类：server 名
     escaped: bool = False               # 文件路径是否逃逸 workspace 根目录
+    absolute_path: str | None = None    # 文件类：经 workspace_root 解析后的绝对真实路径；
+                                         # 供 Executor 回填给 handler，确保实际操作目标与策略
+                                         # 检查目标完全一致（P0 修复：自定义 workspace_root 时
+                                         # handler 若用 CWD 解析会落到错误位置）。
+    param_field: str | None = None      # 文件类：路径参数名（path_param 或默认 "path"），
+                                         # 供 Executor 定位需回填的参数。
 
     def describe(self) -> str:
         """返回脱敏后的资源摘要，供审计与审批提示使用。
@@ -127,7 +133,7 @@ class CapabilityBroker:
             value = ""
 
         if policy in (ToolPolicy.WORKSPACE_READ, ToolPolicy.WORKSPACE_WRITE):
-            return [self._file_request(policy, str(value), workspace_root)]
+            return [self._file_request(policy, str(value), workspace_root, field)]
         if policy is ToolPolicy.PROCESS:
             return [self._process_request(str(value))]
         if policy is ToolPolicy.NETWORK:
@@ -137,9 +143,14 @@ class CapabilityBroker:
         return []
 
     @staticmethod
-    def _file_request(policy: ToolPolicy, path: str, workspace_root: str) -> CapabilityRequest:
-        """形成文件类资源请求，执行路径规范化与逃逸检测。"""
+    def _file_request(policy: ToolPolicy, path: str, workspace_root: str, field: str) -> CapabilityRequest:
+        """形成文件类资源请求，执行路径规范化与逃逸检测。
+
+        field 为路径参数名（path_param 或默认 "path"），absolute_path 为经 workspace_root
+        解析后的绝对真实路径，供 Executor 回填给 handler，确保实际操作目标与策略检查目标一致。
+        """
         normalized, escaped = normalize_workspace_path(workspace_root, path)
+        absolute = resolve_workspace_path(workspace_root, path)
         kind = (
             ResourceKind.FILE_WRITE
             if policy is ToolPolicy.WORKSPACE_WRITE
@@ -150,6 +161,8 @@ class CapabilityBroker:
             profile=policy.value,
             normalized_path=normalized,
             escaped=escaped,
+            absolute_path=absolute,
+            param_field=field,
         )
 
     @staticmethod
@@ -218,6 +231,17 @@ def normalize_workspace_path(workspace_root: str, path: str) -> tuple[str, bool]
         # 逃逸：展示绝对路径（已脱敏，不含内容），便于审计定位。
         normalized = target.replace(os.sep, "/")
     return normalized, not inside
+
+
+def resolve_workspace_path(workspace_root: str, path: str) -> str:
+    """返回 path 相对 workspace_root 解析后的绝对真实路径（不含转义判断）。
+
+    文件/memory handler 必须使用此函数得出的绝对路径作为实际操作目标，确保与
+    Broker 的逃逸检查目标完全一致（P0 修复：自定义 workspace_root 时，Broker 检查
+    的是 workspace_root 下的路径，handler 若用 CWD 解析就会落到错误位置，安全边界失效）。
+    """
+    root = os.path.realpath(os.path.expanduser(workspace_root))
+    return os.path.realpath(os.path.join(root, os.path.expanduser(path)))
 
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")

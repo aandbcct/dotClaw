@@ -20,6 +20,7 @@ import tempfile
 
 from pydantic import BaseModel
 
+from dotclaw.tools.capability import resolve_workspace_path
 from dotclaw.tools.decorator import ToolPolicy, get_tool_meta, tool
 from dotclaw.tools.executor import ToolExecutor
 from dotclaw.tools.function_handler import FunctionToolHandler
@@ -149,14 +150,16 @@ async def test_exec_ask_channel_denied():
 async def test_read_allow_executes():
     res = await _executor().execute("e.read", {"path": "a.txt"})
     assert not res.is_error
-    assert res.output == "READ:a.txt"
+    # P0 修复：handler 收到的是经 workspace_root 解析后的绝对路径（与 Broker 检查目标
+    # 一致），而非原始相对路径——否则自定义 workspace_root 时安全边界会失效。
+    assert res.output == "READ:" + resolve_workspace_path(".", "a.txt")
 
 
 async def test_execute_approved_skips_ask():
     # e.write 档案默认 ASK，但 execute_approved 视为已批准。
     res = await _executor().execute_approved("e.write", {"path": "a.txt"})
     assert not res.is_error
-    assert res.output == "WRITE:a.txt"
+    assert res.output == "WRITE:" + resolve_workspace_path(".", "a.txt")
 
 
 async def test_execute_approved_still_blocked_by_deny():

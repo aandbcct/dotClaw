@@ -174,6 +174,7 @@ def _build_tools(config, skill_registry, agent_policy_rules=None):
         default_policy_scope,
     )
     from dotclaw.tools.capability import CapabilityBroker
+    from dotclaw.agent.identity import load_agent_config as _load_id
 
     registry = ToolRegistry()
 
@@ -206,6 +207,20 @@ def _build_tools(config, skill_registry, agent_policy_rules=None):
     capability_broker = CapabilityBroker()
     approval_mgr = ApprovalManager()
 
+    # Agent 级策略按 agent_id 解析（带缓存），供 ToolExecutor 每次调用冻结独立作用域
+    # （P1 修复：避免 delegation 子 Agent 继承主 Agent 规则，或全局作用域污染所有 Agent）。
+    _policy_rules_cache: dict[str, object] = {}
+
+    def _resolve_agent_policy_rules(agent_id: str) -> "dict[str, str] | None":
+        if agent_id in _policy_rules_cache:
+            return _policy_rules_cache[agent_id]  # type: ignore[return-value]
+        try:
+            rules = _load_id(agent_id=agent_id).policy_rules
+        except Exception:
+            rules = None
+        _policy_rules_cache[agent_id] = rules
+        return rules
+
     skill_parser = SkillParser(skill_registry) if skill_registry else None
     executor = ToolExecutor(
         registry=registry,
@@ -214,6 +229,7 @@ def _build_tools(config, skill_registry, agent_policy_rules=None):
         capability_broker=capability_broker,
         skill_parser=skill_parser,
         approval_commands=set(config.tools.approval_commands),
+        agent_policy_resolver=_resolve_agent_policy_rules,
     )
     return executor
 

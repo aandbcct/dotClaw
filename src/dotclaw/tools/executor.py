@@ -20,8 +20,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from .base import (
     ToolErrorCode,
@@ -29,7 +30,7 @@ from .base import (
     ToolExecutionContext,
     ToolResult,
 )
-from .capability import CapabilityBroker, CapabilityRequest
+from .capability import CapabilityBroker, CapabilityRequest, ResourceKind
 from .decorator import ToolPolicy
 from .handler import ToolHandler
 from .policy import PolicyDecision, PolicyEngine, PolicyScope, default_policy_scope
@@ -56,6 +57,7 @@ class ToolExecutor:
         capability_broker: CapabilityBroker | None = None,
         skill_parser: "SkillParser | None" = None,
         approval_commands: set[str] | None = None,
+        agent_policy_resolver: "Callable[[str], dict[str, str] | None] | None" = None,
     ):
         self._registry = registry
         self._approval = approval_manager or ApprovalManager()
@@ -70,6 +72,10 @@ class ToolExecutor:
         # 配置级审批命令列表（新规范名）。与工具声明式 needs_approval 合并参与决策，
         # 解决"approval_commands 死配置"问题（开发计划阶段五审计）。
         self._approval_commands = set(approval_commands or [])
+        # Agent 级策略解析器：按 agent_id 解析其 policy_rules，供每次调用冻结
+        # 独立的策略作用域（P1 修复：Agent 级策略不再保存在全局 Executor，避免
+        # delegation 子 Agent 继承主 Agent 规则或主 Agent 规则污染所有 Agent）。
+        self._agent_policy_resolver = agent_policy_resolver
 
     @property
     def registry(self) -> ToolRegistry:
@@ -222,8 +228,9 @@ class ToolExecutor:
         )
         summary = _summarize_requests(requests)
 
-        # ③ Policy Engine：计算决策。
-        outcome = self._policy_engine.evaluate(requests, self._policy_scope)
+        # ③ Policy Engine：计算决策（按当前 Run 的 Agent 冻结作用域，P1 修复）。
+        scope = self._effective_scope(execution_context)
+        outcome = self._policy_engine.evaluate(requests, scope)
         if outcome.decision is PolicyDecision.DENY:
             result = ToolResult.from_error(
                 code=ToolErrorCode.POLICY_DENIED,
@@ -255,6 +262,10 @@ class ToolExecutor:
                 return self._finish(result, name, journal, handler)
 
         # ⑤ Handler 执行（超时控制）。
+        # ⑤½ 路径回填：将 Broker 校验过的绝对路径写回参数，确保 handler 实际操作目标
+        # 与策略检查目标完全一致（P0 修复：自定义 workspace_root 时，若 handler 自行用
+        # CWD 解析相对路径，安全边界会在 Broker 批准但实际落到错误位置时失效）。
+        validated = _apply_resolved_paths(validated, requests)
         try:
             result = await self._execute_handler(name, validated, handler, execution_context)
         except Exception:  # 超时/调度异常已在 _execute_handler 内归一化
@@ -297,6 +308,32 @@ class ToolExecutor:
                 error_type=ToolErrorType.EXECUTOR,
             )
 
+    def _effective_scope(
+        self, execution_context: ToolExecutionContext | None
+    ) -> "PolicyScope":
+        """按当前 Run 的 Agent 冻结策略作用域（P1 修复）。
+
+        Agent 级策略不再保存在全局 Executor，而是每次调用依据
+        execution_context.agent_id 解析该 Agent 的 policy_rules 并构造独立作用域，
+        避免 delegation 子 Agent 继承主 Agent 规则、或主 Agent 规则污染所有 Agent。
+        无解析器或 agent_id 时回退全局作用域（兼容测试/直接调用）。
+        """
+        if self._agent_policy_resolver and execution_context is not None and execution_context.agent_id:
+            try:
+                rules = self._agent_policy_resolver(execution_context.agent_id)
+            except Exception:  # 解析失败不阻断执行，回退全局作用域
+                logger.warning("解析 Agent 策略失败: %s", execution_context.agent_id)
+                rules = None
+            if rules:
+                agent_rules: dict[str, PolicyDecision] = {}
+                for profile, decision in rules.items():
+                    try:
+                        agent_rules[profile] = PolicyDecision(decision)
+                    except ValueError:
+                        logger.warning("忽略非法 Agent 策略规则: %s=%s", profile, decision)
+                return dataclasses.replace(self._policy_scope, agent_rules=agent_rules)
+        return self._policy_scope
+
     def _build_context(
         self,
         timeout: float,
@@ -307,6 +344,7 @@ class ToolExecutor:
             return ToolExecutionContext(
                 timeout=timeout,
                 agentrun_id=execution_context.agentrun_id,
+                agent_id=execution_context.agent_id,
             )
         return ToolExecutionContext(timeout=timeout)
 
@@ -337,6 +375,27 @@ class ToolExecutor:
             message=f"错误：未找到工具 '{name}'",
             error_type=ToolErrorType.NOT_FOUND,
         )
+
+
+def _apply_resolved_paths(validated: Any, requests: list[CapabilityRequest]) -> Any:
+    """将 Broker 校验过的绝对路径回填到对应参数，使 handler 实际操作目标与策略检查一致。
+
+    P0 修复核心：Broker 检查的是相对 workspace_root 解析后的路径，而文件/memory handler
+    原本用 CWD 解析相对路径；回填绝对路径后，handler 落点与策略检查目标严格一致。
+    仅对 FILE_READ / FILE_WRITE 请求、且携带已解析 absolute_path 与 param_field 时生效。
+    """
+    for req in requests:
+        if (
+            req.kind in (ResourceKind.FILE_READ, ResourceKind.FILE_WRITE)
+            and req.param_field
+            and req.absolute_path
+        ):
+            field = req.param_field
+            if hasattr(validated, "model_copy"):
+                validated = validated.model_copy(update={field: req.absolute_path})
+            elif isinstance(validated, dict):
+                validated[field] = req.absolute_path
+    return validated
 
 
 def _summarize_requests(requests: list[CapabilityRequest]) -> str:

@@ -42,7 +42,10 @@ class ToolExecutorAdapter(ToolPort):
         legacy_result = await self._executor.execute_approved(
             invocation.call.name,
             invocation.call.arguments,
-            ToolExecutionContext(agentrun_id=invocation.run_id),
+            ToolExecutionContext(
+                agentrun_id=invocation.run_id,
+                agent_id=execution.policy.agent_id,
+            ),
         )
         if legacy_result.is_error:
             return ToolResult(
