@@ -47,6 +47,7 @@ def _get_memory_path(long_term_file: str) -> Path:
     args_model=MemoryReadArgs,
     policy=ToolPolicy.WORKSPACE_READ,
     timeout=10.0,
+    path_param="long_term_file",
 )
 async def read(args: MemoryReadArgs, context: ToolContext) -> str:
     """读取 MEMORY.md 内容。"""
@@ -68,6 +69,7 @@ async def read(args: MemoryReadArgs, context: ToolContext) -> str:
     policy=ToolPolicy.WORKSPACE_WRITE,
     needs_approval=True,
     timeout=10.0,
+    path_param="long_term_file",
 )
 async def write(args: MemoryWriteArgs, context: ToolContext) -> str:
     """追加内容到 MEMORY.md。"""

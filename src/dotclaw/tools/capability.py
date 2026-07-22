@@ -118,7 +118,7 @@ class CapabilityBroker:
             # 未知档案不翻译，交回调用方按 passthrough 处理。
             return []
 
-        field = _PROFILE_FIELD.get(policy)
+        field = getattr(definition, "path_param", None) or _PROFILE_FIELD.get(policy)
         if field is None:
             return []
         value = _read_field(validated_args, field)
@@ -200,13 +200,15 @@ def normalize_workspace_path(workspace_root: str, path: str) -> tuple[str, bool]
           逃逸时回退为绝对解析路径。
         - escaped: 解析后的真实路径是否落在 workspace 根目录之外（含符号链接/联接点）。
 
-    安全说明（总体设计 §10.2）：使用 realpath 解析符号链接/联接点，防止通过软链
-    逃逸 workspace。Windows 联接点同样被 realpath 展开。
+    安全说明（总体设计 §10.2）：先 expanduser 再 realpath，确保与文件/memory
+    handler 的 Path(...).expanduser() 行为一致——否则 `~` 会被当作 workspace 内的字面
+    目录，而 handler 实际访问真实用户目录，造成逃逸检测被绕过。realpath 进一步解析
+    符号链接/联接点，防止通过软链逃逸 workspace。Windows 联接点同样被展开。
     """
-    root = os.path.realpath(workspace_root)
+    root = os.path.realpath(os.path.expanduser(workspace_root))
     # (root / path) 在遇到绝对 path 时，Path 的 / 运算会让绝对路径覆盖 root，
     # 自然解析到 workspace 之外；resolve() 进一步处理 .. 与冗余分隔符。
-    target = os.path.realpath(os.path.join(root, path))
+    target = os.path.realpath(os.path.join(root, os.path.expanduser(path)))
     real_root = root
     inside = target == real_root or target.startswith(real_root + os.sep)
     if inside:

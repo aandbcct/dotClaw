@@ -150,10 +150,18 @@ class PolicyEngine:
                 return PolicyOutcome(PolicyDecision.DENY, request.profile, "MCP server 不在允许列表")
 
         if request.kind is ResourceKind.MCP_CONNECT:
-            # server 连接授权：同样受允许列表约束（开发计划阶段四）。
-            # 不在允许列表的 server 直接拒绝连接（Provider 据此降级，不阻塞 Agent）。
-            if request.server not in scope.allowed_mcp_servers:
-                return PolicyOutcome(PolicyDecision.DENY, request.profile, "MCP server 不在允许列表")
+            # 连接授权：server 必须显式位于 allowed_mcp_servers（配置预授权，
+            # 无需交互通道）。连接发生在后台任务、无 Channel，无法做交互审批，
+            # 因此不在允许列表的 server 一律拒绝（fail-closed：ask 在无交互能力时
+            # 等价于拒绝，设计不变量 §10.1.3）。全局 mcp.connect: DENY 已由上方
+            # effective 分支先行拦截。
+            if request.server in scope.allowed_mcp_servers:
+                return PolicyOutcome(
+                    PolicyDecision.ALLOW,
+                    request.profile,
+                    "MCP server 在允许列表（配置预授权连接）",
+                )
+            return PolicyOutcome(PolicyDecision.DENY, request.profile, "MCP server 不在允许列表")
 
         return PolicyOutcome(effective, request.profile, "")
 

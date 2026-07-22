@@ -65,6 +65,10 @@ class ToolDefinition:
     timeout: float = 60.0                             # 执行超时（秒）
     metadata: dict = field(default_factory=dict)      # 扩展字段
     policy_profile: str | None = None                 # ToolPolicy 档案值，Policy 阶段使用
+    path_param: str | None = None                     # WORKSPACE 类档案对应的路径参数名；
+                                                       # 为 None 时 Broker 默认读 "path"。
+                                                       # memory 工具声明为 "long_term_file" 等，
+                                                       # 使 Broker 能正确读取路径并做逃逸检测。
 
 
 @dataclass

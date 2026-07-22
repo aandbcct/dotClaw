@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from dotclaw.tools.base import (
@@ -30,13 +31,28 @@ from .client import McpClient, McpUnavailableError
 logger = logging.getLogger("dotclaw.mcp.adapter")
 
 
+_INVALID_IDENT_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _sanitize_identifier(value: str) -> str:
+    """将任意字符串规范化为合法标识符片段。
+
+    非 `[A-Za-z0-9_]` 的字符统一替换为 `_`，空输入回退为单个 `_`，
+    保证注册名始终为合法、非空片段（满足设计"规范化为合法标识符"要求）。
+    """
+    cleaned = _INVALID_IDENT_RE.sub("_", value)
+    return cleaned or "_"
+
+
 def mcp_tool_name(server: str, original_tool: str) -> str:
     """构造 MCP 工具的命名空间注册名（总体设计 §4.2 / §4.4）。
 
     保留原始 MCP tool 名的可识别形式，前缀 `mcp.<server>.` 保证不同 server 的
-    同名工具互不冲突。
+    同名工具互不冲突。server 与原始 tool 名均规范化为合法标识符片段，避免
+    含空格/点/斜杠等字符造成注册名非法或命名空间歧义。实际协议调用仍使用
+    原始名（由 McpToolAdapter 单独保存），不受影响。
     """
-    return f"mcp.{server}.{original_tool}"
+    return f"mcp.{_sanitize_identifier(server)}.{_sanitize_identifier(original_tool)}"
 
 
 class McpToolAdapter(ToolHandler):

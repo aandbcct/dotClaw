@@ -1,6 +1,6 @@
 # 各模块todo列表
 
-## runtime
+## 软件架构
 
 - [ ] 顶层组合根还是mian->agent->runtime的形式，agent和runtime应该都是一等公民，需要理清楚层级关系
 
@@ -12,7 +12,7 @@
   Agent 已经是轻量门面，运行过程交给 SessionRunCoordinator；它不应再承担“创建所有基础设施”的语义。
   ```
 
-- [ ] 
+- [ ] 跨进程/多节点 Session，Runtime 从“单进程任务执行器”升级为“分布式任务调度系统”
 
 
 
@@ -59,6 +59,7 @@
 ## llm proxy
 
 - [ ] llm proxy接口多用于路由适配，目前写死了chat，应该可以从config里读功能节点，得到多功能列表
+- [ ] 取消只做了应用层的取消，没有llm proxy的取消
 
 ## tool
 

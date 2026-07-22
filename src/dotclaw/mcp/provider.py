@@ -156,8 +156,10 @@ class MCPToolProvider(ToolProvider):
             server=server,
         )
         outcome = self._policy_engine.evaluate([request])
-        if outcome.decision is PolicyDecision.DENY:
-            return f"策略拒绝连接（{outcome.reason}）"
+        # 连接发生在后台任务、无交互通道，因此只有显式 ALLOW 才连接；
+        # ask / deny 一律拒绝（fail-closed，设计不变量 §10.1.3）。
+        if outcome.decision is not PolicyDecision.ALLOW:
+            return f"策略未明确允许连接（{outcome.reason or outcome.decision.value}）"
         return None
 
     def _mcp_needs_approval(self) -> bool:

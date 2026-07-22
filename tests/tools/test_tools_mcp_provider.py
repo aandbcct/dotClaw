@@ -201,7 +201,10 @@ def test_mcp_connect_gate_denies_disallowed_server():
     assert "mcp.github.foo" in names
     assert "mcp.evil.bar" not in names
     assert "evil" in provider.failed_servers
-    assert "策略拒绝连接" in provider.failed_servers["evil"]
+    # 修复后（P0-3 fail-closed）：未在 allowed_mcp_servers 的 server 被明确拒绝，
+    # 拒绝原因反映"未明确允许连接"语义（旧行为为 ask 直接放行，不写失败原因）。
+    assert "未明确允许" in provider.failed_servers["evil"]
+    assert "不在允许列表" in provider.failed_servers["evil"]
 
 
 def test_disconnected_server_call_returns_mcp_unavailable():

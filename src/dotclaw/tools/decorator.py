@@ -51,6 +51,7 @@ class ToolMeta:
     timeout: float = 60.0
     metadata: dict = field(default_factory=dict)
     args_style: str = "model"
+    path_param: str | None = None
 
     def build_definition(self) -> ToolDefinition:
         """由元数据构造面向 LLM 的 ToolDefinition。
@@ -73,6 +74,7 @@ class ToolMeta:
             timeout=self.timeout,
             metadata=dict(self.metadata),
             policy_profile=self.policy.value if self.policy is not None else None,
+            path_param=self.path_param,
         )
 
 
@@ -89,6 +91,7 @@ def tool(
     needs_approval: bool = False,
     timeout: float = 60.0,
     metadata: dict | None = None,
+    path_param: str | None = None,
 ) -> Callable[[FuncT], FuncT]:
     """声明一个工具的元数据。
 
@@ -112,6 +115,7 @@ def tool(
             needs_approval=needs_approval,
             timeout=timeout,
             metadata=metadata or {},
+            path_param=path_param,
         )
         func.__tool_meta__ = meta  # type: ignore[attr-defined]
         return func

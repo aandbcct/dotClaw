@@ -157,8 +157,12 @@ def _build_skills(config, project_root: Path):
     return registry
 
 
-def _build_tools(config, skill_registry):
-    """构建 ToolExecutor + ToolRegistry + ApprovalManager。"""
+def _build_tools(config, skill_registry, agent_policy_rules=None):
+    """构建 ToolExecutor + ToolRegistry + ApprovalManager。
+
+    agent_policy_rules：Agent 级策略规则（profile -> allow/ask/deny），仅用于
+    收窄全局上限，不能放宽（收窄由 PolicyEngine 在评估时执行）。
+    """
     from dotclaw.tools.registry import ToolRegistry
     from dotclaw.tools.executor import ToolExecutor
     from dotclaw.tools.approval import ApprovalManager
@@ -190,6 +194,13 @@ def _build_tools(config, skill_registry):
         scope.denied_paths = config.tools.policy.denied_paths
     if config.tools.policy.allowed_mcp_servers:
         scope.allowed_mcp_servers = config.tools.policy.allowed_mcp_servers
+    # Agent 级策略：仅收窄全局上限（Profile 决策由 Engine 取更严格者）。
+    if agent_policy_rules:
+        for profile, decision in agent_policy_rules.items():
+            try:
+                scope.agent_rules[profile] = PolicyDecision(decision)
+            except ValueError:
+                logger.warning("忽略非法 Agent 策略规则: %s=%s", profile, decision)
 
     policy_engine = PolicyEngine(scope)
     capability_broker = CapabilityBroker()
@@ -202,6 +213,7 @@ def _build_tools(config, skill_registry):
         policy_engine=policy_engine,
         capability_broker=capability_broker,
         skill_parser=skill_parser,
+        approval_commands=set(config.tools.approval_commands),
     )
     return executor
 
@@ -258,8 +270,12 @@ def _build_memory(config, llm_proxy, project_root: Path):
     return _init()
 
 
-def _build_mcp(config, tool_registry):
-    """构建 MCPToolProvider，MCP 未启用时返回 (None, None)。"""
+def _build_mcp(config, tool_executor):
+    """构建 MCPToolProvider，MCP 未启用时返回 (None, None)。
+
+    tool_executor 必须先行构建，Provider 复用其 registry / policy_engine /
+    capability_broker，避免重复构造安全组件。
+    """
 
     async def _init():
         if not (config.tools.mcp_enabled and config.tools.mcp_servers):
@@ -270,7 +286,7 @@ def _build_mcp(config, tool_registry):
         provider = MCPToolProvider(
             global_config=config.tools.mcp_global,
             server_configs=config.tools.mcp_servers,
-            registry=tool_registry,
+            registry=tool_executor.registry,
             policy_engine=tool_executor.policy_engine,
             capability_broker=tool_executor.capability_broker,
         )
@@ -336,18 +352,23 @@ async def build_agent(
     if agent_id is None:
         agent_id = "default"
 
+    # ── AgentIdentity：启动时即加载，供工具策略作用域收窄（阶段五审计 T43）──
+    identity = load_id(agent_id=agent_id)
+
     # ── 关键组件 ──
     llm_proxy = _build_llm(config, project_root)
     session_mgr: SessionManager = SessionManager(config.session.directory)
     # ── 可降级组件 ──
     skill_registry = _init_sync("技能", lambda: _build_skills(config, project_root))
-    tool_executor = _init_sync("工具", lambda: _build_tools(config, skill_registry))
+    tool_executor = _init_sync(
+        "工具",
+        lambda: _build_tools(config, skill_registry, agent_policy_rules=identity.policy_rules),
+    )
     memory_mgr, memory_dream = await _init_async("记忆", _build_memory(config, llm_proxy, project_root)) or (None, None)
 
-    # MCP 需要 tool_registry
-    tool_registry = tool_executor.registry if tool_executor else None
+    # MCP 需要 tool_executor（复用其 registry / policy_engine / capability_broker）
     mcp_provider, mcp_task = await _init_async(
-        "MCP", _build_mcp(config, tool_registry)
+        "MCP", _build_mcp(config, tool_executor)
     ) or (None, None)
 
     # 阶段四修复：Agent 启动阶段必须 await 首次 MCP 发现（开发计划阶段四·新增/修改④）。
@@ -359,9 +380,6 @@ async def build_agent(
             await mcp_task
         except Exception as e:  # 防御：发现异常不应拖垮 Agent 启动
             logger.warning("MCP 首次发现异常（已忽略）: %s", e)
-
-    # ── AgentIdentity：直接从 YAML 加载 ──
-    identity = load_id(agent_id=agent_id)
 
     # ── AgentRegistry：加载所有 Agent 配置 ──
     from dotclaw.orchestration.registry import AgentRegistry

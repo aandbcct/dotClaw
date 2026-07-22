@@ -55,6 +55,7 @@ class ToolExecutor:
         policy_engine: PolicyEngine | None = None,
         capability_broker: CapabilityBroker | None = None,
         skill_parser: "SkillParser | None" = None,
+        approval_commands: set[str] | None = None,
     ):
         self._registry = registry
         self._approval = approval_manager or ApprovalManager()
@@ -66,6 +67,9 @@ class ToolExecutor:
         self._policy_engine = policy_engine or PolicyEngine(self._policy_scope)
         self._broker = capability_broker or CapabilityBroker()
         self._skill_parser = skill_parser
+        # 配置级审批命令列表（新规范名）。与工具声明式 needs_approval 合并参与决策，
+        # 解决"approval_commands 死配置"问题（开发计划阶段五审计）。
+        self._approval_commands = set(approval_commands or [])
 
     @property
     def registry(self) -> ToolRegistry:
@@ -102,13 +106,14 @@ class ToolExecutor:
     def requires_approval(self, name: str) -> bool:
         """查询工具是否可能触发交互审批（不访问 Channel、不执行工具）。
 
-        由声明式 needs_approval 或档案默认决策为 ask 推导；供适配器做粗粒度预判。
+        由声明式 needs_approval 或配置 approval_commands，或档案默认决策为 ask 推导；
+        供适配器做粗粒度预判。
         """
         handler = self._registry.get(name)
         if handler is None:
             return False
         definition = handler.definition()
-        if definition.needs_approval:
+        if definition.needs_approval or definition.name in self._approval_commands:
             return True
         profile = definition.policy_profile
         if profile is not None:
@@ -229,8 +234,13 @@ class ToolExecutor:
                 journal.tool_policy_resolved(name, "deny", outcome.matched_rule, summary)
             return self._finish(result, name, journal, handler)
 
-        # ④ 审批：ask 且未预先批准时，经 Approval Port 询问。
-        if outcome.decision is PolicyDecision.ASK and not pre_approved:
+        # ④ 审批：ask 或声明式 needs_approval（且未预先批准）时，经 Approval Port 询问。
+        # needs_approval 用于没有资源档案、仍需显式审批的工具（如配置 approval_commands
+        # 指定的工具）；无交互通道时一律拒绝（设计不变量 §10.1.3）。
+        needs_explicit_approval = (
+            definition.needs_approval or definition.name in self._approval_commands
+        ) and not pre_approved
+        if (outcome.decision is PolicyDecision.ASK or needs_explicit_approval) and not pre_approved:
             approved = await self._approval.request(summary, channel)
             if journal:
                 journal.tool_approval_outcome(
