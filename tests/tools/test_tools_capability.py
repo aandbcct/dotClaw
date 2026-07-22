@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 
+import pytest
 from pydantic import BaseModel
 
 from dotclaw.tools.capability import (
@@ -136,6 +138,46 @@ def test_normalize_dotdot_escapes_workspace_root():
         assert escaped is True
         # 逃逸时回退为绝对路径（已脱敏，不含内容）
         assert os.path.isabs(normalized.replace("/", os.sep))
+
+
+def test_normalize_absolute_path_escapes_workspace_root():
+    # 计划 §5 显式要求：绝对路径同样视为逃逸（os.path.join 遇绝对路径会覆盖 root）。
+    with tempfile.TemporaryDirectory() as root:
+        abs_path = os.path.abspath(os.path.join(root, "..", "abs_evil.txt"))
+        normalized, escaped = normalize_workspace_path(root, abs_path)
+        assert escaped is True
+        assert os.path.isabs(normalized.replace("/", os.sep))
+
+
+def test_real_windows_junction_escape_detected():
+    # 完成门槛①：必须在真实 Windows 环境验证符号链接/联接点逃逸。
+    # 目录联接点（mklink /J）可由标准用户创建，无需管理员，最接近运行环境。
+    if os.name != "nt":
+        pytest.skip("仅 Windows 上验证真实联接点逃逸")
+    with tempfile.TemporaryDirectory() as root:
+        outside = tempfile.mkdtemp(prefix="outside_")
+        open(os.path.join(outside, "secret.txt"), "w").close()
+        junction = os.path.join(root, "junction")
+        proc = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", junction, outside],
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            pytest.skip(
+                "无法创建联接点（可能缺少权限）："
+                + proc.stderr.decode("oem", "replace")
+            )
+        try:
+            # 经联接点访问外部文件：realpath 应穿透重解析点，真实路径落在 workspace 外。
+            normalized, escaped = normalize_workspace_path(root, "junction/secret.txt")
+            assert escaped is True
+            assert os.path.isabs(normalized.replace("/", os.sep))
+        finally:
+            # 仅移除联接点重解析点，不触碰外部目标目录。
+            try:
+                os.rmdir(junction)
+            except OSError:
+                pass
 
 
 def test_describe_never_leaks_secret_in_command():
