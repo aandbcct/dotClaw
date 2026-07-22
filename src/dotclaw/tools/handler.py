@@ -1,14 +1,15 @@
-"""工具执行器抽象接口（Phase 5 新增）"""
+"""工具执行器抽象接口（Tool v1 阶段一重构）。
+
+Tool v1 阶段二起，内置工具统一使用 FunctionToolHandler（由 @tool + Discovery 构造），
+BuiltinToolHandler 已删除。本模块只保留统一抽象接口。所有新增注释使用中文。
+"""
 
 from __future__ import annotations
 
-import logging
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Awaitable
+from typing import Any
 
-from .base import ToolDefinition, ToolExecutionContext, ToolResult, ToolSource
-
-logger = logging.getLogger("dotclaw.tools.handler")
+from .base import ToolDefinition, ToolExecutionContext, ToolResult
 
 
 class ToolHandler(ABC):
@@ -32,52 +33,19 @@ class ToolHandler(ABC):
     def name(self) -> str:
         return self.definition().name
 
+    @property
+    def args_model(self):
+        """本地工具的 Pydantic 入参模型（总体设计 §4.1）。
 
-class BuiltinToolHandler(ToolHandler):
-    """内置工具适配器 — 将现有异步函数包装为 ToolHandler"""
+        MCP Adapter 等无 Pydantic 模型的 Handler 返回 None，交由执行器按
+        input_schema 走 JSON Schema 校验分支。
+        """
+        return None
 
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        parameters: dict,
-        handler_fn: Callable[..., Awaitable[Any]],
-        needs_approval: bool = False,
-        timeout: float = 60.0,
-        metadata: dict | None = None,
-    ):
-        self._definition = ToolDefinition(
-            name=name,
-            description=description,
-            parameters=parameters,
-            source=ToolSource.BUILTIN,
-            needs_approval=needs_approval,
-            timeout=timeout,
-            metadata=metadata or {},
-        )
-        self._handler_fn = handler_fn
+    @property
+    def input_schema(self) -> dict | None:
+        """MCP 等外部工具的原始参数 JSON Schema（总体设计 §4.5）。
 
-    def definition(self) -> ToolDefinition:
-        return self._definition
-
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext | None = None,
-    ) -> ToolResult:
-        import inspect
-        try:
-            sig = inspect.signature(self._handler_fn)
-            if "_context" in sig.parameters:
-                result = await self._handler_fn(**arguments, _context=context)
-            else:
-                result = await self._handler_fn(**arguments)
-            return ToolResult(output=str(result))
-        except Exception as e:
-            logger.exception(f"工具 {self._definition.name} 执行出错")
-            return ToolResult(
-                output=f"工具执行出错: {e}",
-                is_error=True,
-                error_code="EXECUTION_ERROR",
-                error_type="execution",
-            )
+        本地工具返回 None，校验交由 args_model（Pydantic）完成。
+        """
+        return None

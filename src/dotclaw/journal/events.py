@@ -50,6 +50,8 @@ class EventType:
     # ── 工具调用 ──
     TOOL_START = "tool.call_start"
     TOOL_END = "tool.call_end"
+    TOOL_POLICY = "tool.policy_resolved"
+    TOOL_APPROVAL = "tool.approval_outcome"
 
     # ── Skill ──
     SKILL_BODY_LOADED = "skill.body_loaded"

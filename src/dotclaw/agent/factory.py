@@ -158,30 +158,72 @@ def _build_skills(config, project_root: Path):
 
 
 def _build_tools(config, skill_registry):
-    """构建 ToolExecutor + ToolRegistry + ApprovalManager。"""
+    """构建 ToolExecutor + ToolRegistry + ApprovalManager。
+
+    基础 PolicyScope 只保留全局上限与资源约束。所有 Agent（含主 Agent）的
+    收窄规则均通过 agent_policy_resolver(agent_id) 在每次 Run 冻结独立作用域，
+    不写入共享 scope，避免 delegation 子 Agent 继承主 Agent 规则（四次审计修复）。
+    """
     from dotclaw.tools.registry import ToolRegistry
     from dotclaw.tools.executor import ToolExecutor
     from dotclaw.tools.approval import ApprovalManager
-    from dotclaw.tools.builtin import register_all
+    from dotclaw.tools.discovery import ToolDiscovery
     from dotclaw.tools.parser import SkillParser
+    from dotclaw.tools.policy import (
+        PolicyEngine,
+        PolicyDecision,
+        default_policy_scope,
+    )
+    from dotclaw.tools.capability import CapabilityBroker
+    from dotclaw.agent.identity import load_agent_config as _load_id
 
     registry = ToolRegistry()
 
+    # 阶段二：通过可信包 Discovery 自动发现并注册 builtin，不再手工 register_all。
+    # Discovery 完成后才应用 disabled_tools（使用迁移后的新规范名）。
     if config.tools.builtin_enabled:
-        register_all(registry)
+        for handler in ToolDiscovery.discover_builtin():
+            registry.register(handler)
 
     for tool_name in config.tools.disabled_tools:
         registry.unregister(tool_name)
 
-    approval_mgr = ApprovalManager(
-        approval_commands=config.tools.approval_commands,
-    )
+    # 阶段三：构造策略作用域（全局上限 + 资源约束），合并配置覆盖后回退设计默认值。
+    scope = default_policy_scope(workspace_root=config.tools.policy.workspace_root)
+    for profile, decision in config.tools.policy.rules.items():
+        scope.global_rules[profile] = PolicyDecision(decision)
+    if config.tools.policy.denied_paths:
+        scope.denied_paths = config.tools.policy.denied_paths
+    if config.tools.policy.allowed_mcp_servers:
+        scope.allowed_mcp_servers = config.tools.policy.allowed_mcp_servers
+
+    policy_engine = PolicyEngine(scope)
+    capability_broker = CapabilityBroker()
+    approval_mgr = ApprovalManager()
+
+    # Agent 级策略按 agent_id 解析（带缓存），供 ToolExecutor 每次调用冻结独立作用域
+    # （P1 修复：避免 delegation 子 Agent 继承主 Agent 规则，或全局作用域污染所有 Agent）。
+    _policy_rules_cache: dict[str, object] = {}
+
+    def _resolve_agent_policy_rules(agent_id: str) -> "dict[str, str] | None":
+        if agent_id in _policy_rules_cache:
+            return _policy_rules_cache[agent_id]  # type: ignore[return-value]
+        try:
+            rules = _load_id(agent_id=agent_id).policy_rules
+        except Exception:
+            rules = None
+        _policy_rules_cache[agent_id] = rules
+        return rules
 
     skill_parser = SkillParser(skill_registry) if skill_registry else None
     executor = ToolExecutor(
         registry=registry,
         approval_manager=approval_mgr,
+        policy_engine=policy_engine,
+        capability_broker=capability_broker,
         skill_parser=skill_parser,
+        approval_commands=set(config.tools.approval_commands),
+        agent_policy_resolver=_resolve_agent_policy_rules,
     )
     return executor
 
@@ -238,8 +280,12 @@ def _build_memory(config, llm_proxy, project_root: Path):
     return _init()
 
 
-def _build_mcp(config, tool_registry):
-    """构建 MCPToolProvider，MCP 未启用时返回 (None, None)。"""
+def _build_mcp(config, tool_executor):
+    """构建 MCPToolProvider，MCP 未启用时返回 (None, None)。
+
+    tool_executor 必须先行构建，Provider 复用其 registry / policy_engine /
+    capability_broker，避免重复构造安全组件。
+    """
 
     async def _init():
         if not (config.tools.mcp_enabled and config.tools.mcp_servers):
@@ -250,8 +296,9 @@ def _build_mcp(config, tool_registry):
         provider = MCPToolProvider(
             global_config=config.tools.mcp_global,
             server_configs=config.tools.mcp_servers,
-            registry=tool_registry,
-            approval_commands=config.tools.approval_commands,
+            registry=tool_executor.registry,
+            policy_engine=tool_executor.policy_engine,
+            capability_broker=tool_executor.capability_broker,
         )
 
         async def _load():
@@ -315,22 +362,34 @@ async def build_agent(
     if agent_id is None:
         agent_id = "default"
 
+    # ── AgentIdentity：启动时即加载，供工具策略作用域收窄（阶段五审计 T43）──
+    identity = load_id(agent_id=agent_id)
+
     # ── 关键组件 ──
     llm_proxy = _build_llm(config, project_root)
     session_mgr: SessionManager = SessionManager(config.session.directory)
     # ── 可降级组件 ──
     skill_registry = _init_sync("技能", lambda: _build_skills(config, project_root))
-    tool_executor = _init_sync("工具", lambda: _build_tools(config, skill_registry))
+    tool_executor = _init_sync(
+        "工具",
+        lambda: _build_tools(config, skill_registry),
+    )
     memory_mgr, memory_dream = await _init_async("记忆", _build_memory(config, llm_proxy, project_root)) or (None, None)
 
-    # MCP 需要 tool_registry
-    tool_registry = tool_executor.registry if tool_executor else None
+    # MCP 需要 tool_executor（复用其 registry / policy_engine / capability_broker）
     mcp_provider, mcp_task = await _init_async(
-        "MCP", _build_mcp(config, tool_registry)
+        "MCP", _build_mcp(config, tool_executor)
     ) or (None, None)
 
-    # ── AgentIdentity：直接从 YAML 加载 ──
-    identity = load_id(agent_id=agent_id)
+    # 阶段四修复：Agent 启动阶段必须 await 首次 MCP 发现（开发计划阶段四·新增/修改④）。
+    # 若仅 fire-and-forget 而不 await，首个 Run 在创建工具快照时会早于发现完成，
+    # 从而漏掉 MCP 工具。client.connect 自带 startup_timeout，失败 server 已在 provider
+    # 内降级为 failed_servers，因此 await 不会无限阻塞 Agent 启动。
+    if mcp_task is not None:
+        try:
+            await mcp_task
+        except Exception as e:  # 防御：发现异常不应拖垮 Agent 启动
+            logger.warning("MCP 首次发现异常（已忽略）: %s", e)
 
     # ── AgentRegistry：加载所有 Agent 配置 ──
     from dotclaw.orchestration.registry import AgentRegistry

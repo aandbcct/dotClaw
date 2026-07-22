@@ -1,21 +1,42 @@
-"""Shell 执行工具（builtin 子包 — Phase 5 迁移 + W1 修复）"""
+"""Shell 执行工具（builtin 子包 — Tool v1 阶段二 @tool 迁移 + W1 修复）。
+
+工具名：builtin.process.execute。
+保留子进程超时与 CancelledError 处理（超时 cancel 时必须 kill 子进程，避免孤儿进程）。
+所有新增注释使用中文。
+"""
 
 from __future__ import annotations
 
 import asyncio
 
-from dotclaw.tools.handler import BuiltinToolHandler
+from pydantic import BaseModel, Field
+
+from dotclaw.tools.base import ToolContext
+from dotclaw.tools.decorator import ToolPolicy, tool
 
 
-async def exec_command(command: str) -> str:
+class ExecArgs(BaseModel):
+    """执行 Shell 命令的参数。"""
+
+    command: str = Field(description="要执行的命令")
+
+
+@tool(
+    name="builtin.process.execute",
+    description="执行一条 Shell 命令。危险操作，执行前需用户确认。",
+    args_model=ExecArgs,
+    policy=ToolPolicy.PROCESS,
+    needs_approval=True,
+    timeout=60.0,
+)
+async def execute(args: ExecArgs, context: ToolContext) -> str:
+    """执行 Shell 命令，返回标准输出。
+
+    Phase 5 W1 修复：添加 CancelledError 处理。当 ToolExecutor 的 asyncio.wait_for
+    超时 cancel task 时，CancelledError（Python 3.9+ 继承 BaseException，不被
+    except Exception 捕获）必须先 kill 子进程再重新抛出，避免孤儿进程。
     """
-    执行 Shell 命令，返回标准输出。
-
-    Phase 5 W1 修复：添加 CancelledError 处理。
-    当 ToolExecutor 的 asyncio.wait_for 超时 cancel task 时，
-    CancelledError（Python 3.9+ 继承 BaseException，不被 except Exception 捕获）
-    必须先 kill 子进程再重新抛出，避免孤儿进程。
-    """
+    command = args.command
     proc = None
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -44,23 +65,3 @@ async def exec_command(command: str) -> str:
         raise
     except Exception as e:
         return f"错误：{e}"
-
-
-def get_exec_handler() -> BuiltinToolHandler:
-    return BuiltinToolHandler(
-        name="exec",
-        description="执行一条 Shell 命令。危险操作，执行前需用户确认。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "要执行的命令",
-                }
-            },
-            "required": ["command"],
-        },
-        handler_fn=exec_command,
-        needs_approval=True,
-        timeout=60.0,
-    )

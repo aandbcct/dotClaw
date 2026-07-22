@@ -1,8 +1,15 @@
-"""工具审批管理器（Phase 5 重构）"""
+"""审批端口（Tool v1 阶段三重构）。
+
+ApprovalManager 在阶段三重构为 Approval Port 的交互适配器：它只消费 Policy Engine
+给出的 `ask` 决策，通过 Channel 向用户展示**已脱敏**的资源摘要并请求确认。它不再
+维护工具名列表，也不再自行决定放行（总体设计 §4.3 / §6）。
+
+关键不变量（总体设计 §4.3）：无可用交互通道（Channel）时，`ask` 必须拒绝，不能像
+旧实现那样默认放行。
+"""
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -10,59 +17,36 @@ if TYPE_CHECKING:
 
 
 class ApprovalManager:
-    """
-    危险工具执行前需要用户确认。
+    """审批端口：把 Policy 的 ask 决策交给用户确认。
 
-    审批策略（双重）：
-    1. ToolDefinition.needs_approval 声明式（工具自己声明）
-    2. config.tools.approval_commands 列表（用户配置覆盖）
-
-    Phase 5 关键变化：
-    - 删除硬编码 NEEDS_APPROVAL = {"exec", "python"}
-    - 新增 _approval_commands 集合，从 config.yaml 加载
+    仅负责交互；放行/拒绝的最终语义由调用方（ToolExecutor）根据返回值翻译为
+    APPROVAL_DENIED 或继续执行。
     """
 
-    def __init__(self, approval_commands: list[str] | None = None):
+    def __init__(self) -> None:
+        # 阶段三起不再持有命令列表；审批完全由 Policy 的 ask 决策驱动。
         self._enabled = True
-        self._approval_commands = set(approval_commands or [])
 
-    def set_enabled(self, enabled: bool):
+    def set_enabled(self, enabled: bool) -> None:
+        """启用/停用审批端口（停用视为所有 ask 直接拒绝）。"""
         self._enabled = enabled
 
-    def set_approval_commands(self, commands: list[str]):
-        """从 config.yaml 加载需要审批的命令列表"""
-        self._approval_commands = set(commands)
+    async def request(self, summary: str, channel: "Channel | None" = None) -> bool:
+        """请求用户确认一次资源访问。
 
-    def requires_approval(self, tool_name: str) -> bool:
-        """返回工具是否需要交互审批，不触发 Channel 副作用。"""
-        return self._enabled and tool_name in self._approval_commands
+        Args:
+            summary: 由 Broker 生成的脱敏资源摘要（不含密钥/认证头）。
+            channel: 交互通道；为 None 时直接拒绝（无默认放行）。
 
-    async def check(
-        self,
-        tool_name: str,
-        arguments: dict,
-        channel: "Channel | None" = None,
-    ) -> bool:
+        Returns:
+            True 表示用户批准；False 表示拒绝或无通道。
         """
-        检查工具是否需要审批。
-
-        逻辑：
-        1. _enabled=False -> 全部放行
-        2. tool_name 在 _approval_commands 中 -> 需要审批
-        3. 否则放行
-        """
-        if not self.requires_approval(tool_name):
-            return True
-
+        if not self._enabled:
+            return False
         if channel is None:
-            # 无 channel 时默认放行（子 Agent 场景）
-            return True
-
-        # 通过 channel 向用户请求确认
-        args_str = json.dumps(arguments, ensure_ascii=False, indent=2)
+            # 无交互通道：默认拒绝（总体设计 §4.3 不变量 3）。
+            return False
         confirm = await channel.ask_user(
-            f"⚠️ 即将执行危险工具 `{tool_name}`\n"
-            f"参数：{args_str}\n"
-            f"确认执行？(y/n): "
+            f"⚠️ 即将执行需要审批的操作\n资源：{summary}\n确认执行？(y/n): "
         )
         return confirm.strip().lower() in ("y", "yes")

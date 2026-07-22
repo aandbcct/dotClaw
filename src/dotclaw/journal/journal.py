@@ -436,6 +436,54 @@ class Journal:
             "error_type": error_type,
         })
 
+    # ═══ 工具策略与审批审计（脱敏） ═══
+
+    def tool_policy_resolved(
+        self,
+        tool_name: str,
+        decision: str,
+        matched_rule: str,
+        capability_summary: str,
+    ) -> None:
+        """记录策略引擎对资源请求的最终决策（脱敏）。
+
+        Args:
+            tool_name: 工具名。
+            decision: allow / ask / deny。
+            matched_rule: 命中的档案名或约束名（不含用户输入值）。
+            capability_summary: Broker 生成的脱敏资源摘要；不含密钥、认证头或
+                原始敏感值（总体设计 §7.2）。
+        """
+        self._require_session()
+        self._emit(EventType.TOOL_POLICY, {
+            "agentrun_id": self._agentrun_id,
+            "tool_name": tool_name,
+            "decision": decision,
+            "matched_rule": matched_rule,
+            "capability_summary": capability_summary,
+        })
+
+    def tool_approval_outcome(
+        self,
+        tool_name: str,
+        outcome: str,
+        summary: str,
+    ) -> None:
+        """记录审批端口的一次结果（脱敏）。
+
+        Args:
+            tool_name: 工具名。
+            outcome: approved / denied / unavailable。
+            summary: 展示给用户的脱敏资源摘要；不含密钥、认证头或原始敏感值。
+        """
+        self._require_session()
+        self._emit(EventType.TOOL_APPROVAL, {
+            "agentrun_id": self._agentrun_id,
+            "tool_name": tool_name,
+            "outcome": outcome,
+            "summary": summary,
+        })
+
     # ═══ Skill ═══
 
     def skill_body_loaded(self, skill_name: str, status: str = "success",

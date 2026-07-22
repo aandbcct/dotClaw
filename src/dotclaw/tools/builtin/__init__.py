@@ -1,25 +1,6 @@
-"""内置工具子包的统一注册入口。"""
+"""内置工具子包——可信工具包。
 
-from __future__ import annotations
-
-def register_all(registry):
-    """
-    注册所有内置工具到注册表。
-    在 main.py 启动时调用。
-    """
-    from .exec_tool import get_exec_handler
-    from .file_tool import get_read_file_handler, get_write_file_handler, get_list_dir_handler
-    from .memory_tool import get_memory_read_handler, get_memory_write_handler
-    from .system_tool import get_system_info_handler, get_time_handler
-    handlers = [
-        get_exec_handler(),
-        get_read_file_handler(),
-        get_write_file_handler(),
-        get_list_dir_handler(),
-        get_memory_read_handler(),
-        get_memory_write_handler(),
-        get_system_info_handler(),
-        get_time_handler(),
-    ]
-    for handler in handlers:
-        registry.register(handler)
+Tool v1 阶段二起不再有手工 register_all()：所有工具通过 @tool 声明，由
+ToolDiscovery 扫描本包及其子模块自动发现（见 dotclaw.tools.discovery）。
+新增工具只需在子模块中用 @tool 装饰函数，无需修改任何注册列表。
+"""

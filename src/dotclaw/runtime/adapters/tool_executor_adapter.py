@@ -30,7 +30,13 @@ class ToolExecutorAdapter(ToolPort):
                 status=ToolResultStatus.FAILED,
                 error=RunError(RunErrorCode.TOOL_FAILURE, "同一工具调用不能重复执行"),
             )
-        if self._executor.requires_approval(invocation.call.name) and key not in self._waiting_calls:
+        if self._executor.requires_approval(
+            invocation.call.name,
+            ToolExecutionContext(
+                agentrun_id=invocation.run_id,
+                agent_id=execution.policy.agent_id,
+            ),
+        ) and key not in self._waiting_calls:
             self._waiting_calls.add(key)
             return ToolResult(
                 call_id=invocation.call.call_id,
@@ -42,7 +48,10 @@ class ToolExecutorAdapter(ToolPort):
         legacy_result = await self._executor.execute_approved(
             invocation.call.name,
             invocation.call.arguments,
-            ToolExecutionContext(agentrun_id=invocation.run_id),
+            ToolExecutionContext(
+                agentrun_id=invocation.run_id,
+                agent_id=execution.policy.agent_id,
+            ),
         )
         if legacy_result.is_error:
             return ToolResult(

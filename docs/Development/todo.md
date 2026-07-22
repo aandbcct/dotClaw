@@ -1,5 +1,21 @@
 # 各模块todo列表
 
+## 软件架构
+
+- [ ] 顶层组合根还是mian->agent->runtime的形式，agent和runtime应该都是一等公民，需要理清楚层级关系
+
+  ```
+  Q：
+  agent/factory.py 实际负责整个应用装配，却放在 agent/ 内。
+  runtime_factory.py 只装配 Runtime 内核及其 Adapter，但其名字和文档又暗示它是唯一组合根。
+  main.py 虽然拿到了 runtime_services，但正常路径实际只用 agent 和 session_mgr；这也说明返回三元组是装配边界泄漏。
+  Agent 已经是轻量门面，运行过程交给 SessionRunCoordinator；它不应再承担“创建所有基础设施”的语义。
+  ```
+
+- [ ] 跨进程/多节点 Session，Runtime 从“单进程任务执行器”升级为“分布式任务调度系统”
+
+
+
 ## multi-agent
 
 - [ ] 重启后恢复未完成任务；
@@ -43,6 +59,8 @@
 ## llm proxy
 
 - [ ] llm proxy接口多用于路由适配，目前写死了chat，应该可以从config里读功能节点，得到多功能列表
+- [ ] 取消只做了应用层的取消，没有llm proxy的取消
+- [ ] 支持多模态
 
 ## tool
 
@@ -60,6 +78,10 @@ A：改成装饰器注册，自动发现
 Q：tool可能会得到一些敏感参数，这要怎么做过滤？
 ```
 
+```
+Q：后续可能有大量工具，全量注入不现实，要怎么做工具路由？
+```
+
 
 
 - [ ] 多加一些内建工具，连接mcp服务器
@@ -72,3 +94,12 @@ Q：tool可能会得到一些敏感参数，这要怎么做过滤？
 ## client
 
 - [ ] 加一个前端，做个桌面应用怎么样
+
+- [ ] 多channel时应用层需要加一个连接层，承载面向用户会话的操作，
+
+  ```
+  ·ChatService：面向用户会话的操作。接收消息、提交 Run、处理审批、取消、重试、放弃，并返回适合 Channel 展示的结果。当前 Agent.process()、resolve_approval() 等方法已经基本在做这件事，所以现阶段不需要重复创建。
+  ·RuntimeOperations：面向运维/控制面的操作。查询可用工具、MCP 连接状态、技能目录，或触发记忆蒸馏等。这些不属于一次聊天 Run 的核心执行，也不应让 Channel 直接耦合 ToolExecutor、MCPToolProvider 等实现。
+  ```
+
+- [ ] 目前channel输出只输出最终回复，中间操作也要作为输出内容，让用户感知

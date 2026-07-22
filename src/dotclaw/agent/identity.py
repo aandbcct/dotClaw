@@ -34,6 +34,11 @@ class AgentIdentity:
     allowed_tools: list[str] = field(default_factory=list)
     """工具白名单。空列表 = 所有已注册工具均可用。"""
 
+    # ── 策略约束（Agent 级只能收窄全局上限）──
+    policy_rules: dict[str, str] | None = None
+    """Agent 级策略规则（profile -> allow/ask/deny）。仅用于收窄全局上限，
+    不能放宽；具体收窄判定由 PolicyEngine 在评估时执行。None = 不附加 Agent 规则。"""
+
     # ── 行为约束 ──
     system_prompt_template: str = ""
     """Agent 级 system prompt 模板。
@@ -161,6 +166,15 @@ def load_agent_config(
         if isinstance(raw_context_slot_ids, list) and all(isinstance(item, str) for item in raw_context_slot_ids)
         else None
     )
+    raw_policy_rules = raw.get("policy_rules")
+    policy_rules: dict[str, str] | None = None
+    if isinstance(raw_policy_rules, dict):
+        # 仅保留 profile -> 决策字符串 的合法条目；非法值忽略，由 PolicyEngine 兜底。
+        policy_rules = {
+            str(k): str(v)
+            for k, v in raw_policy_rules.items()
+            if isinstance(k, str) and str(v) in ("allow", "ask", "deny")
+        } or None
     return AgentIdentity(
         agent_id=raw.get("agent_id", agent_id),
         agent_name=str(raw.get("agent_name", "DotClaw")),
@@ -175,4 +189,5 @@ def load_agent_config(
         input_modes=list(raw.get("input_modes", ["text"])),
         output_modes=list(raw.get("output_modes", ["text"])),
         context_slot_ids=context_slot_ids,
+        policy_rules=policy_rules,
     )

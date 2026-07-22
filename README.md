@@ -33,7 +33,7 @@ flowchart TB
     subgraph Capability["能力平面：Agent 可以做什么"]
         Identity["AgentIdentity\n角色、模型、工具约束"]
         Router["LLM\nRouter / Proxy / 熔断 / 限流"]
-        Tools["Tools + MCP\nRegistry / Executor / Handler"]
+        Tools["Tools + MCP\n@tool Discovery / Schema / Policy"]
         Context["Context\n多 Owner Slots / Version / Budget"]
         Knowledge["Memory / Skills / Workspace\n项目与知识来源"]
         Identity --> Context
@@ -68,7 +68,8 @@ flowchart TB
 |---|---|---|
 | 声明式角色 | `AgentIdentity` + YAML Agent 配置 | 角色、模型偏好、工具约束与执行基础设施解耦 |
 | 模型调用韧性 | `ModelRouter` + `LLMProxy` + 限流/熔断/降级 | 将模型选择与失败编排从 Agent 逻辑中移出 |
-| 工具与 MCP | Registry / Executor / Handler 三层，统一适配 MCP | 工具定义、执行边界和具体业务逻辑可独立扩展 |
+| 工具与 MCP | `@tool` 自动发现 + Pydantic Schema + Registry / Executor / Handler，MCP 统一命名空间接入 | 新工具无需维护注册列表；本地与 MCP 共享校验、超时、错误与审计契约 |
+| 工具安全护栏 | Capability Broker → Policy Engine → 审批 → 受批准路径执行 | 默认拒绝、路径逃逸防护、MCP server allowlist、无交互审批即拒绝，并支持 Agent 按 Run 收窄权限 |
 | 上下文工程 | 多 Owner Slot、Context Version、动态事实引用、精确 Token 预算 | 稳定上下文可审计，多轮工具 ReAct 不产生冗余快照 |
 | 记忆与技能 | Memory、Knowledge、Skill Registry 作为 Context 来源 | 不让 Runtime 直接耦合检索和提示词细节 |
 | 会话与执行分离 | Conversation 与 AgentRun / RunMessage / RunEvent 分容器 | 对话语义保持干净，执行细节可审计、可排障 |
@@ -99,8 +100,8 @@ flowchart LR
 | 模块 | 当前职责 | 与执行内核的关系 |
 |---|---|---|
 | `llm/` | 模型选择、限流、熔断、重试和跨模型降级 | 经 `LLMPort` 返回标准化模型响应 |
-| `tools/` | 工具注册、审批判定、超时和 Handler 执行 | 经 `ToolPort` 暴露调用能力 |
-| `mcp/` | MCP Server 连接与工具适配 | 作为 ToolExecutor 的工具来源 |
+| `tools/` | 装饰器发现、Schema 校验、资源策略、审批、超时与 Handler 执行 | 经 `ToolPort` 暴露受安全策略约束的调用能力 |
+| `mcp/` | MCP Server 连接、快照发现与工具适配 | 仅将 MCP tools 作为命名空间工具来源接入 |
 | `context/` | Slot 组装、缓存、token 预算和降级 | 实现 `ContextPort`，产出完整 `ContextBundle` |
 | `memory/` / `skills/` | 检索、技能目录、项目/知识补充 | 作为 Context Slot 的依赖，不侵入状态机 |
 | `journal/` | 可选 trace、报告和调试观测 | 不承担 checkpoint 或 Runtime 恢复事实 |
@@ -276,6 +277,16 @@ sequenceDiagram
 - 取消是 run 级控制信号：Engine 向 LLMPort、ToolPort 发出 best-effort 取消，并在安全点收口终态；
 - `RuntimeDelegationAdapter` 将 Dispatcher、Broker 和子 Session 封装成 `DelegationPort`，父子关系通过 `parent_run_id`、`root_run_id` 和事件表达；
 - 父 Run 取消时，取消信号可以沿 DelegationPort 传播到当前子 Run。
+
+### Tool：声明式注册、安全执行与 MCP 连接
+
+本地工具采用装饰器 @tool 声明：开发者只需描述工具名称、参数和所触及的资源，框架会在启动时自动发现它并生成模型可用的调用 Schema，不再需要维护分散的注册函数与集中列表。
+
+每次工具调用都会先校验参数，再识别它要访问的文件、进程、网络或 MCP 资源，由统一策略决定允许、请求确认或拒绝。文件路径会处理用户目录、相对跳转和符号链接；真正执行时只使用已经批准的目标路径。不同 Agent 还可以在全局安全上限内进一步收紧权限，且规则随每个 Run 隔离。
+
+MCP 只将标准工具能力接入系统，并以“服务名 + 工具名”的稳定命名空间展示，避免与内置工具或其他服务冲突。服务连接和调用都需要显式授权；首次发现完成后，每个 Run 使用固定的工具快照，运行中不会因服务状态变化而改变模型看到的工具集。
+
+详见 [Tool 模块总体说明](docs/wiki/Tool%20模块总体说明.md)。
 
 ## 项目结构
 

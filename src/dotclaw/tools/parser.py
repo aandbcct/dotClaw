@@ -1,8 +1,8 @@
 """SkillParser — 工具执行后检测 skill 相关操作。
 
-通过分析 read_file / exec 的参数，判断本次调用是否命中了 skill 的
-body（SKILL.md）、reference 文件或 script。与 ToolExecutor 协作，
-不侵入 AgentLoop。
+通过分析 builtin.files.read_text / builtin.process.execute 的参数，判断本次调用
+是否命中了 skill 的 body（SKILL.md）、reference 文件或 script。与 ToolExecutor 协作，
+不侵入 AgentLoop。所有新增注释使用中文。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ logger = logging.getLogger("dotclaw.tools.parser")
 
 
 class SkillParser:
-    """工具调用参数解析器——检测 read_file / exec 是否命中 skill。
+    """工具调用参数解析器——检测 builtin.files.read_text / builtin.process.execute 是否命中 skill。
 
     Args:
         registry: SkillRegistry，提供已注册 skill 的元数据。
@@ -55,15 +55,15 @@ class SkillParser:
         if skill_meta is None:
             return None
 
-        # 2. 根据工具名和路径判断操作类型
-        if tool_name in ("read_file", "read"):
+        # 2. 根据工具名和路径判断操作类型（Tool v1 阶段二新规范名）
+        if tool_name == "builtin.files.read_text":
             if resolved.name == "SKILL.md" or path.endswith("SKILL.md"):
                 return (skill_meta.name, "body", "")
             else:
                 # reference 文件
                 return (skill_meta.name, "reference", resolved.name)
 
-        elif tool_name in ("exec", "python", "bash"):
+        elif tool_name == "builtin.process.execute":
             # 脚本执行
             return (skill_meta.name, "script", path)
 

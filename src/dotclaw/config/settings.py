@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -9,6 +10,75 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger("dotclaw.config")
+
+
+# ── Tool v1 阶段二：旧 builtin 工具名 → 新规范名的一次性迁移映射 ──
+_BUILTIN_NAME_MIGRATION: dict[str, str] = {
+    "read_file": "builtin.files.read_text",
+    "write_file": "builtin.files.write_text",
+    "list_dir": "builtin.files.list_directory",
+    "exec": "builtin.process.execute",
+    "memory_read": "builtin.memory.read",
+    "memory_write": "builtin.memory.write",
+    "system_info": "builtin.system.get_info",
+    "get_time": "builtin.system.get_time",
+}
+
+
+def _migrate_tool_names(names: list[str]) -> list[str]:
+    """将旧工具名迁移为新规范名，返回去重后的新列表。
+
+    规则（开发计划阶段二·兼容与配置迁移）：
+    - 旧名按映射表转换为新名；未命中映射的名称原样保留（如 'python'）。
+    - 同一旧名/新名同时出现时，以新名设置为准（旧名丢弃）并记录警告。
+    - 不新增代码读取旧名；迁移仅在加载时发生。
+    """
+    migrated: list[str] = [
+        _BUILTIN_NAME_MIGRATION.get(name, name) for name in names
+    ]
+    seen: set[str] = set()
+    result: list[str] = []
+    for old, new in zip(names, migrated):
+        if new in seen:
+            logger.warning(
+                "工具名 '%s' 与已迁移名 '%s' 冲突，已以新名为准", old, new
+            )
+            continue
+        seen.add(new)
+        if new != old:
+            logger.warning("工具名 '%s' 已迁移为 '%s'，请更新配置", old, new)
+        result.append(new)
+    return result
+
+
+# Tool v1 阶段三：合法的策略决策值（YAML 书写校验用）。
+_VALID_POLICY_DECISIONS = ("allow", "ask", "deny")
+
+
+def _parse_tool_policy(policy_raw: dict[str, Any]) -> "ToolPolicyConfig":
+    """解析 tools.policy 配置为 ToolPolicyConfig。
+
+    未提供的字段留空，由工厂装配时回退到设计默认值（default_policy_scope）。
+    非法的决策值会被跳过并告警，避免错误配置悄悄放行或拒绝。
+    """
+    if not isinstance(policy_raw, dict):
+        return ToolPolicyConfig()
+
+    rules: dict[str, str] = {}
+    for key, value in (policy_raw.get("rules") or {}).items():
+        if isinstance(value, str) and value.lower() in _VALID_POLICY_DECISIONS:
+            rules[key] = value.lower()
+        else:
+            logger.warning("工具策略规则 '%s' 的值为 '%s'，非法，已忽略", key, value)
+
+    return ToolPolicyConfig(
+        workspace_root=policy_raw.get("workspace_root", "."),
+        rules=rules,
+        denied_paths=list(policy_raw.get("denied_paths", []) or []),
+        allowed_mcp_servers=list(policy_raw.get("allowed_mcp_servers", []) or []),
+    )
 
 
 def _find_project_root() -> Path:
@@ -64,14 +134,30 @@ class AgentConfig:
 
 
 @dataclass
+class ToolPolicyConfig:
+    """Tool v1 阶段三：策略配置（总体设计 §7.1）。
+
+    全局规则是安全上限，Agent 级策略只能收窄（由 PolicyEngine 强制）。
+    缺省值由 tools.policy.default_policy_scope 提供；此处未显式给出的字段
+    在工厂装配时回退到设计默认值。
+    """
+
+    workspace_root: str = "."
+    # 档案名 -> allow/ask/deny（字符串，便于 YAML 书写）。
+    rules: dict[str, str] = field(default_factory=dict)
+    denied_paths: list[str] = field(default_factory=list)
+    allowed_mcp_servers: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ToolsConfig:
     # Phase 5 新增：source 级启停
     builtin_enabled: bool = True
-    mcp_enabled: bool = True       # Phase 5 预留，暂不消费
+    mcp_enabled: bool = True       # 是否启用 MCP（由 _build_mcp 检查）
     skill_enabled: bool = True      # Phase 5 预留，暂不消费
 
-    # 危险命令审批列表
-    approval_commands: list[str] = field(default_factory=lambda: ["exec", "python"])
+    # 危险命令审批列表（默认使用阶段二迁移后的新规范名）
+    approval_commands: list[str] = field(default_factory=lambda: ["builtin.process.execute"])
 
     # 单工具禁用列表（向后兼容旧 config.exec.enabled=false）
     disabled_tools: list[str] = field(default_factory=list)
@@ -85,6 +171,9 @@ class ToolsConfig:
     # Phase 6 新增：MCP 配置
     mcp_global: McpGlobalConfig = field(default_factory=lambda: McpGlobalConfig())
     mcp_servers: list[McpServerConfig] = field(default_factory=list)
+
+    # Tool v1 阶段三：策略配置（全局上限 + 资源约束），缺省回退设计默认值。
+    policy: "ToolPolicyConfig" = field(default_factory=lambda: ToolPolicyConfig())
 
 
 @dataclass
@@ -466,22 +555,14 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         rules=agent_raw.get("rules", ""),
     )
 
-    # Phase 5 升级：ToolsConfig 新格式 + 向后兼容
+    # Phase 5 升级：ToolsConfig 新格式（仅读取新规范字段）。
     tools_raw = raw.get("tools", {})
 
-    # 向后兼容：合并新格式 + 旧格式（始终合并，防止混合格式丢数据）
-    approval_commands = list(tools_raw.get("approval_commands", []))
-    for tool_name in ("exec", "python"):
-        if tools_raw.get(tool_name, {}).get("needs_approval", False):
-            if tool_name not in approval_commands:
-                approval_commands.append(tool_name)
-
-    # 向后兼容：合并新格式 + 旧格式
-    disabled_tools = list(tools_raw.get("disabled_tools", []))
-    for tool_name in ("exec", "python"):
-        if not tools_raw.get(tool_name, {}).get("enabled", True):
-            if tool_name not in disabled_tools:
-                disabled_tools.append(tool_name)
+    # Tool v1 阶段二：旧工具名 → 新规范名一次性迁移（带弃用警告）。
+    # 仅处理新格式字段中的旧名；旧嵌套格式（tools.exec.* / tools.python.*）
+    # 的读取已在阶段五删除，不再兼容。
+    approval_commands = _migrate_tool_names(list(tools_raw.get("approval_commands", [])))
+    disabled_tools = _migrate_tool_names(list(tools_raw.get("disabled_tools", [])))
 
     tools = ToolsConfig(
         builtin_enabled=tools_raw.get("builtin_enabled", True),
@@ -489,12 +570,13 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         skill_enabled=tools_raw.get("skill_enabled", True),
         approval_commands=approval_commands,
         disabled_tools=disabled_tools,
-        exec_timeout=tools_raw.get("exec_timeout") or
-                      tools_raw.get("python", {}).get("timeout", 60.0),
+        exec_timeout=tools_raw.get("exec_timeout", 60.0),
         web_search_enabled=tools_raw.get("web_search", {}).get("enabled", False),
         # Phase 6: MCP 配置解析
         mcp_global=_parse_mcp_global(tools_raw.get("mcp_global", {})),
         mcp_servers=_parse_mcp_servers(tools_raw.get("mcp_servers", [])),
+        # Tool v1 阶段三：策略配置（缺省回退设计默认值）。
+        policy=_parse_tool_policy(tools_raw.get("policy", {})),
     )
 
     skills_raw = raw.get("skills", {})
