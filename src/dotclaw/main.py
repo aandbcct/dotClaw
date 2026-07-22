@@ -25,9 +25,9 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from dotclaw.channel.cli import CLIChannel
-from dotclaw.agent import Agent, build_agent
+from dotclaw.agent import Agent
 from dotclaw.session import Session, SessionManager
-from dotclaw.bootstrap import RuntimeServices
+from dotclaw.bootstrap.application_host import ApplicationHost
 from dotclaw.bootstrap.session_interaction import SessionInteractionService
 from dotclaw.cli.banner import build_banner, console as rich_console
 from dotclaw.mcp.provider import MCPToolProvider
@@ -41,21 +41,13 @@ async def _run_cli() -> None:
     channel: CLIChannel = CLIChannel()
 
     channel.print_info("组件初始化中...")
-    agent: Agent
-    runtime_services: RuntimeServices
-    session_mgr: SessionManager
-    agent, runtime_services, session_mgr = await build_agent(channel=channel)
+    # 阶段 2：ApplicationHost 作为唯一组合根，统一装配与持有全部资源。
+    host: ApplicationHost = await ApplicationHost.build(channel=channel)
+    config = host.config
+    logging.getLogger().setLevel(config.debug.level)
 
-    if agent.config is not None:
-        logging.getLogger().setLevel(agent.config.debug.level)
-
-    # 阶段 1：SessionInteractionService 按 Session 绑定的 Identity 路由交互。
-    service: SessionInteractionService = SessionInteractionService(
-        session_manager=session_mgr,
-        agent_registry=runtime_services.agent_registry,
-        coordinator=runtime_services.coordinator,
-        config=agent.config,
-    )
+    service: SessionInteractionService = host.session_interaction
+    session_mgr: SessionManager = host.session_manager
 
     sessions: list[Session] = await session_mgr.list_all()
     if sessions:
@@ -64,7 +56,7 @@ async def _run_cli() -> None:
         current_session = await service.create_session(title="主对话")
 
     # 按当前 Session 绑定的 Identity 取得路由 Agent 门面（用于 Banner 展示）。
-    agent = await service.get_agent(current_session)
+    agent: Agent = await service.get_agent(current_session)
 
     from dotclaw.config import _find_project_root
     rich_console.print(build_banner(
@@ -124,7 +116,7 @@ async def _run_cli() -> None:
                     else:
                         channel.print_error("用法: /delete <对话ID>")
                 elif cmd == "/dream":
-                    dream = runtime_services.memory_dream
+                    dream = host.memory_dream
                     if dream and hasattr(dream, 'run'):
                         await _cmd_dream_async(channel, dream)
                     else:
@@ -148,11 +140,11 @@ async def _run_cli() -> None:
                     else:
                         channel.print_error("用法: /abandon <run_id>")
                 elif cmd == "/tools":
-                    _cmd_tools(channel, runtime_services.tool_executor)
+                    _cmd_tools(channel, host.tool_executor)
                 elif cmd == "/mcp":
-                    _cmd_mcp(channel, runtime_services.mcp_provider)
+                    _cmd_mcp(channel, host.mcp_provider)
                 elif cmd == "/skills":
-                    _cmd_skills(channel, runtime_services.skill_registry)
+                    _cmd_skills(channel, host.skill_registry)
                 elif cmd == "/model":
                     channel.print_info(f"当前模型: {agent.model_id}")
                 else:

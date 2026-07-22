@@ -24,7 +24,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import BaseModel
 
-from dotclaw.agent.factory import _build_mcp
+from dotclaw.bootstrap._host_components import _build_mcp
 from dotclaw.mcp.provider import MCPToolProvider
 from dotclaw.tools.approval import ApprovalManager
 from dotclaw.tools.capability import (

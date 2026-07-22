@@ -74,6 +74,9 @@ class ContextFake(ContextPort):
         """测试替身不缓存 Slot 实例。"""
         self.released_scopes.append((owner, owner_key))
 
+    async def release_all(self) -> None:
+        """测试替身不缓存 Slot 实例。"""
+
     def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
         """测试替身不维护独立 Slot 刷新状态。"""
 

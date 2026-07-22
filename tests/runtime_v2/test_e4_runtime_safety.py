@@ -31,6 +31,9 @@ class BudgetContext(ContextPort):
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """测试 Port 不保存 Slot 实例。"""
 
+    async def release_all(self) -> None:
+        """测试 Port 不保存 Slot 实例。"""
+
     def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
         """测试 ContextPort 不维护可刷新的 Slot 缓存。"""
 

@@ -257,6 +257,29 @@ async def test_release_scope_releases_cached_owner_instances() -> None:
     assert (agent_slot.releases, session_slot.releases, run_slot.releases) == (1, 1, 1)
 
 
+async def test_release_all_releases_every_cached_instance() -> None:
+    """Host 关闭时 release_all 释放全部 Owner 的缓存实例，等价于逐个释放。"""
+    registry = ContextSlotRegistry()
+    agent_slot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.EMPTY))
+    session_slot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.EMPTY))
+    run_slot = RecordingSlot(ContextContribution(ContextContributionKind.SYSTEM_CONTENT, ContextSlotStatus.EMPTY))
+    registry.register(_descriptor("agent", ContextOwner.AGENT, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.AGENT, 10), lambda: agent_slot)
+    registry.register(_descriptor("session", ContextOwner.SESSION, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.SESSION, 20), lambda: session_slot)
+    registry.register(_descriptor("run", ContextOwner.RUN, ContextContributionKind.SYSTEM_CONTENT, ContextCacheScope.RUN, 30), lambda: run_slot)
+    provider = _provider(
+        registry,
+        ContextSlotManager(registry, ContextSignalBus()),
+        ("agent", "session", "run"),
+    )
+    request = _request()
+
+    await provider.build(request, _execution(request).view())
+    await provider.release_all()
+
+    assert (agent_slot.releases, session_slot.releases, run_slot.releases) == (1, 1, 1)
+
+
+
 async def test_cache_instance_isolated_by_exact_owner_key() -> None:
     """相同 Slot 类型在不同 Agent Owner 下必须创建独立实例。"""
     registry = ContextSlotRegistry()

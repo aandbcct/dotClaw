@@ -69,7 +69,6 @@ async def test_agent_process_submits_to_coordinator_and_projector_writes_convers
         skill_registry=None,
         memory_manager=None,
         agent_registry=AgentRegistry(),
-        mcp_provider=None,
         text_stream_port=ChannelTextStreamAdapter(channel),
     )
     agent = Agent(identity, coordinator=services.coordinator, config=config)

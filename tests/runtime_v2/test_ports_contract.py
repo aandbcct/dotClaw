@@ -40,6 +40,9 @@ class FakeContextPort:
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """测试替身不缓存 Slot 实例。"""
 
+    async def release_all(self) -> None:
+        """测试替身不缓存 Slot 实例。"""
+
 
 class FakeLLMPort:
     """用于验证 LLMPort 标准响应的内存替身。"""

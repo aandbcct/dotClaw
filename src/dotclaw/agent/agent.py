@@ -3,7 +3,7 @@
 模块只保存 Agent 身份与展示所需依赖，将普通执行、审批恢复和取消委托给
 SessionRunCoordinator，禁止持有旧 Runtime、Session 级状态或 delegation runner。
 （阶段 1）Agent 已收缩为 Identity + Coordinator 的轻量门面，不再暴露或关闭任何
-基础设施；工具/MCP/Skill/Dream 等诊断展示依赖由 RuntimeServices 提供（总体设计 §5.3）。
+基础设施；工具/MCP/Skill/Dream 等诊断展示依赖由 ApplicationHost 统一持有（总体设计 §5.3）。
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ class Agent:
         """仅绑定身份与共享协调器。
 
         Agent 不持有或关闭任何基础设施（总体设计 §5.3）：后台 MCP 任务与
-        Context 缓存的生命周期由 ApplicationHost 在阶段 2 统一拥有；工具/MCP/
-        Skill/Dream 等诊断展示依赖改由 RuntimeServices 提供。
+        Context 缓存的生命周期由 ApplicationHost 统一拥有；工具/MCP/
+        Skill/Dream 等诊断展示依赖改由 ApplicationHost 持有。
         """
         self._identity: AgentIdentity = identity
         self._coordinator: SessionRunCoordinator = coordinator

@@ -161,6 +161,9 @@ class ContextPort(Protocol):
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """在指定 Owner 生命周期结束时释放其 Slot 实例缓存。"""
 
+    async def release_all(self) -> None:
+        """Host 关闭时释放全部缓存 Slot 实例（跨所有 Owner 生命周期）。"""
+
     def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
         """请求指定 Owner 的 Slot 在下一次安全点刷新。"""
 

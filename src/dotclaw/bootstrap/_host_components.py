@@ -1,26 +1,24 @@
-"""Agent 工厂 —— 把配置和组件装配成可运行的 Agent 实例。
+"""Host 私有的组件装配辅助（阶段 2）。
 
-职责：
-- 按 config.yaml + daily-assistant.yaml 创建所有依赖
-- 恢复上次状态（agent_id、session_id）
-- 统一初始化失败策略（critical 崩 vs degradable 降级）
-- 返回完全就绪的 Agent 实例
+从原 ``agent/factory.py`` 迁入，作为 ``ApplicationHost`` 的私有构建块。
+集中配置读取、关键/可降级初始化策略与各类基础设施的构造，不承载对话业务规则。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
 
 if TYPE_CHECKING:
     from dotclaw.channel.base import Channel
+    from dotclaw.config.settings import Config
     from dotclaw.context.ports import AgentDirectoryPort, MemorySearchPort, SkillRegistryPort
     from dotclaw.runtime.application.ports import ContextPort
+    from dotclaw.skills.registry import SkillRegistry
 
-logger = logging.getLogger("dotclaw.factory")
+logger = logging.getLogger("dotclaw.bootstrap.components")
 
 ComponentType = TypeVar("ComponentType")
 """初始化辅助函数返回的具体组件类型。"""
@@ -65,36 +63,10 @@ async def _init_async(
 
 
 # ============================================================================
-# 状态持久化
-# ============================================================================
-
-def _state_path(project_root: Path) -> Path:
-    return project_root / ".dotclaw" / "state.json"
-
-
-def _load_state(project_root: Path) -> dict:
-    """加载持久化状态，文件不存在时返回空字典。"""
-    sp = _state_path(project_root)
-    if not sp.exists():
-        return {}
-    try:
-        return json.loads(sp.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_state(project_root: Path, state: dict) -> None:
-    """写入持久化状态。"""
-    sp = _state_path(project_root)
-    sp.parent.mkdir(parents=True, exist_ok=True)
-    sp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-# ============================================================================
 # 组件构建
 # ============================================================================
 
-def _build_llm(config, project_root: Path):
+def _build_llm(config: Config, project_root: Path):
     """构建 LLMProxy ← ModelRouter（内持 RateLimiter + CircuitBreaker）。"""
     from dotclaw.config import load_router_config, _build_router_config_from_legacy
     from dotclaw.llm.model_router import ModelRouter
@@ -129,7 +101,7 @@ def _build_llm(config, project_root: Path):
     return LLMProxy(model_router=model_router)
 
 
-def _build_skills(config, project_root: Path):
+def _build_skills(config: Config, project_root: Path) -> "SkillRegistry | None":
     """构建 SkillRegistry，技能未启用时返回 None。"""
     if not config.skills.enabled:
         return None
@@ -149,7 +121,7 @@ def _build_skills(config, project_root: Path):
     scanner = SkillScanner(skill_paths, skip_prefix=config.skills.skip_prefix)
     metas = scanner.scan()
 
-    registry = SkillRegistry()
+    registry: SkillRegistry = SkillRegistry()
     for meta in metas:
         registry.register(meta)
 
@@ -157,7 +129,7 @@ def _build_skills(config, project_root: Path):
     return registry
 
 
-def _build_tools(config, skill_registry):
+def _build_tools(config: Config, skill_registry: "SkillRegistryPort | None"):
     """构建 ToolExecutor + ToolRegistry + ApprovalManager。
 
     基础 PolicyScope 只保留全局上限与资源约束。所有 Agent（含主 Agent）的
@@ -228,7 +200,7 @@ def _build_tools(config, skill_registry):
     return executor
 
 
-def _build_memory(config, llm_proxy, project_root: Path):
+def _build_memory(config: Config, llm_proxy, project_root: Path):
     """构建 MemoryManager + DeepDream。"""
 
     async def _init():
@@ -280,7 +252,7 @@ def _build_memory(config, llm_proxy, project_root: Path):
     return _init()
 
 
-def _build_mcp(config, tool_executor):
+def _build_mcp(config: Config, tool_executor):
     """构建 MCPToolProvider，MCP 未启用时返回 (None, None)。
 
     tool_executor 必须先行构建，Provider 复用其 registry / policy_engine /
@@ -315,10 +287,10 @@ def _build_mcp(config, tool_executor):
 
 
 def _build_context_port(
-    skill_registry: SkillRegistryPort | None,
-    memory_manager: MemorySearchPort | None,
-    agent_registry: AgentDirectoryPort,
-) -> ContextPort:
+    skill_registry: "SkillRegistryPort | None",
+    memory_manager: "MemorySearchPort | None",
+    agent_registry: "AgentDirectoryPort",
+) -> "ContextPort":
     """构建基于注册表与 Plan Resolver 的 Runtime ContextPort。"""
     from dotclaw.context import ContextDependencies, build_context_provider
 
@@ -327,99 +299,3 @@ def _build_context_port(
         memory_manager=memory_manager,
         agent_registry=agent_registry,
     ))
-
-# ============================================================================
-# 主工厂函数
-# ============================================================================
-
-async def build_agent(
-    agent_id: str | None = None,
-    channel: Channel | None = None,
-) -> tuple[AgentCls, RuntimeServices, SessionManager]:
-    """装配一个完全就绪的 Agent + Runtime v2 服务 + SessionManager。
-
-    从 config.yaml + agent YAML + 上次状态重建所有依赖。
-
-    Args:
-        agent_id: Agent 标识。None = 恢复上次使用的 agent
-        channel: 通信通道
-
-    Returns:
-        (Agent, Runtime, SessionManager)
-
-    普通消息路径只装配 RuntimeEngine 与 SessionRunCoordinator。
-    """
-    from dotclaw.config import get_config, _find_project_root
-    from dotclaw.session.session import SessionManager
-    from dotclaw.agent import Agent as AgentCls
-    from dotclaw.agent.identity import load_agent_config as load_id
-    from dotclaw.bootstrap.runtime_factory import RuntimeServices, build_runtime_services
-    from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
-
-    config = get_config()
-    project_root = _find_project_root()
-
-    if agent_id is None:
-        agent_id = "default"
-
-    # ── AgentIdentity：启动时即加载，供工具策略作用域收窄（阶段五审计 T43）──
-    identity = load_id(agent_id=agent_id)
-
-    # ── 关键组件 ──
-    llm_proxy = _build_llm(config, project_root)
-    session_mgr: SessionManager = SessionManager(config.session.directory)
-    # ── 可降级组件 ──
-    skill_registry = _init_sync("技能", lambda: _build_skills(config, project_root))
-    tool_executor = _init_sync(
-        "工具",
-        lambda: _build_tools(config, skill_registry),
-    )
-    memory_mgr, memory_dream = await _init_async("记忆", _build_memory(config, llm_proxy, project_root)) or (None, None)
-
-    # MCP 需要 tool_executor（复用其 registry / policy_engine / capability_broker）
-    mcp_provider, mcp_task = await _init_async(
-        "MCP", _build_mcp(config, tool_executor)
-    ) or (None, None)
-
-    # 阶段四修复：Agent 启动阶段必须 await 首次 MCP 发现（开发计划阶段四·新增/修改④）。
-    # 若仅 fire-and-forget 而不 await，首个 Run 在创建工具快照时会早于发现完成，
-    # 从而漏掉 MCP 工具。client.connect 自带 startup_timeout，失败 server 已在 provider
-    # 内降级为 failed_servers，因此 await 不会无限阻塞 Agent 启动。
-    if mcp_task is not None:
-        try:
-            await mcp_task
-        except Exception as e:  # 防御：发现异常不应拖垮 Agent 启动
-            logger.warning("MCP 首次发现异常（已忽略）: %s", e)
-
-    # ── AgentRegistry：加载所有 Agent 配置 ──
-    from dotclaw.orchestration.registry import AgentRegistry
-    agent_registry = AgentRegistry()
-    agent_config_dir = project_root / ".dotclaw" / "agentConfig"
-    agent_registry.load_all(agent_config_dir)
-    text_stream_port: ChannelTextStreamAdapter | None = (
-        ChannelTextStreamAdapter(channel) if channel is not None else None
-    )
-    runtime_services = build_runtime_services(
-        config=config,
-        project_root=project_root,
-        identity=identity,
-        llm_proxy=llm_proxy,
-        tool_executor=tool_executor,
-        session_manager=session_mgr,
-        skill_registry=skill_registry,
-        memory_manager=memory_mgr,
-        agent_registry=agent_registry,
-        mcp_provider=mcp_provider,
-        memory_dream=memory_dream,
-        text_stream_port=text_stream_port,
-    )
-    await runtime_services.run_repository.recover_pending_success_commits()
-    # 阶段 1：Agent 已收缩为 Identity + Coordinator 门面，不再接收基础设施。
-    agent: AgentCls = AgentCls(
-        identity=identity,
-        coordinator=runtime_services.coordinator,
-        config=config,
-    )
-    logger.info("Agent [%s] 的 Runtime v2 服务已就绪", agent.agent_id)
-    return agent, runtime_services, session_mgr
-
