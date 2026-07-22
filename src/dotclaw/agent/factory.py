@@ -164,6 +164,12 @@ def _build_tools(config, skill_registry):
     from dotclaw.tools.approval import ApprovalManager
     from dotclaw.tools.discovery import ToolDiscovery
     from dotclaw.tools.parser import SkillParser
+    from dotclaw.tools.policy import (
+        PolicyEngine,
+        PolicyDecision,
+        default_policy_scope,
+    )
+    from dotclaw.tools.capability import CapabilityBroker
 
     registry = ToolRegistry()
 
@@ -176,14 +182,25 @@ def _build_tools(config, skill_registry):
     for tool_name in config.tools.disabled_tools:
         registry.unregister(tool_name)
 
-    approval_mgr = ApprovalManager(
-        approval_commands=config.tools.approval_commands,
-    )
+    # 阶段三：构造策略作用域（全局上限 + 资源约束），合并配置覆盖后回退设计默认值。
+    scope = default_policy_scope(workspace_root=config.tools.policy.workspace_root)
+    for profile, decision in config.tools.policy.rules.items():
+        scope.global_rules[profile] = PolicyDecision(decision)
+    if config.tools.policy.denied_paths:
+        scope.denied_paths = config.tools.policy.denied_paths
+    if config.tools.policy.allowed_mcp_servers:
+        scope.allowed_mcp_servers = config.tools.policy.allowed_mcp_servers
+
+    policy_engine = PolicyEngine(scope)
+    capability_broker = CapabilityBroker()
+    approval_mgr = ApprovalManager()
 
     skill_parser = SkillParser(skill_registry) if skill_registry else None
     executor = ToolExecutor(
         registry=registry,
         approval_manager=approval_mgr,
+        policy_engine=policy_engine,
+        capability_broker=capability_broker,
         skill_parser=skill_parser,
     )
     return executor

@@ -19,6 +19,19 @@ from .function_handler import FunctionToolHandler
 from .handler import ToolHandler
 from .registry import ToolRegistry, DuplicateToolError
 from .discovery import ToolDiscovery, ToolDeclarationError
+from .capability import (
+    CapabilityBroker,
+    CapabilityRequest,
+    ResourceKind,
+    normalize_workspace_path,
+)
+from .policy import (
+    PolicyEngine,
+    PolicyDecision,
+    PolicyScope,
+    PolicyOutcome,
+    default_policy_scope,
+)
 from .executor import ToolExecutor
 from .approval import ApprovalManager
 from .provider import ToolProvider
@@ -44,6 +57,15 @@ __all__ = [
     "DuplicateToolError",
     "ToolDiscovery",
     "ToolDeclarationError",
+    "CapabilityBroker",
+    "CapabilityRequest",
+    "ResourceKind",
+    "normalize_workspace_path",
+    "PolicyEngine",
+    "PolicyDecision",
+    "PolicyScope",
+    "PolicyOutcome",
+    "default_policy_scope",
     "ToolExecutor",
     "ApprovalManager",
     "ToolProvider",

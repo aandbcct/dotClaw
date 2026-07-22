@@ -1,4 +1,21 @@
-"""工具执行调度器（Phase 5 新增）— 审批 + 超时 + 错误处理"""
+"""工具执行调度器（Tool v1 阶段三重构 — 固定安全链路）。
+
+固定执行顺序（总体设计 §4.5 / §8.1）：
+    原始参数 → 入参验证 → Capability Broker → Policy Engine → 审批 → Handler → Journal
+
+职责边界（总体设计 §6）：
+- 只编排链路、超时与统一结果；不解析具体资源，也不直接做交互。
+- 参数校验失败绝不进入 Broker / Policy / Handler。
+- Policy 返回 deny 直接拒绝；返回 ask 时经 Approval Port 询问用户，无 Channel 即拒绝。
+- 所有审计事件只写入脱敏后的策略/审批摘要，不含密钥、认证头或原始敏感值。
+
+两个公开入口：
+- execute()：走完整链路（含 channel 审批），供带交互通道的调用方使用。
+- execute_approved()：走完整链路，但 ask 视为已批准（供 Runtime v2 适配器两阶段
+  审批后复用，避免在已批准时重复询问）。
+
+所有新增注释使用中文。
+"""
 
 from __future__ import annotations
 
@@ -6,9 +23,18 @@ import asyncio
 import logging
 from typing import Any
 
-from .base import ToolExecutionContext, ToolResult
+from .base import (
+    ToolErrorCode,
+    ToolErrorType,
+    ToolExecutionContext,
+    ToolResult,
+)
+from .capability import CapabilityBroker, CapabilityRequest
+from .decorator import ToolPolicy
 from .handler import ToolHandler
+from .policy import PolicyDecision, PolicyEngine, PolicyScope, default_policy_scope
 from .registry import ToolRegistry
+from .schema import ToolValidationError, validate_args
 from .approval import ApprovalManager
 from dotclaw.journal import Journal
 from typing import TYPE_CHECKING
@@ -20,21 +46,30 @@ logger = logging.getLogger("dotclaw.tools.executor")
 
 
 class ToolExecutor:
-    """工具执行调度器 — 审批 + 超时 + 错误处理"""
+    """工具执行调度器 — 固定安全链路编排。"""
 
     def __init__(
         self,
         registry: ToolRegistry,
         approval_manager: ApprovalManager | None = None,
+        policy_engine: PolicyEngine | None = None,
+        capability_broker: CapabilityBroker | None = None,
         skill_parser: "SkillParser | None" = None,
     ):
         self._registry = registry
         self._approval = approval_manager or ApprovalManager()
+        self._policy_scope = (
+            policy_engine.scope
+            if policy_engine is not None and policy_engine.scope is not None
+            else default_policy_scope()
+        )
+        self._policy_engine = policy_engine or PolicyEngine(self._policy_scope)
+        self._broker = capability_broker or CapabilityBroker()
         self._skill_parser = skill_parser
 
     @property
     def registry(self) -> ToolRegistry:
-        """工具注册表（供工厂/MCP 等需要直接操作注册表的场景）"""
+        """工具注册表（供工厂/MCP 等需要直接操作注册表的场景）。"""
         return self._registry
 
     def get_definitions(self) -> list:
@@ -46,38 +81,39 @@ class ToolExecutor:
         return self._registry.get(name)
 
     def requires_approval(self, name: str) -> bool:
-        """查询工具审批需求，不访问 Channel 或执行工具。"""
+        """查询工具是否可能触发交互审批（不访问 Channel、不执行工具）。
+
+        由声明式 needs_approval 或档案默认决策为 ask 推导；供适配器做粗粒度预判。
+        """
         handler = self._registry.get(name)
         if handler is None:
             return False
-        return handler.definition().needs_approval or self._approval.requires_approval(name)
+        definition = handler.definition()
+        if definition.needs_approval:
+            return True
+        profile = definition.policy_profile
+        if profile is not None:
+            try:
+                ToolPolicy(profile)
+            except ValueError:
+                return False
+            if self._policy_scope.global_rules.get(profile) is PolicyDecision.ASK:
+                return True
+        return False
 
     async def execute_approved(
         self,
         name: str,
         arguments: dict[str, Any],
         execution_context: ToolExecutionContext | None = None,
+        journal: Journal | None = None,
     ) -> ToolResult:
-        """在 Runtime 已完成结构化审批后执行工具，不触发旧交互流程。"""
-        return await self._execute_handler(name, arguments, None, execution_context)
+        """执行已获结构化审批的调用：走完整链路，但 ask 视为已批准。"""
+        return await self._run_chain(
+            name, arguments, execution_context, journal, channel=None, pre_approved=True
+        )
 
-    def _build_context(
-        self,
-        timeout: float,
-        execution_context: ToolExecutionContext | None,
-    ) -> ToolExecutionContext:
-        """合并 Runtime 注入的上下文和工具定义超时。"""
-        if execution_context is not None:
-            ctx: ToolExecutionContext = ToolExecutionContext(
-                timeout=timeout,
-                agentrun_id=execution_context.agentrun_id,
-            )
-        else:
-            ctx = ToolExecutionContext(timeout=timeout)
-        return ctx
-
-    def _check_skill(self, tool_name: str, args: dict,
-                     journal: Any, status: str) -> None:
+    def _check_skill(self, tool_name: str, args: dict, journal: Any, status: str) -> None:
         """工具执行后检查是否命中 skill，命中则发射对应 journal 事件。"""
         if not self._skill_parser:
             return
@@ -100,112 +136,169 @@ class ToolExecutor:
         journal: Journal | None = None,
         execution_context: ToolExecutionContext | None = None,
     ) -> ToolResult:
-        """执行工具：查找 Handler → 审批检查 → 超时控制 → 返回 ToolResult。
+        """执行工具：完整安全链路（含 channel 审批）。"""
+        return await self._run_chain(
+            name, arguments, execution_context, journal, channel=channel, pre_approved=False
+        )
 
-        Args:
-            name: 工具名称
-            arguments: 工具参数
-            channel: 通信 Channel
-            journal: Journal 实例
-            execution_context: Runtime 层注入的运行时上下文
-                              （agentrun_id）。
-                              超时由 ToolDefinition.timeout 覆盖。
+    async def _run_chain(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None,
+        journal: Journal | None,
+        channel: Any | None,
+        pre_approved: bool,
+    ) -> ToolResult:
+        """固定安全链路实现。
+
+        顺序：tool_start → 校验 → Broker → Policy → (ask 审批) → Handler → tool_end。
         """
-        # ── Journal：工具执行开始 ──
         if journal:
-            journal.tool_start(name, args=arguments)
+            # 不写入原始参数（设计 §7.2）；脱敏摘要经 tool_policy_resolved 记录。
+            journal.tool_start(name)
 
         handler = self._registry.get(name)
         if handler is None:
-            return self._missing_tool_result(name, journal)
+            return self._finish(self._missing_tool_result(name), name, journal, handler=None)
 
         definition = handler.definition()
-        # todo 将安全模块独立出去，包括workspace限制、鉴权、工具审批、
-        # 审批检查
-        if self.requires_approval(name):
-            approved = await self._approval.check(
-                tool_name=name,
-                arguments=arguments,
-                channel=channel,
-            )
-            if not approved:
-                result = ToolResult(
-                    output=f"用户拒绝了 {name} 的执行",
-                    is_error=True,
-                    error_code="APPROVAL_DENIED",
-                    error_type="approval",
-                )
-                if journal:
-                    journal.tool_end(name, result_len=len(result.output),
-                                     status="error", error_type=result.error_type)
-                return result
 
-        return await self._execute_handler(name, arguments, journal, execution_context)
+        # ① 参数校验（失败不进入 Broker / Policy / Handler）。
+        model = handler.args_model
+        if model is not None and not isinstance(arguments, model):
+            try:
+                validated = validate_args(model, arguments)
+            except ToolValidationError as exc:
+                result = ToolResult.from_error(
+                    code=ToolErrorCode.INVALID_ARGUMENTS,
+                    message=str(exc),
+                    error_type=ToolErrorType.VALIDATION,
+                )
+                return self._finish(result, name, journal, handler)
+        else:
+            validated = arguments
+
+        # ② Capability Broker：翻译资源请求。
+        requests = self._broker.resolve(
+            definition, validated, self._policy_scope.workspace_root
+        )
+        summary = _summarize_requests(requests)
+
+        # ③ Policy Engine：计算决策。
+        outcome = self._policy_engine.evaluate(requests, self._policy_scope)
+        if outcome.decision is PolicyDecision.DENY:
+            result = ToolResult.from_error(
+                code=ToolErrorCode.POLICY_DENIED,
+                message=f"策略拒绝：{outcome.reason}",
+                error_type=ToolErrorType.POLICY,
+            )
+            if journal:
+                journal.tool_policy_resolved(name, "deny", outcome.matched_rule, summary)
+            return self._finish(result, name, journal, handler)
+
+        # ④ 审批：ask 且未预先批准时，经 Approval Port 询问。
+        if outcome.decision is PolicyDecision.ASK and not pre_approved:
+            approved = await self._approval.request(summary, channel)
+            if journal:
+                journal.tool_approval_outcome(
+                    name, "approved" if approved else "denied", summary
+                )
+            if not approved:
+                result = ToolResult.from_error(
+                    code=ToolErrorCode.APPROVAL_DENIED,
+                    message="需要审批但未获批准或无交互通道",
+                    error_type=ToolErrorType.APPROVAL,
+                )
+                return self._finish(result, name, journal, handler)
+
+        # ⑤ Handler 执行（超时控制）。
+        try:
+            result = await self._execute_handler(name, validated, handler, execution_context)
+        except Exception:  # 超时/调度异常已在 _execute_handler 内归一化
+            result = ToolResult.from_error(
+                code=ToolErrorCode.EXECUTOR_ERROR,
+                message="工具调度异常",
+                error_type=ToolErrorType.EXECUTOR,
+            )
+        if journal and not result.is_error:
+            journal.tool_policy_resolved(name, "allow", outcome.matched_rule, summary)
+        return self._finish(result, name, journal, handler)
 
     async def _execute_handler(
         self,
         name: str,
-        arguments: dict[str, Any],
-        journal: Journal | None,
+        validated: Any,
+        handler: ToolHandler,
         execution_context: ToolExecutionContext | None,
     ) -> ToolResult:
-        """执行已通过审批的工具，并保留旧 Journal 可观测行为。"""
-        handler = self._registry.get(name)
-        if handler is None:
-            return self._missing_tool_result(name, journal)
+        """执行已通过策略/审批的工具，含超时控制与异常归一化。"""
         definition = handler.definition()
-
-        # 超时控制 + 执行
         timeout: float = definition.timeout
-        ctx: ToolExecutionContext = self._build_context(
-            timeout=timeout,
-            execution_context=execution_context,
-        )
+        ctx = self._build_context(timeout, execution_context)
 
         try:
-            result = await asyncio.wait_for(
-                handler.execute(arguments, ctx),
-                timeout=timeout,
-            )
-            if journal:
-                status = "error" if result.is_error else "success"
-                journal.tool_end(name, result_len=len(result.output),
-                                 status=status, error_type=result.error_type if result.is_error else "")
-                self._check_skill(name, arguments, journal, status)
+            result = await asyncio.wait_for(handler.execute(validated, ctx), timeout=timeout)
             return result
         except asyncio.TimeoutError:
-            logger.warning(f"工具 {name} 执行超时（{timeout}s）")
-            result = ToolResult(
-                output=f"错误：工具执行超时（{int(timeout)}秒）",
-                is_error=True,
-                error_code="TIMEOUT",
-                error_type="timeout",
+            logger.warning("工具 %s 执行超时（%ss）", name, timeout)
+            return ToolResult.from_error(
+                code=ToolErrorCode.TIMEOUT,
+                message=f"错误：工具执行超时（{int(timeout)}秒）",
+                error_type=ToolErrorType.TIMEOUT,
             )
-            if journal:
-                journal.tool_end(name, result_len=len(result.output),
-                                 status="error", error_type="timeout")
-            return result
-        except Exception as e:
-            logger.exception(f"工具 {name} 调度出错")
-            result = ToolResult(
-                output=f"错误：工具调度异常 - {e}",
-                is_error=True,
-                error_code="EXECUTOR_ERROR",
-                error_type="executor",
+        except Exception as exc:  # 业务异常统一转为 EXECUTION_ERROR
+            logger.exception("工具 %s 调度出错", name)
+            return ToolResult.from_error(
+                code=ToolErrorCode.EXECUTION_ERROR,
+                message=f"错误：工具调度异常 - {exc}",
+                error_type=ToolErrorType.EXECUTOR,
             )
-            if journal:
-                journal.tool_end(name, result_len=len(result.output),
-                                 status="error", error_type="executor")
-            return result
 
-    def _missing_tool_result(self, name: str, journal: Journal | None) -> ToolResult:
-        """构造未注册工具的统一错误结果。"""
-        result = ToolResult(
-            output=f"错误：未找到工具 '{name}'",
-            is_error=True,
-            error_code="TOOL_NOT_FOUND",
-            error_type="not_found",
-        )
+    def _build_context(
+        self,
+        timeout: float,
+        execution_context: ToolExecutionContext | None,
+    ) -> ToolExecutionContext:
+        """合并 Runtime 注入的上下文与工具定义超时。"""
+        if execution_context is not None:
+            return ToolExecutionContext(
+                timeout=timeout,
+                agentrun_id=execution_context.agentrun_id,
+            )
+        return ToolExecutionContext(timeout=timeout)
+
+    def _finish(
+        self,
+        result: ToolResult,
+        name: str,
+        journal: Journal | None,
+        handler: ToolHandler | None,
+    ) -> ToolResult:
+        """统一收尾：发射 tool_end 与 skill 命中事件。"""
         if journal:
-            journal.tool_end(name, result_len=len(result.output), status="error", error_type=result.error_type)
+            status = "error" if result.is_error else "success"
+            journal.tool_end(
+                name,
+                result_len=len(result.output),
+                status=status,
+                error_type=result.error_type if result.is_error else "",
+            )
+            if not result.is_error and handler is not None:
+                self._check_skill(name, {}, journal, status)
         return result
+
+    def _missing_tool_result(self, name: str) -> ToolResult:
+        """构造未注册工具的统一错误结果。"""
+        return ToolResult.from_error(
+            code=ToolErrorCode.TOOL_NOT_FOUND,
+            message=f"错误：未找到工具 '{name}'",
+            error_type=ToolErrorType.NOT_FOUND,
+        )
+
+
+def _summarize_requests(requests: list[CapabilityRequest]) -> str:
+    """汇总资源请求为脱敏摘要（供审计与审批提示）。"""
+    if not requests:
+        return ""
+    return "; ".join(req.describe() for req in requests)

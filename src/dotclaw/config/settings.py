@@ -53,6 +53,34 @@ def _migrate_tool_names(names: list[str]) -> list[str]:
     return result
 
 
+# Tool v1 阶段三：合法的策略决策值（YAML 书写校验用）。
+_VALID_POLICY_DECISIONS = ("allow", "ask", "deny")
+
+
+def _parse_tool_policy(policy_raw: dict[str, Any]) -> "ToolPolicyConfig":
+    """解析 tools.policy 配置为 ToolPolicyConfig。
+
+    未提供的字段留空，由工厂装配时回退到设计默认值（default_policy_scope）。
+    非法的决策值会被跳过并告警，避免错误配置悄悄放行或拒绝。
+    """
+    if not isinstance(policy_raw, dict):
+        return ToolPolicyConfig()
+
+    rules: dict[str, str] = {}
+    for key, value in (policy_raw.get("rules") or {}).items():
+        if isinstance(value, str) and value.lower() in _VALID_POLICY_DECISIONS:
+            rules[key] = value.lower()
+        else:
+            logger.warning("工具策略规则 '%s' 的值为 '%s'，非法，已忽略", key, value)
+
+    return ToolPolicyConfig(
+        workspace_root=policy_raw.get("workspace_root", "."),
+        rules=rules,
+        denied_paths=list(policy_raw.get("denied_paths", []) or []),
+        allowed_mcp_servers=list(policy_raw.get("allowed_mcp_servers", []) or []),
+    )
+
+
 def _find_project_root() -> Path:
     """从 dotClaw 模块位置向上找到项目根目录（包含 config.yaml）"""
     import dotclaw
@@ -106,6 +134,22 @@ class AgentConfig:
 
 
 @dataclass
+class ToolPolicyConfig:
+    """Tool v1 阶段三：策略配置（总体设计 §7.1）。
+
+    全局规则是安全上限，Agent 级策略只能收窄（由 PolicyEngine 强制）。
+    缺省值由 tools.policy.default_policy_scope 提供；此处未显式给出的字段
+    在工厂装配时回退到设计默认值。
+    """
+
+    workspace_root: str = "."
+    # 档案名 -> allow/ask/deny（字符串，便于 YAML 书写）。
+    rules: dict[str, str] = field(default_factory=dict)
+    denied_paths: list[str] = field(default_factory=list)
+    allowed_mcp_servers: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ToolsConfig:
     # Phase 5 新增：source 级启停
     builtin_enabled: bool = True
@@ -127,6 +171,9 @@ class ToolsConfig:
     # Phase 6 新增：MCP 配置
     mcp_global: McpGlobalConfig = field(default_factory=lambda: McpGlobalConfig())
     mcp_servers: list[McpServerConfig] = field(default_factory=list)
+
+    # Tool v1 阶段三：策略配置（全局上限 + 资源约束），缺省回退设计默认值。
+    policy: "ToolPolicyConfig" = field(default_factory=lambda: ToolPolicyConfig())
 
 
 @dataclass
@@ -541,6 +588,8 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         # Phase 6: MCP 配置解析
         mcp_global=_parse_mcp_global(tools_raw.get("mcp_global", {})),
         mcp_servers=_parse_mcp_servers(tools_raw.get("mcp_servers", [])),
+        # Tool v1 阶段三：策略配置（缺省回退设计默认值）。
+        policy=_parse_tool_policy(tools_raw.get("policy", {})),
     )
 
     skills_raw = raw.get("skills", {})
