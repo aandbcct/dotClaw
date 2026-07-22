@@ -88,3 +88,12 @@ Q：tool可能会得到一些敏感参数，这要怎么做过滤？
 ## client
 
 - [ ] 加一个前端，做个桌面应用怎么样
+
+- [ ] 多channel时应用层需要加一个连接层，承载面向用户会话的操作，
+
+  ```
+  ·ChatService：面向用户会话的操作。接收消息、提交 Run、处理审批、取消、重试、放弃，并返回适合 Channel 展示的结果。当前 Agent.process()、resolve_approval() 等方法已经基本在做这件事，所以现阶段不需要重复创建。
+  ·RuntimeOperations：面向运维/控制面的操作。查询可用工具、MCP 连接状态、技能目录，或触发记忆蒸馏等。这些不属于一次聊天 Run 的核心执行，也不应让 Channel 直接耦合 ToolExecutor、MCPToolProvider 等实现。
+  ```
+
+- [ ] 

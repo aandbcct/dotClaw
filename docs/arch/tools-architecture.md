@@ -1,688 +1,262 @@
-# dotClaw 工具层架构文档
+# dotClaw 工具层架构文档（Tool v1）
 
-> **版本**: v1.0 | **对应 Phase**: P5 | **更新日期**: 2026-06-03
+> **版本**: v1.0 | **对应阶段**: Tool v1（阶段一~四已落地，阶段五收敛文档） | **更新日期**: 2026-07-22
 > **维护说明**: 本文档随工具层演进持续更新，每次架构变更请同步更新版本号和变更说明。
+> **权威来源**：设计结论见《[Tool v1 总体设计](../tool/v1/总体设计.md)》，分阶段交付见《[Tool v1 开发计划](../tool/v1/开发计划.md)》。
 
 ---
 
 ## 1. 架构总览
 
-dotClaw 工具层采用 **Registry-Executor-Handler 三层分离架构**，将注册、调度、执行三个关注点完全解耦，为 MCP 集成（Phase 6）和 Skill 工具化（Phase 7）提供统一扩展基础设施。
+dotClaw 工具层（Tool v1）把「可被 LLM 调用的能力」统一抽象为 `ToolHandler`，按**声明式 `@tool` + 可信包自动发现**注册到中心化 `ToolRegistry`，并由 `ToolExecutor` 以**固定安全链路**编排执行（入参校验 → Capability Broker → Policy Engine → 审批 → Handler → Journal）。MCP 远端工具作为独立来源，以命名空间 `mcp.<server>.<tool>` 接入同一注册表，但**只注册 tools**，resources/prompts 停留在 MCP 原生 API，不进入 Tool Registry。
+
+核心分层（依赖方向自上而下，上层只依赖下层抽象）：
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      AgentLoop                                     │
-│    run() → LLM → tool_calls                                       │
-│              │                                                     │
-│              ▼                                                     │
-│    ┌─────────────────────┐                                         │
-│    │   ToolExecutor      │  ← 调度层：审批 + 超时 + 错误             │
-│    │  .execute(name,     │                                         │
-│    │   args, channel)    │                                         │
-│    └──┬──────────┬───────┘                                         │
-│       │          │                                                  │
-│       ▼          ▼                                                  │
-│  ┌─────────┐ ┌──────────────┐                                      │
-│  │ToolRegistry│ │ApprovalManager│ ← 审批：needs_approval +          │
-│  │ 纯注册表   │ │双重门控制      │    approval_commands AND 关系      │
-│  └─────┬─────┘ └──────────────┘                                      │
-│        │                                                            │
-│   ┌────┴────────────┐                                              │
-│   ▼     ▼           ▼                                              │
-│ Builtin  MCP       Skill                                           │
-│ Handler Handler   Handler                                           │
-│ (P5)   (reserved) (reserved)                                        │
-│   │                                                                 │
-│   └── ToolHandler ABC（统一接口）                                    │
-│        ├─ definition() → ToolDefinition                            │
-│        └─ execute(args, ctx) → ToolResult                          │
-│                                                                     │
-│  +────────────────────────────────────────+                         │
-│  |          builtin/ 子包（内置工具）       |                         │
-│  |  exec_tool / file_tool / memory_tool / |                         │
-│  |  system_tool — 工厂函数 → BuiltinToolHandler |                   │
-│  +────────────────────────────────────────+                         │
-│                                                                     │
-│  +────────────────────────────────────────+                         │
-│  |  ToolProvider ABC（骨架 — MCP/Skill 预留）|                       │
-│  |  discover_and_register(registry)       |                         │
-│  +────────────────────────────────────────+                         │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  Agent / Runtime（消费 ToolPort，规划 tool_call）                       │
+│   └─ runtime/adapters/tool_executor_adapter.py  (ToolExecutorAdapter)  │
+│   └─ agent/factory.py  (组合根：_build_tools / _build_mcp / build_agent)│
+├──────────────────────────────────────────────────────────────────────┤
+│  tools/executor.py  (ToolExecutor：固定安全链路编排)                     │
+│     │ 依赖：registry + capability + policy + approval + schema          │
+│  tools/registry.py  (ToolRegistry：纯注册表，无冲突 + 不可变快照)         │
+├──────────────────────────────────────────────────────────────────────┤
+│  tools/capability.py  (CapabilityBroker：定义+参数 → 资源请求)          │
+│  tools/policy.py      (PolicyEngine：资源请求 → allow/ask/deny)         │
+│  tools/approval.py    (ApprovalManager：ask 决策 → Channel 交互 Port)   │
+│  tools/schema.py      (validate_args / validate_json_schema)            │
+├──────────────────────────────────────────────────────────────────────┤
+│  tools/decorator.py   (@tool / ToolPolicy / ToolMeta)                  │
+│  tools/function_handler.py (FunctionToolHandler：已验证函数 → ToolResult)│
+│  tools/discovery.py   (ToolDiscovery：可信包扫描 + 签名推导)             │
+│  tools/parser.py      (SkillParser：执行后 Skill 命中检测，旁路)         │
+├──────────────────────────────────────────────────────────────────────┤
+│  mcp/provider.py   (MCPToolProvider：连接/发现/状态/重连，只注册 tools)  │
+│  mcp/tool_adapter.py (McpToolAdapter：协议参数/结果转换，mcp.<server>.<tool>)│
+│  mcp/client.py     (McpClient：单 server 连接状态机 + 调用)             │
+└──────────────────────────────────────────────────────────────────────┘
 ```
+
+**关键不变量**（总体设计 §10.1，违反即属缺陷）：
+1. 任何工具函数之前必须完成参数验证。
+2. 任何外部副作用之前必须完成 Broker 与 Policy 决策。
+3. `ask` 在无交互能力时等价于拒绝（不得默认放行）。
+4. Registry 内工具名全局唯一，禁止静默覆盖（`DuplicateToolError`）。
+5. MCP tools 必须带 server 命名空间；resources/prompts 不进入 Registry。
+6. 一个 Run 中的 LLM 工具 Schema 与可调用工具集一致且不可变（Run 级快照）。
 
 ---
 
-## 2. 三层架构数据流
+## 2. 数据流
+
+### 2.1 发现与注册（启动期，同步）
 
 ```
-AgentLoop.run()
+agent/factory.py:_build_tools()
+  └─ ToolDiscovery.discover_builtin()
+       ├─ 扫描可信包 dotclaw.tools.builtin（exec_tool/file_tool/memory_tool/system_tool）
+       ├─ 对每个 @tool 函数：
+       │    ├─ 复杂工具：取显式 args_model
+       │    └─ 简单工具：从签名推导等价 Pydantic 模型（仅 str/int/float/bool + 字面量默认）
+       │         不支持的签名（Optional/Union/容器/枚举/嵌套/Annotated/位置参数/*args/**kwargs）
+       │         → 直接抛 ToolDeclarationError，绝不退化为无校验调用
+       └─ FunctionToolHandler(meta, fn) → registry.register()
+  └─ 按 config.tools.disabled_tools 逐个 unregister（迁移后的新规范名）
+```
+
+MCP 来源由 `agent/factory.py:_build_mcp()` 在 `build_agent` 中 await 首次发现完成后装配（阶段四修复：保证首个 Run 快照可见 MCP 工具）。
+
+### 2.2 执行（运行期，固定安全链路）
+
+```
+ToolExecutor.execute(name, args, channel, journal) / execute_approved(...)
   │
-  │  LLM 返回 tool_calls
-  ▼
-┌──────────────────────────────────────────────────────────┐
-│ Layer 3: ToolExecutor（调度层）                          │
-│                                                          │
-│ execute(name, arguments, channel) → ToolResult           │
-│   │                                                      │
-│   ├─ 1. registry.get(name) → ToolHandler | None         │
-│   │     └─ None → ToolResult(TOOL_NOT_FOUND)            │
-│   │                                                      │
-│   ├─ 2. handler.definition().needs_approval?            │
-│   │     └─ True → approval.check(name, args, channel)   │
-│   │           ├─ tool_name in _approval_commands?       │
-│   │           │  └─ Yes → channel.ask_user() → y/n     │
-│   │           │       ├─ n → ToolResult(APPROVAL_DENIED)│
-│   │           │       └─ y → 继续执行                   │
-│   │           └─ No → 放行                              │
-│   │                                                      │
-│   └─ 3. asyncio.wait_for(                              │
-│          handler.execute(arguments, ctx),                │
-│          timeout=definition.timeout)                     │
-│        ├─ 正常返回 → ToolResult                          │
-│        ├─ TimeoutError → ToolResult(TIMEOUT)            │
-│        └─ Exception → ToolResult(EXECUTION_ERROR)        │
-│                                                          │
-│ 返回: ToolResult(output, is_error, error_code, error_type)│
-└──────────────────────┬───────────────────────────────────┘
-                       │
-  ┌────────────────────┴────────────────────┐
-  │                                         │
-  ▼                                         ▼
-┌─────────────────────┐          ┌─────────────────────┐
-│ Layer 1:            │          │ Layer 2:            │
-│ ToolRegistry        │          │ ApprovalManager     │
-│ (纯注册表)           │          │ (审批控制)           │
-│                     │          │                     │
-│ register(handler)   │          │ _approval_commands  │
-│ get(name)           │          │   ⊂ config.yaml      │
-│ unregister(name)    │          │ check(name,args,ch) │
-│ get_definitions()   │          │ set_enabled(bool)   │
-│ list_by_source(src) │          │ set_approval_       │
-│ clear()             │          │   commands(list)    │
-└─────────────────────┘          └─────────────────────┘
+  ├─ 1. registry.get(name) → None ⇒ TOOL_NOT_FOUND
+  ├─ 2. 入参校验：本地工具走 validate_args(args_model)；MCP 走 validate_json_schema(input_schema)
+  │       失败 ⇒ INVALID_ARGUMENTS（绝不进入 Broker/Policy/Handler）
+  ├─ 3. CapabilityBroker.resolve(definition, validated, workspace_root)
+  │       → list[CapabilityRequest]（文件/进程/网络/MCP 四类；policy=None 即 passthrough）
+  ├─ 4. PolicyEngine.evaluate(requests, scope)
+  │       → DENY ⇒ POLICY_DENIED（无审批、无执行）
+  │       → ASK  ⇒ 经 ApprovalManager.request(summary, channel)
+  │            ├─ 无 Channel 或拒绝 ⇒ APPROVAL_DENIED
+  │            └─ 批准 ⇒ 继续
+  │       → ALLOW ⇒ 继续
+  ├─ 5. handler.execute(validated, ctx)  [asyncio.wait_for(timeout)]
+  │       超时 ⇒ TIMEOUT；异常 ⇒ EXECUTION_ERROR；MCP server 不可用 ⇒ MCP_UNAVAILABLE
+  └─ 6. Journal：tool_start / tool_policy_resolved / tool_approval_outcome / tool_end
+              （仅脱敏摘要，不含密钥/认证头/原始敏感值）+ SkillParser 命中检测
 ```
 
 ---
 
 ## 3. 模块详解
 
-### 3.1 `ToolDefinition` + `ToolResult` + `ToolExecutionContext` — 基础数据类型
+### 3.1 基础类型 — `tools/base.py`
+- `ToolSource(str, Enum)`：`BUILTIN` / `MCP` / `SKILL` / `CUSTOM`。
+- `ToolDefinition`：`name` / `description` / `parameters`(JSON Schema) / `source` / `needs_approval` / `timeout` / `metadata` / `policy_profile`（ToolPolicy 档案值，Policy 阶段使用）。是工具对 LLM 与调度器的稳定契约。
+- `ToolResult`：`output` / `is_error` / `error_code`(ToolErrorCode) / `error_type`(ToolErrorType) / `metadata`。所有执行结果的**唯一归一出口**。
+- `ToolExecutionContext`：运行时注入（`timeout` / `agentrun_id` / `session_id` / `agent_id`），每次调用新建、不持久化。
+- `ToolErrorCode`：`INVALID_ARGUMENTS` / `POLICY_DENIED` / `APPROVAL_DENIED` / `TOOL_NOT_FOUND` / `TIMEOUT` / `MCP_UNAVAILABLE` / `EXECUTION_ERROR` / `EXECUTOR_ERROR`。
+- 禁止职责：不含执行逻辑、不含注册逻辑。
 
-| 属性 | 值 |
-|------|-----|
-| **文件** | `src/dotclaw/tools/base.py` |
-| **职责** | 工具层纯数据结构，零外部依赖 |
+### 3.2 装饰器与策略档案 — `tools/decorator.py`
+- `@tool(name, description, args_model?, policy?, source?, needs_approval?, timeout?, metadata?)`：仅把 `ToolMeta` 附着到函数 `__tool_meta__`，**不在导入时注册**。
+- `ToolPolicy(str, Enum)`（工具作者只能从中选择，不能自由组合）：`WORKSPACE_READ`(`workspace.read`) / `WORKSPACE_WRITE`(`workspace.write`) / `PROCESS`(`process.exec`) / `NETWORK`(`network.http`) / `MCP`(`mcp.call`)。
+- `ToolMeta.build_definition()`：由元数据构造 `ToolDefinition`，`parameters` 来自 `args_model` 的 `to_json_schema()`。
 
-**`ToolDefinition` — 工具定义**
+### 3.3 参数 Schema 与校验 — `tools/schema.py`
+- `to_json_schema(model)`：Pydantic 模型 → JSON Schema（供 LLM）。
+- `validate_args(model, raw)`：本地工具参数校验，默认 `extra="forbid"` 拒绝未知字段；失败抛 `ToolValidationError`。
+- `validate_json_schema(raw, schema)`：MCP 等外部工具的 JSON Schema 校验适配层；对 `$ref`/`anyOf` 等组合子保守降级（不阻塞未知结构，但严格拒绝未知字段），失败抛 `ToolValidationError` 并映射为 `INVALID_ARGUMENTS`。
 
-```python
-@dataclass
-class ToolDefinition:
-    name: str                      # 工具名（唯一标识）
-    description: str               # 描述（传给 LLM 生成 tool_calls）
-    parameters: dict               # JSON Schema（参数规范）
-    source: ToolSource             # BUILTIN | MCP | SKILL | CUSTOM
-    needs_approval: bool           # 声明式审批需求
-    timeout: float = 60.0          # 执行超时（秒）
-    metadata: dict = {}            # 扩展字段
-```
+### 3.4 函数执行器 — `tools/function_handler.py`
+- `FunctionToolHandler`：把已验证的本地异步函数包装为 `ToolHandler`；`execute` 仅调用函数并归一 `ToolResult`（异常 → `EXECUTION_ERROR`）。不接触校验/策略/审批。
 
-> **Phase 5 关键变化**：新增 `source`（来源分类）、`needs_approval`（审批声明）、`timeout`（每工具独立超时）、`metadata`（扩展预留）四个字段。
+### 3.5 发现 — `tools/discovery.py`
+- `ToolDiscovery.discover_builtin()`：导入可信包 `dotclaw.tools.builtin` 并收集 `@tool` 函数；记录导入失败、发现结果与冲突。
+- `ToolDeclarationError`：签名不支持推导时抛出，禁止退化为无校验调用。
 
-**`ToolSource` 枚举**：
+### 3.6 注册表 — `tools/registry.py`
+- `ToolRegistry`：内存 `dict[str, ToolHandler]`。
+- `register(handler)`：**同名冲突抛 `DuplicateToolError`**（携带双方来源），绝不静默覆盖。
+- `unregister` / `get` / `get_definitions` / `list_by_source` / `all_names` / `clear`。
+- `snapshot()`：返回 `tuple[ToolDefinition, ...]`，**每个定义深拷贝**——后续注册表增删不影响已取快照，满足 Run 级隔离。
+- 禁止职责：不执行、不校验、不连接外部系统。
 
-| 值 | 含义 | Phase |
-|----|------|-------|
-| `BUILTIN` | 内置工具（exec / file / memory / system） | P5 |
-| `MCP` | MCP 协议工具 | P6（预留） |
-| `SKILL` | Skill 脚本工具 | P7（预留） |
-| `CUSTOM` | 用户自定义工具 | P7+（预留） |
+### 3.7 能力 Broker — `tools/capability.py`
+- `CapabilityBroker.resolve(definition, validated_args, workspace_root) → list[CapabilityRequest]`：
+  - 按 `policy_profile` 翻译文件（`path`）、进程（`command`）、网络（`url`）请求；`policy=None` 或未知档案返回空列表（passthrough）。
+  - MCP 工具：`source == MCP` 时直接由 `metadata["server"]` 形成 `mcp.call` 请求，不依赖运行参数。
+- `ResourceKind`：`FILE_READ` / `FILE_WRITE` / `PROCESS_EXEC` / `NETWORK_HTTP` / `MCP_CONNECT` / `MCP_CALL`。
+- `normalize_workspace_path()`：用 `realpath` 解析符号链接/Windows 联接点，检测 `..`/绝对路径逃逸 workspace 根目录（安全关键）。
+- 脱敏：`_desensitize_command` 剥离 `KEY=VALUE` 环境导出；`_desensitize_url` 去除查询串。`CapabilityRequest.describe()` 只返回脱敏摘要。
 
-**`ToolResult` — 执行结果**
+### 3.8 策略引擎 — `tools/policy.py`
+- `PolicyEngine.evaluate(requests, scope) → PolicyOutcome`：
+  - 合并规则：**任一 DENY → 整体 DENY**；否则**任一 ASK → 整体 ASK**；否则 **ALLOW**；无请求（passthrough）视为 ALLOW。
+- `PolicyScope`：`global_rules`（安全上限）+ `agent_rules`（只能收窄）+ `workspace_root` + `denied_paths` + `allowed_mcp_servers`。
+- 默认规则（设计确认）：`workspace.read=allow` / `workspace.write=ask` / `process.exec=ask` / `network.http=deny` / `mcp.connect=ask` / `mcp.call=ask`。
+- `mcp.connect` / `mcp.call`：**server 不在 `allowed_mcp_servers` 即 DENY**（空列表 = deny-all，fail-closed）。
+- 路径约束：`escaped` 或命中 `denied_paths`(glob) → DENY。
+- 不变量：默认拒绝（无规则命中取保守 `ask`）；Agent 策略只能收窄（取 severity 更严格者）；审计摘要不含敏感值。
 
-```python
-@dataclass
-class ToolResult:
-    output: str = ""               # 输出文本（传给 LLM）
-    is_error: bool = False         # 是否错误
-    error_code: str | None = None  # TOOL_NOT_FOUND | TIMEOUT | APPROVAL_DENIED | EXECUTION_ERROR
-    error_type: str | None = None  # not_found | timeout | approval | execution
-    metadata: dict = {}            # 扩展字段
-```
+### 3.9 审批端口 — `tools/approval.py`
+- `ApprovalManager`：阶段三起重构为 **Approval Port**——只消费 Policy 的 `ask` 决策，通过 `Channel` 向用户展示**脱敏资源摘要**并请求确认。
+- **不再持有命令列表，也不自行决定放行**（旧实现按 `approval_commands` 名单放行的逻辑已删除）。
+- `request(summary, channel) → bool`：无 Channel → `False`（拒绝，不默认放行）；有 Channel → `channel.ask_user(...)`。
 
-> **Phase 5 关键变化**：新增 `error_code`（结构化错误码）、`error_type`（错误分类）、`metadata`（扩展字段）。现有逻辑只消费 `output`，向后兼容。
+### 3.10 执行调度器 — `tools/executor.py`
+- `ToolExecutor`：组合 `registry` + `approval_manager` + `policy_engine` + `capability_broker` + `skill_parser`。
+- 两个入口：`execute()`（完整链路含 channel 审批）/ `execute_approved()`（ask 视为已批准，供 Runtime v2 适配器两阶段审批后复用）。
+- `snapshot_definitions()`：转发 `registry.snapshot()`，供 Run 创建时捕获不可变工具集。
+- `requires_approval(name)`：粗粒度预判（声明式 `needs_approval` 或档案默认 `ask`）。
+- `_run_chain()`：严格按 §2.2 顺序；校验失败/deny/审批拒绝均直接返回，绝不进入 Handler。
+- Journal 可观测：`tool_start` / `tool_policy_resolved` / `tool_approval_outcome`(仅脱敏) / `tool_end`，并关联 `agentrun_id`。
 
-**`ToolExecutionContext` — 运行时上下文**
+### 3.11 MCP Provider 与 Adapter — `mcp/`
+- `MCPToolProvider`（`provider.py`）：编排连接、发现、状态、重连；**只注册 tools**（`McpToolAdapter`），不注册 resources/prompts；单 server 失败降级（`_failed_servers`），不阻塞 Agent 启动；`get_server_states()` 暴露 `McpClientState`（STARTING/CONNECTED/CRASHED/FAILED/SHUTDOWN）；连接前经 `mcp.connect` 网关（`allowed_mcp_servers` fail-closed）。
+- `McpToolAdapter`（`tool_adapter.py`）：注册名 `mcp.<server>.<tool>`（`mcp_tool_name()`），`metadata["server"]` 存原始名；`execute()` 调用远程 `tools/call` 并归一 `ToolResult`；`input_schema` 暴露供 `validate_json_schema`。成功/超时/协议错误/不可用统一映射为 `ToolResult`/Journal 语义。
+- `McpClient`（`client.py`）：单 server 连接状态机、`startup_timeout`(握手) / `tool_timeout`(调用)、崩溃重连（`restart_on_crash` / `max_restart_attempts`）。
 
-```python
-@dataclass
-class ToolExecutionContext:
-    timeout: float = 60.0          # 执行超时（来自 ToolDefinition.timeout）
-```
+### 3.12 Runtime 适配器 — `runtime/adapters/tool_executor_adapter.py`
+- `ToolExecutorAdapter`：实现 Runtime `ToolPort`，隔离审批状态（按 `(run_id, call_id)` 去重，避免重复执行副作用）；对「需审批且未批准」返回 `APPROVAL_REQUIRED`，批准后再 `execute_approved`。Run 创建时通过 `agent_policy_resolver` 取 `executor.snapshot_definitions()` 的不可变快照，Run 内不再读动态 Registry。
 
-> **设计原则**：工具无状态单例——context 只含 timeout，不含 session/workspace 等状态。工具从 arguments 获取所需信息。
-
----
-
-### 3.2 `ToolHandler` ABC + `BuiltinToolHandler` — 执行抽象
-
-| 属性 | 值 |
-|------|-----|
-| **文件** | `src/dotclaw/tools/handler.py` |
-| **职责** | 统一所有工具的执行接口，屏蔽 builtin/MCP/Skill 执行差异 |
-
-**类层次**：
-
-```
-ToolHandler (ABC)
-  ├─ definition() → ToolDefinition        [抽象]
-  ├─ execute(args, ctx) → ToolResult      [抽象]
-  └─ name (property) → str               [具体]
-        │
-        ├── BuiltinToolHandler            [P5 实现]
-        │    └─ 包装现有 async 函数，Adapter 模式
-        │
-        ├── McpToolHandler                [P6 预留]
-        │    └─ MCP 协议调用
-        │
-        └── SkillToolHandler              [P7 预留]
-             └─ Skill 脚本执行
-```
-
-**`BuiltinToolHandler` 实现细节**：
-
-```python
-class BuiltinToolHandler(ToolHandler):
-    def __init__(self, name, description, parameters, handler_fn,
-                 needs_approval=False, timeout=60.0, metadata=None):
-        self._definition = ToolDefinition(
-            name=name, description=description, parameters=parameters,
-            source=ToolSource.BUILTIN, needs_approval=needs_approval,
-            timeout=timeout, metadata=metadata or {}
-        )
-        self._handler_fn = handler_fn  # 原始 async callable
-
-    async def execute(self, arguments, context=None):
-        try:
-            result = await self._handler_fn(**arguments)
-            return ToolResult(output=str(result))
-        except Exception as e:
-            return ToolResult(
-                output=f"工具执行出错: {e}",
-                is_error=True, error_code="EXECUTION_ERROR",
-                error_type="execution"
-            )
-```
-
-> **设计要点**：Adapter 模式——不改变现有 `exec_command()` 等函数签名。超时控制不在 Handler 内做，由 ToolExecutor 统一负责（职责单一）。
+### 3.13 组合根 — `agent/factory.py`
+- `_build_tools(config, skill_registry)`：创建 `ToolRegistry` → `ToolDiscovery.discover_builtin()` 注册 → 按 `disabled_tools` `unregister` → 构造 `PolicyEngine`/`CapabilityBroker`/`ApprovalManager`/`ToolExecutor`。
+- `_build_mcp(config, tool_registry)`：构造 `MCPToolProvider`（注入 `policy_engine`/`capability_broker` 复用连接网关与请求翻译），返回 `(provider, task)`。
+- `build_agent()`：**await MCP 首次发现任务**后再装配 Runtime（阶段四修复，确保首个 Run 快照含 MCP 工具）；`client.connect` 自带 `startup_timeout`，失败 server 已降级，await 不无限阻塞。
 
 ---
 
-### 3.3 `ToolRegistry` — 纯注册表
-
-| 属性 | 值 |
-|------|-----|
-| **文件** | `src/dotclaw/tools/registry.py` |
-| **职责** | 工具注册、查询、列举，不含执行逻辑 |
-
-**对外方法**：
-
-| 方法 | 输入 | 输出 | 说明 |
-|------|------|------|------|
-| `register(handler)` | `ToolHandler` | — | 同名静默覆盖（不抛异常、不打警告） |
-| `unregister(name)` | `str` | `bool` | 注销成功/失败 |
-| `get(name)` | `str` | `ToolHandler \| None` | 按名称获取 |
-| `get_definitions()` | — | `list[ToolDefinition]` | 传给 LLM 生成 tool_calls |
-| `list_by_source(source)` | `ToolSource` | `list[ToolHandler]` | 按来源过滤 |
-| `all_names()` | — | `list[str]` | 所有已注册工具名 |
-| `clear()` | — | — | 清空注册表 |
-
-**覆盖策略**：
+## 4. 安全链路时序图
 
 ```
-register(handler_A)  →  _handlers["exec"] = handler_A
-register(handler_B)  →  _handlers["exec"] = handler_B  # 静默覆盖
-```
-
-> **设计要点**：Phase 5 使用静默覆盖——builtin 先注册，后续 MCP/Skill 如有同名需求由那时决定是否加日志。不含 `execute()`——执行职责完全剥离到 ToolExecutor。
-
----
-
-### 3.4 `ToolExecutor` — 调度层
-
-| 属性 | 值 |
-|------|-----|
-| **文件** | `src/dotclaw/tools/executor.py` |
-| **职责** | 工具执行调度：审批检查 + 超时控制 + 错误处理 |
-
-**`execute(name, arguments, channel) → ToolResult` 完整逻辑**：
-
-```
-execute(name, arguments, channel)
-  │
-  ├─ 1. Registry 查找
-  │     handler = registry.get(name)
-  │     └─ None → TOOL_NOT_FOUND
-  │
-  ├─ 2. 审批检查（双重门）
-  │     if handler.definition().needs_approval:       ← 第一道门（工具声明）
-  │         if not await approval.check(name, args, channel):  ← 第二道门（用户配置）
-  │             return APPROVAL_DENIED
-  │
-  ├─ 3. 超时控制
-  │     ctx = ToolExecutionContext(timeout=definition.timeout)
-  │     result = await asyncio.wait_for(
-  │         handler.execute(arguments, ctx),
-  │         timeout=definition.timeout
-  │     )
-  │     ├─ 正常返回 → result
-  │     ├─ asyncio.TimeoutError → TIMEOUT
-  │     └─ Exception → EXECUTION_ERROR
-  │
-  └─ 返回 ToolResult
-```
-
-**对外扩展方法**：
-
-| 方法 | 说明 |
-|------|------|
-| `get_definitions()` | 转发 `registry.get_definitions()`，供 AgentLoop._build_context() 使用 |
-| `get_handler(name)` | 转发 `registry.get(name)`，供 /tools 命令读取审批标记 |
-
-> **设计要点**：超时直接杀（`asyncio.wait_for` 超时后 cancel task），子进程由 Handler 内部负责 kill（`exec_tool` 已有 `proc.kill()` + `CancelledError` 防护）。不含 MCP/HTTP 超时——MCP Handler 内部自行处理，此处只控制整体执行超时。
-
----
-
-### 3.5 `ApprovalManager` — 审批控制
-
-| 属性 | 值 |
-|------|-----|
-| **文件** | `src/dotclaw/tools/approval.py` |
-| **职责** | 危险工具执行前用户确认，双重门控制 |
-
-**双重门审批模型**：
-
-```
-                    ToolDefinition.needs_approval
-                              │
-                    ┌─────────┴─────────┐
-                    │ True              │ False
-                    ▼                   ▼
-              approval_commands      直接执行（不审批）
-                    │
-              ┌─────┴─────┐
-              │ 在列表中   │ 不在列表中
-              ▼           ▼
-          用户确认      直接执行
-          (y/n)         （放行）
-              │
-        ┌─────┴─────┐
-        │ y / yes   │ n / 其他
-        ▼           ▼
-       执行      APPROVAL_DENIED
-```
-
-> AND 关系：`needs_approval=True` **且** `tool_name in approval_commands` 才触发用户确认。任一条件不满足则放行。
-
-**对外方法**：
-
-| 方法 | 说明 |
-|------|------|
-| `__init__(approval_commands)` | 从 config 加载审批命令列表 |
-| `set_enabled(bool)` | 全局启用/禁用审批 |
-| `set_approval_commands(list)` | 热更新审批列表（无需重启） |
-| `async check(tool_name, args, channel) → bool` | 执行审批检查 |
-
-**`check()` 逻辑**：
-
-```python
-async def check(self, tool_name, arguments, channel) -> bool:
-    if not self._enabled:          # 全局禁用 → 放行
-        return True
-    if tool_name not in self._approval_commands:  # 不在列表中 → 放行
-        return True
-    if channel is None:            # 无 channel（子 Agent）→ 放行
-        return True
-    confirm = await channel.ask_user(f"确认执行 `{tool_name}`？(y/n): ")
-    return confirm.strip().lower() in ("y", "yes")
-```
-
-> **Phase 5 关键变化**：删除硬编码 `NEEDS_APPROVAL = {"exec", "python"}`，改用 `_approval_commands` 集合从 config.yaml 加载。
-
----
-
-### 3.6 `builtin/` — 内置工具子包
-
-| 属性 | 值 |
-|------|-----|
-| **文件夹** | `src/dotclaw/tools/builtin/` |
-| **职责** | 内置工具实现 + 工厂函数 + 统一注册入口 |
-
-**目录结构**：
-
-```
-builtin/
-├── __init__.py        ← register_all(registry) 统一注册 8 个工具
-├── exec_tool.py       ← get_exec_handler()       [needs_approval=True]
-├── file_tool.py       ← get_read_file_handler()  [needs_approval=False]
-│                        get_write_file_handler() [needs_approval=True]
-│                        get_list_dir_handler()   [needs_approval=False]
-├── memory_tool.py     ← get_memory_read_handler() [needs_approval=False]
-│                        get_memory_write_handler()[needs_approval=True]
-└── system_tool.py     ← get_system_info_handler() [needs_approval=False]
-                         get_time_handler()        [needs_approval=False]
-```
-
-**工厂函数模式**（以 `exec_tool.py` 为例）：
-
-```python
-async def exec_command(command: str) -> str:
-    # 原有实现，通过 asyncio.create_subprocess_shell 执行
-    ...
-
-def get_exec_handler() -> BuiltinToolHandler:
-    return BuiltinToolHandler(
-        name="exec",
-        description="执行一条 Shell 命令。危险操作，执行前需用户确认。",
-        parameters={"type": "object", "properties": {...}, "required": ["command"]},
-        handler_fn=exec_command,
-        needs_approval=True,   # 显式声明危险
-        timeout=60.0,
-    )
-```
-
-**注册入口**：
-
-```python
-# builtin/__init__.py
-def register_all(registry: ToolRegistry) -> None:
-    """在 main.py 启动时调用"""
-    handlers = [
-        get_exec_handler(),
-        get_read_file_handler(), get_write_file_handler(), get_list_dir_handler(),
-        get_memory_read_handler(), get_memory_write_handler(),
-        get_system_info_handler(), get_time_handler(),
-    ]
-    for handler in handlers:
-        registry.register(handler)
-```
-
-**内置工具审批状态一览**：
-
-| 工具名 | `needs_approval` | 说明 |
-|--------|------------------|------|
-| exec | True | Shell 命令执行，高风险 |
-| read_file | False | 只读操作，低风险 |
-| write_file | True | 文件写入，中风险 |
-| list_dir | False | 只读操作，低风险 |
-| memory_read | False | 只读操作，低风险 |
-| memory_write | True | 写入记忆，中风险 |
-| system_info | False | 只读操作，低风险 |
-| get_time | False | 只读操作，低风险 |
-
-**W1 修复 — CancelledError 防护**（`exec_tool.py`）：
-
-```python
-async def exec_command(command: str) -> str:
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_shell(command, ...)
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-            ...
-        except asyncio.TimeoutError:
-            proc.kill(); await proc.wait()
-            return "命令执行超时"
-        except asyncio.CancelledError:
-            # ToolExecutor 超时 cancel → 必须 kill 子进程
-            proc.kill(); await proc.wait()
-            raise  # 重新抛出，让 ToolExecutor 正常捕获
-    except asyncio.CancelledError:
-        if proc is not None:
-            proc.kill(); await proc.wait()
-        raise
-    except Exception as e:
-        return f"错误：{e}"
-```
-
-**W2 修复 — 文件大小限制**（`file_tool.py`）：
-
-```python
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-
-async def read_file(path: str) -> str:
-    ...
-    if file_path.stat().st_size > MAX_FILE_SIZE:
-        return f"错误：文件过大（{file_path.stat().st_size} bytes），超过限制 {MAX_FILE_SIZE} bytes"
-    ...
+用户/Runtime       ToolExecutor        Validator      Broker        Policy       Approval      Handler      Journal
+   │                  │                    │             │             │            │            │            │
+   │─ execute ──────►│                    │             │             │            │            │            │
+   │                  ├─ get(name) ───────┤             │             │            │            │            │
+   │                  ├─ validate ───────►│ (INVALID?→INVALID_ARGUMENTS)                        │            │
+   │                  ├─ broker.resolve ──────────────►│             │            │            │            │
+   │                  ├─ policy.evaluate ───────────────────────────►│            │            │            │
+   │                  │  DENY ⇒ POLICY_DENIED                                          │            │            │
+   │                  ├─ ask? request(summary) ──────────────────────────────────────►│            │            │
+   │                  │       无 Channel / 拒绝 ⇒ APPROVAL_DENIED                                     │            │
+   │                  ├─ handler.execute(wait_for) ────────────────────────────────────────────►│            │
+   │                  │       超时⇒TIMEOUT 异常⇒EXECUTION_ERROR MCP不可用⇒MCP_UNAVAILABLE         │            │
+   │                  └─ tool_end + 脱敏策略/审批摘要 ──────────────────────────────────────────────────────►│
+   │◄─ ToolResult ────┤                                                                                        │
 ```
 
 ---
 
-### 3.7 `ToolProvider` ABC — 外部工具注入接口
-
-| 属性 | 值 |
-|------|-----|
-| **文件** | `src/dotclaw/tools/provider.py` |
-| **职责** | 为 MCP/Skill/Custom 工具源预留标准注入入口（Phase 5 仅骨架） |
-
-```python
-class ToolProvider(ABC):
-    @abstractmethod
-    async def discover_and_register(self, registry: ToolRegistry) -> list[str]:
-        """发现工具并注册到 registry。返回注册的工具名称列表。"""
-        ...
-```
-
-**预留实现**：
-
-| 类 | Phase | 说明 |
-|----|-------|------|
-| `MCPToolProvider` | P6 | MCP 协议：`initialize` → `tools/list` → 注册 → `tools/call` |
-| `SkillToolProvider` | P7 | Skill 脚本：解析 SKILL.md → 生成 ToolHandler → 注册 |
-
-**启动时调用**（`main.py` 预留模式）：
-
-```python
-# Phase 6 启动流程
-if config.tools.mcp_enabled:
-    mcp_provider = MCPToolProvider(config.mcp_servers)
-    await mcp_provider.discover_and_register(tool_registry)
-```
-
----
-
-## 4. 完整调用链路时序图
-
-### 4.1 正常工具调用 + 审批通过
-
-```
-用户             AgentLoop          ToolExecutor      ToolRegistry    ApprovalMgr   BuiltinToolHandler    OS
- │                  │                    │                │               │               │              │
- │── "列出文件" ──►│                    │                │               │               │              │
- │                  ├─ LLM.chat() ─────────────────────────────────────────────────────────────────────│
- │                  │                    │                │               │               │              │
- │                  │◄─ tool_call: list_dir(path=".")                                                   │
- │                  │                    │                │               │               │              │
- │                  ├─ execute("list_dir", {"path":"."}, channel) ─►                                    │
- │                  │                    │                │               │               │              │
- │                  │                    ├─ get("list_dir")──►                                           │
- │                  │                    │◄─── handler ──────│               │               │              │
- │                  │                    │                │               │               │              │
- │                  │                    ├─ handler.definition().needs_approval?                         │
- │                  │                    │  = False → 跳过审批                                           │
- │                  │                    │                │               │               │              │
- │                  │                    ├─ asyncio.wait_for(handler.execute({...}), timeout=10)        │
- │                  │                    │                │               │               │              │
- │                  │                    │                │               │               ├─ list_dir(".")│
- │                  │                    │                │               │               │── iterdir ─►│
- │                  │                    │                │               │               │◄── 结果 ────│
- │                  │                    │                │               │               │              │
- │                  │                    │◄── ToolResult(output="file1\nfile2\n...")                      │
- │                  │                    │                │               │               │              │
- │◄── "文件列表..." ──┤                    │                │               │               │              │
- │                  │                    │                │               │               │              │
- │                  ├─ 发送 tool result 给 LLM 继续对话                                                 │
-```
-
-### 4.2 危险工具审批拒绝
-
-```
-用户             AgentLoop          ToolExecutor      ToolRegistry    ApprovalMgr         用户终端
- │                  │                    │                │               │                 │
- │── "删除文件" ──►│                    │                │               │                 │
- │                  ├─ LLM.chat() → tool_call: exec("rm -rf /")                                   │
- │                  │                    │                │               │                 │
- │                  ├─ execute("exec", {"command":"rm -rf /"}, channel) ─►                        │
- │                  │                    │                │               │                 │
- │                  │                    ├─ get("exec") → handler                                 │
- │                  │                    │                │               │                 │
- │                  │                    ├─ handler.definition().needs_approval = True            │
- │                  │                    │                │               │                 │
- │                  │                    ├─ check("exec", {...}, channel) ─►                      │
- │                  │                    │                │               │                 │
- │                  │                    │                │               ├─ "exec" in _approval_commands? → Yes
- │                  │                    │                │               │                 │
- │                  │                    │                │               ├─ ask_user("确认执行?")──►
- │                  │                    │                │               │                 │    │
- │                  │                    │                │               │◄── "n" ───────────│
- │                  │                    │                │               │                 │
- │                  │                    │◄── False ──────│               │                 │
- │                  │                    │                │               │                 │
- │                  │                    ├─ return ToolResult(APPROVAL_DENIED)                     │
- │                  │                    │                │               │                 │
- │                  ├─ 发送 "用户拒绝了 exec 的执行" 给 LLM                                        │
-```
-
-### 4.3 工具执行超时
-
-```
-AgentLoop           ToolExecutor         asyncio.wait_for     BuiltinToolHandler       OS
- │                      │                     │                     │                   │
- ├─ execute("exec", {"command":"sleep 100"}, channel) ─►           │                   │
- │                      │                     │                     │                   │
- │                      ├─ get("exec") → handler                                        │
- │                      ├─ definition.timeout = 60                                      │
- │                      │                     │                     │                   │
- │                      ├─ wait_for(handler.execute(...), timeout=60) ─►               │
- │                      │                     │                     │                   │
- │                      │                     │                     ├─ create_subprocess("sleep 100")
- │                      │                     │                     │── fork ──────►│
- │                      │                     │                     │               │  (running)
- │                      │                     │  ... 60 seconds ... │               │
- │                      │                     │                     │               │
- │                      │                     │  ◄─── TimeoutError ──│               │
- │                      │                     │       (cancel task)  │               │
- │                      │                     │                     │               │
- │                      │                     │  CancelledError → handler              │
- │                      │                     │                     ├─ proc.kill() ──►│
- │                      │                     │                     ├─ proc.wait() ◄──│
- │                      │                     │                     ├─ raise ────────►│
- │                      │                     │                     │                   │
- │                      │◄── TimeoutError ────│                     │                   │
- │                      │                     │                     │                   │
- │                      ├─ return ToolResult(TIMEOUT, "工具执行超时（60秒）")            │
- │                      │                     │                     │                   │
- ├─ 发送超时结果给 LLM                       │                     │                   │
-```
-
----
-
-## 5. 配置参考
-
-`config.yaml` 中的 `tools:` 段：
+## 5. 配置参考（`config.yaml` 的 `tools` 段）
 
 ```yaml
 tools:
-  # === source 级启停（Phase 5 新增） ===
-  builtin_enabled: true              # 内置工具总开关
-  mcp_enabled: true                  # MCP 工具（P6 启用）
-  skill_enabled: true                # Skill 工具（P7 启用）
+  builtin_enabled: true        # 是否注册内置工具
+  mcp_enabled: true             # 是否启用 MCP（由 _build_mcp 检查）
+  skill_enabled: true           # 遗留字段；Skill 真实开关在 config.skills.enabled
 
-  # === 审批控制 ===
-  approval_commands:                 # 需要用户确认的工具列表
-    - exec
-    - python
+  approval_commands:            # 需审批工具名列表（新规范名；覆盖式）
+    - builtin.process.execute
 
-  # === 单工具禁用（向后兼容旧配置） ===
-  disabled_tools: []                 # 如 ["exec"] 禁用 exec 工具
+  disabled_tools: []            # 单工具禁用列表（新格式；旧嵌套格式已不再读取）
 
-  # === exec 工具 ===
-  exec_timeout: 60                   # 秒（浮点数）
+  exec_timeout: 60              # 秒（浮点数）
 
-  # === web 工具 ===
   web_search:
     enabled: false
+
+  # 工具安全策略（阶段三，总体设计 §7.1）
+  policy:
+    workspace_root: .
+    rules:
+      workspace.read: allow
+      workspace.write: ask
+      process.exec: ask
+      network.http: deny
+      mcp.connect: ask
+      mcp.call: ask
+    denied_paths: [".env", ".git/**", "**/*.key"]
+    allowed_mcp_servers: ["github"]   # 空列表在加载时被忽略，沿用默认允许列表
+
+  mcp_global:
+    startup_timeout: 4.0
+    tool_timeout: 60.0
+    restart_on_crash: true
+    max_restart_attempts: 3
+
+  mcp_servers: []                # 例: - name: fs / transport: stdio / command: npx / args: [...]
 ```
 
-**向后兼容**：
-
-旧格式 `tools.exec.needs_approval: true` 和 `tools.exec.enabled: false` 在 `_raw_to_config()` 中自动转换为新格式：
-- `exec.needs_approval: true` → `approval_commands: ["exec"]`
-- `exec.enabled: false` → `disabled_tools: ["exec"]`
-- `python.timeout: 30` → `exec_timeout: 30`
-- 混合格式正确合并（不丢数据）
+**一次性迁移（保留）**：旧工具名（`read_file`/`write_file`/`list_dir`/`exec`/`memory_read`/`memory_write`/`system_info`/`get_time`）在加载时经 `_migrate_tool_names` 转换为新规范名并输出弃用警告；冲突以新名为准。**已删除的兼容**：旧嵌套格式 `tools.exec.needs_approval` / `tools.exec.enabled` / `tools.python.timeout` 的读取逻辑已在阶段五移除。
 
 ---
 
-## 6. 初始化链路（`main.py`）
+## 6. 初始化链路（`agent/factory.py`）
 
 ```
-main.py / _run_cli()
-  │
-  ├─ 1. load_config() → Config 对象
-  │     └─ ToolsConfig（builtin_enabled, mcp_enabled, skill_enabled,
-  │                     approval_commands, disabled_tools, exec_timeout）
-  │
-  ├─ 2. ToolRegistry()
-  │
-  ├─ 3. [if config.tools.builtin_enabled]
-  │     └─ builtin.register_all(tool_registry)
-  │          ├─ get_exec_handler()         → BuiltinToolHandler("exec")
-  │          ├─ get_read_file_handler()    → BuiltinToolHandler("read_file")
-  │          ├─ get_write_file_handler()   → BuiltinToolHandler("write_file")
-  │          ├─ get_list_dir_handler()     → BuiltinToolHandler("list_dir")
-  │          ├─ get_memory_read_handler()  → BuiltinToolHandler("memory_read")
-  │          ├─ get_memory_write_handler() → BuiltinToolHandler("memory_write")
-  │          ├─ get_system_info_handler()  → BuiltinToolHandler("system_info")
-  │          └─ get_time_handler()         → BuiltinToolHandler("get_time")
-  │
-  ├─ 4. [根据 disabled_tools 注销工具]
-  │     for tool_name in config.tools.disabled_tools:
-  │         tool_registry.unregister(tool_name)
-  │
-  ├─ 5. ApprovalManager(approval_commands=config.tools.approval_commands)
-  │
-  ├─ 6. ToolExecutor(registry=tool_registry, approval_manager=approval_mgr)
-  │
-  ├─ 7. AgentLogger(level=config.debug.level, log_file=config.debug.log_file)
-  │     └─ TraceRecord + _setup_logging（Phase 5 合并 DebugManager 能力）
-  │
-  ├─ 8. AgentLoop(tool_executor=tool_executor, logger=agent_logger, ...)
-  │
-  └─ 9. 主循环：await channel.receive() → await agent.run(user_input)
-        │
-        └─ AgentLoop.run()
-             └─ tool_executor.execute(name, args, channel)
+build_agent()
+  ├─ _build_tools() → ToolRegistry（discover_builtin 同步注册 8 个 builtin）
+  ├─ _build_mcp() → MCPToolProvider（注入 policy_engine/capability_broker）
+  ├─ await mcp_task   # 阶段四修复：首个 Run 前完成首次发现
+  └─ build_runtime_services() → ToolExecutorAdapter(ToolPort)
+       └─ Run 创建：agent_policy_resolver.resolve() → executor.snapshot_definitions()
+          （不可变快照，Run 内不读动态 Registry）
 ```
 
 ---
 
-## 7. 扩展预留（Phase 6/7 对接点）
+## 7. 扩展预留（对接点）
 
-| 对接点 | Phase 5 现状 | Phase 6/7 动作 |
-|--------|-------------|---------------|
-| `ToolHandler` ABC | 已定义 `definition()` + `execute()` | P6 实现 `McpToolHandler`；P7 实现 `SkillToolHandler` |
-| `ToolRegistry` | 纯注册表（register/get/unregister） | P6/P7 通过 `register()` 动态添加 MCP/Skill 工具 |
-| `ToolProvider` ABC | 已定义 `discover_and_register()` 接口 | P6 实现 `MCPToolProvider`；P7 实现 `SkillToolProvider` |
-| `ToolSource.MCP` | 枚举值已定义 | P6 使用 |
-| `ToolSource.SKILL` | 枚举值已定义 | P7 使用 |
-| `config.tools.mcp_enabled` | 已预留字段 | P6 初始化时检查 |
-| `config.tools.skill_enabled` | 已预留字段 | P7 初始化时检查 |
-| `ApprovalManager.set_approval_commands()` | 已实现热更新 | P6 MCP 工具可动态加入审批列表 |
-| `disabled_tools` → `unregister()` | 已实现管道 | P6 MCP 工具也可通过此机制禁用 |
-
----
+| 对接点 | 现状 | 演进方向 |
+|--------|------|----------|
+| `ToolHandler` ABC | `FunctionToolHandler` + `McpToolAdapter` | 未来 CUSTOM/第三方本地工具包 |
+| `ToolRegistry` | 无冲突注册 + 不可变快照 | 来源动态增删不影响在途 Run |
+| `ToolProvider` ABC | `MCPToolProvider` 唯一实现 | `SkillToolProvider` / `CustomToolProvider`（Skill 当前走旁路 `SkillParser`，不注册为 Handler） |
+| `PolicyEngine` | 文件/进程/网络/MCP 四类 | OS 级沙箱、网络命名空间（非本次范围） |
+| Run 级快照 | `snapshot_definitions()` 深拷贝 | 重连只影响下一 Run 快照 |
 
 *本文档由 dotClaw 开发工程师维护。架构变更后请同步更新此文档。*
-开发日志见 `docs/phase5-record.md`。详细设计见 `docs/phase5-roadmap.md`。

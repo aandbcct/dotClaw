@@ -63,3 +63,20 @@ def test_raw_to_config_migrates_tools_section() -> None:
     )
     assert cfg.tools.approval_commands == ["builtin.process.execute"]
     assert cfg.tools.disabled_tools == ["builtin.process.execute", "python"]
+
+
+def test_old_nested_format_no_longer_read() -> None:
+    # 阶段五删除条件：旧嵌套格式 tools.exec.* / tools.python.* 的读取逻辑已移除。
+    cfg = _raw_to_config(
+        {
+            "tools": {
+                "exec": {"needs_approval": True, "enabled": False},
+                "python": {"needs_approval": True, "timeout": 30},
+            }
+        }
+    )
+    # 旧嵌套格式不再被读取：不应出现旧名。
+    assert cfg.tools.approval_commands == []
+    assert cfg.tools.disabled_tools == []
+    # exec_timeout 不再从 python.timeout 回退（保留新格式默认 60.0）。
+    assert cfg.tools.exec_timeout == 60.0

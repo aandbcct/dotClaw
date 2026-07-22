@@ -153,7 +153,7 @@ class ToolPolicyConfig:
 class ToolsConfig:
     # Phase 5 新增：source 级启停
     builtin_enabled: bool = True
-    mcp_enabled: bool = True       # Phase 5 预留，暂不消费
+    mcp_enabled: bool = True       # 是否启用 MCP（由 _build_mcp 检查）
     skill_enabled: bool = True      # Phase 5 预留，暂不消费
 
     # 危险命令审批列表（默认使用阶段二迁移后的新规范名）
@@ -555,26 +555,14 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         rules=agent_raw.get("rules", ""),
     )
 
-    # Phase 5 升级：ToolsConfig 新格式 + 向后兼容
+    # Phase 5 升级：ToolsConfig 新格式（仅读取新规范字段）。
     tools_raw = raw.get("tools", {})
 
-    # 向后兼容：合并新格式 + 旧格式（始终合并，防止混合格式丢数据）
-    approval_commands = list(tools_raw.get("approval_commands", []))
-    for tool_name in ("exec", "python"):
-        if tools_raw.get(tool_name, {}).get("needs_approval", False):
-            if tool_name not in approval_commands:
-                approval_commands.append(tool_name)
-
-    # 向后兼容：合并新格式 + 旧格式
-    disabled_tools = list(tools_raw.get("disabled_tools", []))
-    for tool_name in ("exec", "python"):
-        if not tools_raw.get(tool_name, {}).get("enabled", True):
-            if tool_name not in disabled_tools:
-                disabled_tools.append(tool_name)
-
     # Tool v1 阶段二：旧工具名 → 新规范名一次性迁移（带弃用警告）。
-    approval_commands = _migrate_tool_names(approval_commands)
-    disabled_tools = _migrate_tool_names(disabled_tools)
+    # 仅处理新格式字段中的旧名；旧嵌套格式（tools.exec.* / tools.python.*）
+    # 的读取已在阶段五删除，不再兼容。
+    approval_commands = _migrate_tool_names(list(tools_raw.get("approval_commands", [])))
+    disabled_tools = _migrate_tool_names(list(tools_raw.get("disabled_tools", [])))
 
     tools = ToolsConfig(
         builtin_enabled=tools_raw.get("builtin_enabled", True),
@@ -582,8 +570,7 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         skill_enabled=tools_raw.get("skill_enabled", True),
         approval_commands=approval_commands,
         disabled_tools=disabled_tools,
-        exec_timeout=tools_raw.get("exec_timeout") or
-                      tools_raw.get("python", {}).get("timeout", 60.0),
+        exec_timeout=tools_raw.get("exec_timeout", 60.0),
         web_search_enabled=tools_raw.get("web_search", {}).get("enabled", False),
         # Phase 6: MCP 配置解析
         mcp_global=_parse_mcp_global(tools_raw.get("mcp_global", {})),

@@ -42,13 +42,30 @@ tools:
   approval_commands:
     - builtin.process.execute
 
-  # 单工具禁用列表（向后兼容旧 config.exec.enabled: false）
+  # 单工具禁用列表（新格式；旧嵌套格式 tools.exec.* 已不再读取）
   disabled_tools: []
 
   exec_timeout: 60
 
   web_search:
     enabled: false
+
+  # 工具安全策略（Tool v1 阶段三，总体设计 §7.1）
+  # 全局规则是安全上限；Agent 级策略只能收窄，不得放宽。
+  policy:
+    workspace_root: .
+    rules:
+      workspace.read: allow      # 工作区读
+      workspace.write: ask       # 工作区写（需审批）
+      process.exec: ask          # 进程执行（需审批）
+      network.http: deny         # 网络请求（默认拒绝）
+      mcp.connect: ask           # MCP 连接（需审批）
+      mcp.call: ask              # MCP 调用（需审批）
+    denied_paths:                # 命中即拒绝（glob，详见 default_policy_scope）
+      - ".env"
+      - ".git/**"
+      - "**/*.key"
+    allowed_mcp_servers: ["github"]  # 允许连接的 MCP server 名；空列表在加载时被忽略，沿用默认允许列表
 
   # Phase 6 新增：MCP 全局配置
   mcp_global:
