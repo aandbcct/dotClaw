@@ -9,6 +9,8 @@
   旧实现：主 Agent 的 policy_rules 写入全局 scope，delegation 子 Agent 不会切换策略
   （子 Agent 收窄规则不生效，或主 Agent 规则污染所有 Agent）。修复后 Executor 按
   execution_context.agent_id 解析该 Agent 的 policy_rules 并构造独立作用域。
+- 四次审计补充：基础 PolicyScope 只保留全局上限，主 Agent 规则不再注入共享 scope；
+  子 Agent 无 policy_rules 时返回独立空 agent_rules 作用域，不继承主 Agent 的收窄规则。
 
 所有新增注释使用中文。
 """
@@ -193,3 +195,45 @@ def test_run_rules_override_global_baked_agent_rules():
         )
     )
     assert res_none.error_code == "POLICY_DENIED", "无 Run 规则时应回退全局 baked deny"
+
+
+def test_subagent_without_rules_does_not_inherit_main_agent_deny():
+    """四次审计回归：主 Agent 把 workspace.read 收窄为 deny，但 delegation 子 Agent
+    无 policy_rules 时，不得继承主 Agent 的 deny，必须按全局 allow 执行——每个 Agent
+    只能收窄自身权限，互不继承（修复：factory 不再把主 Agent 规则写入共享 scope，
+    _effective_scope 对无规则 Agent 返回独立空 agent_rules 作用域）。
+    """
+    def resolver(agent_id: str):
+        # 主 Agent 收窄为 deny；子 Agent 无规则返回 None。
+        return {"workspace.read": "deny"} if agent_id == "main" else None
+
+    # 基础 scope 只保留全局上限（workspace.read=allow），不写入任何 Agent 规则，
+    # 模拟修复后的 factory（不再把主 Agent 规则注入共享 scope）。
+    scope = default_policy_scope()
+    scope.global_rules["workspace.read"] = PolicyDecision.ALLOW
+    policy_engine = PolicyEngine(scope)
+    executor = ToolExecutor(
+        registry=_builtin_registry(),
+        approval_manager=ApprovalManager(),
+        policy_engine=policy_engine,
+        capability_broker=CapabilityBroker(),
+        skill_parser=None,
+        approval_commands=set(),
+        agent_policy_resolver=resolver,
+    )
+
+    # 主 Agent 的 deny 生效。
+    res_main = asyncio.run(
+        executor.execute_approved(
+            "builtin.files.read_text", {"path": "f.txt"}, execution_context=ToolExecutionContext(agent_id="main")
+        )
+    )
+    assert res_main.error_code == "POLICY_DENIED", "主 Agent 的 deny 应生效"
+
+    # 子 Agent 无规则 → 继承全局 allow，而非主 Agent 的 deny。
+    res_sub = asyncio.run(
+        executor.execute_approved(
+            "builtin.files.read_text", {"path": "f.txt"}, execution_context=ToolExecutionContext(agent_id="sub")
+        )
+    )
+    assert res_sub.error_code != "POLICY_DENIED", "子 Agent 不应继承主 Agent 的 deny，应按全局 allow 执行"

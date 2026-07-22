@@ -157,11 +157,12 @@ def _build_skills(config, project_root: Path):
     return registry
 
 
-def _build_tools(config, skill_registry, agent_policy_rules=None):
+def _build_tools(config, skill_registry):
     """构建 ToolExecutor + ToolRegistry + ApprovalManager。
 
-    agent_policy_rules：Agent 级策略规则（profile -> allow/ask/deny），仅用于
-    收窄全局上限，不能放宽（收窄由 PolicyEngine 在评估时执行）。
+    基础 PolicyScope 只保留全局上限与资源约束。所有 Agent（含主 Agent）的
+    收窄规则均通过 agent_policy_resolver(agent_id) 在每次 Run 冻结独立作用域，
+    不写入共享 scope，避免 delegation 子 Agent 继承主 Agent 规则（四次审计修复）。
     """
     from dotclaw.tools.registry import ToolRegistry
     from dotclaw.tools.executor import ToolExecutor
@@ -195,13 +196,6 @@ def _build_tools(config, skill_registry, agent_policy_rules=None):
         scope.denied_paths = config.tools.policy.denied_paths
     if config.tools.policy.allowed_mcp_servers:
         scope.allowed_mcp_servers = config.tools.policy.allowed_mcp_servers
-    # Agent 级策略：仅收窄全局上限（Profile 决策由 Engine 取更严格者）。
-    if agent_policy_rules:
-        for profile, decision in agent_policy_rules.items():
-            try:
-                scope.agent_rules[profile] = PolicyDecision(decision)
-            except ValueError:
-                logger.warning("忽略非法 Agent 策略规则: %s=%s", profile, decision)
 
     policy_engine = PolicyEngine(scope)
     capability_broker = CapabilityBroker()
@@ -378,7 +372,7 @@ async def build_agent(
     skill_registry = _init_sync("技能", lambda: _build_skills(config, project_root))
     tool_executor = _init_sync(
         "工具",
-        lambda: _build_tools(config, skill_registry, agent_policy_rules=identity.policy_rules),
+        lambda: _build_tools(config, skill_registry),
     )
     memory_mgr, memory_dream = await _init_async("记忆", _build_memory(config, llm_proxy, project_root)) or (None, None)
 

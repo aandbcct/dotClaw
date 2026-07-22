@@ -337,14 +337,17 @@ class ToolExecutor:
             except Exception:  # 解析失败不阻断执行，回退全局作用域
                 logger.warning("解析 Agent 策略失败: %s", execution_context.agent_id)
                 rules = None
+            agent_rules: dict[str, PolicyDecision] = {}
             if rules:
-                agent_rules: dict[str, PolicyDecision] = {}
                 for profile, decision in rules.items():
                     try:
                         agent_rules[profile] = PolicyDecision(decision)
                     except ValueError:
                         logger.warning("忽略非法 Agent 策略规则: %s=%s", profile, decision)
-                return dataclasses.replace(self._policy_scope, agent_rules=agent_rules)
+            # 无论该 Agent 是否有规则，都返回独立 scope：有规则用其收窄规则，
+            # 无规则则 agent_rules 为空（仅全局上限生效），绝不回退已被污染的共享
+            # scope，避免 delegation 子 Agent 继承主 Agent 的收窄规则（四次审计修复）。
+            return dataclasses.replace(self._policy_scope, agent_rules=agent_rules)
         return self._policy_scope
 
     def _build_context(
