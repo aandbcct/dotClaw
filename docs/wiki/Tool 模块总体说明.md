@@ -44,12 +44,22 @@ src/dotclaw/
 │   ├── approval.py                     # ApprovalManager：Approval Port（只消费 ask 决策）
 │   ├── executor.py                     # ToolExecutor：固定安全链路编排
 │   ├── parser.py                       # SkillParser：工具执行后命中 Skill 检测（旁路）
+│   ├── http_client.py                  # 受控 HTTP 客户端（阶段二）：HttpClient 协议 + HttpxHttpClient
+│   ├── network.py                      # 固定网络主机路由表 KNOWN_NETWORK_HOSTS
+│   ├── providers/                      # 固定外部协议 Provider（阶段三）
+│   │   ├── __init__.py                 # ProviderError / TavilyProvider / OpenMeteoProvider 导出
+│   │   ├── base.py                     # ProviderError / map_http_status / call 统一脱敏
+│   │   ├── tavily.py                   # Tavily 搜索 Provider（POST /search）
+│   │   └── open_meteo.py               # Open-Meteo 地理编码 + 预报 Provider
 │   └── builtin/                        # 内置工具子包（@tool 声明）
 │       ├── __init__.py                 # 供 ToolDiscovery 扫描
 │       ├── exec_tool.py                # builtin.process.execute（需审批）
 │       ├── file_tool.py                # builtin.files.read_text / write_text / list_directory
 │       ├── memory_tool.py              # builtin.memory.read / write
-│       └── system_tool.py              # builtin.system.get_info / get_time
+│       ├── system_tool.py              # builtin.system.get_info / get_time
+│       ├── web_tool.py                 # builtin.web.search（固定 Tavily，NETWORK）
+│       ├── weather_tool.py             # builtin.weather.get_forecast（固定 Open-Meteo，NETWORK）
+│       └── math_tool.py                # builtin.math.calculate（本地受限计算，无策略档案）
 │
 ├── mcp/                                # MCP 接入
 │   ├── provider.py                     # MCPToolProvider：只注册 tools + 状态 + 重连 + mcp.connect 网关
@@ -123,6 +133,7 @@ flowchart TB
 - `@tool(name, description, args_model?, policy?, source?, needs_approval?, timeout?, metadata?, path_param?)`：仅把 `ToolMeta` 写到 `func.__tool_meta__`，**不在导入时注册**，也不导入全局 Registry。
 - `path_param`：文件类工具的实际路径参数名；默认是 `path`，记忆工具显式声明 `long_term_file`，避免安全策略检查与真实文件目标脱节。
 - `ToolPolicy(str, Enum)`：`WORKSPACE_READ` / `WORKSPACE_WRITE` / `PROCESS` / `NETWORK` / `MCP`（工具作者只能从中选择，不能自由组合能力；MCP 档案由 Provider 自动生成）。
+- `network_service` / `network_hosts`：网络类工具（`policy=NETWORK`）在 `ToolDefinition` / `ToolMeta` 上**静态声明**的 Provider 服务标识与精确 HTTPS 主机集合（如 `tavily` / `["api.tavily.com"]`）。Broker 据此生成 `NETWORK_HTTP` 请求，绝不读取 Agent 参数中的 URL；Policy 同时校验「服务已启用 + 主机精确匹配」才放行（开发计划 §2.2）。
 
 ### 4.3 参数校验 — `tools/schema.py`
 - `to_json_schema(model)`：Pydantic 模型 → JSON Schema（供 LLM）。
@@ -144,7 +155,7 @@ flowchart TB
 - 禁止职责：不执行、不做审批、不连接外部系统。
 
 ### 4.7 能力 Broker — `tools/capability.py`
-- `CapabilityBroker.resolve(definition, validated_args, workspace_root) → list[CapabilityRequest]`：按 `policy_profile` 翻译文件/进程/网络请求；`policy=None` 或未知档案返回空列表（passthrough）。
+- `CapabilityBroker.resolve(definition, validated_args, workspace_root) → list[CapabilityRequest]`：按 `policy_profile` 翻译文件/进程/网络请求；`policy=None` 或未知档案返回空列表（passthrough）。网络类（`NETWORK`）按 `definition.network_service` / `network_hosts` **静态声明**为每个精确主机生成一条 `NETWORK_HTTP` 请求（携带 `service` 与 `host`），**绝不读取 Agent 参数中的 URL**；声明多主机则生成多条请求。
 - MCP 工具：`source == MCP` 时直接由 `metadata["server"]` 形成 `mcp.call` 请求，不依赖运行参数。
 - `ResourceKind`：`FILE_READ` / `FILE_WRITE` / `PROCESS_EXEC` / `NETWORK_HTTP` / `MCP_CONNECT` / `MCP_CALL`。
 - `normalize_workspace_path()`：先 `expanduser` 再用 `realpath` 解析符号链接/Windows 联接点，检测 `..`/绝对路径逃逸 workspace 根目录（安全关键）。
@@ -153,7 +164,8 @@ flowchart TB
 
 ### 4.8 策略引擎 — `tools/policy.py`
 - `PolicyEngine.evaluate(requests, scope) → PolicyOutcome`：任一 `DENY` → 整体 `DENY`；否则任一 `ASK` → 整体 `ASK`；否则 `ALLOW`；无请求视为 `ALLOW`。
-- `PolicyScope`：`global_rules`(安全上限) + `agent_rules`(只能收窄) + `workspace_root` + `denied_paths` + `allowed_mcp_servers`。
+- `PolicyScope`：`global_rules`(安全上限) + `agent_rules`(只能收窄) + `workspace_root` + `denied_paths` + `allowed_mcp_servers` + `network_services`(服务→精确主机集合，fail-closed 空集合)。
+- 网络策略：`NETWORK_HTTP` 请求需同时满足「全局 `network.http` 上限允许 + 服务在 `network_services` 中启用 + 请求主机在允许列表 + Agent 未收窄为 ask/deny」才 `ALLOW`；任一不满足即 `DENY`。`network_services` 与 `network.http` 由 Host 工厂从 `tools.network.<service>.enabled` 投影：启用任一服务时派生 `network.http=allow`，未启用则 `deny`；用户显式写出的 `allow/ask/deny` 始终优先。
 - Agent 规则来自 `AgentIdentity.policy_rules`；Executor 按 `ToolExecutionContext.agent_id` 为每次 Run 构造独立 scope。基础 scope 不写入主 Agent 规则，因此委派子 Agent 不会继承主 Agent 的收窄权限。
 - 默认规则：`workspace.read=allow` / `workspace.write=ask` / `process.exec=ask` / `network.http=deny` / `mcp.connect=ask` / `mcp.call=ask`。
 - `mcp.connect` / `mcp.call`：server 不在 `allowed_mcp_servers` 即 `DENY`（空列表 = deny-all，fail-closed）。
@@ -170,7 +182,7 @@ flowchart TB
 - `snapshot_definitions()`：转发 `registry.snapshot()`，供 Run 创建时捕获不可变工具集。
 - `_run_chain()`：严格按「tool_start → 校验 → Broker → Policy →(ask 审批)→ 受批准路径回填 → Handler → tool_end」；校验失败/deny/审批拒绝均直接返回，绝不进入 Handler。
 - `requires_approval(name, context)`：Runtime 预检与执行链共用 Agent 的有效策略；某 Agent 将全局 `allow` 收窄为 `ask` 时，首次调用仍会进入审批，不能被 `execute_approved()` 绕过。
-- Journal 可观测：`tool_start` / `tool_policy_resolved` / `tool_approval_outcome`(仅脱敏) / `tool_end`，并关联 `agentrun_id`。
+- Journal 可观测：`tool_start` / `tool_policy_resolved` / `tool_approval_outcome`(仅脱敏) / `tool_end`，并关联 `agentrun_id`。网络类工具执行时，`ToolExecutor` 用审计包装客户端包裹注入的 `HttpClient`：每次网络请求成功后写入 `tool.network_audit` 事件，仅含服务/主机/HTTP 状态类别/耗时/响应字节/重试次数（脱敏，不含密钥、认证头或 URL 查询串）；`HttpClient` 本身不依赖 Journal。
 
 ### 4.11 MCP Provider 与 Adapter — `mcp/`
 - `MCPToolProvider`（`provider.py`）：编排连接/发现/状态/重连；**只注册 tools**，不注册 resources/prompts；单 server 失败降级（`_failed_servers`），不阻塞 Agent 启动；`get_server_states()` 暴露 `McpClientState`（STARTING/CONNECTED/CRASHED/FAILED/SHUTDOWN）；连接前经 `mcp.connect` 网关（`allowed_mcp_servers` fail-closed）。
@@ -185,6 +197,19 @@ flowchart TB
 ### 4.13 Runtime 适配器 — `runtime/adapters/tool_executor_adapter.py`
 - `ToolExecutorAdapter`：实现 Runtime `ToolPort`，按 `(run_id, call_id)` 去重避免重复执行副作用；预检时把 `execution.policy.agent_id` 传给 `requires_approval`，对「需审批且未批准」返回 `APPROVAL_REQUIRED`，批准后再 `execute_approved`。审批恢复的权威事实是持久化检查点还原的 `ToolInvocation.approved`，而非适配器的进程内集合；`_waiting_calls` / `_executed_calls` 仅作本进程短生命周期去重缓存，Run 终态由 Runtime 调用 `clear_run()` 清理。
 - `AgentPolicyResolver`：在 Run 创建时调用 `executor.snapshot_definitions()` 冻结不可变工具集；Run 内不再读动态 Registry。
+
+### 4.13.1 受控 HTTP 客户端、固定 Provider 与网络工具（阶段二 / 三 / 四）
+
+网络能力默认关闭；仅在 `config.yaml` 的 `tools.network.<service>.enabled` 显式启用后才产生可用能力。所有联网 Tool 经 Tool v1 固定链路（校验 → Broker → Policy → 审批 → Handler → Journal）执行，且**不存在 Agent 可控的 URL / host / endpoint 参数**。
+
+- `tools/http_client.py`（`HttpClient` 协议 + `HttpxHttpClient`）：仅供内置 Provider 使用的薄客户端。只允许 HTTPS、精确声明主机与 443 端口，拒绝 IP 字面量、非标准端口、用户信息段、重定向与未声明路径的跨主机跳转；连接超时 3s、总超时 10s、单响应 1 MiB 流式上限、并发 4；Tavily 不重试、Open-Meteo 仅对临时网络错误重试一次；异常消息脱敏（不含密钥/认证头/查询串/正文）。Agent 不可见、不进入工具注册表、不直接依赖 Journal。`ApplicationHost.shutdown()` 关闭共享连接池。
+- `tools/network.py`（`KNOWN_NETWORK_HOSTS`）：固定服务→主机路由表（tavily → api.tavily.com；open_meteo → geocoding-api.open-meteo.com + api.open-meteo.com）。
+- `tools/providers/`：`ProviderError` 统一携带应映射的 `ToolErrorCode`（401/403→CONFIGURATION_ERROR，429/4xx/5xx→NETWORK_ERROR，均脱敏）；`call()` 把脱敏 `HttpClientError` 归一为 `NETWORK_ERROR`。Provider 只做最小必要请求与受限结果映射，端点/方法/认证方式属于代码、不可由 Agent 参数或 YAML 覆盖。
+  - `TavilyProvider.search`：固定 `POST /search`，读取 `TAVILY_API_KEY` 环境变量（缺失→CONFIGURATION_ERROR，不读 YAML、不写日志）；请求不含 Extract/Crawl/Map；输出按 title/url/snippet/总字符上限截断。
+  - `OpenMeteoProvider.get_forecast`：先地理编码（固定字段、支持 `country_code` 缩小候选），唯一候选直接预报、零候选返回 `no_candidate`、多候选返回至多 5 个 `candidates`；预报固定当前/每日字段、`timezone=auto`，不机械透传全部参数。
+- `tools/builtin/math_tool.py`（`builtin.math.calculate`）：本地受限计算，不访问文件/网络/环境；仅允许 `+ - * / // % **`、括号、数值字面量、固定数学函数白名单（sqrt/log/exp/sin/cos…）与常量（pi/e/tau）；求值前做 AST 白名单遍历 + 深度/节点数限制，自定义幂运算限制指数与结果量级，非有限/复数结果拒绝；任何异常映射为脱敏的 `EXECUTION_ERROR`。该工具**不产生 Capability Request**（无策略档案）。
+
+**边界（没有任意网页抓取）**：框架不提供通用 HTTP Tool、任意 URL 抓取、网页正文提取、爬虫或搜索引擎 HTML 抓取；联网能力严格限定为上述两个固定 Provider 的预授权端点。
 
 ### 4.14 组合根 — `bootstrap/ApplicationHost`
 - `_build_tools(config, skill_registry)`：创建 `ToolRegistry` → `ToolDiscovery.discover_builtin()` 注册 → 按 `disabled_tools` `unregister` → 构造基础全局 `PolicyScope`、`PolicyEngine`/`CapabilityBroker`/`ApprovalManager`/`ToolExecutor`；所有 Agent 规则运行时按 `agent_id` 合并，不污染基础 scope。
@@ -239,7 +264,7 @@ sequenceDiagram
 
     F->>R: 创建空注册表
     F->>B: discover_builtin()  [同步]
-    B->>R: register 8 个 @tool 内置工具（新规范名）
+    B->>R: register 11 个 @tool 内置工具（新规范名）
     F->>M: MCPToolProvider(registry=同一实例, policy_engine, capability_broker)
     F->>M: start()  [启动期 await 首次发现]
     M->>Ext: 并行 connect 各 server（startup_timeout 握手）
@@ -342,7 +367,7 @@ flowchart TD
 
 ### 7.7 脱敏审计（问题 → 机制 → 收益 → 边界）
 - **问题**：审批提示与审计若含密钥/认证头/原始敏感值会泄漏。
-- **机制**：`CapabilityBroker` 形成请求时 `_desensitize_command` 剥离 `KEY=VALUE`、`_desensitize_url` 去除查询串；`CapabilityRequest.describe()` 仅返回脱敏摘要；Journal 的 `tool_policy_resolved` / `tool_approval_outcome` 只写脱敏摘要。
+- **机制**：`CapabilityBroker` 形成请求时 `_desensitize_command` 剥离 `KEY=VALUE`、`_desensitize_url` 去除查询串；`CapabilityRequest.describe()` 仅返回脱敏摘要；Journal 的 `tool_policy_resolved` / `tool_approval_outcome` 只写脱敏摘要；网络工具另经 `tool.network_audit` 写入脱敏的网络摘要（服务/主机/状态类别/耗时/字节/重试），`HttpClient` 不直接接触 Journal。
 - **收益**：策略拒绝/审批信息不泄露敏感参数（计划 §7 验收 3）。
 - **边界**：`normalized_path` 为相对 workspace 的逻辑路径，绝对路径仅用于逃逸判定，不写入审计展示。
 
@@ -377,6 +402,10 @@ flowchart TD
 | `policy.rules` | 见 §4.8 默认 | `PolicyEngine` | 档案 → allow/ask/deny |
 | `policy.denied_paths` | [.env, .git/**, **/*.key] | `PolicyEngine` | 命中即拒绝（glob） |
 | `policy.allowed_mcp_servers` | [github] | `PolicyEngine` | MCP server 允许列表（fail-closed） |
+| `network.tavily.enabled` | false | `_host_components` → `PolicyScope.network_services` | 启用 Tavily 搜索服务（预授权精确主机）；启用即派生 `network.http=allow` |
+| `network.open_meteo.enabled` | false | `_host_components` → `PolicyScope.network_services` | 启用 Open-Meteo 天气服务（预授权两个固定主机） |
+| `tavily.api_key` / `TAVILY_API_KEY` | 无 | `TavilyProvider` | 仅从环境变量 `TAVILY_API_KEY` 读取；缺失→CONFIGURATION_ERROR，不读 YAML、不写审计 |
+| `tools.web_search`（旧） | 无 | `settings` 加载告警 | 已弃用且不再读取；出现时输出一次告警并忽略，请改用 `tools.network.*.enabled` |
 | `mcp_global.startup_timeout` | 4.0 | `McpClient` | 握手超时 |
 | `mcp_global.tool_timeout` | 60.0 | `McpClient` | MCP 工具调用超时 |
 | `mcp_global.restart_on_crash` | true | `McpClient` | 崩溃自动重连 |
