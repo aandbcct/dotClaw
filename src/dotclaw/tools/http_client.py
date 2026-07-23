@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .network import KNOWN_NETWORK_HOSTS
+from .network import KNOWN_NETWORK_HOSTS, KNOWN_NETWORK_ROUTES
 
 logger = logging.getLogger("dotclaw.tools.http_client")
 
@@ -164,7 +164,7 @@ class HttpxHttpClient:
         if self._closed:
             raise HttpClientError("HTTP 客户端已关闭，无法发起请求")
 
-        self._validate_url(service, url)
+        self._validate_url(service, method, url)
         content: bytes | None = None
         if json is not None:
             content = json_module.dumps(json, ensure_ascii=False).encode("utf-8")
@@ -202,8 +202,8 @@ class HttpxHttpClient:
         assert last_exc is not None
         raise self._safe_error(last_exc, url) from last_exc
 
-    def _validate_url(self, service: str, url: str) -> None:
-        """再次校验 URL：HTTPS、声明主机、443 端口、无用户信息段。"""
+    def _validate_url(self, service: str, method: str, url: str) -> None:
+        """再次校验 URL：HTTPS、声明主机、443 端口、无用户信息段、固定路由。"""
         parsed = urlparse(url)
         if parsed.scheme != "https":
             raise HttpClientError("仅允许 HTTPS 请求")
@@ -213,10 +213,18 @@ class HttpxHttpClient:
             # 拒绝包含用户信息的 URL（纵使不含真实密钥，亦属越权形态）。
             raise HttpClientError("URL 不得包含用户信息段")
         host = parsed.hostname or ""
-        allowed = KNOWN_NETWORK_HOSTS.get(service, [])
-        if host not in allowed:
+        allowed_hosts = KNOWN_NETWORK_HOSTS.get(service, [])
+        if host not in allowed_hosts:
             # 不回显完整 URL（可能含查询串），仅给出服务与主机。
             raise HttpClientError(f"服务 {service} 不允许访问主机 {host}")
+
+        # 二次纵深防御：同一允许主机上，只有该服务声明的 (方法, 路径) 才能通过。
+        allowed_routes = KNOWN_NETWORK_ROUTES.get(service, [])
+        route = (method.upper(), parsed.path)
+        if route not in allowed_routes:
+            raise HttpClientError(
+                f"服务 {service} 不允许 {method.upper()} {parsed.path or '/' }"
+            )
 
     async def _read_limited(self, resp: "httpx.Response") -> str:
         """流式读取响应体并强制大小上限；超限立即抛脱敏异常。"""

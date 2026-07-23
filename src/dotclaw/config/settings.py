@@ -81,20 +81,40 @@ def _parse_tool_policy(policy_raw: dict[str, Any]) -> "ToolPolicyConfig":
     )
 
 
+def _coerce_network_enabled(value: Any, service: str) -> bool:
+    """把 services 的 enabled 开关强制为 bool；仅接受真实布尔值。
+
+    字符串 "false"/"true"、整数 1/0 等均会被显式告警并按关闭处理，避免
+    ``bool("false") == True`` 这类意外启用（开发计划 §2.3）。
+    """
+    if isinstance(value, bool):
+        return value
+    logger.warning(
+        "tools.network.%s.enabled 必须是布尔值，当前值 %r 将被视为 false",
+        service,
+        value,
+    )
+    return False
+
+
 def _parse_network_tools(raw: dict[str, Any]) -> "NetworkToolsConfig":
     """解析 tools.network 配置为 NetworkToolsConfig。
 
     仅读取各服务的 enabled 开关；端点/主机等由代码固定（开发计划 §2.3）。
-    未提供的服务缺省关闭。
+    未提供的服务缺省关闭；非法 enabled 值告警并按关闭处理。
     """
     if not isinstance(raw, dict):
         return NetworkToolsConfig()
     return NetworkToolsConfig(
         tavily=NetworkServiceConfig(
-            enabled=bool((raw.get("tavily") or {}).get("enabled", False))
+            enabled=_coerce_network_enabled(
+                (raw.get("tavily") or {}).get("enabled", False), "tavily"
+            )
         ),
         open_meteo=NetworkServiceConfig(
-            enabled=bool((raw.get("open_meteo") or {}).get("enabled", False))
+            enabled=_coerce_network_enabled(
+                (raw.get("open_meteo") or {}).get("enabled", False), "open_meteo"
+            )
         ),
     )
 

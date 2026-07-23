@@ -14,3 +14,11 @@ KNOWN_NETWORK_HOSTS: dict[str, list[str]] = {
     "tavily": ["api.tavily.com"],
     "open_meteo": ["geocoding-api.open-meteo.com", "api.open-meteo.com"],
 }
+
+# 固定 Provider 服务标识 → 该服务允许被调用的 (HTTP 方法, 路径) 集合。
+# 客户端在主机校验之后再做一次方法和完整路径的纵深防御，拒绝同一主机上的未声明端点
+# （开发计划 §2.4）。
+KNOWN_NETWORK_ROUTES: dict[str, list[tuple[str, str]]] = {
+    "tavily": [("POST", "/search")],
+    "open_meteo": [("GET", "/v1/search"), ("GET", "/v1/forecast")],
+}

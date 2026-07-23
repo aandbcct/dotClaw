@@ -53,6 +53,20 @@ async def test_host_not_allowed_for_service():
         await c.request(service="open_meteo", method="GET", url="https://api.tavily.com/search")
 
 
+async def test_unexpected_method_on_allowed_host():
+    c = _client()
+    # api.tavily.com 是声明主机，但 DELETE 不是该服务允许的方法。
+    with pytest.raises(HttpClientError):
+        await c.request(service="tavily", method="DELETE", url="https://api.tavily.com/search")
+
+
+async def test_unexpected_path_on_allowed_host():
+    c = _client()
+    # api.tavily.com 是声明主机，但 /unexpected 不是该服务允许的路径。
+    with pytest.raises(HttpClientError):
+        await c.request(service="tavily", method="POST", url="https://api.tavily.com/unexpected")
+
+
 async def test_valid_request_returns_response():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "api.tavily.com"

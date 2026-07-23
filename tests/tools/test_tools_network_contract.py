@@ -35,7 +35,12 @@ from dotclaw.tools.policy import (
 from dotclaw.tools.network import KNOWN_NETWORK_HOSTS
 
 from dotclaw.bootstrap._host_components import _build_tools
-from dotclaw.config.settings import Config, NetworkServiceConfig, NetworkToolsConfig
+from dotclaw.config.settings import (
+    Config,
+    NetworkServiceConfig,
+    NetworkToolsConfig,
+    _raw_to_config,
+)
 
 
 # ── 工具定义构造辅助 ──
@@ -223,6 +228,39 @@ def test_config_explicit_network_http_priority():
 
     assert scope.network_services == {"tavily": KNOWN_NETWORK_HOSTS["tavily"]}
     assert scope.global_rules["network.http"] is PolicyDecision.DENY
+
+
+def test_config_string_false_warns_and_disabled(caplog) -> None:
+    # 字符串 "false" 不得被 bool() 解析为 True；应告警并按关闭处理。
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        cfg = _raw_to_config({"tools": {"network": {"tavily": {"enabled": "false"}}}})
+
+    assert cfg.tools.network.tavily.enabled is False
+    assert any(
+        "tools.network.tavily.enabled 必须是布尔值" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_config_integer_enabled_warns_and_disabled(caplog) -> None:
+    # 整数 1 等非布尔值同样告警并按关闭处理。
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        cfg = _raw_to_config({"tools": {"network": {"open_meteo": {"enabled": 1}}}})
+
+    assert cfg.tools.network.open_meteo.enabled is False
+    assert any(
+        "tools.network.open_meteo.enabled 必须是布尔值" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_config_true_bool_accepted() -> None:
+    cfg = _raw_to_config({"tools": {"network": {"tavily": {"enabled": True}}}})
+    assert cfg.tools.network.tavily.enabled is True
 
 
 # ── 新增错误码映射 ──

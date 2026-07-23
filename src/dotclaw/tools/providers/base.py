@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dotclaw.tools.base import ToolErrorCode
-from dotclaw.tools.http_client import HttpClientError
+from dotclaw.tools.http_client import HttpClientError, ResponseTooLargeError
 
 
 class ProviderError(Exception):
@@ -74,5 +74,10 @@ async def call(
             json=json,
             retry_once=retry_once,
         )
+    except ResponseTooLargeError as exc:
+        # 响应体超限是独立的错误类别，不归类为一般网络错误（开发计划 §2.6）。
+        raise ProviderError(
+            ToolErrorCode.RESPONSE_TOO_LARGE, f"{label}响应体超过最大允许大小"
+        ) from exc
     except HttpClientError as exc:
         raise ProviderError(ToolErrorCode.NETWORK_ERROR, f"{label}网络请求失败") from exc

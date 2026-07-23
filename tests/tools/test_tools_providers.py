@@ -19,7 +19,11 @@ from dotclaw.config.settings import Config, NetworkServiceConfig, NetworkToolsCo
 from dotclaw.tools.base import ToolErrorCode, ToolExecutionContext
 from dotclaw.tools.builtin.web_tool import SearchArgs, web_search
 from dotclaw.tools.builtin.weather_tool import WeatherArgs, get_forecast
-from dotclaw.tools.http_client import HttpClientError, ProviderHttpResponse
+from dotclaw.tools.http_client import (
+    HttpClientError,
+    ProviderHttpResponse,
+    ResponseTooLargeError,
+)
 from dotclaw.tools.providers import OpenMeteoProvider, TavilyProvider
 
 
@@ -179,6 +183,15 @@ async def test_tavily_search_network_error(monkeypatch) -> None:
     result = await web_search(SearchArgs(query="python"), _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.NETWORK_ERROR.value
+
+
+async def test_tavily_search_response_too_large(monkeypatch) -> None:
+    """响应体超限映射为 RESPONSE_TOO_LARGE（开发计划 §2.6）。"""
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    client = FakeHttpClient([], raise_exc=ResponseTooLargeError("响应体超过最大允许大小"))
+    result = await web_search(SearchArgs(query="python"), _ctx(client))
+    assert result.is_error
+    assert result.error_code == ToolErrorCode.RESPONSE_TOO_LARGE.value
 
 
 async def test_tavily_search_output_truncation(monkeypatch) -> None:
