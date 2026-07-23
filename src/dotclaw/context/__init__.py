@@ -16,7 +16,7 @@ from .contracts import (
 from .defaults import build_context_provider, default_context_plan_configuration
 from .plan_configuration import ContextOwnerPlanConfiguration, InMemoryContextPlanConfiguration
 from .ports import ContextDependencies, ContextPlanConfigurationPort
-from .plan_resolver import ContextPlanResolver
+from .plan_resolver import ContextPlanResolver, build_context_plan_from_registry
 from .provider import ContextProvider
 from .registry import ContextSlotRegistry
 from .signals import ContextRefreshReason, ContextRefreshSignal, ContextSignalBus, ContextSignalSubscription
@@ -45,6 +45,7 @@ __all__ = [
     "ContextOwnerSnapshot",
     "ContextPlan",
     "ContextPlanResolver",
+    "build_context_plan_from_registry",
     "ContextPort",
     "ContextProvider",
     "ContextRefreshPolicy",

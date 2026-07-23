@@ -256,7 +256,15 @@ class RuntimeEngine:
                 (),
                 "审批通过后恢复运行",
             )
-            result = await self._drive(execution, resumed_run, messages, pending_calls, event_sequence, text_stream_port)
+            result = await self._drive(
+                execution,
+                resumed_run,
+                messages,
+                pending_calls,
+                event_sequence,
+                text_stream_port,
+                resume_approved_call_id=pending_calls[0].call_id if pending_calls else None,
+            )
             await self._release_run_context_if_terminal(result)
             return result
         finally:
@@ -391,7 +399,7 @@ class RuntimeEngine:
         await self._release_run_context_if_terminal(result)
 
     async def _release_run_context_if_terminal(self, result: RunResult) -> None:
-        """仅在 Run 终态释放 Run Owner 的私有 Slot 实例。"""
+        """仅在 Run 终态释放 Run Owner 的私有 Slot 实例，并清理工具端口的进程内缓存。"""
         terminal_statuses: frozenset[RunStatus] = frozenset({
             RunStatus.COMPLETED,
             RunStatus.FAILED,
@@ -400,8 +408,12 @@ class RuntimeEngine:
         })
         if result.status in terminal_statuses:
             await self._context_port.release_scope(ContextOwner.RUN, result.run_id)
+            # 可选能力：工具端口若缓存了本 Run 的恢复状态，终态时清理，避免 Adapter 内存累积。
+            clear_run = getattr(self._tool_port, "clear_run", None)
+            if clear_run is not None:
+                await clear_run(result.run_id)
 
-    async def _drive(self, execution: RunExecution, run: AgentRun, initial_messages: tuple[RunMessage, ...], pending_calls: tuple[ToolCall, ...], event_sequence: int = 0, text_stream_port: TextStreamPort | None = None) -> RunResult:
+    async def _drive(self, execution: RunExecution, run: AgentRun, initial_messages: tuple[RunMessage, ...], pending_calls: tuple[ToolCall, ...], event_sequence: int = 0, text_stream_port: TextStreamPort | None = None, resume_approved_call_id: str | None = None) -> RunResult:
         """驱动局部状态机，并在每个事实边界按顺序持久化。"""
         messages: list[RunMessage] = list(initial_messages)
         execution.replace_run_messages(tuple(messages))
@@ -454,8 +466,12 @@ class RuntimeEngine:
                         continue
                     event_number = await self._tool_started_event(run, event_number, messages, tool_call)
                     try:
+                        approved: bool = (
+                            resume_approved_call_id is not None
+                            and tool_call.call_id == resume_approved_call_id
+                        )
                         tool_result: ToolResult = await self._tool_port.execute(
-                            ToolInvocation(execution.run_id, tool_call),
+                            ToolInvocation(execution.run_id, tool_call, approved=approved),
                             execution.view(),
                         )
                     except Exception as error:

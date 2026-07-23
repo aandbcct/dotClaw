@@ -186,6 +186,8 @@ class ToolInvocation:
 
     run_id: str
     call: ToolCall
+    approved: bool = False
+    """恢复场景下该调用已获批准，适配器应直接执行而非再次请求审批。"""
 
 
 @dataclass(frozen=True)

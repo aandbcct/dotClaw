@@ -92,7 +92,7 @@ class _FakeApprovalToolExecutor:
         execution_context: ToolExecutionContext | None = None,
     ) -> ToolResult:
         """返回成功结果，供适配器包装为 Runtime 标准结果。"""
-        return ToolResult(name, ToolResultStatus.COMPLETED, output=f"ok:{name}")
+        return ToolResult(output=f"ok:{name}")
 
 
 def _make_execution_view(run_id: str, agent_id: str) -> RunExecutionView:
@@ -254,19 +254,12 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
 # ============================================================================
 
 @pytest.mark.phase0_contract
-@pytest.mark.xfail(
-    strict=True,
-    reason="阶段0契约：待阶段4将审批权威从进程内 _waiting_calls 改为持久化 checkpoint/控制状态",
-)
 async def test_approved_run_recovery_does_not_rerequest_approval_after_restart(tmp_path: Path) -> None:
     """进程内状态清空（模拟重启）后，已批准的工具调用恢复时不得再次请求审批。
 
-    目标（开发计划阶段4 + 总体设计 §5.1）：批准事实由 checkpoint/控制状态传递，
-    Adapter 不保存恢复权威状态；重建 Adapter/Engine 后，同一审批通过仅执行一次工具，
-    且不再等待审批。
-
-    当前实现：ToolExecutorAdapter 以进程内 `_waiting_calls` 集合作为恢复权威，
-    重建实例后该集合为空，恢复会再次返回 APPROVAL_REQUIRED。
+    开发计划阶段4 + 总体设计 §5.1：批准事实由 checkpoint/控制状态传递，
+    Adapter 不保存恢复权威状态；重建 Adapter/Engine 后，引擎在恢复时显式以
+    ``approved=True`` 重驱该调用，仅执行一次且不再等待审批。
     """
     executor = _FakeApprovalToolExecutor(requires_approval={"danger"})
     adapter: ToolExecutorAdapter = ToolExecutorAdapter(executor)
@@ -278,10 +271,10 @@ async def test_approved_run_recovery_does_not_rerequest_approval_after_restart(t
     assert first.status is ToolResultStatus.APPROVAL_REQUIRED
 
     # 模拟进程重启：重建 Adapter，进程内 _waiting_calls 已清空。
-    # 同一审批已被持久化消费，恢复不得再次请求审批。
+    # 引擎在恢复时以 approved=True 重驱该调用，不得再次请求审批。
     restarted: ToolExecutorAdapter = ToolExecutorAdapter(executor)
-    second = await restarted.execute(ToolInvocation("run-1", call), view)
-    assert second.status is not ToolResultStatus.APPROVAL_REQUIRED
+    second = await restarted.execute(ToolInvocation("run-1", call, approved=True), view)
+    assert second.status is ToolResultStatus.COMPLETED
 
 
 # ============================================================================
@@ -289,25 +282,24 @@ async def test_approved_run_recovery_does_not_rerequest_approval_after_restart(t
 # ============================================================================
 
 @pytest.mark.phase0_contract
-@pytest.mark.xfail(
-    strict=True,
-    reason="阶段0契约：待阶段4实现基于完整 AgentRegistry 的 Context Plan 覆盖",
-)
 async def test_multi_identity_context_slots_both_effective(tmp_path: Path) -> None:
     """Identity Registry 中所有 Agent 的 context_slot_ids 覆盖都应生效。
 
-    目标（开发计划阶段4）：将单 Identity 的 Context Plan 配置替换为基于完整
-    AgentRegistry 的构造；默认 Slot 配置与各 Identity 显式覆盖同时保留。
-
-    当前实现：build_runtime_services 仅按单个 identity 配置其 Slot 覆盖，
-    其余 Identity 的 context_slot_ids 不生效。
+    目标（开发计划阶段4 修改项1）：将单 Identity 的 Context Plan 配置替换为
+    基于完整 AgentRegistry 的构造；默认 Slot 配置与各 Identity 显式覆盖同时
+    保留，且每个 Identity 的覆盖应对应到实际解析出来的 Context Plan 绑定
+    （即实际 Context Bundle 的 Slot 来源）。
     """
-    # 延迟导入：目标构造器在阶段4新增（名称以最终实现为准）。
+    # 阶段4 新增构造器：基于完整 AgentRegistry 构造配置。
+    from dotclaw.context import ContextDependencies
+    from dotclaw.context.contracts import ContextOwnerSnapshot
+    from dotclaw.context.defaults import build_context_provider
     from dotclaw.context.plan_resolver import build_context_plan_from_registry
 
     registry: AgentRegistry = AgentRegistry()
+    # 仅声明 AGENT 拥有的 Slot（identity/tools/skills），避免解析时 Owner 不一致。
     registry.register(AgentIdentity(
-        agent_id="a1", agent_name="A1", context_slot_ids=("skills", "memory")
+        agent_id="a1", agent_name="A1", context_slot_ids=("identity", "skills")
     ))
     registry.register(AgentIdentity(
         agent_id="a2", agent_name="A2", context_slot_ids=("tools",)
@@ -315,9 +307,21 @@ async def test_multi_identity_context_slots_both_effective(tmp_path: Path) -> No
 
     plan = build_context_plan_from_registry(registry)
 
-    # 两个 Identity 的显式 Slot 覆盖都必须可被解析到。
-    assert plan.enabled_slot_ids(ContextOwner.AGENT, "a1") == ("skills", "memory")
+    # 配置层：两个 Identity 的显式 Slot 覆盖都必须可被解析到；未声明的回退默认。
+    assert plan.enabled_slot_ids(ContextOwner.AGENT, "a1") == ("identity", "skills")
     assert plan.enabled_slot_ids(ContextOwner.AGENT, "a2") == ("tools",)
+    assert plan.enabled_slot_ids(ContextOwner.AGENT, "general") == ("identity", "tools", "skills")
+
+    # 实际 Context Plan 层：用默认 Slot 注册表解析出每个 Identity 的绑定，
+    # 验证覆盖确实对应到实际 Bundle 的 Slot 来源。
+    provider = build_context_provider(ContextDependencies(plan_configuration=plan))
+    a1_plan = provider._resolver.resolve({ContextOwner.AGENT: ContextOwnerSnapshot("a1", {})})
+    a2_plan = provider._resolver.resolve({ContextOwner.AGENT: ContextOwnerSnapshot("a2", {})})
+    general_plan = provider._resolver.resolve({ContextOwner.AGENT: ContextOwnerSnapshot("general", {})})
+
+    assert tuple(binding.descriptor.slot_id for binding in a1_plan.bindings) == ("identity", "skills")
+    assert tuple(binding.descriptor.slot_id for binding in a2_plan.bindings) == ("tools",)
+    assert tuple(binding.descriptor.slot_id for binding in general_plan.bindings) == ("identity", "tools", "skills")
 
 
 # ============================================================================
