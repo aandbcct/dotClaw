@@ -202,9 +202,9 @@ flowchart TB
 
 网络能力默认关闭；仅在 `config.yaml` 的 `tools.network.<service>.enabled` 显式启用后才产生可用能力。所有联网 Tool 经 Tool v1 固定链路（校验 → Broker → Policy → 审批 → Handler → Journal）执行，且**不存在 Agent 可控的 URL / host / endpoint 参数**。
 
-- `tools/http_client.py`（`HttpClient` 协议 + `HttpxHttpClient`）：仅供内置 Provider 使用的薄客户端。只允许 HTTPS、精确声明主机与 443 端口，拒绝 IP 字面量、非标准端口、用户信息段、重定向与未声明路径的跨主机跳转；连接超时 3s、总超时 10s、单响应 1 MiB 流式上限、并发 4；Tavily 不重试、Open-Meteo 仅对临时网络错误重试一次；异常消息脱敏（不含密钥/认证头/查询串/正文）。Agent 不可见、不进入工具注册表、不直接依赖 Journal。`ApplicationHost.shutdown()` 关闭共享连接池。
-- `tools/network.py`（`KNOWN_NETWORK_HOSTS`）：固定服务→主机路由表（tavily → api.tavily.com；open_meteo → geocoding-api.open-meteo.com + api.open-meteo.com）。
-- `tools/providers/`：`ProviderError` 统一携带应映射的 `ToolErrorCode`（401/403→CONFIGURATION_ERROR，429/4xx/5xx→NETWORK_ERROR，均脱敏）；`call()` 把脱敏 `HttpClientError` 归一为 `NETWORK_ERROR`。Provider 只做最小必要请求与受限结果映射，端点/方法/认证方式属于代码、不可由 Agent 参数或 YAML 覆盖。
+- `tools/http_client.py`（`HttpClient` 协议 + `HttpxHttpClient`）：仅供内置 Provider 使用的薄客户端。只允许 HTTPS、精确声明主机、443 端口与代码登记的 HTTP 方法/路径，拒绝 IP 字面量、非标准端口、用户信息段、重定向及同一主机上的未声明路由；连接超时 3s、总超时 10s、单响应 1 MiB 流式上限、并发 4；Tavily 不重试、Open-Meteo 仅对临时网络错误重试一次；异常消息脱敏（不含密钥/认证头/查询串/正文）。Agent 不可见、不进入工具注册表、不直接依赖 Journal。`ApplicationHost.shutdown()` 关闭共享连接池。
+- `tools/network.py`（`KNOWN_NETWORK_HOSTS` / `KNOWN_NETWORK_ROUTES`）：固定服务→精确主机及方法/路径路由表（Tavily 仅 `POST /search`；Open-Meteo 仅 `GET /v1/search` 与 `GET /v1/forecast`）。
+- `tools/providers/`：`ProviderError` 统一携带应映射的 `ToolErrorCode`（401/403→CONFIGURATION_ERROR，响应过大→RESPONSE_TOO_LARGE，429/其他 4xx/5xx→NETWORK_ERROR，均脱敏）；`call()` 将脱敏网络异常归一为对应错误码。Provider 只做最小必要请求与受限结果映射，端点/方法/认证方式属于代码、不可由 Agent 参数或 YAML 覆盖。
   - `TavilyProvider.search`：固定 `POST /search`，读取 `TAVILY_API_KEY` 环境变量（缺失→CONFIGURATION_ERROR，不读 YAML、不写日志）；请求不含 Extract/Crawl/Map；输出按 title/url/snippet/总字符上限截断。
   - `OpenMeteoProvider.get_forecast`：先地理编码（固定字段、支持 `country_code` 缩小候选），唯一候选直接预报、零候选返回 `no_candidate`、多候选返回至多 5 个 `candidates`；预报固定当前/每日字段、`timezone=auto`，不机械透传全部参数。
 - `tools/builtin/math_tool.py`（`builtin.math.calculate`）：本地受限计算，不访问文件/网络/环境；仅允许 `+ - * / // % **`、括号、数值字面量、固定数学函数白名单（sqrt/log/exp/sin/cos…）与常量（pi/e/tau）；求值前做 AST 白名单遍历 + 深度/节点数限制，自定义幂运算限制指数与结果量级，非有限/复数结果拒绝；任何异常映射为脱敏的 `EXECUTION_ERROR`。该工具**不产生 Capability Request**（无策略档案）。

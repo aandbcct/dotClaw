@@ -286,6 +286,8 @@ sequenceDiagram
 
 内置通用工具当前包含：`builtin.files.*`（文件读写/列举）、`builtin.process.execute`（进程执行，需审批）、`builtin.memory.*`（记忆读写）、`builtin.system.*`（信息/时间）、`builtin.web.search`（固定调用 Tavily 搜索）、`builtin.weather.get_forecast`（固定调用 Open-Meteo 预报）与 `builtin.math.calculate`（本地受限表达式计算）。网络类工具通过**静态声明**的固定 Provider 访问预授权主机，不存在可由 Agent 控制的任意 URL/endpoint，也没有任意网页抓取、正文提取或爬虫能力；`HttpClient` 是仅供 Provider 使用的受控内部客户端，不进入工具注册表与提示词。
 
+联网能力默认关闭：启用 Tavily 搜索时，将 `tools.network.tavily.enabled` 设为 `true`，并在运行环境提供 `TAVILY_API_KEY`；仅使用天气时，启用 `tools.network.open_meteo.enabled` 即可。服务未启用或 Tavily 密钥缺失时，工具会明确返回配置/策略错误，不会降级为任意网页访问。
+
 MCP 只将标准工具能力接入系统，并以“服务名 + 工具名”的稳定命名空间展示，避免与内置工具或其他服务冲突。服务连接和调用都需要显式授权；首次发现完成后，每个 Run 使用固定的工具快照，运行中不会因服务状态变化而改变模型看到的工具集。
 
 详见 [Tool 模块总体说明](docs/wiki/Tool%20模块总体说明.md)。
