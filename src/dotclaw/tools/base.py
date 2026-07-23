@@ -8,6 +8,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # HttpClient 协议由阶段二新增的 http_client.py 定义；此处仅用于类型标注，
+    # 不在运行时导入，避免 base 模块过早依赖 httpx。
+    from .http_client import HttpClient
 
 logger = logging.getLogger("dotclaw.tools")
 
@@ -35,6 +41,9 @@ class ToolErrorCode(str, Enum):
     MCP_UNAVAILABLE = "MCP_UNAVAILABLE"
     EXECUTION_ERROR = "EXECUTION_ERROR"
     EXECUTOR_ERROR = "EXECUTOR_ERROR"
+    CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+    NETWORK_ERROR = "NETWORK_ERROR"
+    RESPONSE_TOO_LARGE = "RESPONSE_TOO_LARGE"
 
 
 class ToolErrorType(str, Enum):
@@ -48,6 +57,9 @@ class ToolErrorType(str, Enum):
     EXECUTION = "execution"
     EXECUTOR = "executor"
     MCP_UNAVAILABLE = "mcp_unavailable"
+    CONFIGURATION = "configuration"
+    NETWORK = "network"
+    RESPONSE_TOO_LARGE = "response_too_large"
 
 
 @dataclass
@@ -67,6 +79,15 @@ class ToolDefinition:
     policy_profile: str | None = None                 # ToolPolicy 档案值，Policy 阶段使用
     path_param: str | None = None                     # WORKSPACE 类档案对应的路径参数名；
                                                        # 为 None 时 Broker 默认读 "path"。
+                                                       # memory 工具声明为 "long_term_file" 等，
+                                                       # 使 Broker 能正确读取路径并做逃逸检测。
+    network_service: str | None = None                # 网络类静态声明：Provider 服务标识
+                                                       # （如 "tavily" / "open_meteo"）；为 None
+                                                       # 时不持有网络能力，Broker 不生成 NETWORK 请求。
+    network_hosts: list[str] = field(default_factory=list)  # 网络类静态声明：该工具
+                                                       # 精确 HTTPS 主机集合；Broker 据此为每个
+                                                       # 主机生成一条 NETWORK_HTTP 请求，绝不读取
+                                                       # Agent 参数中的 URL。
                                                        # memory 工具声明为 "long_term_file" 等，
                                                        # 使 Broker 能正确读取路径并做逃逸检测。
 
@@ -114,6 +135,9 @@ def _default_error_type(code: ToolErrorCode) -> ToolErrorType:
         ToolErrorCode.MCP_UNAVAILABLE: ToolErrorType.MCP_UNAVAILABLE,
         ToolErrorCode.EXECUTION_ERROR: ToolErrorType.EXECUTION,
         ToolErrorCode.EXECUTOR_ERROR: ToolErrorType.EXECUTOR,
+        ToolErrorCode.CONFIGURATION_ERROR: ToolErrorType.CONFIGURATION,
+        ToolErrorCode.NETWORK_ERROR: ToolErrorType.NETWORK,
+        ToolErrorCode.RESPONSE_TOO_LARGE: ToolErrorType.RESPONSE_TOO_LARGE,
     }[code]
 
 
@@ -136,6 +160,10 @@ class ToolExecutionContext:
 
     agent_id: str = ""
     """Agent 标识，用于策略收窄与审计。"""
+
+    http_client: "HttpClient | None" = None
+    """内部只读依赖：受控 HTTP 客户端（阶段二装配）；网络 Tool 经此调用固定
+    Provider，Agent 不可见、不可覆盖。"""
 
 
 # ToolContext 在模块末尾绑定为 ToolExecutionContext 的别名，供函数签名使用。

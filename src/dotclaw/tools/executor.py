@@ -23,6 +23,7 @@ import asyncio
 import dataclasses
 import logging
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from .base import (
     ToolErrorCode,
@@ -41,6 +42,7 @@ from dotclaw.journal import Journal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .http_client import HttpClient, ProviderHttpResponse
     from .parser import SkillParser
 
 logger = logging.getLogger("dotclaw.tools.executor")
@@ -58,6 +60,7 @@ class ToolExecutor:
         skill_parser: "SkillParser | None" = None,
         approval_commands: set[str] | None = None,
         agent_policy_resolver: "Callable[[str], dict[str, str] | None] | None" = None,
+        http_client: "HttpClient | None" = None,
     ):
         self._registry = registry
         self._approval = approval_manager or ApprovalManager()
@@ -76,6 +79,9 @@ class ToolExecutor:
         # 独立的策略作用域（P1 修复：Agent 级策略不再保存在全局 Executor，避免
         # delegation 子 Agent 继承主 Agent 规则或主 Agent 规则污染所有 Agent）。
         self._agent_policy_resolver = agent_policy_resolver
+        # 受控 HTTP 客户端（阶段二装配）：作为只读内部依赖注入 Tool 执行上下文，
+        # 仅供网络 Tool 的固定 Provider 使用，Agent 不可见、不可覆盖。
+        self._http_client = http_client
 
     @property
     def registry(self) -> ToolRegistry:
@@ -280,7 +286,9 @@ class ToolExecutor:
         # CWD 解析相对路径，安全边界会在 Broker 批准但实际落到错误位置时失效）。
         validated = _apply_resolved_paths(validated, requests)
         try:
-            result = await self._execute_handler(name, validated, handler, execution_context)
+            result = await self._execute_handler(
+                name, validated, handler, execution_context, journal
+            )
         except Exception:  # 超时/调度异常已在 _execute_handler 内归一化
             result = ToolResult.from_error(
                 code=ToolErrorCode.EXECUTOR_ERROR,
@@ -297,11 +305,12 @@ class ToolExecutor:
         validated: Any,
         handler: ToolHandler,
         execution_context: ToolExecutionContext | None,
+        journal: Journal | None,
     ) -> ToolResult:
         """执行已通过策略/审批的工具，含超时控制与异常归一化。"""
         definition = handler.definition()
         timeout: float = definition.timeout
-        ctx = self._build_context(timeout, execution_context)
+        ctx = self._build_context(timeout, execution_context, journal, name)
 
         try:
             result = await asyncio.wait_for(handler.execute(validated, ctx), timeout=timeout)
@@ -354,15 +363,25 @@ class ToolExecutor:
         self,
         timeout: float,
         execution_context: ToolExecutionContext | None,
+        journal: Journal | None,
+        tool_name: str,
     ) -> ToolExecutionContext:
-        """合并 Runtime 注入的上下文与工具定义超时。"""
+        """合并 Runtime 注入的上下文与工具定义超时，并注入受控 HTTP 客户端。
+
+        若提供了 Journal，则用审计包装客户端包裹真实客户端，使其在每次网络请求后
+        写入脱敏的 network_audit 摘要（开发计划 §2.6）；HttpClient 本身不依赖 Journal。
+        """
+        http_client = self._http_client
+        if journal is not None and http_client is not None:
+            http_client = _AuditHttpClient(http_client, journal, tool_name)
         if execution_context is not None:
             return ToolExecutionContext(
                 timeout=timeout,
                 agentrun_id=execution_context.agentrun_id,
                 agent_id=execution_context.agent_id,
+                http_client=http_client,
             )
-        return ToolExecutionContext(timeout=timeout)
+        return ToolExecutionContext(timeout=timeout, http_client=http_client)
 
     def _finish(
         self,
@@ -391,6 +410,68 @@ class ToolExecutor:
             message=f"错误：未找到工具 '{name}'",
             error_type=ToolErrorType.NOT_FOUND,
         )
+
+
+def _status_class(status_code: int) -> str:
+    """把 HTTP 状态码归约为脱敏的类别字符串（供 network_audit 记录）。"""
+    if 200 <= status_code < 300:
+        return "2xx"
+    if 300 <= status_code < 400:
+        return "3xx"
+    if 400 <= status_code < 500:
+        return "4xx"
+    if 500 <= status_code < 600:
+        return "5xx"
+    return "other"
+
+
+class _AuditHttpClient:
+    """审计包装客户端：实现 HttpClient 协议，委托真实客户端并记录脱敏网络摘要。
+
+    仅在每次请求成功后写入 Journal 的 network_audit 事件；不接触密钥、认证头、
+    完整 URL 查询串或响应正文（开发计划 §2.6）。HttpClient 本身不依赖 Journal，
+    审计职责由 ToolExecutor 通过本包装类承担。
+    """
+
+    def __init__(self, inner: "HttpClient", journal: "Journal", tool_name: str) -> None:
+        self._inner = inner
+        self._journal = journal
+        self._tool_name = tool_name
+
+    async def request(
+        self,
+        *,
+        service: str,
+        method: str,
+        url: str,
+        headers: dict | None = None,
+        json: Any | None = None,
+        retry_once: bool = False,
+    ) -> "ProviderHttpResponse":
+        """委托请求并记录脱敏审计摘要。"""
+        resp = await self._inner.request(
+            service=service,
+            method=method,
+            url=url,
+            headers=headers,
+            json=json,
+            retry_once=retry_once,
+        )
+        host = urlparse(url).hostname or ""
+        self._journal.tool_network_audit(
+            tool_name=self._tool_name,
+            service=service,
+            host=host,
+            status_class=_status_class(resp.status_code),
+            elapsed_ms=resp.elapsed_ms,
+            bytes_len=len(resp.text.encode("utf-8")),
+            retries=resp.retries,
+        )
+        return resp
+
+    async def close(self) -> None:
+        """关闭时委托真实客户端。"""
+        await self._inner.close()
 
 
 def _apply_resolved_paths(validated: Any, requests: list[CapabilityRequest]) -> Any:

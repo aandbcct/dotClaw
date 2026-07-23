@@ -100,6 +100,8 @@ class ToolDiscovery:
                     timeout=meta.timeout,
                     metadata=dict(meta.metadata),
                     args_style="model",
+                    network_service=meta.network_service,
+                    network_hosts=list(meta.network_hosts),
                 )
 
             handler = FunctionToolHandler(func, meta)
@@ -241,6 +243,8 @@ def _with_inferred(meta: ToolMeta, inferred: type[BaseModel] | None) -> ToolMeta
         timeout=meta.timeout,
         metadata=dict(meta.metadata),
         args_style="fields" if inferred is not None else "model",
+        network_service=meta.network_service,
+        network_hosts=list(meta.network_hosts),
     )
 
 

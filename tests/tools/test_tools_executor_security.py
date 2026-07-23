@@ -55,7 +55,14 @@ async def e_exec(args, context):
     return "EXEC:" + args.command
 
 
-@tool(name="e.net", description="网络请求", policy=ToolPolicy.NETWORK, args_model=UrlArgs)
+@tool(
+    name="e.net",
+    description="网络请求",
+    policy=ToolPolicy.NETWORK,
+    network_service="tavily",
+    network_hosts=["api.tavily.com"],
+    args_model=UrlArgs,
+)
 async def e_net(args, context):
     return "NET:" + args.url
 

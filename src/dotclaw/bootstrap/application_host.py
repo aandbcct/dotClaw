@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from ._host_components import (
     CRITICAL,
+    _build_http_client,
     _build_llm,
     _build_mcp,
     _build_memory,
@@ -62,6 +63,7 @@ class ApplicationHost:
         self._context_port: ContextPort | None = None
         self._runtime_services: RuntimeServices | None = None
         self._session_interaction: SessionInteractionService | None = None
+        self._http_client: "HttpClient | None" = None
 
     # ── 构建 ──
 
@@ -96,8 +98,12 @@ class ApplicationHost:
         # ── 可降级组件 ──
         self._skill_registry = _init_sync("技能", lambda: _build_skills(config, root))
         # 工具缺失将明确终止启动（ToolExecutor 是 Runtime 必要依赖）。
+        # 受控 HTTP 客户端作为共享只读依赖随工具一同装配（网络工具关闭时亦可降级）。
+        self._http_client = _build_http_client()
         self._tool_executor = _init_sync(
-            "工具", lambda: _build_tools(config, self._skill_registry), on_fail=CRITICAL
+            "工具",
+            lambda: _build_tools(config, self._skill_registry, http_client=self._http_client),
+            on_fail=CRITICAL,
         )
         memory_mgr, self._memory_dream = await _init_async(
             "记忆", _build_memory(config, self._llm_proxy, root)
@@ -232,5 +238,12 @@ class ApplicationHost:
             except Exception as e:
                 logger.warning("Context 缓存释放异常: %s", e)
             self._context_port = None
-        # 3) 其他可关闭资源（当前无进程级资源需显式释放）
+        # 3) 关闭受控 HTTP 客户端（共享连接池回收）；网络工具不可用时已为 None。
+        if self._http_client is not None:
+            try:
+                await self._http_client.close()
+            except Exception as e:
+                logger.warning("HTTP 客户端关闭异常: %s", e)
+            self._http_client = None
+        # 4) 其他可关闭资源（当前无进程级资源需显式释放）
         logger.info("ApplicationHost 已关闭")

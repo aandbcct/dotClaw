@@ -80,3 +80,26 @@ def test_old_nested_format_no_longer_read() -> None:
     assert cfg.tools.disabled_tools == []
     # exec_timeout 不再从 python.timeout 回退（保留新格式默认 60.0）。
     assert cfg.tools.exec_timeout == 60.0
+
+
+def test_deprecated_tools_web_search_warns_and_is_ignored(caplog) -> None:
+    # 开发计划 §2.3 / §5.1：旧 tools.web_search 出现时输出一次明确弃用告警并忽略，
+    # 不应影响新网络服务配置（tools.network.*.enabled）。旧字段无任何生产读取路径。
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        cfg = _raw_to_config(
+            {
+                "tools": {
+                    "web_search": {"enabled": True},
+                    "network": {"tavily": {"enabled": False}},
+                }
+            }
+        )
+
+    assert any("tools.web_search" in rec.message for rec in caplog.records), (
+        "出现旧 tools.web_search 时应输出一次弃用告警"
+    )
+    # web_search 不污染新网络配置：tavily 仍按显式配置为关闭。
+    assert cfg.tools.network.tavily.enabled is False
+    assert cfg.tools.network.open_meteo.enabled is False

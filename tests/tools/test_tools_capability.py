@@ -62,7 +62,13 @@ async def c_exec(args, context):
     return "ok"
 
 
-@tool(name="c.net", description="网络请求", policy=ToolPolicy.NETWORK, args_model=UrlArgs)
+@tool(
+    name="c.net",
+    description="网络请求",
+    policy=ToolPolicy.NETWORK,
+    network_service="tavily",
+    network_hosts=["api.tavily.com"],
+)
 async def c_net(args, context):
     return "ok"
 
@@ -107,11 +113,13 @@ def test_exec_maps_to_process_with_desensitized_command():
     assert "secret123" not in reqs[0].command
 
 
-def test_net_maps_to_network_http_stripping_query_string():
-    reqs = _broker().resolve(_defn(c_net), UrlArgs(url="https://api.x.com/path?token=abc"), ".")
+def test_net_maps_to_network_http_from_static_declaration():
+    # 网络 Tool 的主机来自静态声明，Broker 不读取 Agent 参数中的 url。
+    reqs = _broker().resolve(_defn(c_net), UrlArgs(url="https://evil.com/path?token=abc"), ".")
     assert reqs[0].kind is ResourceKind.NETWORK_HTTP
-    assert reqs[0].host == "api.x.com"
-    assert "token=abc" not in reqs[0].host
+    assert reqs[0].service == "tavily"
+    assert reqs[0].host == "api.tavily.com"
+    assert "token=abc" not in (reqs[0].host or "")
 
 
 def test_mcp_maps_to_mcp_call():
