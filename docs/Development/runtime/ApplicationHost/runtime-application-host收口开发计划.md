@@ -49,14 +49,14 @@
 - 新增 `session_interaction.py`（名称以实现时项目风格为准）中的 `SessionInteractionService`。
 - `SessionManager.create()` 的 `agent_id` 改为必填；构造与反序列化校验空值/未知值策略。
 - Host 负责显式优先、默认兜底的 Identity 选择并在创建时落盘。
-- Agent 收缩为 Identity + Coordinator 的轻量门面；移除直接暴露基础设施的属性和 `shutdown()`。
-- 将 `Agent.process()` 的 Session Identity 一致性校验迁入 SessionInteractionService，避免调用方绕过 Session 权威。
+- 删除运行时 `Agent` 门面；`AgentIdentity` 保留为身份、模型与能力范围的声明边界，不持有基础设施或执行状态。
+- SessionInteractionService 校验 Session Identity 后，在 Coordinator 的 Session 租约内冻结 `RunRequest`，避免调用方绕过 Session 权威。
 - `main.py` 的 Session 创建、切换和正常消息路径改为调用 SessionInteractionService。
 
 ### 验证
 
 - 不同 Session 可分别绑定不同 Identity，并生成对应 Run 策略。
-- 用不匹配 Identity 的内部 Agent 门面不能绕过 Session 路由。
+- 空或未知 Identity 的 Session 不得提交；不同 Session 必须生成对应 Identity 的冻结 Run 策略，且生产路径不构造运行时 Agent 对象。
 - 现有审批、取消、重试、放弃的外部行为保持等价。
 
 ## 5. 阶段 2：ApplicationHost 与资源生命周期
@@ -89,7 +89,7 @@
 ### 修改项
 
 - 定义只属于本次提交的输出选项/执行参数；不得把 Port 放入需要持久化或诊断序列化的 `RunRequest`。
-- 依次迁移 `SessionInteractionService -> Agent -> SessionRunCoordinator -> RuntimeEngine -> LLMPort -> LLMProxyAdapter` 的方法签名。
+- 依次迁移 `SessionInteractionService -> SessionRunCoordinator -> RuntimeEngine -> LLMPort -> LLMProxyAdapter` 的方法签名；Service 返回结构化 `RunResult`，由 Channel 渲染。
 - `LLMProxyAdapter` 构造函数只接收 LLMProxy；删除 `_text_stream_port` 成员。
 - Scheduler 和无流式测试传入 `None`；CLI 每次消息构造本次的 `ChannelTextStreamAdapter`。
 
@@ -132,7 +132,7 @@
 - 为 ApprovalRepository 增加按 Session 清理所需的最小 Port/Adapter 方法；不得让 SessionManager 直接了解审批文件布局。
 - `SessionManager.delete()` 收缩为 Session 文件/目录原子操作或仅供协调器调用；不再以单文件删除代表完整 Session 删除。
 - 删除 `agent/factory.py`、其导出、未使用 `_build_context_port()`、旧 main 导入和不再适用的测试契约。
-- 更新 README 与 Runtime 文档中“唯一组合根”“Agent 门面”“Session Identity”的陈述。
+- 更新 README 与 Runtime 文档中“唯一组合根”“AgentIdentity 声明边界”“Session Identity”的陈述。
 
 ### 删除前搜索验证
 

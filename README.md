@@ -84,7 +84,7 @@ flowchart TB
 
 ### 声明式 Agent 与会话
 
-`AgentIdentity` 是声明式角色边界（角色、模型、工具约束、策略收窄），不持有运行时对象、不是可执行门面。运行时入口 `SessionInteractionService` 读取 `Session.agent_id` 校验 Identity，再以冻结的 `RunRequest` 直接提交 `SessionRunCoordinator`；同一套执行基础设施因此可以服务多个不同 Agent 身份，而无需任何 Agent 实例。
+`AgentIdentity` 是声明式角色边界（角色、模型、工具约束、策略收窄），不持有运行时对象、不是可执行门面。运行时入口 `SessionInteractionService` 读取 `Session.agent_id` 校验 Identity，再以冻结的 `RunRequest` 直接提交 `SessionRunCoordinator` 并返回结构化 `RunResult`；Channel 负责按本次提交的输出端口渲染结果。同一套执行基础设施因此可以服务多个不同 Agent 身份，而无需任何 Agent 实例。
 
 ```mermaid
 flowchart LR

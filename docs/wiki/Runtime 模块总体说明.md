@@ -22,14 +22,13 @@
 flowchart TB
     Entry["入口层\nChannel / CLI / Web / Scheduler"]
     Host["bootstrap.ApplicationHost\n唯一公开组合根与资源生命周期宿主"]
-    Interaction["SessionInteractionService\n按 Session 的 agent_id 路由"]
-    Agent["Agent\nIdentity + Coordinator 轻量门面"]
+    Interaction["SessionInteractionService\n按 Session 的 agent_id 路由；返回 RunResult"]
     Coordinator["SessionRunCoordinator\n同 Session 串行；跨 Session 并行"]
     Engine["RuntimeEngine\n应用层执行协调器"]
     Execution["RunExecution\n一次运行的内存执行上下文"]
     State["AgentState\n纯状态机"]
 
-    Entry --> Interaction --> Agent --> Coordinator
+    Entry --> Interaction --> Coordinator
     Host -. "创建并注入" .-> Interaction
     Host -. "经私有 runtime_factory 装配" .-> Coordinator
     Host -. "经私有 runtime_factory 装配" .-> Engine
