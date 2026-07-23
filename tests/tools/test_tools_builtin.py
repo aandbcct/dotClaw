@@ -1,7 +1,9 @@
-"""8 个 builtin 工具迁移验证（Tool v1 阶段二）。
+"""11 个 builtin 工具迁移验证（Tool v1 阶段二 + 阶段三 + 阶段四）。
 
 逐个验证：新规范名、JSON Schema（必填/默认值）、以及现有业务行为不变。
-所有新增注释使用中文。
+阶段三新增 builtin.web.search 与 builtin.weather.get_forecast 两个网络工具，
+阶段四新增 builtin.math.calculate 受限计算工具，均通过可信 builtin Discovery 自动发现
+（开发计划阶段三/四验收）。所有新增注释使用中文。
 """
 
 from __future__ import annotations
@@ -21,6 +23,9 @@ EXPECTED_NAMES = {
     "builtin.memory.write",
     "builtin.system.get_info",
     "builtin.system.get_time",
+    "builtin.web.search",
+    "builtin.weather.get_forecast",
+    "builtin.math.calculate",
 }
 
 
@@ -29,7 +34,7 @@ def handlers():
     return {h.name: h for h in ToolDiscovery.discover_builtin()}
 
 
-def test_all_eight_builtins_discovered(handlers) -> None:
+def test_all_builtins_discovered(handlers) -> None:
     assert set(handlers.keys()) == EXPECTED_NAMES
 
 
@@ -50,6 +55,25 @@ def test_approval_flags(handlers) -> None:
     assert handlers["builtin.process.execute"].definition().needs_approval is True
     assert handlers["builtin.memory.write"].definition().needs_approval is True
     assert handlers["builtin.files.read_text"].definition().needs_approval is False
+
+
+def test_network_tools_static_declaration(handlers) -> None:
+    """阶段三验收 #2：网络 Tool 静态声明服务与主机，无 Agent 可控 URL/host 参数。
+
+    同时验证两者的策略档案均为 network.http。
+    """
+    web = handlers["builtin.web.search"].definition()
+    assert web.policy_profile == ToolPolicy.NETWORK.value
+    assert web.network_service == "tavily"
+    assert web.network_hosts == ["api.tavily.com"]
+
+    weather = handlers["builtin.weather.get_forecast"].definition()
+    assert weather.policy_profile == ToolPolicy.NETWORK.value
+    assert weather.network_service == "open_meteo"
+    assert weather.network_hosts == [
+        "geocoding-api.open-meteo.com",
+        "api.open-meteo.com",
+    ]
 
 
 def test_schemas_required_and_defaults(handlers) -> None:

@@ -484,6 +484,34 @@ class Journal:
             "summary": summary,
         })
 
+    def tool_network_audit(
+        self,
+        tool_name: str,
+        service: str,
+        host: str,
+        status_class: str,
+        elapsed_ms: float,
+        bytes_len: int,
+        retries: int,
+    ) -> None:
+        """记录网络 Tool 的脱敏网络审计摘要（开发计划 §2.6）。
+
+        只记录服务标识、主机、HTTP 状态类别、耗时、响应字节数与重试次数；
+        绝不记录密钥、认证头、完整 URL 查询串或响应正文。仅由 ToolExecutor 的
+        审计包装客户端写入，HttpClient 本身不直接依赖 Journal。
+        """
+        self._require_session()
+        self._emit(EventType.NETWORK_AUDIT, {
+            "agentrun_id": self._agentrun_id,
+            "tool_name": tool_name,
+            "service": service,
+            "host": host,
+            "status_class": status_class,
+            "elapsed_ms": round(elapsed_ms, 1),
+            "bytes": bytes_len,
+            "retries": retries,
+        })
+
     # ═══ Skill ═══
 
     def skill_body_loaded(self, skill_name: str, status: str = "success",

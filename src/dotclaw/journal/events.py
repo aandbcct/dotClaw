@@ -29,7 +29,7 @@ class AgentEvent:
 
 
 class EventType:
-    """18 种标准事件类型常量。"""
+    """标准事件类型常量。"""
 
     # ── 会话 ──
     SESSION_START = "session.start"
@@ -52,6 +52,7 @@ class EventType:
     TOOL_END = "tool.call_end"
     TOOL_POLICY = "tool.policy_resolved"
     TOOL_APPROVAL = "tool.approval_outcome"
+    NETWORK_AUDIT = "tool.network_audit"
 
     # ── Skill ──
     SKILL_BODY_LOADED = "skill.body_loaded"
