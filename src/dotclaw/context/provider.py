@@ -51,6 +51,10 @@ class ContextProvider:
         """由 Owner 生命周期终点释放对应缓存实例。"""
         await self._manager.release_scope(owner, owner_key)
 
+    async def release_all(self) -> None:
+        """Host 关闭时释放全部缓存 Slot 实例。"""
+        await self._manager.release_all()
+
     def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
         """向 Manager 请求精确 Owner 的 Slot 在下一安全点刷新。"""
         self._manager.request_refresh(slot_id, owner, owner_key)

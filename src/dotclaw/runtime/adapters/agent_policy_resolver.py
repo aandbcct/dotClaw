@@ -55,6 +55,9 @@ class AgentPolicyResolver(RunPolicyPort):
         identity_version: str = _identity_version(identity)
         model_name: str = identity.resolve_model(self._config.llm.default_model)
         context_window, tokenizer_encoding = self._model_budget_settings(model_name)
+        compaction_model, compaction_tokenizer = resolve_compaction_settings(
+            model_name, self._router_config, self._config.llm.default_model
+        )
         return AgentPolicySnapshot(
             agent_id=identity.agent_id,
             identity_version=identity_version,
@@ -67,8 +70,8 @@ class AgentPolicyResolver(RunPolicyPort):
                 "max_context_tokens": self._config.agent.max_context_tokens,
                 "context_window": context_window,
                 "tokenizer_encoding": tokenizer_encoding,
-                "context_compaction_model": "qwen3.7-max",
-                "context_compaction_tokenizer_encoding": "cl100k_base",
+                "context_compaction_model": compaction_model,
+                "context_compaction_tokenizer_encoding": compaction_tokenizer,
             },
         )
 
@@ -113,3 +116,21 @@ def _identity_version(identity: AgentIdentity) -> str:
     """根据身份约束生成稳定版本，供 scoped cache 隔离。"""
     source = repr(identity).encode("utf-8")
     return hashlib.sha256(source).hexdigest()[:16]
+
+
+def resolve_compaction_settings(
+    model_name: str,
+    router_config: RouterConfig | None,
+    default_model: str,
+) -> tuple[str, str]:
+    """确定性解析上下文压缩模型与 Tokenizer 编码（开发计划阶段4 修改项5）。
+
+    优先级：RouterConfig 中该模型项 -> 回退到请求模型名 -> 无 RouterConfig 时回退默认模型；
+    Tokenizer 编码缺失时回退空串，由预算端口在真正需要时拒绝。去除原硬编码的魔法字符串。
+    """
+    if router_config is None:
+        return default_model, ""
+    model = router_config.models.get(model_name)
+    if model is None:
+        return model_name, ""
+    return model.model_id, model.tokenizer_encoding

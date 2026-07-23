@@ -29,7 +29,7 @@ async def run(
     root = Path(project_root) if project_root else Path(__file__).parent.parent.parent
 
     from dotclaw.config.settings import load_config
-    from dotclaw.agent.factory import _build_llm
+    from dotclaw.bootstrap._host_components import _build_llm
 
     config = load_config(str(root / "config.yaml"))
     llm = _build_llm(config, root)

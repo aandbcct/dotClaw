@@ -81,9 +81,9 @@ src/dotclaw/
 │   ├── ports.py                 # MemorySearchPort / MemorySearchRecord（接口契约）
 │   ├── provider.py              # _memory_text()：检索结果转提示文本
 │   └── slots.py                 # MemorySlot：绑定 "memory_text" 上下文变量
-├── agent/
-│   ├── factory.py               # _build_memory()：组合根
-│   └── agent.py                 # 持有 DeepDream（memory_dream 属性）
+├── bootstrap/
+│   ├── _host_components.py      # _build_memory()：Host 私有基础设施装配
+│   └── application_host.py      # 持有 DeepDream 生命周期与 CLI 诊断入口
 ├── tools/builtin/
 │   └── memory_tool.py           # memory_read / memory_write 工具（直读直写 MEMORY.md）
 └── config/
@@ -141,8 +141,8 @@ SQLite + FTS5 双索引 + embedding BLOB + 文件变更检测。
 ### 4.10 `context/slots.py` — MemorySlot
 `_TextOwnerSlot("memory_text")`，从 RUN 快照读取 `memory_text` 注入系统提示。属于每轮（RUN 级）条件性上下文。
 
-### 4.11 `agent/factory.py` — `_build_memory()`（组合根）
-异步工厂：`MemoryStorage(config.memory.get_db_path)` → `TextChunker` → `EmbeddingCache` → `MemoryFlushManager` → `MemoryManager` → `DeepDream(memory_manager=...)`，返回 `(memory_mgr, dream)`。其中 `memory_mgr` 作为 `MemorySearchPort` 注入 `ContextDependencies`；`dream` 存到 `Agent.memory_dream`，由 CLI `/dream` 触发。
+### 4.11 `bootstrap/_host_components.py` — `_build_memory()`（Host 私有装配）
+异步工厂：`MemoryStorage(config.memory.get_db_path)` → `TextChunker` → `EmbeddingCache` → `MemoryFlushManager` → `MemoryManager` → `DeepDream(memory_manager=...)`，返回 `(memory_mgr, dream)`。其中 `memory_mgr` 作为 `MemorySearchPort` 注入 `ContextDependencies`；`dream` 由 `ApplicationHost` 持有并供 CLI `/dream` 触发，Agent 不持有基础设施生命周期。
 
 ### 4.12 `tools/builtin/memory_tool.py` — 记忆工具
 `memory_read` / `memory_write` 直读直写 `MEMORY.md`（`memory_write` 需审批）。**注意**：它绕过 `MemoryManager` 与索引，直接落盘——写入后不会自动 `sync` 进向量库，下次蒸馏（`/dream`）才会被 `DeepDream` 拾取并入库。

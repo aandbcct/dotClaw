@@ -24,7 +24,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import BaseModel
 
-from dotclaw.agent.factory import _build_mcp
+from dotclaw.bootstrap._host_components import _build_mcp
 from dotclaw.mcp.provider import MCPToolProvider
 from dotclaw.tools.approval import ApprovalManager
 from dotclaw.tools.capability import (
@@ -126,13 +126,9 @@ def test_build_mcp_reuses_tool_executor_components():
 
     async def _run():
         # 旧代码：`_build_mcp(config, tool_registry)` 中 `tool_executor` 未定义 → NameError。
-        # 修复后：`_build_mcp(config, tool_executor)` 复用 executor 的安全组件。
-        provider, task = await _build_mcp(config, executor)
-        if task is not None:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        # 修复后：`_build_mcp(config, tool_executor)` 复用 executor 的安全组件，并在启动时
+        # 完成首次发现（启动就绪语义），直接返回已就绪的 Provider。
+        provider = await _build_mcp(config, executor)
         return provider
 
     with patch("dotclaw.mcp.MCPToolProvider", _FakeMCPProvider):

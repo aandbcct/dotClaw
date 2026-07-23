@@ -90,6 +90,13 @@ class ContextSlotManager:
                 await self._instances.pop(cache_key).release()
                 self._bindings.pop(cache_key, None)
                 self._invalid_bindings.discard(cache_key)
+
+    async def release_all(self) -> None:
+        """在 Host 关闭时释放全部缓存的 Slot 实例（跨所有 Owner 生命周期）。"""
+        for cache_key in tuple(self._instances):
+            await self._instances.pop(cache_key).release()
+            self._bindings.pop(cache_key, None)
+            self._invalid_bindings.discard(cache_key)
     def _slot(self, binding: ContextSlotBinding) -> ContextSlot:
         """按缓存范围获得 Slot 实例。"""
         slot_id: str = binding.descriptor.slot_id

@@ -161,6 +161,9 @@ class ContextPort(Protocol):
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """在指定 Owner 生命周期结束时释放其 Slot 实例缓存。"""
 
+    async def release_all(self) -> None:
+        """Host 关闭时释放全部缓存 Slot 实例（跨所有 Owner 生命周期）。"""
+
     def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
         """请求指定 Owner 的 Slot 在下一次安全点刷新。"""
 
@@ -178,8 +181,13 @@ class RunPolicyPort(Protocol):
 class LLMPort(Protocol):
     """执行标准化模型调用并支持尽力取消的协议。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
-        """返回一次完整模型响应消息。"""
+    async def complete(
+        self,
+        context: ContextBundle,
+        execution: RunExecutionView,
+        text_stream_port: TextStreamPort | None = None,
+    ) -> RunMessage:
+        """返回一次完整模型响应消息；text_stream_port 为本次提交的运行级输出端口。"""
 
     async def cancel(self, run_id: str) -> None:
         """尽力取消正在进行的模型调用。"""

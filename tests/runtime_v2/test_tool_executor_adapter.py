@@ -58,6 +58,35 @@ async def test_tool_executor_adapter_requires_approval_without_channel_and_execu
     assert executions == ["done"]
 
 
+async def test_clear_run_removes_run_keys_from_cache() -> None:
+    """Run 终态后 clear_run 必须清空其进程内短生命周期缓存（阶段4 验证门槛#3）。
+
+    开发计划阶段4：若保留短生命周期执行缓存，必须在 Run 终态清理且不改变
+    恢复语义。引擎在每条终态路径调用 clear_run，本测试断言缓存确实被清空，
+    避免终态 Run 在 Adapter 内累积内存状态。
+    """
+
+    @tool(name="dangerous", description="危险操作", needs_approval=True)
+    async def dangerous() -> str:
+        return "完成"
+
+    registry = ToolRegistry()
+    registry.register(FunctionToolHandler(dangerous, get_tool_meta(dangerous)))
+    executor = ToolExecutor(registry, ApprovalManager())
+    port: ToolExecutorAdapter = ToolExecutorAdapter(executor)
+    invocation = ToolInvocation("run-9", ToolCall("call-9", "dangerous", {}))
+
+    # 走完审批后执行，缓存写入 _waiting_calls / _executed_calls。
+    await port.execute(invocation, _execution())  # APPROVAL_REQUIRED
+    await port.execute(invocation, _execution())  # COMPLETED
+    assert ("run-9", "call-9") in port._executed_calls
+
+    # 模拟 Run 终态清理：调用 clear_run 后该 Run 的缓存键必须被移除。
+    await port.clear_run("run-9")
+    assert ("run-9", "call-9") not in port._waiting_calls
+    assert ("run-9", "call-9") not in port._executed_calls
+
+
 class FixedPolicy(RunPolicyPort):
     """为 Port bridge 集成测试提供固定策略。"""
 
@@ -86,6 +115,9 @@ class EmptyContext(ContextPort):
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
         """测试替身不缓存 Slot 实例。"""
 
+    async def release_all(self) -> None:
+        """测试替身不缓存 Slot 实例。"""
+
     def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
         """测试替身没有可刷新的 Slot。"""
 
@@ -100,7 +132,7 @@ class ToolThenFinalLLM(LLMPort):
         self._tool_name = tool_name
         self._calls = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """依次返回工具调用和普通回答。"""
         self._calls += 1
         if self._calls == 1:

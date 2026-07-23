@@ -72,7 +72,7 @@ from .dto import (
     ToolResultStatus,
 )
 from .history_compaction import ConversationBatch, HistoryCompactorUnavailable, compact_in_batches, select_oldest_conversations
-from .ports import CheckpointRepository, ContextPort, DelegationPort, HistoryCompactorPort, LLMPort, LLMUnavailableError, RunPolicyPort, RunRepository, TokenCounterPort, ToolPort
+from .ports import CheckpointRepository, ContextPort, DelegationPort, HistoryCompactorPort, LLMPort, LLMUnavailableError, RunPolicyPort, RunRepository, TextStreamPort, TokenCounterPort, ToolPort
 
 
 class ContextBudgetRejected(RuntimeError):
@@ -125,8 +125,15 @@ class RuntimeEngine:
         self._token_counter: TokenCounterPort = token_counter
         self._history_compactor: HistoryCompactorPort = history_compactor
 
-    async def execute(self, request: RunRequest) -> RunResult:
-        """创建新的 RunExecution，并执行到成功、失败、取消或审批等待。"""
+    async def execute(
+        self,
+        request: RunRequest,
+        text_stream_port: TextStreamPort | None = None,
+    ) -> RunResult:
+        """创建新的 RunExecution，并执行到成功、失败、取消或审批等待。
+
+        ``text_stream_port`` 为本提交的运行级输出端口，仅本次 LLM 调用使用。
+        """
         policy = await self._policy_port.resolve(request)
         run_id: str = request.run_id or uuid.uuid4().hex
         execution: RunExecution = RunExecution(
@@ -150,13 +157,18 @@ class RuntimeEngine:
         await self._run_repository.create_run(run)
         self._cancellation_service.register(run_id, execution.cancellation)
         try:
-            result: RunResult = await self._drive(execution, run, (), ())
+            result: RunResult = await self._drive(execution, run, (), (), text_stream_port=text_stream_port)
             await self._release_run_context_if_terminal(result)
             return result
         finally:
             self._cancellation_service.unregister(run_id)
 
-    async def resolve_approval(self, approval_id: str, approved: bool) -> RunResult:
+    async def resolve_approval(
+        self,
+        approval_id: str,
+        approved: bool,
+        text_stream_port: TextStreamPort | None = None,
+    ) -> RunResult:
         """消费审批记录，并在同一 run_id 上恢复等待中的执行。"""
         pending_record: ApprovalRecord | None = await self._approval_service.find_pending(approval_id)
         if pending_record is None:
@@ -244,7 +256,15 @@ class RuntimeEngine:
                 (),
                 "审批通过后恢复运行",
             )
-            result = await self._drive(execution, resumed_run, messages, pending_calls, event_sequence)
+            result = await self._drive(
+                execution,
+                resumed_run,
+                messages,
+                pending_calls,
+                event_sequence,
+                text_stream_port,
+                resume_approved_call_id=pending_calls[0].call_id if pending_calls else None,
+            )
             await self._release_run_context_if_terminal(result)
             return result
         finally:
@@ -287,7 +307,11 @@ class RuntimeEngine:
             raise RuntimeError("同一 Session 存在多个未终态 Run")
         return runs[0] if runs else None
 
-    async def retry_interrupted(self, run_id: str) -> RunResult:
+    async def retry_interrupted(
+        self,
+        run_id: str,
+        text_stream_port: TextStreamPort | None = None,
+    ) -> RunResult:
         """依据 checkpoint 和活动 Context Version 重试被外部服务中断的 Run。"""
         run: AgentRun | None = await self._run_repository.find_run(run_id)
         if run is None or run.status is not RunStatus.INTERRUPTED:
@@ -328,7 +352,7 @@ class RuntimeEngine:
         event_sequence: int = await self._event(resumed, checkpoint.event_sequence, RunEventType.RUN_RESUMED, (), "重试中断 Run")
         self._cancellation_service.register(run.run_id, execution.cancellation)
         try:
-            result: RunResult = await self._drive(execution, resumed, messages, (), event_sequence)
+            result: RunResult = await self._drive(execution, resumed, messages, (), event_sequence, text_stream_port)
             await self._release_run_context_if_terminal(result)
             return result
         finally:
@@ -375,7 +399,7 @@ class RuntimeEngine:
         await self._release_run_context_if_terminal(result)
 
     async def _release_run_context_if_terminal(self, result: RunResult) -> None:
-        """仅在 Run 终态释放 Run Owner 的私有 Slot 实例。"""
+        """仅在 Run 终态释放 Run Owner 的私有 Slot 实例，并清理工具端口的进程内缓存。"""
         terminal_statuses: frozenset[RunStatus] = frozenset({
             RunStatus.COMPLETED,
             RunStatus.FAILED,
@@ -384,8 +408,12 @@ class RuntimeEngine:
         })
         if result.status in terminal_statuses:
             await self._context_port.release_scope(ContextOwner.RUN, result.run_id)
+            # 可选能力：工具端口若缓存了本 Run 的恢复状态，终态时清理，避免 Adapter 内存累积。
+            clear_run = getattr(self._tool_port, "clear_run", None)
+            if clear_run is not None:
+                await clear_run(result.run_id)
 
-    async def _drive(self, execution: RunExecution, run: AgentRun, initial_messages: tuple[RunMessage, ...], pending_calls: tuple[ToolCall, ...], event_sequence: int = 0) -> RunResult:
+    async def _drive(self, execution: RunExecution, run: AgentRun, initial_messages: tuple[RunMessage, ...], pending_calls: tuple[ToolCall, ...], event_sequence: int = 0, text_stream_port: TextStreamPort | None = None, resume_approved_call_id: str | None = None) -> RunResult:
         """驱动局部状态机，并在每个事实边界按顺序持久化。"""
         messages: list[RunMessage] = list(initial_messages)
         execution.replace_run_messages(tuple(messages))
@@ -438,8 +466,12 @@ class RuntimeEngine:
                         continue
                     event_number = await self._tool_started_event(run, event_number, messages, tool_call)
                     try:
+                        approved: bool = (
+                            resume_approved_call_id is not None
+                            and tool_call.call_id == resume_approved_call_id
+                        )
                         tool_result: ToolResult = await self._tool_port.execute(
-                            ToolInvocation(execution.run_id, tool_call),
+                            ToolInvocation(execution.run_id, tool_call, approved=approved),
                             execution.view(),
                         )
                     except Exception as error:
@@ -556,7 +588,7 @@ class RuntimeEngine:
             )
             await self._checkpoint_repository.save(replace(checkpoint, event_sequence=event_number))
             try:
-                response = await self._llm_port.complete(context, execution.view())
+                response = await self._llm_port.complete(context, execution.view(), text_stream_port)
             except LLMUnavailableError as error:
                 return await self._interrupt(execution, run, tuple(messages), event_number, str(error))
             except Exception as error:

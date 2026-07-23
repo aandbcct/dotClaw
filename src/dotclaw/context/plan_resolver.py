@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dotclaw.agent.identity import AgentIdentity
+from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.runtime.domain.context import ContextOwner
 from .contracts import ContextOwnerSnapshot, ContextPlan, ContextSlotBinding
+from .plan_configuration import ContextOwnerPlanConfiguration, InMemoryContextPlanConfiguration
 from .ports import ContextPlanConfigurationPort
 from .registry import ContextSlotRegistry
 
@@ -33,3 +36,25 @@ class ContextPlanResolver:
                     raise ValueError(f"Context Slot {slot_id} 的 Owner 与启用配置不一致")
                 bindings.append(ContextSlotBinding(descriptor, owner_snapshot.owner_key, owner_snapshot.data))
         return ContextPlan(tuple(sorted(bindings, key=lambda binding: binding.descriptor.order)))
+
+
+def build_context_plan_from_registry(registry: AgentRegistry) -> InMemoryContextPlanConfiguration:
+    """基于完整 AgentRegistry 构造 Context Plan 配置（开发计划阶段4 修改项1）。
+
+    保留默认 Owner Slot 配置，并将每个显式声明 ``context_slot_ids`` 的 Identity
+    覆盖到对应 Agent Owner 的精确标识；未声明的 Identity 回退到默认计划。
+    """
+    from .defaults import default_context_plan_configuration  # 延迟导入避免与 defaults 的循环依赖
+
+    defaults: InMemoryContextPlanConfiguration = default_context_plan_configuration()
+    agent_overrides: dict[str, tuple[str, ...]] = {
+        identity.agent_id: identity.context_slot_ids
+        for identity in registry.list_all()
+        if identity.context_slot_ids is not None
+    }
+    if not agent_overrides:
+        return defaults
+    return InMemoryContextPlanConfiguration(
+        default_configurations=defaults.default_configurations,
+        owner_configurations={ContextOwner.AGENT: agent_overrides},
+    )

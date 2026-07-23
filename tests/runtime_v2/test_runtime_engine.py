@@ -74,6 +74,9 @@ class ContextFake(ContextPort):
         """测试替身不缓存 Slot 实例。"""
         self.released_scopes.append((owner, owner_key))
 
+    async def release_all(self) -> None:
+        """测试替身不缓存 Slot 实例。"""
+
     def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
         """测试替身不维护独立 Slot 刷新状态。"""
 
@@ -84,7 +87,7 @@ class ContextFake(ContextPort):
 class FinalLLM(LLMPort):
     """立即返回普通最终回答的 LLM 替身。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """返回不含工具调用的最终回复。"""
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "请补充信息")
 
@@ -195,7 +198,7 @@ class ApprovalLLM(LLMPort):
     def __init__(self) -> None:
         self._call_count: int = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """第一次返回工具调用，第二次返回普通完成消息。"""
         self._call_count += 1
         if self._call_count == 1:
@@ -325,7 +328,7 @@ class ReActLLM(LLMPort):
         """初始化模型调用记录。"""
         self.contexts: list[ContextBundle] = []
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """首轮请求两个工具，次轮在断言上下文完整后返回最终回答。"""
         self.contexts.append(context)
         if len(self.contexts) == 1:
@@ -620,7 +623,7 @@ class OrderedEngine:
         self.started: list[str] = []
         self.release: asyncio.Event = asyncio.Event()
 
-    async def execute(self, request: RunRequest) -> RunResult:
+    async def execute(self, request: RunRequest, text_stream_port=None) -> RunResult:
         """记录请求顺序；首条请求等待以制造竞争窗口。"""
         self.started.append(request.lease_id)
         if request.lease_id == "lease-fifo-1":
@@ -634,7 +637,7 @@ class OrderedEngine:
         """测试替身不占用 Session。"""
         return None
 
-    async def retry_interrupted(self, run_id: str) -> RunResult:
+    async def retry_interrupted(self, run_id: str, text_stream_port=None) -> RunResult:
         """测试替身不支持中断重试。"""
         return RunResult(run_id, RunStatus.FAILED)
 
@@ -668,7 +671,7 @@ class ControlOrderedEngine:
         self.approval_entered: asyncio.Event = asyncio.Event()
         self.release_approval: asyncio.Event = asyncio.Event()
 
-    async def execute(self, request: RunRequest) -> RunResult:
+    async def execute(self, request: RunRequest, text_stream_port=None) -> RunResult:
         """记录普通请求何时真正获得执行机会。"""
         self.started.append(f"submit:{request.lease_id}")
         return RunResult(request.lease_id, RunStatus.COMPLETED)
@@ -677,7 +680,7 @@ class ControlOrderedEngine:
         """将测试审批固定映射到同一 Session。"""
         return "session-control" if approval_id == "approval-control" else None
 
-    async def resolve_approval(self, approval_id: str, approved: bool) -> RunResult:
+    async def resolve_approval(self, approval_id: str, approved: bool, text_stream_port=None) -> RunResult:
         """阻塞审批恢复，制造与普通消息竞争同一租约的窗口。"""
         self.started.append(f"approval:{approval_id}")
         self.approval_entered.set()
@@ -698,7 +701,7 @@ class ControlOrderedEngine:
         """测试替身不占用 Session。"""
         return None
 
-    async def retry_interrupted(self, run_id: str) -> RunResult:
+    async def retry_interrupted(self, run_id: str, text_stream_port=None) -> RunResult:
         """测试替身不支持中断重试。"""
         return RunResult(run_id, RunStatus.FAILED)
 

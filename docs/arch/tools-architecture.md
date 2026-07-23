@@ -16,7 +16,7 @@ dotClaw 工具层（Tool v1）把「可被 LLM 调用的能力」统一抽象为
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Agent / Runtime（消费 ToolPort，规划 tool_call）                       │
 │   └─ runtime/adapters/tool_executor_adapter.py  (ToolExecutorAdapter)  │
-│   └─ agent/factory.py  (组合根：_build_tools / _build_mcp / build_agent)│
+│   └─ bootstrap/application_host.py  (唯一组合根，私有装配工具与 MCP)     │
 ├──────────────────────────────────────────────────────────────────────┤
 │  tools/executor.py  (ToolExecutor：固定安全链路编排)                     │
 │     │ 依赖：registry + capability + policy + approval + schema          │
@@ -53,7 +53,7 @@ dotClaw 工具层（Tool v1）把「可被 LLM 调用的能力」统一抽象为
 ### 2.1 发现与注册（启动期，同步）
 
 ```
-agent/factory.py:_build_tools()
+ApplicationHost → bootstrap/_host_components.py:_build_tools()
   └─ ToolDiscovery.discover_builtin()
        ├─ 扫描可信包 dotclaw.tools.builtin（exec_tool/file_tool/memory_tool/system_tool）
        ├─ 对每个 @tool 函数：
@@ -65,7 +65,7 @@ agent/factory.py:_build_tools()
   └─ 按 config.tools.disabled_tools 逐个 unregister（迁移后的新规范名）
 ```
 
-MCP 来源由 `agent/factory.py:_build_mcp()` 在 `build_agent` 中 await 首次发现完成后装配（阶段四修复：保证首个 Run 快照可见 MCP 工具）。
+MCP 来源由 `bootstrap/_host_components.py:_build_mcp()` 创建；`ApplicationHost.initialize()` 在对外就绪前完成首次发现，保证首个 Run 快照可见 MCP 工具。
 
 ### 2.2 执行（运行期，固定安全链路）
 
@@ -161,12 +161,12 @@ ToolExecutor.execute(name, args, channel, journal) / execute_approved(...)
 - `McpClient`（`client.py`）：单 server 连接状态机、`startup_timeout`(握手) / `tool_timeout`(调用)、崩溃重连（`restart_on_crash` / `max_restart_attempts`）。
 
 ### 3.12 Runtime 适配器 — `runtime/adapters/tool_executor_adapter.py`
-- `ToolExecutorAdapter`：实现 Runtime `ToolPort`，隔离审批状态（按 `(run_id, call_id)` 去重，避免重复执行副作用）；对「需审批且未批准」返回 `APPROVAL_REQUIRED`，批准后再 `execute_approved`。Run 创建时通过 `agent_policy_resolver` 取 `executor.snapshot_definitions()` 的不可变快照，Run 内不再读动态 Registry。
+- `ToolExecutorAdapter`：实现 Runtime `ToolPort`，隔离审批状态（按 `(run_id, call_id)` 去重，避免重复执行副作用）；对「需审批且未批准」返回 `APPROVAL_REQUIRED`，批准后再 `execute_approved`。审批恢复以持久化检查点还原的 `ToolInvocation.approved` 为权威，`_waiting_calls` / `_executed_calls` 仅是本进程短生命周期去重缓存，Run 终态由 Runtime 调用 `clear_run()` 清理。Run 创建时通过 `agent_policy_resolver` 取 `executor.snapshot_definitions()` 的不可变快照，Run 内不再读动态 Registry。
 
-### 3.13 组合根 — `agent/factory.py`
+### 3.13 组合根 — `bootstrap/ApplicationHost`
 - `_build_tools(config, skill_registry)`：创建 `ToolRegistry` → `ToolDiscovery.discover_builtin()` 注册 → 按 `disabled_tools` `unregister` → 构造 `PolicyEngine`/`CapabilityBroker`/`ApprovalManager`/`ToolExecutor`。
-- `_build_mcp(config, tool_registry)`：构造 `MCPToolProvider`（注入 `policy_engine`/`capability_broker` 复用连接网关与请求翻译），返回 `(provider, task)`。
-- `build_agent()`：**await MCP 首次发现任务**后再装配 Runtime（阶段四修复，确保首个 Run 快照含 MCP 工具）；`client.connect` 自带 `startup_timeout`，失败 server 已降级，await 不无限阻塞。
+- `_build_mcp(config, tool_executor)`：构造 `MCPToolProvider`（复用同一 executor 的 registry、`policy_engine`/`capability_broker` 连接网关与请求翻译）。
+- `ApplicationHost.initialize()`：完成首次 MCP 发现后再装配并暴露 Runtime；`client.connect` 自带 `startup_timeout`，失败 server 降级，Host 仍可使用 builtin 工具启动。
 
 ---
 
@@ -235,13 +235,13 @@ tools:
 
 ---
 
-## 6. 初始化链路（`agent/factory.py`）
+## 6. 初始化链路（`ApplicationHost`）
 
 ```
-build_agent()
-  ├─ _build_tools() → ToolRegistry（discover_builtin 同步注册 8 个 builtin）
-  ├─ _build_mcp() → MCPToolProvider（注入 policy_engine/capability_broker）
-  ├─ await mcp_task   # 阶段四修复：首个 Run 前完成首次发现
+ApplicationHost.build()
+  ├─ _host_components._build_tools() → ToolRegistry（discover_builtin 同步注册 8 个 builtin）
+  ├─ _host_components._build_mcp() → MCPToolProvider（注入 policy_engine/capability_broker）
+  ├─ await 首次发现   # Host 就绪前完成，首个 Run 可见 MCP 工具
   └─ build_runtime_services() → ToolExecutorAdapter(ToolPort)
        └─ Run 创建：agent_policy_resolver.resolve() → executor.snapshot_definitions()
           （不可变快照，Run 内不读动态 Registry）

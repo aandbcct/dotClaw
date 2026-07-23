@@ -19,13 +19,17 @@ from ..domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 class LLMProxyAdapter(LLMPort):
     """聚合旧流式响应并转换为 Runtime v4 完整 RunMessage 的适配器。"""
 
-    def __init__(self, proxy: LLMProxy, text_stream_port: TextStreamPort | None = None) -> None:
-        """绑定既有 LLM 代理与可选的入口文本流端口。"""
+    def __init__(self, proxy: LLMProxy) -> None:
+        """绑定既有 LLM 代理；文本流端口改为每次 complete 的运行级参数。"""
         self._proxy: LLMProxy = proxy
-        self._text_stream_port: TextStreamPort | None = text_stream_port
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
-        """调用旧代理并聚合文本、工具调用与 token 统计。"""
+    async def complete(
+        self,
+        context: ContextBundle,
+        execution: RunExecutionView,
+        text_stream_port: TextStreamPort | None = None,
+    ) -> RunMessage:
+        """调用旧代理并聚合文本、工具调用与 token 统计；向运行级端口发射文本增量。"""
         messages: list[LegacyMessage] = [
             LegacyMessage(
                 role=message.role.value,
@@ -55,8 +59,8 @@ class LLMProxyAdapter(LLMPort):
             async for chunk in response:
                 if chunk.content:
                     content_parts.append(chunk.content)
-                    if self._text_stream_port is not None:
-                        await self._text_stream_port.emit(execution.run_id, chunk.content)
+                    if text_stream_port is not None:
+                        await text_stream_port.emit(execution.run_id, chunk.content)
                         has_streamed_text = True
                 if chunk.tool_call is not None:
                     tool_calls.append(_tool_call_from_legacy(chunk.tool_call))

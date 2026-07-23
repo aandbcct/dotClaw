@@ -17,7 +17,7 @@ from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordi
 from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.context import ContextOwner, ContextVersion
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, HistoryCompressionSnapshot, MessageRole, RunCheckpoint, RunError, RunErrorCode, RunMessage, RunMessageKind, RunStatus, ToolCall
-from dotclaw.agent.agent import _display_result
+from dotclaw.bootstrap.session_interaction import format_run_result
 
 
 class BudgetContext(ContextPort):
@@ -29,6 +29,9 @@ class BudgetContext(ContextPort):
         return ContextBundle((message,), (), ContextMetadata(1))
 
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
+        """测试 Port 不保存 Slot 实例。"""
+
+    async def release_all(self) -> None:
         """测试 Port 不保存 Slot 实例。"""
 
     def request_refresh(self, slot_id: str, owner: ContextOwner, owner_key: str) -> None:
@@ -148,7 +151,7 @@ class RepeatedCompressionCounter(ScriptedCounter):
 class FinalLLM(LLMPort):
     """立即返回最终文本。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """返回无工具调用的最终回答。"""
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "完成")
 
@@ -162,7 +165,7 @@ class FlakyLLM(LLMPort):
     def __init__(self) -> None:
         self.calls: int = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """首次抛出可恢复代理错误，第二次给出最终回答。"""
         self.calls += 1
         if self.calls == 1:
@@ -179,7 +182,7 @@ class WaitingApprovalLLM(LLMPort):
     def __init__(self) -> None:
         self._calls: int = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """首轮产生审批工具调用，后续轮次给出最终回答。"""
         self._calls += 1
         if self._calls == 1:
@@ -527,6 +530,6 @@ def test_channel_display_maps_busy_interrupted_and_abandoned_results() -> None:
     interrupted: RunResult = RunResult("run-interrupted", RunStatus.INTERRUPTED)
     abandoned: RunResult = RunResult("run-abandoned", RunStatus.ABANDONED)
 
-    assert "未完成运行" in _display_result(busy)
-    assert "可重试" in _display_result(interrupted)
-    assert "已放弃" in _display_result(abandoned)
+    assert "未完成运行" in format_run_result(busy)
+    assert "可重试" in format_run_result(interrupted)
+    assert "已放弃" in format_run_result(abandoned)

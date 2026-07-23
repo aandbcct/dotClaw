@@ -56,4 +56,5 @@ pythonpath = ["src"]
 addopts = "-m 'not legacy'"
 markers = [
     "legacy: 依赖已废弃接口、仅用于迁移对照的历史测试。",
+    "phase0_contract: ApplicationHost 收口开发计划阶段0的基线契约测试；当前实现尚未收口，按待迁移标记 xfail。",
 ]

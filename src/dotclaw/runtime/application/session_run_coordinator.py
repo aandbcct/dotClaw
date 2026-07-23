@@ -8,13 +8,14 @@ from typing import Protocol
 
 from ..domain.facts import AgentRun, RunError, RunErrorCode, RunStatus
 from .dto import RunRequest, RunResult
+from .ports import TextStreamPort
 
 
 class RuntimeExecutionPort(Protocol):
     """协调器依赖的最小执行接口。"""
 
-    async def execute(self, request: RunRequest) -> RunResult:
-        """执行已获得 Session 租约的请求。"""
+    async def execute(self, request: RunRequest, text_stream_port: TextStreamPort | None = None) -> RunResult:
+        """执行已获得 Session 租约的请求；text_stream_port 为本提交的运行级输出端口。"""
 
 
 class RuntimeControlPort(RuntimeExecutionPort, Protocol):
@@ -23,8 +24,8 @@ class RuntimeControlPort(RuntimeExecutionPort, Protocol):
     async def get_approval_session_id(self, approval_id: str) -> str | None:
         """定位待处理审批所属的 Session。"""
 
-    async def resolve_approval(self, approval_id: str, approved: bool) -> RunResult:
-        """恢复指定审批关联的运行。"""
+    async def resolve_approval(self, approval_id: str, approved: bool, text_stream_port: TextStreamPort | None = None) -> RunResult:
+        """恢复指定审批关联的运行；text_stream_port 为本恢复的运行级输出端口。"""
 
     async def get_run_session_id(self, run_id: str) -> str | None:
         """定位运行所属的 Session。"""
@@ -38,8 +39,8 @@ class RuntimeControlPort(RuntimeExecutionPort, Protocol):
     async def active_run(self, session_id: str) -> AgentRun | None:
         """读取持久化的当前 Session 占用。"""
 
-    async def retry_interrupted(self, run_id: str) -> RunResult:
-        """重试可恢复中断 Run。"""
+    async def retry_interrupted(self, run_id: str, text_stream_port: TextStreamPort | None = None) -> RunResult:
+        """重试可恢复中断 Run；text_stream_port 为本重试的运行级输出端口。"""
 
     async def abandon_interrupted(self, run_id: str) -> RunResult:
         """放弃可恢复中断 Run。"""
@@ -54,19 +55,20 @@ class SessionRunCoordinator:
         self._locks: dict[str, asyncio.Lock] = {}
         self._locks_guard: asyncio.Lock = asyncio.Lock()
 
-    async def submit(self, request: RunRequest) -> RunResult:
-        """按 Session 获取 FIFO 租约后执行请求。"""
+    async def submit(self, request: RunRequest, text_stream_port: TextStreamPort | None = None) -> RunResult:
+        """按 Session 获取 FIFO 租约后执行请求；text_stream_port 为本提交运行级端口。"""
         lock: asyncio.Lock = await self._get_lock(request.session_id)
         async with lock:
             occupied: RunResult | None = await self._prepare_new_request(request.session_id)
             if occupied is not None:
                 return occupied
-            return await self._engine.execute(request)
+            return await self._engine.execute(request, text_stream_port)
 
     async def submit_prepared(
         self,
         session_id: str,
         request_factory: Callable[[], Awaitable[RunRequest]],
+        text_stream_port: TextStreamPort | None = None,
     ) -> RunResult:
         """在同一 Session 租约内准备冻结请求并执行，避免压缩版本并发覆盖。"""
         lock: asyncio.Lock = await self._get_lock(session_id)
@@ -77,16 +79,16 @@ class SessionRunCoordinator:
             request: RunRequest = await request_factory()
             if request.session_id != session_id:
                 raise ValueError("冻结请求的 Session 与租约不一致")
-            return await self._engine.execute(request)
+            return await self._engine.execute(request, text_stream_port)
 
-    async def resolve_approval(self, approval_id: str, approved: bool) -> RunResult:
-        """在审批所属 Session 的租约内恢复原运行。"""
+    async def resolve_approval(self, approval_id: str, approved: bool, text_stream_port: TextStreamPort | None = None) -> RunResult:
+        """在审批所属 Session 的租约内恢复原运行；text_stream_port 为本恢复运行级端口。"""
         session_id: str | None = await self._engine.get_approval_session_id(approval_id)
         if session_id is None:
-            return await self._engine.resolve_approval(approval_id, approved)
+            return await self._engine.resolve_approval(approval_id, approved, text_stream_port)
         lock: asyncio.Lock = await self._get_lock(session_id)
         async with lock:
-            return await self._engine.resolve_approval(approval_id, approved)
+            return await self._engine.resolve_approval(approval_id, approved, text_stream_port)
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """立即发送取消信号，避免等待运行自身占用的 Session 租约。
@@ -97,14 +99,14 @@ class SessionRunCoordinator:
         """
         await self._engine.cancel(run_id, reason)
 
-    async def retry_interrupted(self, run_id: str) -> RunResult:
-        """在所属 Session 锁内重试中断 Run，避免与普通请求并发。"""
+    async def retry_interrupted(self, run_id: str, text_stream_port: TextStreamPort | None = None) -> RunResult:
+        """在所属 Session 锁内重试中断 Run，避免与普通请求并发；text_stream_port 为本重试运行级端口。"""
         session_id: str | None = await self._engine.get_run_session_id(run_id)
         if session_id is None:
-            return await self._engine.retry_interrupted(run_id)
+            return await self._engine.retry_interrupted(run_id, text_stream_port)
         lock: asyncio.Lock = await self._get_lock(session_id)
         async with lock:
-            return await self._engine.retry_interrupted(run_id)
+            return await self._engine.retry_interrupted(run_id, text_stream_port)
 
     async def abandon_interrupted(self, run_id: str) -> RunResult:
         """在所属 Session 锁内放弃中断 Run。"""

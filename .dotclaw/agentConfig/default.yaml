@@ -1,9 +1,9 @@
 # ============================================
-# dotClaw Agent 配置 (daily-assistant.yaml)
+# dotClaw Agent 配置 (default.yaml)
 # ============================================
 
 # ── 身份标识 ──
-agent_id: daily-assistant
+agent_id: default
 agent_name: "日常助手"
 description: "默认日常助手"
 

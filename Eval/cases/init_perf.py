@@ -79,7 +79,7 @@ async def _measure_one_iteration(root: Path) -> dict[str, float]:
     times: dict[str, float] = {}
 
     from dotclaw.config.settings import load_config
-    from dotclaw.agent.factory import _build_llm, _build_prompt_builder, _build_memory
+    from dotclaw.bootstrap._host_components import _build_llm, _build_tools, _build_memory
     from dotclaw.memory.store import SessionManager
 
     t0 = time.perf_counter()
@@ -153,7 +153,7 @@ def _build_tools(config, skill_registry):
 async def _assemble_agent(root, config, llm, session_mgr, skill_registry):
     """测量 Agent 完整装配耗时。"""
     from dotclaw.agent import Agent, load_agent_config
-    from dotclaw.agent.factory import _build_memory
+    from dotclaw.bootstrap._host_components import _build_memory
 
     agent_config = load_agent_config(agent_id="default")
     tool_executor = _build_tools(config, skill_registry)
