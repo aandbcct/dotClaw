@@ -179,7 +179,7 @@ async def test_application_host_build_fails_without_identities(tmp_path: Path, m
     monkeypatch.setattr(config_mod, "_find_project_root", lambda: tmp_path)
     monkeypatch.setattr(app_host_mod, "_build_llm", lambda config, root: _FakeLLM())
     monkeypatch.setattr(app_host_mod, "_build_skills", lambda config, root: None)
-    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry: _FakeTools())
+    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry, http_client=None: _FakeTools())
     monkeypatch.setattr(app_host_mod, "_build_memory", lambda config, llm_proxy, root: (None, None))
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
@@ -209,7 +209,7 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
     monkeypatch.setattr(config_mod, "_find_project_root", lambda: tmp_path)
     monkeypatch.setattr(app_host_mod, "_build_llm", lambda config, root: _FakeLLM())
     monkeypatch.setattr(app_host_mod, "_build_skills", lambda config, root: None)
-    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry: _FakeTools())
+    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry, http_client=None: _FakeTools())
     monkeypatch.setattr(app_host_mod, "_build_memory", lambda config, llm_proxy, root: (None, None))
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
@@ -247,7 +247,7 @@ async def test_application_host_build_cleans_up_partial_resources_on_init_failur
     monkeypatch.setattr(config_mod, "_find_project_root", lambda: tmp_path)
     monkeypatch.setattr(app_host_mod, "_build_llm", lambda config, root: _FakeLLM())
     monkeypatch.setattr(app_host_mod, "_build_skills", lambda config, root: None)
-    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry: _FakeTools())
+    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry, http_client=None: _FakeTools())
     monkeypatch.setattr(app_host_mod, "_build_memory", lambda config, llm_proxy, root: (None, None))
 
     fake_mcp = _FakeMCP()
