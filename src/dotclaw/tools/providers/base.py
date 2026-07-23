@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dotclaw.tools.base import ToolErrorCode
-from dotclaw.tools.http_client import HttpClientError, ResponseTooLargeError
+from dotclaw.tools.http_client import HttpClient, HttpClientError, ProviderHttpResponse, ResponseTooLargeError
 
 
 class ProviderError(Exception):
@@ -49,7 +49,7 @@ def map_http_status(service_label: str, status_code: int) -> ProviderError:
 
 
 async def call(
-    client: "object",
+    client: HttpClient,
     *,
     service: str,
     method: str,
@@ -58,15 +58,15 @@ async def call(
     headers: dict | None = None,
     json: object | None = None,
     retry_once: bool = False,
-) -> "object":
+) -> ProviderHttpResponse:
     """调用受控 HttpClient，并把脱敏的 HttpClientError 转换为统一 NETWORK_ERROR。
 
     这样超时/连接失败等网络异常在 Tool 层统一映射为 NETWORK_ERROR，而非
-    EXECUTION_ERROR（开发计划 §2.6）。
+    EXECUTION_ERROR（开发计划 §2.6）。client 参数使用窄 HttpClient Protocol，
+    仅暴露 request/close 两个能力。
     """
     try:
-        # client 为 HttpClient 协议实现（HttpxHttpClient 或测试 Fake）。
-        return await client.request(  # type: ignore[attr-defined]
+        return await client.request(
             service=service,
             method=method,
             url=url,
