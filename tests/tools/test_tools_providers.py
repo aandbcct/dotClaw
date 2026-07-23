@@ -275,7 +275,7 @@ async def test_open_meteo_zero_candidates_returns_no_candidate(monkeypatch) -> N
 
 
 async def test_open_meteo_multi_candidate_returns_candidates(monkeypatch) -> None:
-    """多候选返回至多 5 个候选，供 Agent 向用户追问。"""
+    """首项不精确的多候选返回至多 5 个候选，供 Agent 向用户追问。"""
     many = [
         {"name": f"City{i}", "country": "X", "admin1": "", "latitude": i, "longitude": i}
         for i in range(9)
@@ -287,6 +287,37 @@ async def test_open_meteo_multi_candidate_returns_candidates(monkeypatch) -> Non
     assert data["type"] == "candidates"
     # 至多 5 个候选。
     assert len(data["candidates"]) == 5
+
+
+async def test_open_meteo_top_exact_candidate_returns_forecast(monkeypatch) -> None:
+    """首项与输入精确匹配时采用 Provider 排序并直接返回天气。"""
+    guangzhou_candidates = [
+        {
+            "name": "Guangzhou",
+            "country": "China",
+            "admin1": "Guangdong",
+            "latitude": 23.11667,
+            "longitude": 113.25,
+            "timezone": "Asia/Shanghai",
+        },
+        {
+            "name": "Guangzhou",
+            "country": "China",
+            "admin1": "Jiangxi",
+            "latitude": 27.38164,
+            "longitude": 114.13426,
+            "timezone": "Asia/Shanghai",
+        },
+    ]
+    client = FakeHttpClient([_ok(_geo_payload(guangzhou_candidates)), _ok(_fc_payload())])
+    result = await get_forecast(WeatherArgs(location="Guangzhou"), _ctx(client))
+
+    assert not result.is_error
+    data = json.loads(result.output)
+    assert data["type"] == "forecast"
+    assert data["location"]["name"] == "Guangzhou"
+    assert data["location"]["admin1"] == "Guangdong"
+    assert len(client.calls) == 2
 
 
 async def test_open_meteo_country_code_narrows(monkeypatch) -> None:

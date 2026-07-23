@@ -2,8 +2,9 @@
 
 固定协议适配器：先地理编码解析经纬度，再以 ``timezone=auto`` 请求当前天气与每日预报；
 预报请求固定当前/每日字段，不机械透传 Open-Meteo 的全部参数（开发计划 §2.5）。
-地点候选处理：唯一候选直接返回预报；零候选返回稳定业务结构；多候选返回至多 5 个
-候选供 Agent 向用户追问，不静默猜测。所有新增注释使用中文。
+地点候选处理：唯一候选直接返回预报；首个候选与输入地点精确匹配时，也采用该 Provider
+排序第一的候选并返回其完整地点信息；其余多候选才返回至多 5 项供 Agent 向用户追问。
+所有新增注释使用中文。
 """
 
 from __future__ import annotations
@@ -91,17 +92,17 @@ class OpenMeteoProvider:
     async def get_forecast(
         self, location: str, country_code: str | None, days: int
     ) -> dict:
-        """端到端：地理编码 → 候选处理 →（唯一候选）预报。
+        """端到端：地理编码 → 候选处理 →（唯一或首项精确匹配）预报。
 
         返回稳定的业务结构：
         - 零候选：{"type": "no_candidate", ...}
-        - 多候选：{"type": "candidates", "candidates": [...]}（至多 5 个）
-        - 唯一候选：{"type": "forecast", "location": ..., "current": ..., "daily": ...}
+        - 非精确多候选：{"type": "candidates", "candidates": [...]}（至多 5 个）
+        - 唯一候选或首项精确匹配：{"type": "forecast", "location": ..., "current": ..., "daily": ...}
         """
         candidates = await self.geocode(location, country_code)
         if not candidates:
             return {"type": "no_candidate", "location": location}
-        if len(candidates) > 1:
+        if len(candidates) > 1 and not self._is_top_exact_match(location, candidates[0]):
             trimmed = [
                 {
                     "name": c.get("name", ""),
@@ -129,3 +130,13 @@ class OpenMeteoProvider:
             "current": fc.get("current", {}),
             "daily": fc.get("daily", {}),
         }
+
+    @staticmethod
+    def _is_top_exact_match(location: str, candidate: dict) -> bool:
+        """判断 Provider 排序第一的候选是否与用户地点精确匹配。
+
+        当名称相同且位居第一时，采用 Provider 的排序结果继续请求预报，并在返回中
+        显式携带实际解析的地点；避免广州等常见城市因后续模糊匹配而只得到候选列表。
+        """
+        candidate_name = candidate.get("name")
+        return isinstance(candidate_name, str) and candidate_name.casefold() == location.casefold()

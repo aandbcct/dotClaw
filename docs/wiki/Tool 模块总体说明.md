@@ -206,7 +206,7 @@ flowchart TB
 - `tools/network.py`（`KNOWN_NETWORK_HOSTS` / `KNOWN_NETWORK_ROUTES`）：固定服务→精确主机及方法/路径路由表（Tavily 仅 `POST /search`；Open-Meteo 仅 `GET /v1/search` 与 `GET /v1/forecast`）。
 - `tools/providers/`：`ProviderError` 统一携带应映射的 `ToolErrorCode`（401/403→CONFIGURATION_ERROR，响应过大→RESPONSE_TOO_LARGE，429/其他 4xx/5xx→NETWORK_ERROR，均脱敏）；`call()` 将脱敏网络异常归一为对应错误码。Provider 只做最小必要请求与受限结果映射，端点/方法/认证方式属于代码、不可由 Agent 参数或 YAML 覆盖。
   - `TavilyProvider.search`：固定 `POST /search`，读取 `TAVILY_API_KEY` 环境变量（缺失→CONFIGURATION_ERROR，不读 YAML、不写日志）；请求不含 Extract/Crawl/Map；输出按 title/url/snippet/总字符上限截断。
-  - `OpenMeteoProvider.get_forecast`：先地理编码（固定字段、支持 `country_code` 缩小候选），唯一候选直接预报、零候选返回 `no_candidate`、多候选返回至多 5 个 `candidates`；预报固定当前/每日字段、`timezone=auto`，不机械透传全部参数。
+  - `OpenMeteoProvider.get_forecast`：先地理编码（固定字段、支持 `country_code` 缩小候选）。唯一候选或首个与输入地点精确匹配的候选直接预报，并在结果中返回实际解析地点；零候选返回 `no_candidate`，其余多候选返回至多 5 个 `candidates`；预报固定当前/每日字段、`timezone=auto`，不机械透传全部参数。
 - `tools/builtin/math_tool.py`（`builtin.math.calculate`）：本地受限计算，不访问文件/网络/环境；仅允许 `+ - * / // % **`、括号、数值字面量、固定数学函数白名单（sqrt/log/exp/sin/cos…）与常量（pi/e/tau）；求值前做 AST 白名单遍历 + 深度/节点数限制，自定义幂运算限制指数与结果量级，非有限/复数结果拒绝；任何异常映射为脱敏的 `EXECUTION_ERROR`。该工具**不产生 Capability Request**（无策略档案）。
 
 **边界（没有任意网页抓取）**：框架不提供通用 HTTP Tool、任意 URL 抓取、网页正文提取、爬虫或搜索引擎 HTML 抓取；联网能力严格限定为上述两个固定 Provider 的预授权端点。
