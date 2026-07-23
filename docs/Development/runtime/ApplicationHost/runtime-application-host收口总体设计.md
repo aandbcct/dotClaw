@@ -125,7 +125,7 @@ Identity Registry 是所有可用 Identity 的唯一目录。Runtime Policy Reso
 1. 查询该 Session 是否有非终态 Run；存在则拒绝删除，要求先取消、重试或放弃。
 2. 使该 Session 的待审批记录不可恢复并清理。
 3. 删除完整 Session 存储目录，包括 `session.json`、`agent_runs/`、checkpoint、消息和事件。
-4. 释放 Session、Agent、Run 范围的 Context 缓存。
+4. 释放该 Session 的 SESSION 范围缓存及其 Run 的 RUN 范围缓存；AGENT 范围缓存按 Identity 跨 Session 共享，仅在 Identity/Host 生命周期终点释放。
 
 本地文件存储不提供跨文件全原子删除；步骤设计为幂等，进程中断后可安全重试。该规则描述项目功能，不授权本次开发过程删除开发者已有数据。
 

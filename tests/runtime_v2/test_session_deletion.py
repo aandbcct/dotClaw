@@ -147,3 +147,29 @@ async def test_run_and_session_context_cache_released(tmp_path: Path) -> None:
 
     assert (ContextOwner.SESSION, session.id) in context_port.calls
     assert (ContextOwner.RUN, "run-1") in context_port.calls
+
+
+async def test_delete_session_keeps_shared_agent_cache_for_other_sessions(tmp_path: Path) -> None:
+    """同一 Identity 下有两个 Session：删除其一，只释放目标 Session 与其 Run 的缓存，
+    不释放 AGENT 范围缓存，也不误伤另一 Session（总体设计 §5.2 第 4 步）。
+
+    AGENT 范围缓存的 owner_key 是 agent_id，跨同 Identity 的所有 Session 共享；
+    随单 Session 删除释放会误伤其他活 Session 的上下文，因此仅在 Identity/Host
+    生命周期终点（如 ApplicationHost.shutdown 的 release_all）释放。
+    """
+    context_port = FakeContextPort()
+    session_manager, service, _, _ = _service(tmp_path, context_port=context_port)
+    s1 = await session_manager.create(agent_id="agent-1")
+    s2 = await session_manager.create(agent_id="agent-1")  # 同 Identity 的另一 Session
+    _write_run(tmp_path, s1.id, "run-1", "completed")  # 仅被删 Session 拥有 Run
+
+    await service.delete_session(s1.id)
+
+    # 目标 Session 与其 Run 的缓存被释放
+    assert (ContextOwner.SESSION, s1.id) in context_port.calls
+    assert (ContextOwner.RUN, "run-1") in context_port.calls
+    # AGENT 范围缓存（按 agent_id 共享）不得随单 Session 删除释放
+    assert (ContextOwner.AGENT, "agent-1") not in context_port.calls
+    # 同一 Identity 下另一 Session 的缓存不得被误伤
+    assert (ContextOwner.SESSION, s2.id) not in context_port.calls
+
