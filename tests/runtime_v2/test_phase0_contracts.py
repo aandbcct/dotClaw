@@ -226,7 +226,6 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
         session_manager=session_manager,
         agent_registry=registry,
         coordinator=services.coordinator,
-        config=config,
         default_agent_id=identity.agent_id,
     )
 

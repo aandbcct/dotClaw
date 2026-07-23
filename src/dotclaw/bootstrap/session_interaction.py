@@ -10,7 +10,6 @@ SessionInteractionService 是必要的最小 Session 入口，不是泛化的 Ch
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ..agent.identity import AgentIdentity
 from ..orchestration.registry import AgentRegistry
@@ -23,9 +22,6 @@ from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.domain.context import ContextOwner
 from ..runtime.domain.facts import RunErrorCode, RunStatus
 from ..session.session import Session, SessionManager
-
-if TYPE_CHECKING:
-    from ..config.settings import Config
 
 
 class UnknownIdentityError(ValueError):
@@ -48,7 +44,6 @@ class SessionInteractionService:
         session_manager: SessionManager,
         agent_registry: AgentRegistry,
         coordinator: SessionRunCoordinator,
-        config: Config | None = None,
         default_agent_id: str | None = None,
         run_repository: RunRepositoryAdapter | None = None,
         approval_repository: ApprovalRepositoryAdapter | None = None,
@@ -63,7 +58,6 @@ class SessionInteractionService:
         self._session_manager: SessionManager = session_manager
         self._agent_registry: AgentRegistry = agent_registry
         self._coordinator: SessionRunCoordinator = coordinator
-        self._config: Config | None = config
         self._default_agent_id: str | None = default_agent_id
         self._run_repository: RunRepositoryAdapter | None = run_repository
         self._approval_repository: ApprovalRepositoryAdapter | None = approval_repository

@@ -143,7 +143,6 @@ class ApplicationHost:
             session_manager=self._session_manager,
             agent_registry=self._agent_registry,
             coordinator=self._runtime_services.coordinator,
-            config=config,
             default_agent_id=default_identity.agent_id,
             run_repository=self._runtime_services.run_repository,
             approval_repository=self._runtime_services.approval_repository,

@@ -6,8 +6,12 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+if TYPE_CHECKING:
+    from dotclaw.config.settings import Config
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -62,16 +66,8 @@ async def _run_cli() -> None:
         else:
             current_session = await service.create_session(title="主对话")
 
-        # 按当前 Session 绑定的 Identity 取得展示信息（用于 Banner）。
-        identity = service.get_identity(current_session)
-
-        from dotclaw.config import _find_project_root
-        rich_console.print(build_banner(
-            agent_name=identity.agent_name,
-            model=identity.resolve_model(config.llm.default_model),
-            session_title=current_session.title,
-            workspace=str(_find_project_root()),
-        ))
+        # 按当前 Session 绑定的 Identity 取得展示信息并打印 Banner。
+        _refresh_banner(service, current_session, config)
 
         while True:
             try:
@@ -97,6 +93,7 @@ async def _run_cli() -> None:
                         title: str = args or "新对话"
                         current_session = await service.create_session(title=title)
                         channel.print_info(f"已创建并切换到新对话: [{current_session.id}] {title}")
+                        _refresh_banner(service, current_session, config)
                     elif cmd == "/list":
                         await _cmd_list(channel, session_mgr, current_session)
                     elif cmd == "/switch":
@@ -105,6 +102,7 @@ async def _run_cli() -> None:
                             if s:
                                 current_session = s
                                 channel.print_info(f"已切换到 [{s.id}] {s.title}")
+                                _refresh_banner(service, current_session, config)
                             else:
                                 channel.print_error(f"未找到对话: {args}")
                         else:
@@ -127,6 +125,7 @@ async def _run_cli() -> None:
                                         if ss:
                                             current_session = ss[0]
                                             channel.print_info(f"已切换到 [{current_session.id}] {current_session.title}")
+                                            _refresh_banner(service, current_session, config)
                         else:
                             channel.print_error("用法: /delete <对话ID>")
                     elif cmd == "/dream":
@@ -319,6 +318,22 @@ async def _render_result(channel: CLIChannel, result: RunResult) -> None:
         if text:
             # 最终回复由 CLI 入口负责呈现，Runtime 仅返回执行结果以保持边界解耦。
             await channel.print_markdown(text)
+
+
+def _refresh_banner(service: SessionInteractionService, current_session: Session, config: Config) -> None:
+    """按当前 Session 绑定的 Identity 重建并打印 Banner。
+
+    初次启动、``/new``、``/switch``、``/delete`` 切到其它会话后都应调用，
+    确保身份展示始终反映当前会话（fix 文档 §3.3）。
+    """
+    identity = service.get_identity(current_session)
+    from dotclaw.config import _find_project_root
+    rich_console.print(build_banner(
+        agent_name=identity.agent_name,
+        model=identity.resolve_model(config.llm.default_model),
+        session_title=current_session.title,
+        workspace=str(_find_project_root()),
+    ))
 
 
 def main() -> None:

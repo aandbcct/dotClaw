@@ -72,6 +72,14 @@
 - [ ] llm proxy接口多用于路由适配，目前写死了chat，应该可以从config里读功能节点，得到多功能列表
 - [ ] 取消只做了应用层的取消，没有llm proxy的取消
 - [ ] 支持多模态
+- [ ] llm支持think、response等llm标签，能够在前端输出思考链路
+- [ ] Provider Client 存在严重的并发安全问题
+
+  ```
+  Provider Client 存在严重的并发安全问题
+  ```
+
+  
 
 ## tool
 

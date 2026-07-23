@@ -77,7 +77,6 @@ async def test_submit_writes_conversation_through_coordinator_and_projector(tmp_
         session_manager=session_manager,
         agent_registry=registry,
         coordinator=services.coordinator,
-        config=config,
     )
     session = await session_manager.create(agent_id=identity.agent_id)
 

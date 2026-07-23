@@ -120,3 +120,16 @@ async def test_submit_routes_by_session_identity(
     )
     await service.submit(s1, "你好")
     assert captured["agent_id"] == "a1"
+
+
+def test_service_has_no_config_dependency_minimal_entry(tmp_path: Path) -> None:
+    """门面删除后 SessionInteractionService 不再持有 Config，符合“最小入口”收口目标。"""
+    registry: AgentRegistry = AgentRegistry()
+    registry.register(AgentIdentity(agent_id="a1", agent_name="A1"))
+    service: SessionInteractionService = SessionInteractionService(
+        session_manager=SessionManager(tmp_path),
+        agent_registry=registry,
+        coordinator=object(),
+    )
+    # 构造期不应再接收或存储 config 依赖。
+    assert not hasattr(service, "_config")
