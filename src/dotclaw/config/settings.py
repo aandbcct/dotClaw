@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 logger = logging.getLogger("dotclaw.config")
 
@@ -138,6 +139,15 @@ def _expand_env(value: Any) -> Any:
     """递归替换 ${ENV_VAR} 为环境变量值（委托 common.utils）"""
     from dotclaw.common.utils import expand_env_vars
     return expand_env_vars(value)
+
+
+def _load_project_env(project_root: Path) -> None:
+    """加载项目根目录的 .env，但不覆盖已存在的系统环境变量。
+
+    Provider 与配置中的 ${VAR} 共用同一进程环境；系统环境变量优先，.env 仅补齐
+    未设置的变量，便于本地开发而不改变部署侧显式配置。
+    """
+    load_dotenv(dotenv_path=project_root / ".env", override=False)
 
 
 # ============================================================
@@ -772,10 +782,13 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     支持 ${ENV_VAR} 环境变量展开。
     默认从项目根目录（config.yaml 所在目录）加载。
     """
+    project_root = _find_project_root()
+    _load_project_env(project_root)
+
     if Path(path).is_absolute():
         config_path = Path(path)
     else:
-        config_path = _find_project_root() / path
+        config_path = project_root / path
     if not config_path.exists():
         return Config()
 

@@ -404,7 +404,7 @@ flowchart TD
 | `policy.allowed_mcp_servers` | [github] | `PolicyEngine` | MCP server 允许列表（fail-closed） |
 | `network.tavily.enabled` | false | `_host_components` → `PolicyScope.network_services` | 启用 Tavily 搜索服务（预授权精确主机）；启用即派生 `network.http=allow` |
 | `network.open_meteo.enabled` | false | `_host_components` → `PolicyScope.network_services` | 启用 Open-Meteo 天气服务（预授权两个固定主机） |
-| `tavily.api_key` / `TAVILY_API_KEY` | 无 | `TavilyProvider` | 仅从环境变量 `TAVILY_API_KEY` 读取；缺失→CONFIGURATION_ERROR，不读 YAML、不写审计 |
+| `tavily.api_key` / `TAVILY_API_KEY` | 无 | `TavilyProvider` | 从系统环境变量或项目根 `.env` 读取 `TAVILY_API_KEY`（系统环境优先）；缺失→CONFIGURATION_ERROR，不读 YAML、不写审计 |
 | `tools.web_search`（旧） | 无 | `settings` 加载告警 | 已弃用且不再读取；出现时输出一次告警并忽略，请改用 `tools.network.*.enabled` |
 | `mcp_global.startup_timeout` | 4.0 | `McpClient` | 握手超时 |
 | `mcp_global.tool_timeout` | 60.0 | `McpClient` | MCP 工具调用超时 |
