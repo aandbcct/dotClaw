@@ -70,7 +70,7 @@
 - 新增 `bootstrap/application_host.py`：集中配置读取、Identity Registry 加载、LLM、工具、Skills、Memory、MCP、SessionManager、Runtime 的创建。
 - 将 `agent/factory.py` 中的构建辅助函数迁入 bootstrap 私有模块或 ApplicationHost；依据关键/可降级规则处理初始化失败。
 - 将 `runtime_factory.py` 收缩为 Host 私有的 Runtime 组装函数；`RuntimeServices` 移除工具、MCP、Skills 等展示字段。
-- Host 统一执行 `recover_pending_success_commits()`，持有 MCP 初始化任务/Provider，并提供 `shutdown()`。
+- Host 统一执行 `recover_pending_success_commits()`，在启动期完成首次 MCP 发现并持有 Provider，再提供幂等 `shutdown()`。
 - `main.py` 仅构建 Host，并从 Host 取得 SessionInteractionService、SessionManager 和现有诊断资源。
 
 ### 验证
@@ -78,7 +78,7 @@
 - 主入口不再 import `build_agent` 或 RuntimeServices。
 - `agent/` 不再 import `bootstrap/` 或创建外部基础设施。
 - MCP 启动失败可降级；关键依赖失败会明确终止启动。
-- Host 关闭可等待/取消后台 MCP 初始化，并释放 Context 缓存。
+- Host 关闭可关闭已完成首次发现的 MCP Provider，并释放 Context 缓存；`initialize()` 中途失败时由 `build()` 回收已创建资源。
 
 ## 6. 阶段 3：请求级输出端口
 
@@ -138,7 +138,8 @@
 
 ```powershell
 rg -n "build_agent|agent\.factory|_build_context_port|RuntimeServices.*tool_executor|memory_dream" src tests
-rg -n "LLMProxyAdapter\([^\n]*text_stream|_waiting_calls|_executed_calls" src tests
+rg -n "LLMProxyAdapter\([^\n]*text_stream" src tests
+rg -n "resume_approved_call_id|approved=True|clear_run" src tests
 ```
 
 ### 完成门槛
@@ -159,13 +160,12 @@ rg -n "LLMProxyAdapter\([^\n]*text_stream|_waiting_calls|_executed_calls" src te
 
 ## 10. 最终验收清单
 
-- [ ] 应用启动只有 `ApplicationHost` 一个公开组合根。
-- [ ] 每个新 Session 都持久化有效 `agent_id`，所有消息从 Session Identity 路由。
-- [ ] Agent 不持有或关闭基础设施；RuntimeEngine 不依赖具体基础设施。
-- [ ] 多 Channel 并发使用同一 Host 时流文本不串流。
-- [ ] Identity Registry 中所有 Agent 的 Context Slot 覆盖都生效。
-- [ ] 审批在重启后可恢复且同一工具调用至多执行一次。
-- [ ] 关键/可降级初始化策略可测试、可观测。
-- [ ] 删除 Session 不留 Run、checkpoint、事件或审批孤儿数据。
-- [ ] Runtime v4 架构、入口迁移、审批、取消、恢复、Context 与多 Channel 新测试通过。
-
+- [x] 应用启动只有 `ApplicationHost` 一个公开组合根。
+- [x] 每个新 Session 都持久化有效 `agent_id`，所有消息从 Session Identity 路由。
+- [x] Agent 不持有或关闭基础设施；RuntimeEngine 不依赖具体基础设施。
+- [x] 多 Channel 并发使用同一 Host 时流文本不串流。
+- [x] Identity Registry 中所有 Agent 的 Context Slot 覆盖都生效。
+- [x] 审批在重启后可恢复且同一工具调用至多执行一次。
+- [x] 关键/可降级初始化策略可测试、可观测。
+- [x] 删除 Session 不留 Run、checkpoint、事件或审批孤儿数据。
+- [x] Runtime v4 架构、入口迁移、审批、取消、恢复、Context 与多 Channel 新测试通过。

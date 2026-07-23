@@ -22,7 +22,7 @@
 - 不做 OS 级沙箱（总体设计 §2.3 非目标）。
 
 **入口与适用边界**
-- 注册入口：`agent/factory.py:_build_tools`（builtin 同步）、`_build_mcp`（MCP 启动期 await 首次发现）。
+- 注册入口：`bootstrap/_host_components.py:_build_tools`（builtin 同步）与 `_build_mcp`；`ApplicationHost` 在启动期完成首次 MCP 发现后才对外就绪。
 - 执行入口：`ToolExecutor.execute(...)` / `execute_approved(...)`；Runtime v2 侧经 `runtime/adapters/tool_executor_adapter.py:ToolExecutorAdapter`（实现 `ToolPort`）间接调用。
 - 适用边界：任何需要「把一段能力暴露给 LLM 作为 tool_call」的场景；配置 `config.yaml` 的 `tools` 段控制启停、审批与安全策略。
 
@@ -59,8 +59,9 @@ src/dotclaw/
 ├── runtime/adapters/
 │   └── tool_executor_adapter.py        # ToolExecutorAdapter：ToolPort 实现，按 run_id 隔离审批
 │
-└── agent/
-    └── factory.py                      # 组合根：_build_tools / _build_mcp / build_agent
+└── bootstrap/
+    ├── _host_components.py             # Host 私有：_build_tools / _build_mcp
+    └── application_host.py             # 唯一公开组合根与资源生命周期宿主
 ```
 
 ## 3. 总体架构
@@ -69,7 +70,7 @@ src/dotclaw/
 flowchart TB
     subgraph Sources["工具来源"]
         Builtin["tools/builtin/*\n@tool 声明\nToolDiscovery 同步注册"]
-        MCP["mcp/provider.py\nMCPToolProvider\n启动期 await 首次发现"]
+        MCP["mcp/provider.py\nMCPToolProvider\nHost 启动期完成首次发现"]
     end
 
     Registry["tools/registry.py\nToolRegistry\n无冲突 + 不可变快照"]
@@ -107,7 +108,7 @@ flowchart TB
     McpAdapter -. "实现" .-> Handler
 ```
 
-**依赖方向**：`builtin` 与 `mcp` 两个来源都依赖核心抽象 `ToolHandler` / `ToolRegistry`；`ToolExecutor` 依赖 `ToolRegistry` + `CapabilityBroker` + `PolicyEngine` + `ApprovalManager` + schema；`ToolExecutorAdapter` 依赖 `ToolExecutor` 与 Runtime 的 `ToolPort` 协议。上层（Runtime）只依赖 `ToolPort` 抽象，不感知具体注册来源——符合依赖倒置。组合根 `agent/factory.py` 负责装配具体 Provider 与同一 `ToolRegistry` 实例。
+**依赖方向**：`builtin` 与 `mcp` 两个来源都依赖核心抽象 `ToolHandler` / `ToolRegistry`；`ToolExecutor` 依赖 `ToolRegistry` + `CapabilityBroker` + `PolicyEngine` + `ApprovalManager` + schema；`ToolExecutorAdapter` 依赖 `ToolExecutor` 与 Runtime 的 `ToolPort` 协议。上层（Runtime）只依赖 `ToolPort` 抽象，不感知具体注册来源——符合依赖倒置。`ApplicationHost` 通过私有 `_host_components` 装配具体 Provider 与同一 `ToolRegistry` 实例。
 
 ## 4. 模块说明与依赖
 
@@ -182,13 +183,13 @@ flowchart TB
 - 与 ToolExecutor 协作，在工具执行后发射 Journal 事件；**不侵入 AgentLoop**。
 
 ### 4.13 Runtime 适配器 — `runtime/adapters/tool_executor_adapter.py`
-- `ToolExecutorAdapter`：实现 Runtime `ToolPort`，按 `(run_id, call_id)` 去重避免重复执行副作用；预检时把 `execution.policy.agent_id` 传给 `requires_approval`，对「需审批且未批准」返回 `APPROVAL_REQUIRED`，批准后再 `execute_approved`。
+- `ToolExecutorAdapter`：实现 Runtime `ToolPort`，按 `(run_id, call_id)` 去重避免重复执行副作用；预检时把 `execution.policy.agent_id` 传给 `requires_approval`，对「需审批且未批准」返回 `APPROVAL_REQUIRED`，批准后再 `execute_approved`。审批恢复的权威事实是持久化检查点还原的 `ToolInvocation.approved`，而非适配器的进程内集合；`_waiting_calls` / `_executed_calls` 仅作本进程短生命周期去重缓存，Run 终态由 Runtime 调用 `clear_run()` 清理。
 - `AgentPolicyResolver`：在 Run 创建时调用 `executor.snapshot_definitions()` 冻结不可变工具集；Run 内不再读动态 Registry。
 
-### 4.14 组合根 — `agent/factory.py`
+### 4.14 组合根 — `bootstrap/ApplicationHost`
 - `_build_tools(config, skill_registry)`：创建 `ToolRegistry` → `ToolDiscovery.discover_builtin()` 注册 → 按 `disabled_tools` `unregister` → 构造基础全局 `PolicyScope`、`PolicyEngine`/`CapabilityBroker`/`ApprovalManager`/`ToolExecutor`；所有 Agent 规则运行时按 `agent_id` 合并，不污染基础 scope。
 - `_build_mcp(config, tool_executor)`：构造 `MCPToolProvider`，复用同一 executor 的 registry、`policy_engine` 与 `capability_broker`。
-- `build_agent()`：**await MCP 首次发现任务**后再装配 Runtime（阶段四修复，确保首个 Run 快照含 MCP 工具）；`client.connect` 自带 `startup_timeout`，失败 server 已降级，await 不无限阻塞。
+- `ApplicationHost.initialize()`：在装配 Runtime 前完成 MCP 首次发现，确保首个 Run 快照含 MCP 工具；`client.connect` 自带 `startup_timeout`，失败 server 降级，不阻断 Host 启动。
 
 ## 5. 业务处理流程
 
@@ -230,7 +231,7 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-    participant F as build_agent(factory)
+    participant F as ApplicationHost
     participant R as ToolRegistry
     participant B as ToolDiscovery(builtin)
     participant M as MCPToolProvider
@@ -282,7 +283,7 @@ flowchart TD
 ```
 
 **降级与失败隔离**
-- **MCP 加载失败**：`_build_mcp` 内 try/except 仅 `logger.warning`，不阻断 builtin；单 server 失败（`gather return_exceptions`）不影响其他 server 与整体启动。`mcp_provider` 可为 `None`，`build_agent` 用 `or (None, None)` 兜底。
+- **MCP 加载失败**：Host 将 MCP 作为可降级依赖；单 server 失败（`gather return_exceptions`）不影响其他 server 与 Host 启动。`mcp_provider` 可为 `None`，但 builtin 工具仍可用。
 - **disabled_tools**：`_build_tools` 在注册后按配置（新规范名）`unregister`，实现单工具降级（如关闭 `builtin.process.execute`）。
 - **审批无 channel**：`ApprovalManager.request` 返回 `False` → `APPROVAL_DENIED`，保证子 Agent / 无交互场景不静默放行。
 - **路径逃逸**：`normalize_workspace_path` 检测 `..`/绝对路径/`~`/符号链接/联接点逃逸 → `POLICY_DENIED`；通过后回填 `resolve_workspace_path` 的绝对路径，实际读写目标与审批目标一致。
@@ -325,7 +326,7 @@ flowchart TD
 - **问题**：MCP 重连/可用性变化不应修改在途 Run 的可见工具集。
 - **机制**：`ToolExecutor.snapshot_definitions()` 转发 `registry.snapshot()`，对每个 `ToolDefinition` 深拷贝；Run 创建时捕获固定集合，Run 内不再读动态 Registry。
 - **收益**：重连只影响下一 Run 快照，在途 Run 完全隔离（总体设计 §9）。
-- **边界**：快照是深拷贝，后续注册表增删不影响已取快照；MCP 工具需在 Run 创建前完成发现（阶段四 await 修复保证首个 Run 可见）。
+- **边界**：快照是深拷贝，后续注册表增删不影响已取快照；Host 在首次 Run 前完成 MCP 发现，保证首个 Run 可见。
 
 ### 7.5.1 Agent 级最小权限隔离
 - **问题**：不同 Agent 的工具白名单之外，还可能需要把同一类资源从 `allow` 收窄为 `ask` 或 `deny`；把主 Agent 的规则写入共享 Executor 会污染委派子 Agent。

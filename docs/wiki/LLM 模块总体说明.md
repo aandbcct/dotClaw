@@ -23,7 +23,7 @@
 
 **入口与适用边界**
 - 统一调用入口：`LLMProxy.chat(messages, tools, model, purpose, stream, journal)`（流式）、`LLMProxy.embed(texts, model, purpose, dimensions)`（向量化）。
-- 装配入口：`agent/factory.py:_build_llm`（旧链路组合根）、`bootstrap/runtime_factory.py`（Runtime v4 组合根，包进 `LLMProxyAdapter`）。
+- 装配入口：`bootstrap/application_host.py:ApplicationHost` 的私有组件装配；`bootstrap/runtime_factory.py` 仅在 Host 内部将 `LLMProxy` 包进 `LLMProxyAdapter`。
 - 适用边界：任何需要向大模型发请求的场景（对话、function calling、上下文压缩、记忆/梦境的向量化）。`model_router_config.yaml` 缺失时自动降级为单供应商 P1 行为。
 
 ## 2. 代码层级
@@ -50,8 +50,9 @@ src/dotclaw/llm/
 
 # 上层调用方（不在本模块，但构成模块边界）
 src/dotclaw/runtime/adapters/llm_proxy_adapter.py   # LLMProxyAdapter：旧 LLMProxy → Runtime v4 的 LLMPort
-src/dotclaw/agent/factory.py                        # _build_llm()：组合根
-src/dotclaw/bootstrap/runtime_factory.py            # Runtime v4 组合根，包进 LLMProxyAdapter
+src/dotclaw/bootstrap/_host_components.py           # _build_llm()：Host 私有基础设施装配
+src/dotclaw/bootstrap/application_host.py           # 唯一公开组合根与生命周期宿主
+src/dotclaw/bootstrap/runtime_factory.py            # Host 私有 Runtime 装配，包进 LLMProxyAdapter
 src/dotclaw/config/settings.py                      # RouterConfig 数据类 + load_router_config()
 model_router_config.yaml                            # 路由配置（优先级 / 限流 / 熔断 / 重试）
 ```

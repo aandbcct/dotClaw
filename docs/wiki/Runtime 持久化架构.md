@@ -1,6 +1,6 @@
 # Runtime 持久化架构
 
-> 适用实现：Runtime v2 当前文件存储实现。  
+> 适用实现：Runtime v4 当前文件存储实现。
 > 核心原则：**一个容器只回答一个问题；运行事实、恢复控制和用户会话投影不能互相替代。**
 
 ## 1. 概览
@@ -21,7 +21,7 @@ Runtime 的职责是保存一次执行的完整、可审计事实，并在成功
 
 ## 2. 存储层级与依赖方向
 
-默认组合根会将 Session 与 Runtime 仓储指向同一配置的数据根目录。逻辑目录如下，其中 `{session_id}` 和 `{run_id}` 都是受校验的路径片段：
+`ApplicationHost` 通过私有 `runtime_factory` 将 Session 与 Runtime 仓储指向同一配置的数据根目录。逻辑目录如下，其中 `{session_id}` 和 `{run_id}` 都是受校验的路径片段：
 
 ```text
 {storage_root}/
@@ -40,7 +40,7 @@ Runtime 的职责是保存一次执行的完整、可审计事实，并在成功
 
 ```mermaid
 flowchart TB
-    Entry["入口层 / Agent"] --> Coordinator["SessionRunCoordinator\n同 Session 串行"]
+    Entry["Channel / SessionInteractionService\n按 Session 的 agent_id 路由"] --> Coordinator["SessionRunCoordinator\n同 Session 串行"]
     Coordinator --> Engine["RuntimeEngine\n编排执行"]
     Engine --> RunRepo["RunRepository"]
     Engine --> CheckpointRepo["CheckpointRepository"]
@@ -234,6 +234,12 @@ sequenceDiagram
 - `events.jsonl` 是追加式审计文件；跨文件的成功提交通过补偿意图达到最终一致，而不是数据库事务。
 - 当前历史压缩在创建 Run 前处理 `SESSION_HISTORY`；每次 `LLM_STARTED` 前对工具结果和中间回复进行 `RUN_CONTEXT` 压缩尚未启用。现有 `ContextCompactionPort` 已预留该作用域，未来新增的 Run 内摘要只能存入当前 Run，不能写入 Session。
 - 审批记录存放于 `approvals/{approval_id}.json`，用于通过 approval ID 定位并一次性消费控制请求；它是控制索引，未计入上述五个核心容器。
+
+### 7.1 Session 删除的持久化收口
+
+删除 Session 是 `SessionInteractionService.delete_session()` 协调的应用级流程，而不是删除 `session.json`：先拒绝仍有非终态 Run 的 Session，再删除该 Session 的审批索引，最后移除整个 `{session_id}/` 目录。因此 `agent_runs/`、消息、事件、checkpoint、临时成功提交意图和 `session.json` 不会遗留孤儿文件。
+
+删除后只释放该 Session 及其 Run 范围的 Context 缓存。AGENT 范围缓存按 Identity 跨 Session 共享，不能因删除一个 Session 而清空；它由 `ApplicationHost.shutdown()` 在进程级生命周期终点统一释放。
 
 ## 8. 排障顺序
 
