@@ -81,6 +81,24 @@ def _parse_tool_policy(policy_raw: dict[str, Any]) -> "ToolPolicyConfig":
     )
 
 
+def _parse_network_tools(raw: dict[str, Any]) -> "NetworkToolsConfig":
+    """解析 tools.network 配置为 NetworkToolsConfig。
+
+    仅读取各服务的 enabled 开关；端点/主机等由代码固定（开发计划 §2.3）。
+    未提供的服务缺省关闭。
+    """
+    if not isinstance(raw, dict):
+        return NetworkToolsConfig()
+    return NetworkToolsConfig(
+        tavily=NetworkServiceConfig(
+            enabled=bool((raw.get("tavily") or {}).get("enabled", False))
+        ),
+        open_meteo=NetworkServiceConfig(
+            enabled=bool((raw.get("open_meteo") or {}).get("enabled", False))
+        ),
+    )
+
+
 def _find_project_root() -> Path:
     """从 dotClaw 模块位置向上找到项目根目录（包含 config.yaml）"""
     import dotclaw
@@ -150,6 +168,28 @@ class ToolPolicyConfig:
 
 
 @dataclass
+class NetworkServiceConfig:
+    """单个固定网络服务的启用开关（开发计划 §2.3）。
+
+    启用即代表用户对该服务的显式预授权；未启用则不会产生任何该服务的网络能力。
+    """
+
+    enabled: bool = False
+
+
+@dataclass
+class NetworkToolsConfig:
+    """Tool v1 阶段一：固定网络服务配置（总体设计 §7.1）。
+
+    默认两项均关闭，不产生可用的网络能力。端点、方法、认证方式属于 Provider 代码，
+    不在此配置（开发计划 §2.1 / §2.3）。
+    """
+
+    tavily: NetworkServiceConfig = field(default_factory=NetworkServiceConfig)
+    open_meteo: NetworkServiceConfig = field(default_factory=NetworkServiceConfig)
+
+
+@dataclass
 class ToolsConfig:
     # Phase 5 新增：source 级启停
     builtin_enabled: bool = True
@@ -165,8 +205,8 @@ class ToolsConfig:
     # exec 工具配置
     exec_timeout: float = 60.0
 
-    # web_search 配置
-    web_search_enabled: bool = False
+    # Tool v1 阶段一：固定网络服务配置（取代旧的 web_search_enabled）。
+    network: NetworkToolsConfig = field(default_factory=NetworkToolsConfig)
 
     # Phase 6 新增：MCP 配置
     mcp_global: McpGlobalConfig = field(default_factory=lambda: McpGlobalConfig())
@@ -571,13 +611,22 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         approval_commands=approval_commands,
         disabled_tools=disabled_tools,
         exec_timeout=tools_raw.get("exec_timeout", 60.0),
-        web_search_enabled=tools_raw.get("web_search", {}).get("enabled", False),
+        # Tool v1 阶段一：固定网络服务配置（取代旧 web_search_enabled）。
+        network=_parse_network_tools(tools_raw.get("network", {})),
         # Phase 6: MCP 配置解析
         mcp_global=_parse_mcp_global(tools_raw.get("mcp_global", {})),
         mcp_servers=_parse_mcp_servers(tools_raw.get("mcp_servers", [])),
         # Tool v1 阶段三：策略配置（缺省回退设计默认值）。
         policy=_parse_tool_policy(tools_raw.get("policy", {})),
     )
+
+    # 旧 tools.web_search 配置已弃用：本次不再读取，出现时输出一次明确告警并忽略
+    # （开发计划 §5.1 / §2.3）。用户应改用 tools.network.<tavily|open_meteo>.enabled。
+    if "web_search" in tools_raw:
+        logger.warning(
+            "配置项 tools.web_search 已弃用，将被忽略。请改用 tools.network.tavily.enabled "
+            "或 tools.network.open_meteo.enabled 启用对应的固定联网工具。"
+        )
 
     skills_raw = raw.get("skills", {})
     # Phase 7: directory 支持字符串或列表

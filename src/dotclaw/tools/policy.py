@@ -47,6 +47,9 @@ class PolicyScope:
     workspace_root: str = "."
     denied_paths: list[str] = field(default_factory=list)
     allowed_mcp_servers: list[str] = field(default_factory=list)
+    network_services: dict[str, list[str]] = field(default_factory=dict)
+    # 已启用的网络服务 → 该服务允许调用的精确主机集合；空字典 = fail-closed
+    # （任何网络请求均拒绝，除非显式启用服务）。仅供固定 Provider 使用（§2.2）。
 
 
 @dataclass
@@ -162,6 +165,19 @@ class PolicyEngine:
                     "MCP server 在允许列表（配置预授权连接）",
                 )
             return PolicyOutcome(PolicyDecision.DENY, request.profile, "MCP server 不在允许列表")
+
+        if request.kind is ResourceKind.NETWORK_HTTP:
+            # 纵深防御（开发计划 §2.2 / §2.4）：
+            # 1) 服务必须在已启用集合中（未启用 = 拒绝）；
+            # 2) 请求主机必须是该服务声明的精确主机之一（主机错配 = 拒绝）。
+            # 二者任一不满足均 fail-closed 拒绝，不依赖全局 network.http 取值。
+            allowed_hosts = scope.network_services.get(request.service or "")
+            if not allowed_hosts or request.host not in allowed_hosts:
+                return PolicyOutcome(
+                    PolicyDecision.DENY,
+                    request.profile,
+                    "网络服务未启用或主机不在允许列表",
+                )
 
         return PolicyOutcome(effective, request.profile, "")
 

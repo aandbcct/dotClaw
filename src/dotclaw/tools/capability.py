@@ -52,6 +52,7 @@ class CapabilityRequest:
     normalized_path: str | None = None  # 文件类：相对 workspace 的逻辑路径
     command: str | None = None          # 进程类：已脱敏的命令
     host: str | None = None             # 网络类：主机名
+    service: str | None = None          # 网络类：Provider 服务标识（如 tavily/open_meteo）
     server: str | None = None           # MCP 类：server 名
     escaped: bool = False               # 文件路径是否逃逸 workspace 根目录
     absolute_path: str | None = None    # 文件类：经 workspace_root 解析后的绝对真实路径；
@@ -72,18 +73,20 @@ class CapabilityRequest:
         if self.kind is ResourceKind.PROCESS_EXEC:
             return f"进程执行: {self.command or '(未知)'}"
         if self.kind is ResourceKind.NETWORK_HTTP:
-            return f"网络请求: {self.host or '(未知)'}"
+            svc = f"{self.service}@" if self.service else ""
+            return f"网络请求: {svc}{self.host or '(未知)'}"
         if self.kind in (ResourceKind.MCP_CONNECT, ResourceKind.MCP_CALL):
             return f"MCP 调用: {self.server or '(未知)'}"
         return f"资源({self.kind.value})"
 
 
 # 各 ToolPolicy 档案对应的参数来源字段（从已验证参数中读取）。
+# 注意：NETWORK 不再从 Agent 参数读取 url——固定 Provider 的主机由 ToolDefinition
+# 的 network_service / network_hosts 静态声明，详见 _network_requests。
 _PROFILE_FIELD: dict[ToolPolicy, str] = {
     ToolPolicy.WORKSPACE_READ: "path",
     ToolPolicy.WORKSPACE_WRITE: "path",
     ToolPolicy.PROCESS: "command",
-    ToolPolicy.NETWORK: "url",
     ToolPolicy.MCP: "server",
 }
 
@@ -124,6 +127,10 @@ class CapabilityBroker:
             # 未知档案不翻译，交回调用方按 passthrough 处理。
             return []
 
+        # 网络类：主机来自 ToolDefinition 的静态声明，绝不读取 Agent 参数（§2.2）。
+        if policy is ToolPolicy.NETWORK:
+            return self._network_requests(definition)
+
         field = getattr(definition, "path_param", None) or _PROFILE_FIELD.get(policy)
         if field is None:
             return []
@@ -136,8 +143,6 @@ class CapabilityBroker:
             return [self._file_request(policy, str(value), workspace_root, field)]
         if policy is ToolPolicy.PROCESS:
             return [self._process_request(str(value))]
-        if policy is ToolPolicy.NETWORK:
-            return [self._network_request(str(value))]
         if policy is ToolPolicy.MCP:
             return [self._mcp_request(str(value))]
         return []
@@ -175,15 +180,36 @@ class CapabilityBroker:
         )
 
     @staticmethod
-    def _network_request(url: str) -> CapabilityRequest:
-        """形成网络类资源请求，仅保留主机名、去除查询串。"""
-        safe_url = _desensitize_url(url)
-        host = urlparse(safe_url).hostname or safe_url
-        return CapabilityRequest(
-            kind=ResourceKind.NETWORK_HTTP,
-            profile=ToolPolicy.NETWORK.value,
-            host=host,
-        )
+    def _network_requests(definition: Any) -> list[CapabilityRequest]:
+        """按 ToolDefinition 的静态网络声明生成 NETWORK_HTTP 请求。
+
+        固定 Provider 的主机由 ``network_service`` / ``network_hosts`` 声明，Broker
+        不读取任何 Agent 参数（总体设计 §7.2 / 开发计划 §2.2）。一个工具可声明多个
+        精确主机（如 Open-Meteo 的地理编码与预报域名），为每个主机生成一条请求。
+
+        安全兜底：声明了 NETWORK 档案却缺少 service 或 hosts 时仍生成一条请求，
+        由 Policy Engine 因服务未启用/主机未声明而拒绝（fail-closed，不静默放行）。
+        """
+        service = getattr(definition, "network_service", None)
+        hosts = getattr(definition, "network_hosts", None) or []
+        if not service or not hosts:
+            return [
+                CapabilityRequest(
+                    kind=ResourceKind.NETWORK_HTTP,
+                    profile=ToolPolicy.NETWORK.value,
+                    service=service,
+                    host=None,
+                )
+            ]
+        return [
+            CapabilityRequest(
+                kind=ResourceKind.NETWORK_HTTP,
+                profile=ToolPolicy.NETWORK.value,
+                service=service,
+                host=host,
+            )
+            for host in hosts
+        ]
 
     @staticmethod
     def _mcp_request(server: str) -> CapabilityRequest:

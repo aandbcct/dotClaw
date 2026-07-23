@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from dotclaw.context.ports import AgentDirectoryPort, MemorySearchPort, SkillRegistryPort
     from dotclaw.runtime.application.ports import ContextPort
     from dotclaw.skills.registry import SkillRegistry
+    from dotclaw.tools.http_client import HttpClient
 
 logger = logging.getLogger("dotclaw.bootstrap.components")
 
@@ -128,7 +129,27 @@ def _build_skills(config: Config, project_root: Path) -> "SkillRegistry | None":
     return registry
 
 
-def _build_tools(config: Config, skill_registry: "SkillRegistryPort | None"):
+def _build_http_client() -> "HttpClient | None":
+    """构建受控 HTTP 客户端（阶段二）。
+
+    仅供内置 Provider 使用；作为共享只读依赖注入 Tool 执行上下文，并在
+    ApplicationHost 关闭流程中被关闭。构造失败视为可降级（网络工具不可用但不
+    阻断整体启动）。
+    """
+    from dotclaw.tools.http_client import HttpxHttpClient
+
+    try:
+        return HttpxHttpClient()
+    except Exception as e:  # 极少发生（构造期仅创建 AsyncClient）
+        logger.warning("受控 HTTP 客户端初始化失败（已降级）: %s", e)
+        return None
+
+
+def _build_tools(
+    config: Config,
+    skill_registry: "SkillRegistryPort | None",
+    http_client: "HttpClient | None" = None,
+):
     """构建 ToolExecutor + ToolRegistry + ApprovalManager。
 
     基础 PolicyScope 只保留全局上限与资源约束。所有 Agent（含主 Agent）的
@@ -146,6 +167,7 @@ def _build_tools(config: Config, skill_registry: "SkillRegistryPort | None"):
         default_policy_scope,
     )
     from dotclaw.tools.capability import CapabilityBroker
+    from dotclaw.tools.network import KNOWN_NETWORK_HOSTS
     from dotclaw.agent.identity import load_agent_config as _load_id
 
     registry = ToolRegistry()
@@ -167,6 +189,26 @@ def _build_tools(config: Config, skill_registry: "SkillRegistryPort | None"):
         scope.denied_paths = config.tools.policy.denied_paths
     if config.tools.policy.allowed_mcp_servers:
         scope.allowed_mcp_servers = config.tools.policy.allowed_mcp_servers
+
+    # 阶段一：固定网络服务约束——仅把“已启用”的服务投影为
+    # service -> 精确主机集合，供 Policy 纵深防御（开发计划 §2.2 / §2.4）。
+    # 端点/主机由代码固定（KNOWN_NETWORK_HOSTS），不读取 YAML 或 Agent 参数。
+    enabled_services: dict[str, list[str]] = {}
+    for svc_name, svc_cfg in (
+        ("tavily", config.tools.network.tavily),
+        ("open_meteo", config.tools.network.open_meteo),
+    ):
+        if svc_cfg.enabled:
+            enabled_services[svc_name] = list(KNOWN_NETWORK_HOSTS.get(svc_name, []))
+    scope.network_services = enabled_services
+
+    # 阶段一：派生 network.http 全局规则（开发计划 §2.3）。
+    # 仅在用户未显式写出 network.http 时生效：任一服务启用 → allow，否则 deny。
+    # 用户显式 allow/ask/deny 始终优先（上方已写入 scope.global_rules）。
+    if "network.http" not in config.tools.policy.rules:
+        scope.global_rules["network.http"] = (
+            PolicyDecision.ALLOW if enabled_services else PolicyDecision.DENY
+        )
 
     policy_engine = PolicyEngine(scope)
     capability_broker = CapabilityBroker()
@@ -195,6 +237,7 @@ def _build_tools(config: Config, skill_registry: "SkillRegistryPort | None"):
         skill_parser=skill_parser,
         approval_commands=set(config.tools.approval_commands),
         agent_policy_resolver=_resolve_agent_policy_rules,
+        http_client=http_client,
     )
     return executor
 

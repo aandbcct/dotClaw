@@ -52,6 +52,8 @@ class ToolMeta:
     metadata: dict = field(default_factory=dict)
     args_style: str = "model"
     path_param: str | None = None
+    network_service: str | None = None        # 网络类静态声明：Provider 服务标识
+    network_hosts: list[str] = field(default_factory=list)  # 网络类静态声明：精确主机集合
 
     def build_definition(self) -> ToolDefinition:
         """由元数据构造面向 LLM 的 ToolDefinition。
@@ -75,6 +77,8 @@ class ToolMeta:
             metadata=dict(self.metadata),
             policy_profile=self.policy.value if self.policy is not None else None,
             path_param=self.path_param,
+            network_service=self.network_service,
+            network_hosts=list(self.network_hosts),
         )
 
 
@@ -92,6 +96,8 @@ def tool(
     timeout: float = 60.0,
     metadata: dict | None = None,
     path_param: str | None = None,
+    network_service: str | None = None,
+    network_hosts: list[str] | None = None,
 ) -> Callable[[FuncT], FuncT]:
     """声明一个工具的元数据。
 
@@ -101,8 +107,15 @@ def tool(
         async def read_text(args: ReadTextArgs, context: ToolExecutionContext) -> str:
             ...
 
-    该装饰器仅把 ToolMeta 记录到 func.__tool_meta__，不执行任何注册动作，
-    也不导入全局 Registry。
+        @tool(name="builtin.web.search", args_model=SearchArgs,
+              policy=ToolPolicy.NETWORK,
+              network_service="tavily", network_hosts=["api.tavily.com"])
+        async def search(args: SearchArgs, context: ToolExecutionContext) -> str:
+            ...
+
+    网络类工具通过 ``network_service`` / ``network_hosts`` 静态声明固定 Provider 主机，
+    Broker 不读取 Agent 参数中的 URL（开发计划 §2.2）。该装饰器仅把 ToolMeta 记录到
+    func.__tool_meta__，不执行任何注册动作，也不导入全局 Registry。
     """
 
     def _wrap(func: FuncT) -> FuncT:
@@ -116,6 +129,8 @@ def tool(
             timeout=timeout,
             metadata=metadata or {},
             path_param=path_param,
+            network_service=network_service,
+            network_hosts=list(network_hosts or []),
         )
         func.__tool_meta__ = meta  # type: ignore[attr-defined]
         return func

@@ -47,18 +47,25 @@ tools:
 
   exec_timeout: 60
 
-  web_search:
-    enabled: false
+  # Tool v1 阶段一：固定网络服务配置（总体设计 §7.1）。
+  # 默认两项均关闭，不产生可用的网络能力；启用即代表用户对该服务的显式预授权。
+  # 端点、方法与认证方式由代码固定，不在此处配置（开发计划 §2.3）。
+  network:
+    tavily:
+      enabled: false
+    open_meteo:
+      enabled: false
 
   # 工具安全策略（Tool v1 阶段三，总体设计 §7.1）
   # 全局规则是安全上限；Agent 级策略只能收窄，不得放宽。
+  # 注意：network.http 不再在此显式声明；其取值由启用服务自动派生
+  # （启用任一服务 → allow，否则 deny），以免覆盖受限授权（开发计划 §2.3）。
   policy:
     workspace_root: .
     rules:
       workspace.read: allow      # 工作区读
       workspace.write: ask       # 工作区写（需审批）
       process.exec: ask          # 进程执行（需审批）
-      network.http: deny         # 网络请求（默认拒绝）
       mcp.connect: ask           # MCP 连接（需审批）
       mcp.call: ask              # MCP 调用（需审批）
     denied_paths:                # 命中即拒绝（glob，详见 default_policy_scope）
