@@ -283,18 +283,3 @@ def _build_mcp(config: Config, tool_executor):
         return provider
 
     return _init()
-
-
-def _build_context_port(
-    skill_registry: "SkillRegistryPort | None",
-    memory_manager: "MemorySearchPort | None",
-    agent_registry: "AgentDirectoryPort",
-) -> "ContextPort":
-    """构建基于注册表与 Plan Resolver 的 Runtime ContextPort。"""
-    from dotclaw.context import ContextDependencies, build_context_provider
-
-    return build_context_provider(ContextDependencies(
-        skill_registry=skill_registry,
-        memory_manager=memory_manager,
-        agent_registry=agent_registry,
-    ))

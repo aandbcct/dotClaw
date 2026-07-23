@@ -29,7 +29,7 @@ from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
 from dotclaw.agent import Agent
 from dotclaw.session import Session, SessionManager
 from dotclaw.bootstrap import ApplicationHost
-from dotclaw.bootstrap.session_interaction import SessionInteractionService
+from dotclaw.bootstrap.session_interaction import SessionDeletionRejected, SessionInteractionService
 from dotclaw.cli.banner import build_banner, console as rich_console
 from dotclaw.mcp.provider import MCPToolProvider
 from dotclaw.memory.dream import DeepDream
@@ -108,16 +108,22 @@ async def _run_cli() -> None:
                             channel.print_error("用法: /switch <对话ID>")
                     elif cmd == "/delete":
                         if args:
-                            deleted: bool = await session_mgr.delete(args)
-                            if deleted:
-                                channel.print_info(f"已删除对话: {args}")
-                                if current_session.id == args:
-                                    ss = await session_mgr.list_all()
-                                    if ss:
-                                        current_session = ss[0]
-                                        channel.print_info(f"已切换到 [{current_session.id}] {current_session.title}")
-                            else:
+                            existing: Session | None = await session_mgr.load(args)
+                            if existing is None:
                                 channel.print_error(f"未找到对话: {args}")
+                            else:
+                                # 阶段 5：应用级删除协调流程，活动 Run 会被明确拒绝。
+                                try:
+                                    await service.delete_session(args)
+                                except SessionDeletionRejected as e:
+                                    channel.print_error(f"无法删除对话 {args}：{e}")
+                                else:
+                                    channel.print_info(f"已删除对话: {args}")
+                                    if current_session.id == args:
+                                        ss = await session_mgr.list_all()
+                                        if ss:
+                                            current_session = ss[0]
+                                            channel.print_info(f"已切换到 [{current_session.id}] {current_session.title}")
                         else:
                             channel.print_error("用法: /delete <对话ID>")
                     elif cmd == "/dream":

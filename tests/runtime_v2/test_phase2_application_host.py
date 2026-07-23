@@ -62,6 +62,16 @@ class _FakeTools:
     capability_broker = None
 
 
+class _FakeApprovalRepository:
+    """审批仓储替身：阶段 5 新增，供 SessionInteractionService 按 Session 清理审批。"""
+
+    async def delete_by_session(self, session_id: str) -> None:
+        pass
+
+    def load(self, approval_id: str) -> object | None:
+        return None
+
+
 def _fake_config(session_dir: str) -> types.SimpleNamespace:
     """构造 initialize() 实际读取的最小配置（其余组件已打桩，不再深度读取）。"""
     tools_policy = types.SimpleNamespace(
@@ -123,8 +133,10 @@ def test_runtime_services_has_no_diagnostic_fields() -> None:
         coordinator=_FakeCoordinator(),
         run_repository=_FakeRunRepository(),
         agent_registry=_patch_registry([])(),
+        approval_repository=_FakeApprovalRepository(),
     )
-    for required in ("engine", "context_port", "coordinator", "run_repository", "agent_registry"):
+    for required in ("engine", "context_port", "coordinator", "run_repository", "agent_registry",
+                     "approval_repository"):
         assert hasattr(rs, required), f"缺失必需字段 {required}"
     for removed in ("tool_executor", "mcp_provider", "skill_registry", "memory_dream"):
         assert not hasattr(rs, removed), f"诊断字段 {removed} 不应再出现在 RuntimeServices"
@@ -148,6 +160,7 @@ async def test_application_host_shutdown_releases_context_and_closes_mcp(tmp_pat
         coordinator=_FakeCoordinator(),
         run_repository=_FakeRunRepository(),
         agent_registry=host._agent_registry,
+        approval_repository=_FakeApprovalRepository(),
     )
 
     await host.shutdown()
@@ -178,6 +191,7 @@ async def test_application_host_build_fails_without_identities(tmp_path: Path, m
             coordinator=_FakeCoordinator(),
             run_repository=_FakeRunRepository(),
             agent_registry=agent_registry,
+            approval_repository=_FakeApprovalRepository(),
         )
 
     monkeypatch.setattr(app_host_mod, "build_runtime_services", _fake_build_runtime_services)
@@ -207,6 +221,7 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
             coordinator=_FakeCoordinator(),
             run_repository=_FakeRunRepository(),
             agent_registry=agent_registry,
+            approval_repository=_FakeApprovalRepository(),
         )
 
     monkeypatch.setattr(app_host_mod, "build_runtime_services", _fake_build_runtime_services)
@@ -250,6 +265,7 @@ async def test_application_host_build_cleans_up_partial_resources_on_init_failur
             coordinator=_FakeCoordinator(),
             run_repository=_FakeRunRepository(),
             agent_registry=agent_registry,
+            approval_repository=_FakeApprovalRepository(),
         )
 
     monkeypatch.setattr(app_host_mod, "build_runtime_services", _fake_build_runtime_services)

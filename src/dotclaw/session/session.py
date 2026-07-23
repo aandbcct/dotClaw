@@ -14,6 +14,7 @@ import asyncio
 import json
 import hashlib
 import os
+import shutil
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
@@ -231,10 +232,18 @@ class SessionManager:
         self._deletion_handler = handler
 
     def _session_path(self, session_id: str) -> Path:
-        """获取 Session 文件路径。"""
+        """获取 Session 文件路径（同时创建目录，供创建/保存/加载使用）。"""
         session_dir: Path = self._data_dir / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir / "session.json"
+
+    def session_directory(self, session_id: str) -> Path:
+        """返回 Session 存储目录路径（只读访问，不创建目录）。
+
+        该目录包含 session.json、agent_runs/、conversation.json、checkpoint 与
+        事件等全部运行事实；删除协调流程据此做整目录原子清理（开发计划阶段 5）。
+        """
+        return self._data_dir / session_id
 
     async def create(self, agent_id: str, title: str = "新对话",
                      model: str = "") -> Session:
@@ -303,14 +312,23 @@ class SessionManager:
         return sessions
 
     async def delete(self, session_id: str) -> bool:
-        """删除 Session。"""
-        path: Path = self._session_path(session_id)
-        if path.exists():
-            path.unlink()
-            if self._deletion_handler is not None:
-                await self._deletion_handler(session_id)
-            return True
-        return False
+        """删除完整 Session 存储目录（session.json + agent_runs + 消息/事件/checkpoint）。
+
+        收缩为目录级原子操作，不再以单文件删除代表完整 Session 删除
+        （开发计划阶段 5 + 总体设计 §5.2）。具体的审批清理与 Context 缓存释放
+        由应用级协调器（SessionInteractionService.delete_session）负责，本方法
+        仅执行文件系统级整目录移除并在完成后触发删除处理器。
+
+        Returns:
+            目录存在并已删除返回 True；目录不存在（幂等）返回 False。
+        """
+        session_dir: Path = self.session_directory(session_id)
+        if not session_dir.is_dir():
+            return False
+        shutil.rmtree(session_dir)
+        if self._deletion_handler is not None:
+            await self._deletion_handler(session_id)
+        return True
 
 
 def _legacy_conversation_id(session_id: str, index: int, conversation_data: dict) -> str:

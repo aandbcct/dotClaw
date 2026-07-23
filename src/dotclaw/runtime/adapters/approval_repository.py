@@ -29,6 +29,14 @@ class ApprovalRepositoryAdapter:
         """原子标记并返回仍处于待处理状态的审批记录。"""
         return await asyncio.to_thread(self._consume_sync, approval_id)
 
+    async def delete_by_session(self, session_id: str) -> None:
+        """删除该 Session 的全部审批记录，使其不可再恢复（开发计划阶段 5）。
+
+        审批文件布局由本适配器独占负责，SessionManager 不直接了解；应用级删除
+        协调流程据此清理待审批事实，避免遗留孤儿审批（总体设计 §5.2）。
+        """
+        await asyncio.to_thread(self._delete_by_session_sync, session_id)
+
     def _create_sync(self, record: ApprovalRecord) -> None:
         path: Path = self._approval_path(record.approval_id)
         if path.exists():
@@ -48,6 +56,15 @@ class ApprovalRepositoryAdapter:
         consumed_record: ApprovalRecord = replace(record, status=ApprovalStatus.CONSUMED)
         write_json_atomic(self._approval_path(approval_id), consumed_record.to_dict())
         return consumed_record
+
+    def _delete_by_session_sync(self, session_id: str) -> None:
+        approvals_dir: Path = self._root_directory / "approvals"
+        if not approvals_dir.is_dir():
+            return
+        for path in approvals_dir.glob("*.json"):
+            record: ApprovalRecord = _approval_from_dict(load_json_map(path))
+            if record.session_id == session_id:
+                path.unlink()
 
     def _approval_path(self, approval_id: str) -> Path:
         safe_approval_id: str = validate_path_segment(approval_id, "approval_id")

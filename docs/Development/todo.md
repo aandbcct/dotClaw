@@ -14,7 +14,18 @@
 
 - [ ] 跨进程/多节点 Session，Runtime 从“单进程任务执行器”升级为“分布式任务调度系统”
 
+## agentState状态机
 
+- [ ] **状态分层**：将运行状态拆成生命周期、执行阶段、等待原因和终态结果，避免一个枚举承担所有语义。
+- [ ] **等待原因独立**：用 `WaitReason` 表示审批、委派、补充信息、恢复等外部等待，而不是继续堆叠 `WAITING_*` 状态。
+- [ ] **执行阶段内化**：将 `WAITING_LLM`、`WAITING_TOOLS` 改为运行中的 `stage`，它们不是“暂停”。
+- [ ] **统一状态迁移**：所有状态改变只能通过 `transition(event)` 完成，业务代码不再直接修改状态字段。
+- [ ] **状态机产出决策**：一次迁移同时返回新状态、下一步动作、RunStatus 投影、是否需要 checkpoint 和应记录的事件。
+- [ ] **Engine 只执行副作用**：Runtime 主循环根据状态机给出的 action 调 LLM、工具、审批或恢复逻辑，不自行推断状态含义。
+- [ ] **RunStatus 单向投影**：`AgentRun.status` 由状态机状态推导，不再与 `AgentState` 分别维护生命周期。
+- [ ] **修正中断语义**：可恢复的 `INTERRUPTED` 应属于“挂起并等待恢复”，真正放弃才进入终态 `ABANDONED`。
+- [ ] **Checkpoint 记录恢复必要状态**：持久化分层状态、待审批/待恢复信息和安全恢复点，不把整个运行对象当快照保存。
+- [ ] **兼容迁移优先**：先让 checkpoint 能读取旧 `phase` 格式，再逐步移除旧枚举和 Engine 中对具体 phase 的分支。
 
 ## multi-agent
 
@@ -43,7 +54,7 @@
 
 ## 上下文压缩
 
-- [ ] 考虑在单次agentrun中需要触发压缩的情况，每次llm_request前判断压缩
+- [x] 考虑在单次agentrun中需要触发压缩的情况，每次llm_request前判断压缩
 
 ## checkpoint/resume
 

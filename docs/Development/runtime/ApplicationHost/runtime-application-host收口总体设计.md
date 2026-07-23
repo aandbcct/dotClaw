@@ -4,7 +4,7 @@
 
 ### 1.1 背景
 
-当前普通入口由 `main.py -> agent.factory.build_agent()` 启动。`agent/factory.py` 实际创建 LLM、工具、MCP、记忆、技能、Session 与 AgentRegistry，再调用 `bootstrap/runtime_factory.py` 组装 Runtime。这个结构使 `agent/` 反向承担应用组合根职责，且 `Agent` 同时持有身份、交互、展示依赖和后台资源生命周期。
+当前入口由 `main.py` 构建 `ApplicationHost`（唯一组合根）启动。`ApplicationHost` 创建并持有全部应用级资源、调用 `bootstrap/runtime_factory.py` 装配 Runtime，使 `agent/` 回归为内部轻量门面，不再反向承担应用组合根职责，且 `Agent` 仅持有身份与协调器、不持有任何基础设施或资源生命周期。
 
 Runtime v4 的端口与状态机边界已经存在，但其组合根、Session 到 Identity 的绑定、跨 Channel 流输出和审批恢复仍未收口。项目定位为本地、单进程 Agent harness，本次目标是完成主架构的逻辑闭环，不引入分布式运行时或新的业务能力。
 

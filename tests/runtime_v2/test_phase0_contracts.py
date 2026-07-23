@@ -26,6 +26,8 @@ from dotclaw.agent.identity import AgentIdentity
 from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
 from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.runtime.adapters.approval_repository import ApprovalRepositoryAdapter
+from dotclaw.runtime.adapters.run_repository import RunRepositoryAdapter
+from dotclaw.runtime.adapters.session_conversation_projector import SessionConversationProjector
 from dotclaw.runtime.adapters.tool_executor_adapter import ToolExecutorAdapter
 from dotclaw.runtime.application.dto import (
     RunRequest,
@@ -329,14 +331,11 @@ async def test_multi_identity_context_slots_both_effective(tmp_path: Path) -> No
 # ============================================================================
 
 @pytest.mark.phase0_contract
-@pytest.mark.xfail(strict=True, reason="阶段0契约：待阶段5实现应用级 Session 删除协调流程")
 async def test_active_session_deletion_is_rejected(tmp_path: Path) -> None:
     """存在非终态 Run 的 Session 删除必须被拒绝，要求先取消/重试/放弃。
 
     目标（开发计划阶段5 + 总体设计 §5.2）：删除是应用级流程，查询到有非终态
     Run 时拒绝删除，避免产生部分删除与孤儿数据。
-
-    当前实现：SessionManager.delete 不感知 Run 状态，任何情况下都直接删。
     """
     from dotclaw.bootstrap.session_interaction import (
         SessionDeletionRejected,
@@ -346,19 +345,30 @@ async def test_active_session_deletion_is_rejected(tmp_path: Path) -> None:
     session_manager: SessionManager = SessionManager(tmp_path)
     registry: AgentRegistry = AgentRegistry()
     registry.register(AgentIdentity(agent_id="agent-1", agent_name="已知 Agent"))
-
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(
+        tmp_path, SessionConversationProjector(session_manager)
+    )
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
         coordinator=None,  # type: ignore[arg-type]
+        run_repository=run_repository,
     )
 
     session = await session_manager.create(agent_id="agent-1")
-    # 启动一个活动（非终态）Run 后，删除必须被明确拒绝。
-    # 阶段5前 delete_session 尚未实现（属性缺失），本契约因此 xfail；
-    # 阶段5实现后须抛出 SessionDeletionRejected，届时移除 xfail 即可收敛。
+    # 模拟一个非终态（运行中）Run 遗留的 run.json。
+    run_dir: Path = tmp_path / session.id / "agent_runs" / "run-active"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        '{"run_id": "run-active", "session_id": "%s", "agent_id": "agent-1", "status": "running"}'
+        % session.id,
+        encoding="utf-8",
+    )
+
+    # 活动 Run 存在时删除必须被明确拒绝，且目录保持完整（不产生部分删除）。
     with pytest.raises(SessionDeletionRejected):
         await service.delete_session(session.id)
+    assert (tmp_path / session.id).is_dir()
 
 
 # ============================================================================
@@ -366,19 +376,12 @@ async def test_active_session_deletion_is_rejected(tmp_path: Path) -> None:
 # ============================================================================
 
 @pytest.mark.phase0_contract
-@pytest.mark.xfail(
-    strict=True,
-    reason="阶段0契约：待阶段5实现应用级删除协调流程，清理完整目录与审批记录",
-)
 async def test_terminal_session_deletion_removes_session_directory_and_approvals(tmp_path: Path) -> None:
     """终态 Session 删除后，其完整目录（运行目录/消息/事件）与审批记录均不可查询。
 
     目标（开发计划阶段5 + 总体设计 §5.2）：应用级删除流程清理完整 Session 存储目录，
-    并使该 Session 的待审批记录不可恢复。当前实现：删除仅删 session.json，
-    运行目录与审批记录均残留（且 ApprovalRepository 暂无以 Session 清理的最小方法）。
-
-    说明：审批仓库根目录与 Host 同源（此处用 tmp_path）；阶段5实现后若 Coordinator
-    使用不同的审批仓库根，本契约的清理断言需按真实装配校准。
+    并使该 Session 的待审批记录不可恢复。审批仓库根目录与 Host 同源（此处用 tmp_path），
+    由 ApprovalRepositoryAdapter 独占文件布局，SessionManager 不直接了解。
     """
     from dotclaw.bootstrap.session_interaction import SessionInteractionService
 
@@ -386,10 +389,15 @@ async def test_terminal_session_deletion_removes_session_directory_and_approvals
     registry: AgentRegistry = AgentRegistry()
     registry.register(AgentIdentity(agent_id="agent-1", agent_name="已知 Agent"))
 
+    # 模拟该 Session 的待审批记录（审批仓库与 Host 同源根目录）。
+    approval_repo: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(tmp_path)
+    approval_id = "apr-run-1"
+
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
         coordinator=None,  # type: ignore[arg-type]
+        approval_repository=approval_repo,
     )
 
     session = await session_manager.create(agent_id="agent-1")
@@ -400,9 +408,6 @@ async def test_terminal_session_deletion_removes_session_directory_and_approvals
     (run_dir / "run.json").write_text("{}", encoding="utf-8")
     (run_dir / "messages.json").write_text("{}", encoding="utf-8")
 
-    # 模拟该 Session 的待审批记录（审批仓库与 Host 同源根目录）。
-    approval_repo: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(tmp_path)
-    approval_id = "apr-run-1"
     await approval_repo.create(ApprovalRecord(
         approval_id=approval_id,
         run_id="run-1",
@@ -411,8 +416,9 @@ async def test_terminal_session_deletion_removes_session_directory_and_approvals
         created_at="2026-07-22T00:00:00Z",
         metadata={},
     ))
+    assert await approval_repo.load(approval_id) is not None  # 清理前可查询
 
-    # 应用级删除：拒绝孤儿数据，清理运行目录与审批记录。
+    # 应用级删除：清理运行目录与审批记录，不留孤儿数据。
     await service.delete_session(session.id)
 
     # 目标：Session 目录整体消失，且其审批记录不可再查询。

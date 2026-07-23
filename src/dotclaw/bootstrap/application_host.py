@@ -145,6 +145,9 @@ class ApplicationHost:
             coordinator=self._runtime_services.coordinator,
             config=config,
             default_agent_id=default_identity.agent_id,
+            run_repository=self._runtime_services.run_repository,
+            approval_repository=self._runtime_services.approval_repository,
+            context_port=self._context_port,
         )
         logger.info("ApplicationHost 就绪：%d 个 Identity 已注册", len(self._agent_registry.list_all()))
 

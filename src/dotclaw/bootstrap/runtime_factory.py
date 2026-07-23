@@ -53,6 +53,8 @@ class RuntimeServices:
     coordinator: SessionRunCoordinator
     run_repository: RunRepositoryAdapter
     """启动阶段用于补偿未决成功提交的本地运行仓储。"""
+    approval_repository: ApprovalRepositoryAdapter
+    """应用级 Session 删除协调流程按 Session 清理审批记录所需。"""
     agent_registry: AgentRegistry
     """所有可用 Identity 的目录，供 SessionInteractionService 路由与校验。"""
 
@@ -79,7 +81,6 @@ def build_runtime_services(
         agent_registry=agent_registry,
         plan_configuration=build_context_plan_from_registry(agent_registry),
     ))
-    session_manager.set_deletion_handler(_session_context_releaser(context_port))
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(
         storage_root,
         SessionConversationProjector(session_manager),
@@ -118,6 +119,7 @@ def build_runtime_services(
         context_port=context_port,
         coordinator=coordinator,
         run_repository=run_repository,
+        approval_repository=approval_repository,
         agent_registry=agent_registry,
     )
 
@@ -126,12 +128,3 @@ def _storage_root(project_root: Path, configured_directory: str) -> Path:
     """将 Session 存储目录解析为与 SessionManager 相同的绝对根目录。"""
     directory = Path(configured_directory)
     return directory if directory.is_absolute() else project_root / directory
-
-
-def _session_context_releaser(context_port: ContextPort) -> Callable[[str], Awaitable[None]]:
-    """构造只释放指定 Session Owner 缓存的删除回调。"""
-    async def release(session_id: str) -> None:
-        """在 Session 文件删除后释放对应 Slot 实例。"""
-        await context_port.release_scope(ContextOwner.SESSION, session_id)
-
-    return release
