@@ -135,7 +135,7 @@ async def test_submit_routes_by_session_identity(
         has_streamed_text = False
 
     class _FakeCoordinator:
-        async def submit_prepared(self, session_id: str, create_request) -> _FakeResult:
+        async def submit_prepared(self, session_id: str, create_request, text_stream_port=None) -> _FakeResult:
             req = await create_request()
             captured["agent_id"] = req.agent_id
             return _FakeResult()

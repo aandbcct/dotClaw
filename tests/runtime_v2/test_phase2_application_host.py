@@ -171,8 +171,7 @@ async def test_application_host_build_fails_without_identities(tmp_path: Path, m
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
-                                      session_manager, skill_registry, memory_manager, agent_registry,
-                                      text_stream_port=None):
+                                      session_manager, skill_registry, memory_manager, agent_registry):
         return RuntimeServices(
             engine=_FakeLLM(),
             context_port=_FakeContextPort(),
@@ -201,8 +200,7 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
-                                      session_manager, skill_registry, memory_manager, agent_registry,
-                                      text_stream_port=None):
+                                      session_manager, skill_registry, memory_manager, agent_registry):
         return RuntimeServices(
             engine=_FakeLLM(),
             context_port=_FakeContextPort(),
@@ -245,8 +243,7 @@ async def test_application_host_build_cleans_up_partial_resources_on_init_failur
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _fake_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
-                                      session_manager, skill_registry, memory_manager, agent_registry,
-                                      text_stream_port=None):
+                                      session_manager, skill_registry, memory_manager, agent_registry):
         return RuntimeServices(
             engine=_FakeLLM(),
             context_port=_FakeContextPort(),

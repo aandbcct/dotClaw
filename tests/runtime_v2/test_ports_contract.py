@@ -47,7 +47,7 @@ class FakeContextPort:
 class FakeLLMPort:
     """用于验证 LLMPort 标准响应的内存替身。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """返回不依赖具体模型客户端的标准消息。"""
         return RunMessage(
             message_id="message-assistant-1",

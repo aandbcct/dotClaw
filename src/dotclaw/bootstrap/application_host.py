@@ -121,11 +121,8 @@ class ApplicationHost:
         default_identity = self._resolve_default_agent_id()
 
         # ── 装配 Runtime（Host 私有组装函数）──
-        text_stream_port = None
-        if self._channel is not None:
-            from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
-
-            text_stream_port = ChannelTextStreamAdapter(self._channel)
+        # 文本流端口不再在构造期绑定到 LLMProxyAdapter；改为 CLI 每次消息构造
+        # 本次的 ChannelTextStreamAdapter 并作为运行级参数透传（总体设计 §4.4）。
         self._runtime_services = build_runtime_services(
             config=config,
             project_root=root,
@@ -136,7 +133,6 @@ class ApplicationHost:
             skill_registry=self._skill_registry,
             memory_manager=memory_mgr,
             agent_registry=self._agent_registry,
-            text_stream_port=text_stream_port,
         )
         # Host 启动时补偿未决成功提交（总体设计 §5.3）。
         await self._runtime_services.run_repository.recover_pending_success_commits()

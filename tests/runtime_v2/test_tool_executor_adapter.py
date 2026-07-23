@@ -103,7 +103,7 @@ class ToolThenFinalLLM(LLMPort):
         self._tool_name = tool_name
         self._calls = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """依次返回工具调用和普通回答。"""
         self._calls += 1
         if self._calls == 1:

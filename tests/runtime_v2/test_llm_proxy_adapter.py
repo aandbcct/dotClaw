@@ -45,7 +45,7 @@ async def test_llm_proxy_adapter_converts_context_and_aggregates_chunks() -> Non
     """完整上下文、工具定义、工具调用、token 与文本流均转换到 v2 模型。"""
     proxy = StreamingProxy()
     stream_collector: TextStreamCollector = TextStreamCollector()
-    port: LLMProxyAdapter = LLMProxyAdapter(proxy, stream_collector)  # type: ignore[arg-type]
+    port: LLMProxyAdapter = LLMProxyAdapter(proxy)
     context = ContextBundle(
         messages=(RunMessage("m1", 1, RunMessageKind.LLM_REQUEST, MessageRole.USER, "查天气"),),
         tools=(ToolDefinition("weather", "查询天气", {"type": "object"}),),
@@ -53,7 +53,7 @@ async def test_llm_proxy_adapter_converts_context_and_aggregates_chunks() -> Non
     )
     execution = RunExecutionView("run-1", AgentPolicySnapshot("agent", "v1", "model-x", 3), AgentState(), RunBudget(3), 0, None)
 
-    message = await port.complete(context, execution)
+    message = await port.complete(context, execution, stream_collector)
 
     assert proxy.messages[0].content == "查天气"
     assert proxy.tools[0].name == "weather"

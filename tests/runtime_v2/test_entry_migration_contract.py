@@ -69,12 +69,11 @@ async def test_agent_process_submits_to_coordinator_and_projector_writes_convers
         skill_registry=None,
         memory_manager=None,
         agent_registry=AgentRegistry(),
-        text_stream_port=ChannelTextStreamAdapter(channel),
     )
     agent = Agent(identity, coordinator=services.coordinator, config=config)
     session = await session_manager.create(agent_id=identity.agent_id)
 
-    answer = await agent.process(session, "你好")
+    answer = await agent.process(session, "你好", text_stream_port=ChannelTextStreamAdapter(channel))
     projected = await session_manager.load(session.id)
 
     assert answer == "已通过新版入口"

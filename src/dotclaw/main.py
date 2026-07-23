@@ -25,6 +25,7 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from dotclaw.channel.cli import CLIChannel
+from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
 from dotclaw.agent import Agent
 from dotclaw.session import Session, SessionManager
 from dotclaw.bootstrap import ApplicationHost
@@ -72,6 +73,9 @@ async def _run_cli() -> None:
                 user_input: str = await channel.receive()
                 if not user_input.strip():
                     continue
+
+                # 本次消息的运行级文本流端口：CLI 每次消息构造，只服务本 Run。
+                text_stream_port = ChannelTextStreamAdapter(channel)
 
                 # 每次交互前按当前 Session 绑定的 Identity 路由到对应 Agent 门面，
                 # 确保提交严格由 Session 权威驱动，内部构造的 Agent 无法绕过。
@@ -130,7 +134,7 @@ async def _run_cli() -> None:
                             channel.print_error("用法: /cancel <run_id>")
                     elif cmd == "/retry":
                         if args:
-                            retry_result: str = await agent.retry_interrupted(args)
+                            retry_result: str = await agent.retry_interrupted(args, text_stream_port)
                             await channel.print_markdown(retry_result)
                         else:
                             channel.print_error("用法: /retry <run_id>")
@@ -153,8 +157,8 @@ async def _run_cli() -> None:
                     continue
 
                 # ── 正常对话 ──
-                final_answer: str = await agent.process(current_session, user_input)
-                final_answer = await _resolve_pending_approvals(channel, agent, final_answer)
+                final_answer: str = await agent.process(current_session, user_input, text_stream_port)
+                final_answer = await _resolve_pending_approvals(channel, agent, final_answer, text_stream_port)
 
                 if not final_answer:
                     channel.print_error("执行异常：未返回有效回复")
@@ -286,8 +290,8 @@ async def _cmd_dream_async(channel: CLIChannel, dream: DeepDream) -> None:
         channel.print_error(f"Dream 失败: {e}")
 
 
-async def _resolve_pending_approvals(channel: CLIChannel, agent: Agent, current_text: str) -> str:
-    """展示有限审批选项，并只向 Engine 提交 approval_id 与决定。"""
+async def _resolve_pending_approvals(channel: CLIChannel, agent: Agent, current_text: str, text_stream_port=None) -> str:
+    """展示有限审批选项，并只向 Engine 提交 approval_id 与决定；透传运行级输出端口。"""
     answer: str = current_text
     while agent.last_run_result is not None and agent.last_run_result.status.value == "waiting_approval":
         approval_id = agent.last_run_result.approval_id
@@ -295,7 +299,7 @@ async def _resolve_pending_approvals(channel: CLIChannel, agent: Agent, current_
             return "执行失败：等待审批运行缺少 approval_id"
         decision = await channel.ask_user("⚠️ 工具需要审批，确认执行？(y/n): ")
         approved = decision.strip().lower() in ("y", "yes")
-        answer = await agent.resolve_approval(approval_id, approved)
+        answer = await agent.resolve_approval(approval_id, approved, text_stream_port)
     return answer
 
 

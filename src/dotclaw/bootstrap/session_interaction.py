@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from ..agent.agent import Agent, _display_result
 from ..agent.identity import AgentIdentity
 from ..orchestration.registry import AgentRegistry
+from ..runtime.application.ports import TextStreamPort
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..session.session import Session, SessionManager
 
@@ -90,10 +91,10 @@ class SessionInteractionService:
 
     # ── 提交与控制 ──
 
-    async def submit(self, session: Session | str, user_message: str, output_port=None) -> str:
+    async def submit(self, session: Session | str, user_message: str, output_port: TextStreamPort | None = None) -> str:
         """提交一次普通消息，按 Session 路由到对应 Identity 的 Agent 门面。
 
-        ``output_port`` 当前仅接收，阶段 3 才线程到 Runtime 执行参数（运行级输出端口）。
+        ``output_port`` 为本提交的运行级输出端口，透传至 Runtime 执行参数。
         """
         if isinstance(session, str):
             loaded: Session | None = await self._session_manager.load(session)
@@ -101,20 +102,20 @@ class SessionInteractionService:
                 raise UnknownIdentityError(f"Session 不存在: {session}")
             session = loaded
         agent: Agent = await self.get_agent(session)
-        return await agent.process(session, user_message)
+        return await agent.process(session, user_message, output_port)
 
-    async def resolve_approval(self, approval_id: str, approved: bool) -> str:
-        """提交审批决定并返回恢复后的展示文本。"""
-        result = await self._coordinator.resolve_approval(approval_id, approved)
+    async def resolve_approval(self, approval_id: str, approved: bool, output_port: TextStreamPort | None = None) -> str:
+        """提交审批决定并返回恢复后的展示文本；透传运行级输出端口。"""
+        result = await self._coordinator.resolve_approval(approval_id, approved, output_port)
         return _display_result(result)
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
-    async def retry_interrupted(self, run_id: str) -> str:
-        """重试可恢复中断 Run，并返回展示结果。"""
-        result = await self._coordinator.retry_interrupted(run_id)
+    async def retry_interrupted(self, run_id: str, output_port: TextStreamPort | None = None) -> str:
+        """重试可恢复中断 Run，并返回展示结果；透传运行级输出端口。"""
+        result = await self._coordinator.retry_interrupted(run_id, output_port)
         return _display_result(result)
 
     async def abandon_interrupted(self, run_id: str) -> str:

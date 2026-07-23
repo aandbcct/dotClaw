@@ -62,7 +62,7 @@ class SessionLoopCompactor(HistoryCompactorPort):
 class FinalLLM(LLMPort):
     """成功结束运行，驱动 SessionConversationProjector 提交候选。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """返回最终回答。"""
         return RunMessage("final", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "本轮回答")
 

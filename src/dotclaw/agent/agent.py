@@ -15,8 +15,9 @@ from .identity import AgentIdentity
 
 if TYPE_CHECKING:
     from ..config import Config
-    from ..runtime.application.session_run_coordinator import SessionRunCoordinator
     from ..runtime.application.dto import RunRequest, RunResult
+    from ..runtime.application.ports import TextStreamPort
+    from ..runtime.application.session_run_coordinator import SessionRunCoordinator
     from ..session.session import Session
 
 
@@ -76,20 +77,33 @@ class Agent:
         result: RunResult | None = self._last_run_result
         return result is not None and result.final_message is not None and result.has_streamed_text
 
-    async def process(self, session: Session, user_message: str) -> str:
-        """提交普通用户消息，并将标准 RunResult 转换为 Channel 文本。"""
+    async def process(
+        self,
+        session: Session,
+        user_message: str,
+        text_stream_port: "TextStreamPort | None" = None,
+    ) -> str:
+        """提交普通用户消息，并将标准 RunResult 转换为 Channel 文本。
+
+        ``text_stream_port`` 为本次提交的运行级输出端口，由 CLI 每次消息构造。
+        """
         from ..runtime.application.request_factory import create_run_request
 
         async def create_request() -> RunRequest:
             return create_run_request(session, self.agent_id, user_message)
 
-        result: RunResult = await self._coordinator.submit_prepared(session.id, create_request)
+        result: RunResult = await self._coordinator.submit_prepared(session.id, create_request, text_stream_port)
         self._last_run_result = result
         return _display_result(result)
 
-    async def resolve_approval(self, approval_id: str, approved: bool) -> str:
-        """提交审批决定并返回同一运行恢复后的展示文本。"""
-        result: RunResult = await self._coordinator.resolve_approval(approval_id, approved)
+    async def resolve_approval(
+        self,
+        approval_id: str,
+        approved: bool,
+        text_stream_port: "TextStreamPort | None" = None,
+    ) -> str:
+        """提交审批决定并返回同一运行恢复后的展示文本；透传运行级输出端口。"""
+        result: RunResult = await self._coordinator.resolve_approval(approval_id, approved, text_stream_port)
         self._last_run_result = result
         return _display_result(result)
 
@@ -97,9 +111,9 @@ class Agent:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
-    async def retry_interrupted(self, run_id: str) -> str:
-        """重试可恢复中断 Run，并返回 Channel 可展示的结果。"""
-        result: RunResult = await self._coordinator.retry_interrupted(run_id)
+    async def retry_interrupted(self, run_id: str, text_stream_port: "TextStreamPort | None" = None) -> str:
+        """重试可恢复中断 Run，并返回 Channel 可展示的结果；透传运行级输出端口。"""
+        result: RunResult = await self._coordinator.retry_interrupted(run_id, text_stream_port)
         self._last_run_result = result
         return _display_result(result)
 

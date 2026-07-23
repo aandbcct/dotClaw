@@ -181,8 +181,13 @@ class RunPolicyPort(Protocol):
 class LLMPort(Protocol):
     """执行标准化模型调用并支持尽力取消的协议。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
-        """返回一次完整模型响应消息。"""
+    async def complete(
+        self,
+        context: ContextBundle,
+        execution: RunExecutionView,
+        text_stream_port: TextStreamPort | None = None,
+    ) -> RunMessage:
+        """返回一次完整模型响应消息；text_stream_port 为本次提交的运行级输出端口。"""
 
     async def cancel(self, run_id: str) -> None:
         """尽力取消正在进行的模型调用。"""

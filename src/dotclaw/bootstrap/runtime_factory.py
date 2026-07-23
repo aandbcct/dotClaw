@@ -31,7 +31,6 @@ from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.engine import RuntimeEngine
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
-from ..runtime.application.ports import TextStreamPort
 from ..runtime.application.ports import ContextPort
 from ..runtime.domain.context import ContextOwner
 from ..session.session import SessionManager
@@ -72,7 +71,6 @@ def build_runtime_services(
     skill_registry: SkillRegistry | None,
     memory_manager: MemoryManager | None,
     agent_registry: AgentRegistry,
-    text_stream_port: TextStreamPort | None = None,
 ) -> RuntimeServices:
     """按 Port 边界装配 RuntimeEngine 与 SessionRunCoordinator。"""
     if tool_executor is None:
@@ -100,7 +98,7 @@ def build_runtime_services(
         run_repository=run_repository,
         checkpoint_repository=CheckpointRepositoryAdapter(storage_root),
         context_port=context_port,
-        llm_port=LLMProxyAdapter(llm_proxy, text_stream_port),
+        llm_port=LLMProxyAdapter(llm_proxy),
         tool_port=ToolExecutorAdapter(tool_executor),
         policy_port=AgentPolicyResolver(
             identity,

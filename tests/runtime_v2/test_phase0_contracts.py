@@ -174,47 +174,71 @@ async def test_unknown_identity_submission_is_rejected(tmp_path: Path) -> None:
 # ============================================================================
 
 @pytest.mark.phase0_contract
-@pytest.mark.xfail(strict=True, reason="阶段0契约：待阶段3实现 Run 级输出端口")
 async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> None:
     """共享同一 Runtime 的两个并发提交，各自只收到本 Run 的流式文本，不得串流。
 
     目标（开发计划阶段3）：输出端口仅属于本次提交/Run，Runtime 实例可被多个
-    Channel 安全共享；LLMProxyAdapter 不再在构造期绑定单一 Channel。
+    Channel 安全共享；LLMProxyAdapter 不再在构造期绑定单一 Channel，文本流只在
+    ``complete(context, execution, text_stream_port)`` 调用时按提交隔离。
 
-    当前实现：LLMProxyAdapter 在构造期绑定单个 TextStreamPort，无法按提交隔离。
+    本测试用真实 RuntimeEngine + SessionRunCoordinator + LLMProxyAdapter（旧 LLM
+    替身）装配 Runtime，对两个不同 Session 并发提交、各自携带本次输出收集器，
+    断言二者的文本流互不串扰。
     """
-    from collections.abc import AsyncIterator as _AsyncIterator
+    from collections.abc import AsyncIterator
+    from pathlib import Path as _Path
 
-    # 延迟导入：目标组件在阶段2/3新增。
-    from dotclaw.bootstrap.application_host import ApplicationHost
+    from dotclaw.bootstrap.runtime_factory import build_runtime_services
+    from dotclaw.bootstrap.session_interaction import SessionInteractionService
+    from dotclaw.config.settings import Config
+    from dotclaw.llm.base import ChatChunk
+    from dotclaw.tools.executor import ToolExecutor
+    from dotclaw.tools.registry import ToolRegistry
+
+    project_root: _Path = _Path(__file__).resolve().parents[2]
 
     class _PerSessionProxy:
-        """按提交返回固定文本的极简 LLM 替身。"""
+        """统一返回固定文本的极简 LLM 替身。"""
 
-        async def chat(self, messages, tools, model, stream) -> _AsyncIterator:
-            yield type("C", (), {"content": "answer", "is_final": True,
-                                  "input_tokens": 1, "output_tokens": 1})()
+        async def chat(self, messages, tools, model, stream) -> AsyncIterator[ChatChunk]:
+            yield ChatChunk(content="answer", is_final=True, input_tokens=1, output_tokens=1)
 
-    # 预期装配形态（待目标组件落地后校准）。
-    host = ApplicationHost.build(  # type: ignore[attr-defined]
-        config=None,  # type: ignore[arg-type]
-        project_root=tmp_path,
+    config = Config()
+    config.session.directory = str(tmp_path)
+    identity = AgentIdentity(agent_id="agent-1", agent_name="已知 Agent", model="qwen3.7-max")
+    session_manager = SessionManager(tmp_path)
+    registry = AgentRegistry()
+    registry.register(identity)
+    services = build_runtime_services(
+        config=config,
+        project_root=project_root,
+        identity=identity,
         llm_proxy=_PerSessionProxy(),
-        tool_executor=None,  # type: ignore[arg-type]
+        tool_executor=ToolExecutor(ToolRegistry()),
+        session_manager=session_manager,
+        skill_registry=None,
+        memory_manager=None,
+        agent_registry=registry,
     )
-    service = host.session_interaction
+    service = SessionInteractionService(
+        session_manager=session_manager,
+        agent_registry=registry,
+        coordinator=services.coordinator,
+        config=config,
+        default_agent_id=identity.agent_id,
+    )
 
     collector_a: ChannelCollector = ChannelCollector()
     collector_b: ChannelCollector = ChannelCollector()
     session_a = await service.create_session(agent_id="agent-1")
-    session_b = await service.create_session(agent_id="agent-2")
+    session_b = await service.create_session(agent_id="agent-1")
 
     async def submit_one(session_id: str, collector: ChannelCollector) -> str:
         return await service.submit(
             session_id, "你好", output_port=ChannelTextStreamAdapter(collector)
         )
 
-    # 两个 Channel 并发提交，各自携带本次输出收集器。
+    # 两个 Session 并发提交，各自携带本次输出收集器（不同 Session 走不同串行锁）。
     await asyncio.gather(
         submit_one(session_a.id, collector_a),
         submit_one(session_b.id, collector_b),

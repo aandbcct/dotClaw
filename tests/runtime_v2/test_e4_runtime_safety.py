@@ -151,7 +151,7 @@ class RepeatedCompressionCounter(ScriptedCounter):
 class FinalLLM(LLMPort):
     """立即返回最终文本。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """返回无工具调用的最终回答。"""
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "完成")
 
@@ -165,7 +165,7 @@ class FlakyLLM(LLMPort):
     def __init__(self) -> None:
         self.calls: int = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """首次抛出可恢复代理错误，第二次给出最终回答。"""
         self.calls += 1
         if self.calls == 1:
@@ -182,7 +182,7 @@ class WaitingApprovalLLM(LLMPort):
     def __init__(self) -> None:
         self._calls: int = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
         """首轮产生审批工具调用，后续轮次给出最终回答。"""
         self._calls += 1
         if self._calls == 1:
