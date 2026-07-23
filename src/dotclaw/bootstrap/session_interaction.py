@@ -1,9 +1,10 @@
-"""按 Session 路由 Identity 的最小交互入口（阶段 1）。
+"""按 Session 路由 Identity 的最小交互入口（阶段 1 + 门面移除修复）。
 
 SessionInteractionService 是必要的最小 Session 入口，不是泛化的 ChatService。
-它读取 ``session.agent_id``，在 ``AgentRegistry`` 中验证 Identity 后取得/创建轻量
-Agent 门面，委托其提交共享 Coordinator。未知或空 Identity 必须返回明确错误，
-不能回退到默认 Identity（开发计划阶段 1 + 总体设计 §4.2）。
+它读取 ``session.agent_id``，在 ``AgentRegistry`` 中验证 Identity 后，以冻结的
+``RunRequest`` 直接提交共享 ``SessionRunCoordinator``；不构造任何运行时 Agent 门面。
+未知或空 Identity 必须返回明确错误，不能回退到默认 Identity
+（开发计划阶段 1 + 总体设计 §4.2 + agent_remove_fix）。
 """
 
 from __future__ import annotations
@@ -11,14 +12,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..agent.agent import Agent, _display_result
 from ..agent.identity import AgentIdentity
 from ..orchestration.registry import AgentRegistry
 from ..runtime.adapters.approval_repository import ApprovalRepositoryAdapter
 from ..runtime.adapters.run_repository import RunRepositoryAdapter
+from ..runtime.application.dto import RunRequest, RunResult
 from ..runtime.application.ports import ContextPort, TextStreamPort
+from ..runtime.application.request_factory import create_run_request
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.domain.context import ContextOwner
+from ..runtime.domain.facts import RunErrorCode, RunStatus
 from ..session.session import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -36,7 +39,7 @@ class SessionDeletionRejected(RuntimeError):
 class SessionInteractionService:
     """按 Session 路由 Identity 的最小交互入口。
 
-    允许依赖：SessionManager、AgentRegistry、Coordinator/Agent 门面。
+    允许依赖：SessionManager、AgentRegistry、Coordinator。
     禁止依赖具体 LLM、工具、MCP 或 Channel 实现。
     """
 
@@ -95,48 +98,49 @@ class SessionInteractionService:
             raise UnknownIdentityError(f"Session 绑定了未知或空 Identity: {agent_id}")
         return self._agent_registry.get(agent_id)  # type: ignore[return-value]
 
-    async def get_agent(self, session: Session) -> Agent:
-        """为 Session 取得绑定 Identity 的轻量 Agent 门面（路由权威）。
+    def get_identity(self, session: Session) -> AgentIdentity:
+        """只读校验入口：取得绑定 Identity 供 CLI Banner 与 ``/model`` 展示。
 
-        调用方必须经由本服务取得 Agent，才能确保提交严格按 Session 绑定的
-        Identity 路由，避免内部构造的 Agent 门面绕过 Session 权威。
+        不创建任何运行时 Agent 对象；提交路由仍以 ``session.agent_id`` 为权威。
         """
-        identity: AgentIdentity = self._require_identity(session)
-        return Agent(identity=identity, coordinator=self._coordinator, config=self._config)
+        return self._require_identity(session)
 
     # ── 提交与控制 ──
 
-    async def submit(self, session: Session | str, user_message: str, output_port: TextStreamPort | None = None) -> str:
-        """提交一次普通消息，按 Session 路由到对应 Identity 的 Agent 门面。
+    async def submit(self, session: Session | str, user_message: str, text_stream_port: TextStreamPort | None = None) -> RunResult:
+        """提交一次普通消息，按 Session 路由到对应 Identity 并冻结 RunRequest。
 
-        ``output_port`` 为本提交的运行级输出端口，透传至 Runtime 执行参数。
+        ``text_stream_port`` 为本提交的运行级输出端口，透传至 Runtime 执行参数。
+        冻结请求在 Coordinator 取得 Session 租约后创建（见 ``submit_prepared``），
+        保持历史压缩、Conversation 快照与 Run 创建的原有并发语义。
         """
         if isinstance(session, str):
             loaded: Session | None = await self._session_manager.load(session)
             if loaded is None:
                 raise UnknownIdentityError(f"Session 不存在: {session}")
             session = loaded
-        agent: Agent = await self.get_agent(session)
-        return await agent.process(session, user_message, output_port)
+        identity: AgentIdentity = self._require_identity(session)
 
-    async def resolve_approval(self, approval_id: str, approved: bool, output_port: TextStreamPort | None = None) -> str:
-        """提交审批决定并返回恢复后的展示文本；透传运行级输出端口。"""
-        result = await self._coordinator.resolve_approval(approval_id, approved, output_port)
-        return _display_result(result)
+        async def _make_request() -> RunRequest:
+            return create_run_request(session, identity.agent_id, user_message)
+
+        return await self._coordinator.submit_prepared(session.id, _make_request, text_stream_port)
+
+    async def resolve_approval(self, approval_id: str, approved: bool, text_stream_port: TextStreamPort | None = None) -> RunResult:
+        """提交审批决定并返回恢复后的结构化结果；透传运行级输出端口。"""
+        return await self._coordinator.resolve_approval(approval_id, approved, text_stream_port)
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
-    async def retry_interrupted(self, run_id: str, output_port: TextStreamPort | None = None) -> str:
-        """重试可恢复中断 Run，并返回展示结果；透传运行级输出端口。"""
-        result = await self._coordinator.retry_interrupted(run_id, output_port)
-        return _display_result(result)
+    async def retry_interrupted(self, run_id: str, text_stream_port: TextStreamPort | None = None) -> RunResult:
+        """重试可恢复中断 Run，并返回结构化结果；透传运行级输出端口。"""
+        return await self._coordinator.retry_interrupted(run_id, text_stream_port)
 
-    async def abandon_interrupted(self, run_id: str) -> str:
-        """放弃可恢复中断 Run，并返回展示结果。"""
-        result = await self._coordinator.abandon_interrupted(run_id)
-        return _display_result(result)
+    async def abandon_interrupted(self, run_id: str) -> RunResult:
+        """放弃可恢复中断 Run，并返回结构化结果。"""
+        return await self._coordinator.abandon_interrupted(run_id)
 
     # ── 删除协调 ──
 
@@ -193,3 +197,24 @@ class SessionInteractionService:
         if not agent_runs.is_dir():
             return ()
         return tuple(child.name for child in agent_runs.iterdir() if child.is_dir())
+
+
+def format_run_result(result: RunResult) -> str:
+    """将 Runtime 领域结果收敛为 Channel 可直接展示的文本（不含流式收尾决策）。
+
+    CLI/Channel 的渲染函数基于本文本决定 Markdown 输出；运行时已通过输出端口
+    流式呈现的内容不应再由本函数重复输出。
+    """
+    if result.final_message is not None:
+        return result.final_message.content
+    if result.status is RunStatus.WAITING_APPROVAL:
+        return f"运行等待审批：{result.run_id}"
+    if result.status is RunStatus.INTERRUPTED:
+        return f"运行已中断，可重试：{result.run_id}"
+    if result.status is RunStatus.ABANDONED:
+        return f"运行已放弃：{result.run_id}"
+    if result.error is not None:
+        if result.error.code is RunErrorCode.SESSION_BUSY:
+            return "当前会话仍有未完成运行，请先完成审批、重试或取消后再发送消息。"
+        return f"执行失败：{result.error.message}"
+    return f"执行未完成：{result.status.value}"

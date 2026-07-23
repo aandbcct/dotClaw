@@ -17,7 +17,7 @@ from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordi
 from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.context import ContextOwner, ContextVersion
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, HistoryCompressionSnapshot, MessageRole, RunCheckpoint, RunError, RunErrorCode, RunMessage, RunMessageKind, RunStatus, ToolCall
-from dotclaw.agent.agent import _display_result
+from dotclaw.bootstrap.session_interaction import format_run_result
 
 
 class BudgetContext(ContextPort):
@@ -530,6 +530,6 @@ def test_channel_display_maps_busy_interrupted_and_abandoned_results() -> None:
     interrupted: RunResult = RunResult("run-interrupted", RunStatus.INTERRUPTED)
     abandoned: RunResult = RunResult("run-abandoned", RunStatus.ABANDONED)
 
-    assert "未完成运行" in _display_result(busy)
-    assert "可重试" in _display_result(interrupted)
-    assert "已放弃" in _display_result(abandoned)
+    assert "未完成运行" in format_run_result(busy)
+    assert "可重试" in format_run_result(interrupted)
+    assert "已放弃" in format_run_result(abandoned)

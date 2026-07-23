@@ -26,14 +26,19 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from dotclaw.channel.cli import CLIChannel
 from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
-from dotclaw.agent import Agent
 from dotclaw.session import Session, SessionManager
 from dotclaw.bootstrap import ApplicationHost
-from dotclaw.bootstrap.session_interaction import SessionDeletionRejected, SessionInteractionService
+from dotclaw.bootstrap.session_interaction import (
+    SessionDeletionRejected,
+    SessionInteractionService,
+    format_run_result,
+)
 from dotclaw.cli.banner import build_banner, console as rich_console
 from dotclaw.mcp.provider import MCPToolProvider
 from dotclaw.memory.dream import DeepDream
 from dotclaw.skills.registry import SkillRegistry
+from dotclaw.runtime.application.dto import RunResult
+from dotclaw.runtime.domain.facts import RunErrorCode, RunStatus
 from dotclaw.tools.base import ToolDefinition, ToolSource
 from dotclaw.tools.executor import ToolExecutor
 
@@ -57,13 +62,13 @@ async def _run_cli() -> None:
         else:
             current_session = await service.create_session(title="主对话")
 
-        # 按当前 Session 绑定的 Identity 取得路由 Agent 门面（用于 Banner 展示）。
-        agent: Agent = await service.get_agent(current_session)
+        # 按当前 Session 绑定的 Identity 取得展示信息（用于 Banner）。
+        identity = service.get_identity(current_session)
 
         from dotclaw.config import _find_project_root
         rich_console.print(build_banner(
-            agent_name=agent.agent_name,
-            model=agent.model_id,
+            agent_name=identity.agent_name,
+            model=identity.resolve_model(config.llm.default_model),
             session_title=current_session.title,
             workspace=str(_find_project_root()),
         ))
@@ -77,9 +82,7 @@ async def _run_cli() -> None:
                 # 本次消息的运行级文本流端口：CLI 每次消息构造，只服务本 Run。
                 text_stream_port = ChannelTextStreamAdapter(channel)
 
-                # 每次交互前按当前 Session 绑定的 Identity 路由到对应 Agent 门面，
-                # 确保提交严格由 Session 权威驱动，内部构造的 Agent 无法绕过。
-                agent = await service.get_agent(current_session)
+                # 每次交互按当前 Session 绑定的 Identity 路由，提交严格由 Session 权威驱动。
 
                 if user_input.startswith("/"):
                     cmd: str = user_input.split()[0].lower()
@@ -134,20 +137,20 @@ async def _run_cli() -> None:
                             channel.print_error("Dream: 记忆系统未初始化")
                     elif cmd == "/cancel":
                         if args:
-                            await agent.cancel_run(args, "用户通过 CLI 取消")
+                            await service.cancel(args, "用户通过 CLI 取消")
                             channel.print_info(f"已提交取消请求: {args}")
                         else:
                             channel.print_error("用法: /cancel <run_id>")
                     elif cmd == "/retry":
                         if args:
-                            retry_result: str = await agent.retry_interrupted(args, text_stream_port)
-                            await channel.print_markdown(retry_result)
+                            result: RunResult = await service.retry_interrupted(args, text_stream_port)
+                            await _render_result(channel, result)
                         else:
                             channel.print_error("用法: /retry <run_id>")
                     elif cmd == "/abandon":
                         if args:
-                            abandon_result: str = await agent.abandon_interrupted(args)
-                            await channel.print_markdown(abandon_result)
+                            result = await service.abandon_interrupted(args)
+                            await _render_result(channel, result)
                         else:
                             channel.print_error("用法: /abandon <run_id>")
                     elif cmd == "/tools":
@@ -157,23 +160,16 @@ async def _run_cli() -> None:
                     elif cmd == "/skills":
                         _cmd_skills(channel, host.skill_registry)
                     elif cmd == "/model":
-                        channel.print_info(f"当前模型: {agent.model_id}")
+                        identity = service.get_identity(current_session)
+                        channel.print_info(f"当前模型: {identity.resolve_model(config.llm.default_model)}")
                     else:
                         channel.print_error(f"未知命令: {cmd}")
                     continue
 
                 # ── 正常对话 ──
-                final_answer: str = await agent.process(current_session, user_input, text_stream_port)
-                final_answer = await _resolve_pending_approvals(channel, agent, final_answer, text_stream_port)
-
-                if not final_answer:
-                    channel.print_error("执行异常：未返回有效回复")
-                elif agent.has_streamed_final_answer:
-                    # 文本增量已在运行期间输出，此处仅补齐终端换行，避免重复显示最终回复。
-                    await channel.stream("\n")
-                else:
-                    # 最终回复由 CLI 入口负责呈现，Runtime 仅返回执行结果以保持边界解耦。
-                    await channel.print_markdown(final_answer)
+                result: RunResult = await service.submit(current_session, user_input, text_stream_port)
+                result = await _resolve_pending_approvals(channel, service, result, text_stream_port)
+                await _render_result(channel, result)
 
                 sys.stdout.flush()
 
@@ -296,17 +292,33 @@ async def _cmd_dream_async(channel: CLIChannel, dream: DeepDream) -> None:
         channel.print_error(f"Dream 失败: {e}")
 
 
-async def _resolve_pending_approvals(channel: CLIChannel, agent: Agent, current_text: str, text_stream_port=None) -> str:
-    """展示有限审批选项，并只向 Engine 提交 approval_id 与决定；透传运行级输出端口。"""
-    answer: str = current_text
-    while agent.last_run_result is not None and agent.last_run_result.status.value == "waiting_approval":
-        approval_id = agent.last_run_result.approval_id
-        if not approval_id:
-            return "执行失败：等待审批运行缺少 approval_id"
+async def _resolve_pending_approvals(
+    channel: CLIChannel,
+    service: SessionInteractionService,
+    result: RunResult,
+    text_stream_port=None,
+) -> RunResult:
+    """循环处理等待审批的运行：仅向服务提交 approval_id 与决定，返回最终 RunResult。
+
+    透传运行级输出端口；不保存任何 Agent 实例状态。
+    """
+    while result.status is RunStatus.WAITING_APPROVAL and result.approval_id:
         decision = await channel.ask_user("⚠️ 工具需要审批，确认执行？(y/n): ")
         approved = decision.strip().lower() in ("y", "yes")
-        answer = await agent.resolve_approval(approval_id, approved, text_stream_port)
-    return answer
+        result = await service.resolve_approval(result.approval_id, approved, text_stream_port)
+    return result
+
+
+async def _render_result(channel: CLIChannel, result: RunResult) -> None:
+    """将结构化 RunResult 渲染给用户：流式已在运行期间输出则仅补换行，否则打印文本。"""
+    if result.has_streamed_text:
+        # 文本增量已在运行期间输出，此处仅补齐终端换行，避免重复显示最终回复。
+        await channel.stream("\n")
+    else:
+        text: str = format_run_result(result)
+        if text:
+            # 最终回复由 CLI 入口负责呈现，Runtime 仅返回执行结果以保持边界解耦。
+            await channel.print_markdown(text)
 
 
 def main() -> None:

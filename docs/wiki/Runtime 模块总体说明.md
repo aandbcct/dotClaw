@@ -83,7 +83,7 @@ src/dotclaw/
 │   ├── application_host.py             # 唯一公开组合根与资源生命周期宿主
 │   ├── _host_components.py             # Host 私有的基础设施装配
 │   ├── runtime_factory.py              # Host 私有的 Runtime Adapter/服务装配
-│   └── session_interaction.py          # Session → Identity → Agent 门面路由与删除协调
+│   └── session_interaction.py          # Session → Identity 路由与删除协调（直接提交 Coordinator）
 │
 ├── runtime/
 │   ├── domain/                         # 运行领域的稳定事实与规则
