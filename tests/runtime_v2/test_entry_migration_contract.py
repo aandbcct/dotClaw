@@ -11,7 +11,7 @@ from dotclaw.bootstrap.session_interaction import SessionInteractionService
 from dotclaw.channel.base import Channel
 from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
 from dotclaw.config.settings import Config
-from dotclaw.llm.base import ChatChunk
+from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind, TokenUsage
 from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.session.session import SessionManager
 from dotclaw.tools.executor import ToolExecutor
@@ -26,7 +26,7 @@ class FinalProxy:
 
     async def chat(self, messages, tools, model, stream) -> AsyncIterator[ChatChunk]:
         """返回一个普通完成回复。"""
-        yield ChatChunk(content="已通过新版入口", is_final=True, input_tokens=2, output_tokens=2)
+        yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "已通过新版入口"),), finish_reason="stop", usage=TokenUsage(2, 2))
 
 
 class ChannelCollector(Channel):

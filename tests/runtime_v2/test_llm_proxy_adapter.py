@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from dotclaw.llm.base import ChatChunk, ToolCall as LegacyToolCall
+from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind, TokenUsage, ToolCall as LegacyToolCall
 from dotclaw.runtime.adapters import LLMProxyAdapter
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ToolDefinition
@@ -25,9 +25,9 @@ class StreamingProxy:
         self.messages = messages
         self.tools = tools
         self.model = model
-        yield ChatChunk(content="你好，")
-        yield ChatChunk(tool_call=LegacyToolCall("call-1", "weather", '{"city":"上海"}'))
-        yield ChatChunk(content="请稍候", is_final=True, input_tokens=12, output_tokens=4)
+        yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "你好，"),))
+        yield ChatChunk(tool_calls=(LegacyToolCall("call-1", "weather", '{"city":"上海"}'),))
+        yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "请稍候"),), finish_reason="stop", usage=TokenUsage(12, 4))
 
 
 class TextStreamCollector:

@@ -57,16 +57,16 @@ class LLMProxyAdapter(LLMPort):
         )
         try:
             async for chunk in response:
-                if chunk.content:
-                    content_parts.append(chunk.content)
+                for delta in chunk.text_deltas:
+                    content_parts.append(delta.content)
                     if text_stream_port is not None:
-                        await text_stream_port.emit(execution.run_id, chunk.content)
+                        await text_stream_port.emit(execution.run_id, delta.content)
                         has_streamed_text = True
-                if chunk.tool_call is not None:
-                    tool_calls.append(_tool_call_from_legacy(chunk.tool_call))
-                if chunk.is_final:
-                    input_tokens = chunk.input_tokens
-                    output_tokens = chunk.output_tokens
+                if chunk.tool_calls:
+                    tool_calls.extend(_tool_call_from_legacy(tc) for tc in chunk.tool_calls)
+                if chunk.finish_reason is not None and chunk.usage is not None:
+                    input_tokens = chunk.usage.input_tokens
+                    output_tokens = chunk.usage.output_tokens
         except Exception as error:
             raise LLMUnavailableError("业务模型服务不可用") from error
         return RunMessage(

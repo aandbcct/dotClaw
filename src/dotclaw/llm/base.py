@@ -14,6 +14,26 @@ class LLMUsage(StrEnum):
     CONTEXT_COMPACTION = "context_compaction"
 
 
+class TextDeltaKind(StrEnum):
+    """流式文本增量的语义类别：模型推理过程或面向用户的响应。"""
+    REASONING = "reasoning"
+    RESPONSE = "response"
+
+
+@dataclass(frozen=True)
+class ChatTextDelta:
+    """单次流式数据包内的有序文本增量，携带其语义类别。"""
+    kind: TextDeltaKind
+    content: str
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    """一次 LLM 调用的 token 用量快照，与路由用途枚举 LLMUsage 互不混淆。"""
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
 @dataclass
 class Message:
     """对话消息"""
@@ -40,15 +60,18 @@ class ToolDefinition:
     parameters: dict  # JSON Schema
 
 
-@dataclass
+@dataclass(frozen=True)
 class ChatChunk:
-    """LLM 流式返回的一个 chunk"""
-    content: str = ""
-    tool_call: ToolCall | None = None
-    is_final: bool = False  # 是否是最后一个 chunk
-    finish_reason: str | None = None  # P13: "stop" / "tool_calls" / "length"
-    input_tokens: int = 0   # 本次调用消耗的 prompt tokens（仅 is_final=True 的 chunk 携带）
-    output_tokens: int = 0  # 本次调用产生的 completion tokens（同上）
+    """LLM 流式返回的一个标准化数据包。
+
+    可同时携带有序文本增量、已组装工具调用、结束原因与 token 用量。
+    text_deltas 为有序元组：原生 reasoning_content/content 同时存在时固定为
+    reasoning 在前、response 在后；标签模式严格按原始文本顺序产生。
+    """
+    text_deltas: tuple[ChatTextDelta, ...] = ()
+    tool_calls: tuple[ToolCall, ...] = ()
+    finish_reason: str | None = None
+    usage: TokenUsage | None = None
 
 
 class LLMClient(ABC):

@@ -193,7 +193,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
     from dotclaw.bootstrap.runtime_factory import build_runtime_services
     from dotclaw.bootstrap.session_interaction import SessionInteractionService
     from dotclaw.config.settings import Config
-    from dotclaw.llm.base import ChatChunk
+    from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind, TokenUsage
     from dotclaw.tools.executor import ToolExecutor
     from dotclaw.tools.registry import ToolRegistry
 
@@ -203,7 +203,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
         """统一返回固定文本的极简 LLM 替身。"""
 
         async def chat(self, messages, tools, model, stream) -> AsyncIterator[ChatChunk]:
-            yield ChatChunk(content="answer", is_final=True, input_tokens=1, output_tokens=1)
+            yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "answer"),), finish_reason="stop", usage=TokenUsage(1, 1))
 
     config = Config()
     config.session.directory = str(tmp_path)

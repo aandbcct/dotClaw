@@ -128,13 +128,13 @@ class LLMProxy:
                             yield first_chunk
                             try:
                                 async for chunk in chat_iter:
-                                    if chunk.content:
-                                        output_token_count += len(chunk.content)
-                                    if chunk.is_final:
-                                        if chunk.input_tokens:
-                                            input_tokens = chunk.input_tokens
-                                        if chunk.output_tokens:
-                                            output_tokens = chunk.output_tokens
+                                    if chunk.text_deltas:
+                                        output_token_count += sum(
+                                            len(delta.content) for delta in chunk.text_deltas
+                                        )
+                                    if chunk.finish_reason is not None and chunk.usage is not None:
+                                        input_tokens = chunk.usage.input_tokens
+                                        output_tokens = chunk.usage.output_tokens
                                     yield chunk
                             except Exception as e:
                                 raise NonRetryableStreamError(

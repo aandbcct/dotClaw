@@ -19,7 +19,16 @@ from typing import AsyncIterator, Iterator
 
 from openai import AsyncOpenAI
 
-from .base import ChatChunk, LLMClient, Message, ToolCall, ToolDefinition
+from .base import (
+    ChatChunk,
+    ChatTextDelta,
+    LLMClient,
+    Message,
+    TextDeltaKind,
+    TokenUsage,
+    ToolCall,
+    ToolDefinition,
+)
 
 
 class OpenAICompatibleClient(LLMClient):
@@ -145,18 +154,22 @@ class OpenAICompatibleClient(LLMClient):
                     output_tokens = chunk.usage.completion_tokens or 0
                 for sub in self._parse_stream_chunk(chunk):
                     yield sub
-            # 统一 yield 最终的 is_final chunk（携带 tokens + finish_reason）
-            yield ChatChunk(content="", is_final=True,
-                           finish_reason=self._stream_finish_reason,
-                           input_tokens=input_tokens, output_tokens=output_tokens)
+            # 统一 yield 最终的结束包（携带 token 用量与结束原因）
+            yield ChatChunk(
+                finish_reason=self._stream_finish_reason,
+                usage=TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+            )
         else:
             choice = response.choices[0]
             content = choice.message.content or ""
             usage = getattr(response, "usage", None)
             in_tok = usage.prompt_tokens if usage else 0
             out_tok = usage.completion_tokens if usage else 0
-            yield ChatChunk(content=content, is_final=True,
-                           input_tokens=in_tok, output_tokens=out_tok)
+            yield ChatChunk(
+                text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, content),),
+                finish_reason="stop",
+                usage=TokenUsage(input_tokens=in_tok, output_tokens=out_tok),
+            )
 
     # ---- 消息格式转换 ----
 
@@ -220,11 +233,12 @@ class OpenAICompatibleClient(LLMClient):
             for idx, pending in self._pending_tool_calls.items():
                 if pending["name"]:
                     yield ChatChunk(
-                        content="",
-                        tool_call=ToolCall(
-                            id=pending["id"],
-                            name=pending["name"],
-                            arguments=pending["arguments"],
+                        tool_calls=(
+                            ToolCall(
+                                id=pending["id"],
+                                name=pending["name"],
+                                arguments=pending["arguments"],
+                            ),
                         ),
                     )
 
@@ -233,4 +247,4 @@ class OpenAICompatibleClient(LLMClient):
             self._reset_stream_state()
         else:
             if content:
-                yield ChatChunk(content=content, tool_call=None)
+                yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, content),))
