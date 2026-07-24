@@ -69,6 +69,16 @@ async def test_reasoning_only_prints_single_think_header() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reasoning_hidden_only_suppresses_reasoning_output() -> None:
+    """关闭思考展示后仅抑制 reasoning，response 仍按原协议输出。"""
+    ch = CollectingChannel()
+    adapter = ChannelLLMOutputAdapter(ch, show_reasoning=False)
+    await adapter.emit(_event("r1", LLMOutputKind.REASONING_DELTA, "让我想想"))
+    await adapter.emit(_event("r1", LLMOutputKind.RESPONSE_DELTA, "最终回答"))
+    assert ch.chunks == ["\n回答：\n", "最终回答"]
+
+
+@pytest.mark.asyncio
 async def test_reasoning_then_response_prints_both_headers_once() -> None:
     """reasoning→response：两段各打印一次标题，顺序正确。"""
     ch = CollectingChannel()

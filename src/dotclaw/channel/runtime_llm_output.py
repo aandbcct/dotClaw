@@ -18,9 +18,10 @@ class ChannelLLMOutputAdapter:
     Runtime application 的 DTO/Port，符合 §4 依赖方向。
     """
 
-    def __init__(self, channel: Channel) -> None:
-        """绑定入口层拥有的 Channel，不向 Runtime 泄漏具体通道类型。"""
+    def __init__(self, channel: Channel, *, show_reasoning: bool = True) -> None:
+        """绑定入口层拥有的 Channel，并按展示策略决定是否显示思考增量。"""
         self._channel: Channel = channel
+        self._show_reasoning: bool = show_reasoning
         # 每个运行单独记忆上次展示语义，避免不同 Run 的标题状态互相污染。
         self._last_kind: dict[str, LLMOutputKind | None] = {}
 
@@ -32,6 +33,9 @@ class ChannelLLMOutputAdapter:
         """
         if not event.content:
             # 空增量无展示价值，既不输出文本也不切换标题状态。
+            return
+        if event.kind is LLMOutputKind.REASONING_DELTA and not self._show_reasoning:
+            # 仅隐藏入口展示，不改变 LLM 调用、最终回答或 Runtime 聚合语义。
             return
 
         last_kind: LLMOutputKind | None = self._last_kind.get(event.run_id)

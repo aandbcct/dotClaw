@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -48,7 +50,7 @@ from dotclaw.tools.base import ToolDefinition, ToolSource
 from dotclaw.tools.executor import ToolExecutor
 
 
-async def _run_cli() -> None:
+async def _run_cli(show_reasoning: bool = True) -> None:
     channel: CLIChannel = CLIChannel()
 
     channel.print_info("组件初始化中...")
@@ -78,7 +80,10 @@ async def _run_cli() -> None:
 
                 # 本次消息的运行级输出端口：CLI 每次消息构造，只服务本 Run；
                 # 适配器按语义分区展示思考/回答，模型文本走纯文本路径。
-                output_port: LLMOutputPort = ChannelLLMOutputAdapter(channel)
+                output_port: LLMOutputPort = ChannelLLMOutputAdapter(
+                    channel,
+                    show_reasoning=show_reasoning,
+                )
 
                 # 每次交互按当前 Session 绑定的 Identity 路由，提交严格由 Session 权威驱动。
 
@@ -338,9 +343,21 @@ def _refresh_banner(service: SessionInteractionService, current_session: Session
     ))
 
 
+def _parse_show_reasoning(args: Sequence[str] | None = None) -> bool:
+    """解析 CLI 的思考展示开关，默认展示 reasoning 增量。"""
+    parser = argparse.ArgumentParser(description="dotClaw 命令行客户端")
+    parser.add_argument(
+        "--hide-thinking",
+        action="store_false",
+        dest="show_reasoning",
+        help="隐藏模型的思考过程，仅展示最终回答",
+    )
+    return bool(parser.parse_args(args).show_reasoning)
+
+
 def main() -> None:
     try:
-        asyncio.run(_run_cli())
+        asyncio.run(_run_cli(show_reasoning=_parse_show_reasoning()))
     except KeyboardInterrupt:
         pass
 
