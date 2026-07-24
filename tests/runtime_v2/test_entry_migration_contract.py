@@ -9,9 +9,9 @@ from dotclaw.agent.identity import AgentIdentity
 from dotclaw.bootstrap.runtime_factory import build_runtime_services
 from dotclaw.bootstrap.session_interaction import SessionInteractionService
 from dotclaw.channel.base import Channel
-from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
+from dotclaw.channel.runtime_llm_output import ChannelLLMOutputAdapter
 from dotclaw.config.settings import Config
-from dotclaw.llm.base import ChatChunk
+from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind, TokenUsage
 from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.session.session import SessionManager
 from dotclaw.tools.executor import ToolExecutor
@@ -26,7 +26,7 @@ class FinalProxy:
 
     async def chat(self, messages, tools, model, stream) -> AsyncIterator[ChatChunk]:
         """返回一个普通完成回复。"""
-        yield ChatChunk(content="已通过新版入口", is_final=True, input_tokens=2, output_tokens=2)
+        yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "已通过新版入口"),), finish_reason="stop", usage=TokenUsage(2, 2))
 
 
 class ChannelCollector(Channel):
@@ -80,13 +80,14 @@ async def test_submit_writes_conversation_through_coordinator_and_projector(tmp_
     )
     session = await session_manager.create(agent_id=identity.agent_id)
 
-    result = await service.submit(session, "你好", text_stream_port=ChannelTextStreamAdapter(channel))
+    result = await service.submit(session, "你好", output_port=ChannelLLMOutputAdapter(channel))
     projected = await session_manager.load(session.id)
 
     assert result.final_message is not None
     assert result.final_message.content == "已通过新版入口"
-    assert result.has_streamed_text is True
-    assert channel.chunks == ["已通过新版入口"]
+    assert result.has_streamed_response is True
+    # 适配器按语义分区：response 首次出现打印一次「回答：」标题，再拼接正文。
+    assert channel.chunks == ["\n回答：\n", "已通过新版入口"]
     assert projected is not None
     assert [(item.user_query, item.final_answer) for item in projected.conversations] == [("你好", "已通过新版入口")]
 

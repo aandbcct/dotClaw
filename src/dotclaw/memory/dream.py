@@ -146,7 +146,7 @@ class DeepDream:
 
         result: str = ""
         async for chunk in self._llm.chat(messages=messages, stream=False):
-            result += chunk.content
+            result += "".join(delta.content for delta in chunk.text_deltas)
         return result.strip()
 
     def _load_state(self) -> dict:

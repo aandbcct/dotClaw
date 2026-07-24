@@ -12,7 +12,7 @@ from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, Cont
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult, HistoryCompactorUnavailable
-from dotclaw.runtime.application.ports import ContextPort, HistoryCompactorPort, LLMPort, LLMUnavailableError, RunPolicyPort, ToolPort
+from dotclaw.runtime.application.ports import ContextPort, HistoryCompactorPort, LLMPort, LLMOutputPort, LLMUnavailableError, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.context import ContextOwner, ContextVersion
@@ -151,7 +151,7 @@ class RepeatedCompressionCounter(ScriptedCounter):
 class FinalLLM(LLMPort):
     """立即返回最终文本。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """返回无工具调用的最终回答。"""
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "完成")
 
@@ -165,7 +165,7 @@ class FlakyLLM(LLMPort):
     def __init__(self) -> None:
         self.calls: int = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """首次抛出可恢复代理错误，第二次给出最终回答。"""
         self.calls += 1
         if self.calls == 1:
@@ -182,7 +182,7 @@ class WaitingApprovalLLM(LLMPort):
     def __init__(self) -> None:
         self._calls: int = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """首轮产生审批工具调用，后续轮次给出最终回答。"""
         self._calls += 1
         if self._calls == 1:

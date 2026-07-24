@@ -65,6 +65,9 @@ models:
     tokenizer_encoding: cl100k_base
     capabilities: [chat, function_calling]
     status: active
+    # 双通道输出：原生 reasoning_content 字段（开发计划阶段二）
+    reasoning:
+      mode: native
 #  qwen-turbo:
 #    provider: qwen
 #    model_id: qwen-turbo

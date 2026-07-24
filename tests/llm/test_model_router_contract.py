@@ -16,7 +16,7 @@ import time
 import pytest
 
 
-from dotclaw.llm.base import ChatChunk, Message, ToolCall
+from dotclaw.llm.base import ChatChunk, ChatTextDelta, Message, TextDeltaKind, ToolCall
 from dotclaw.llm.openai_compat import OpenAICompatibleClient
 from dotclaw.llm.rate_limiter import RateLimiter, RateLimitConfig, RateLimitTimeout
 from dotclaw.llm.circuit_breaker import CircuitBreaker, BreakerConfig
@@ -140,12 +140,12 @@ async def test_1_equivalence():
     ]
     client = _TestClient(chunks)
     results = [c async for c in client.chat([Message(role="user", content="x")], stream=True)]
-    contents = "".join(c.content for c in results if c.content)
-    tcs = [c.tool_call for c in results if c.tool_call and c.tool_call.name]
+    contents = "".join(d.content for c in results for d in c.text_deltas)
+    tcs = [tc for c in results for tc in c.tool_calls if tc.name]
     assert contents == "你好，"
     assert len(tcs) == 1 and tcs[0].name == "get_t"
     assert json.loads(tcs[0].arguments) == {"city": "北京"}
-    assert results[-1].is_final
+    assert results[-1].finish_reason is not None
     print(f"  ✅ 文本 '{contents}', tool_call {tcs[0].name}({tcs[0].arguments})")
 
 
@@ -189,7 +189,7 @@ async def test_3_fallback_after_setup_failure():
 
     class SuccessfulClient:
         async def chat(self, messages, tools=None, stream=True):
-            yield ChatChunk(content="fallback", is_final=True)
+            yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "fallback"),), finish_reason="stop")
 
     class Router:
         def __init__(self):
@@ -223,11 +223,13 @@ async def test_3_fallback_after_setup_failure():
     router = Router()
     proxy = LLMProxy(model_router=router)
     response = "".join([
-        chunk.content async for chunk in proxy.chat(
+        delta.content
+        async for chunk in proxy.chat(
             [Message(role="user", content="hi")],
             purpose="chat",
             stream=False,
         )
+        for delta in chunk.text_deltas
     ])
 
     assert response == "fallback"
@@ -317,8 +319,8 @@ async def test_6_stream_no_fallback():
     print("\n=== 场景 6：Proxy 流式中途不降级 ===")
     class FailClient:
         async def chat(self, messages, tools=None, stream=True):
-            yield ChatChunk(content="a")
-            yield ChatChunk(content="b")
+            yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "a"),))
+            yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "b"),))
             raise RuntimeError("broke")
 
     class SpyRouter:
@@ -363,7 +365,7 @@ async def test_7_setup_fallback():
 
     class OkClient:
         async def chat(self, messages, tools=None, stream=True):
-            yield ChatChunk(content="ok", is_final=True)
+            yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "ok"),), finish_reason="stop")
 
     class SpyRouter:
         def select(self, purpose="chat", forced_model=None):
@@ -384,9 +386,9 @@ async def test_7_setup_fallback():
             return 0.01
 
     p = LLMProxy(model_router=SpyRouter())
-    chunks = [c.content async for c in p.chat(
+    chunks = [d.content async for c in p.chat(
         [Message(role="user", content="x")], purpose="chat"
-    )]
+    ) for d in c.text_deltas]
     r = "".join(chunks)
     assert "ok" in r
     print(f"  ✅ 降级成功: {r}")

@@ -401,6 +401,29 @@ class ProviderConfig:
     retry: ProviderRetryConfig = field(default_factory=ProviderRetryConfig)
 
 
+# 标签模式下的标准默认标签（总体设计 §3.2）。
+# 定义在 config 层（config 不依赖 llm），供 _parse_reasoning_config 使用。
+_DEFAULT_REASONING_START = "<think>"
+_DEFAULT_REASONING_END = "</think>"
+_DEFAULT_RESPONSE_START = "<response>"
+_DEFAULT_RESPONSE_END = "</response>"
+
+
+@dataclass
+class ModelReasoningConfig:
+    """模型级推理输出配置（总体设计 §3.2）。
+
+    mode 决定 Provider 如何识别 reasoning 与 response；tags 模式下可覆盖标签。
+    mode=none（默认）保持旧模型的普通文本行为；tags 模式才要求标签非空且成对不重复。
+    """
+
+    mode: str = "none"  # none | native | tags
+    reasoning_start: str = ""
+    reasoning_end: str = ""
+    response_start: str = "<response>"
+    response_end: str = "</response>"
+
+
 @dataclass
 class ModelConfig:
     """模型配置"""
@@ -410,6 +433,7 @@ class ModelConfig:
     tokenizer_encoding: str = ""
     capabilities: list[str] = field(default_factory=lambda: ["chat"])
     status: str = "active"
+    reasoning: "ModelReasoningConfig" = field(default_factory=ModelReasoningConfig)
 
 
 @dataclass
@@ -447,6 +471,53 @@ class RouterConfig:
 # ============================================================
 # P2 新增 — 路由配置加载
 # ============================================================
+
+def _parse_reasoning_config(raw: Any) -> ModelReasoningConfig:
+    """解析模型的 reasoning 子配置（总体设计 §3.2 / 开发计划阶段二）。
+
+    mode 非法、或 tags 模式下标签为空 / 起止相同，直接配置加载失败。
+    旧 YAML 未提供 reasoning 字段时回退到 mode=none（保持兼容）。
+    """
+    if not isinstance(raw, dict):
+        return ModelReasoningConfig()
+
+    mode = raw.get("mode", "none")
+    if mode not in ("none", "native", "tags"):
+        raise ValueError(
+            f"非法 reasoning.mode: {mode!r}，允许值: none, native, tags"
+        )
+
+    rtags = raw.get("reasoning_tags") or {}
+    ptags = raw.get("response_tags") or {}
+
+    # tags 模式未显式覆盖标签时回退到标准默认（总体设计 §3.2）。
+    rstart = rtags.get("start", _DEFAULT_REASONING_START)
+    rend = rtags.get("end", _DEFAULT_REASONING_END)
+    pstart = ptags.get("start", _DEFAULT_RESPONSE_START)
+    pend = ptags.get("end", _DEFAULT_RESPONSE_END)
+
+    if mode == "tags":
+        if not rstart or not rend:
+            raise ValueError(
+                "reasoning.mode=tags 时 reasoning_tags.start/end 均不能为空"
+            )
+        if rstart == rend:
+            raise ValueError("reasoning_tags.start 与 reasoning_tags.end 不能相同")
+        if not pstart or not pend:
+            raise ValueError(
+                "reasoning.mode=tags 时 response_tags.start/end 均不能为空"
+            )
+        if pstart == pend:
+            raise ValueError("response_tags.start 与 response_tags.end 不能相同")
+
+    return ModelReasoningConfig(
+        mode=mode,
+        reasoning_start=rstart,
+        reasoning_end=rend,
+        response_start=pstart,
+        response_end=pend,
+    )
+
 
 def load_router_config(path: str | Path | None = None) -> RouterConfig:
     """
@@ -499,6 +570,7 @@ def load_router_config(path: str | Path | None = None) -> RouterConfig:
             tokenizer_encoding=cfg.get("tokenizer_encoding", ""),
             capabilities=cfg.get("capabilities", ["chat"]),
             status=cfg.get("status", "active"),
+            reasoning=_parse_reasoning_config(cfg.get("reasoning")),
         )
 
     # purposes

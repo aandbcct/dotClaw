@@ -6,12 +6,13 @@ import json
 from collections.abc import AsyncIterator
 
 from ...llm.base import ChatChunk
+from ...llm.base import TextDeltaKind
 from ...llm.base import Message as LegacyMessage
 from ...llm.base import ToolCall as LegacyToolCall
 from ...llm.base import ToolDefinition as LegacyToolDefinition
 from ...llm.proxy import LLMProxy
-from ..application.dto import ContextBundle
-from ..application.ports import LLMPort, LLMUnavailableError, TextStreamPort
+from ..application.dto import ContextBundle, LLMOutputEvent, LLMOutputKind
+from ..application.ports import LLMPort, LLMOutputPort, LLMUnavailableError
 from dotclaw.runtime.application.execution import RunExecutionView
 from ..domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 
@@ -20,16 +21,20 @@ class LLMProxyAdapter(LLMPort):
     """聚合旧流式响应并转换为 Runtime v4 完整 RunMessage 的适配器。"""
 
     def __init__(self, proxy: LLMProxy) -> None:
-        """绑定既有 LLM 代理；文本流端口改为每次 complete 的运行级参数。"""
+        """绑定既有 LLM 代理；输出端口改为每次 complete 的运行级参数。"""
         self._proxy: LLMProxy = proxy
 
     async def complete(
         self,
         context: ContextBundle,
         execution: RunExecutionView,
-        text_stream_port: TextStreamPort | None = None,
+        output_port: LLMOutputPort | None = None,
     ) -> RunMessage:
-        """调用旧代理并聚合文本、工具调用与 token 统计；向运行级端口发射文本增量。"""
+        """调用旧代理并聚合文本、工具调用与 token 统计；按语义顺序发射增量事件。
+
+        顺序映射每个 ``ChatTextDelta``：reasoning 仅 emit 不聚合，response 既 emit
+        又聚合进最终消息；工具、finish、usage 保持既有 Runtime 语义。
+        """
         messages: list[LegacyMessage] = [
             LegacyMessage(
                 role=message.role.value,
@@ -48,7 +53,7 @@ class LLMProxyAdapter(LLMPort):
         tool_calls: list[ToolCall] = []
         input_tokens: int = 0
         output_tokens: int = 0
-        has_streamed_text: bool = False
+        has_streamed_response: bool = False
         response: AsyncIterator[ChatChunk] = self._proxy.chat(
             messages=messages,
             tools=tools or None,
@@ -57,16 +62,36 @@ class LLMProxyAdapter(LLMPort):
         )
         try:
             async for chunk in response:
-                if chunk.content:
-                    content_parts.append(chunk.content)
-                    if text_stream_port is not None:
-                        await text_stream_port.emit(execution.run_id, chunk.content)
-                        has_streamed_text = True
-                if chunk.tool_call is not None:
-                    tool_calls.append(_tool_call_from_legacy(chunk.tool_call))
-                if chunk.is_final:
-                    input_tokens = chunk.input_tokens
-                    output_tokens = chunk.output_tokens
+                for delta in chunk.text_deltas:
+                    if delta.kind is TextDeltaKind.REASONING:
+                        # 思考过程只发射、不进入最终消息/Conversation/Context。
+                        if output_port is not None:
+                            await output_port.emit(
+                                LLMOutputEvent(
+                                    session_id=execution.session_id,
+                                    run_id=execution.run_id,
+                                    kind=LLMOutputKind.REASONING_DELTA,
+                                    content=delta.content,
+                                )
+                            )
+                    else:
+                        # response 既发射又聚合，并标记已向入口输出过回复。
+                        if output_port is not None:
+                            await output_port.emit(
+                                LLMOutputEvent(
+                                    session_id=execution.session_id,
+                                    run_id=execution.run_id,
+                                    kind=LLMOutputKind.RESPONSE_DELTA,
+                                    content=delta.content,
+                                )
+                            )
+                            has_streamed_response = True
+                        content_parts.append(delta.content)
+                if chunk.tool_calls:
+                    tool_calls.extend(_tool_call_from_legacy(tc) for tc in chunk.tool_calls)
+                if chunk.finish_reason is not None and chunk.usage is not None:
+                    input_tokens = chunk.usage.input_tokens
+                    output_tokens = chunk.usage.output_tokens
         except Exception as error:
             raise LLMUnavailableError("业务模型服务不可用") from error
         return RunMessage(
@@ -79,7 +104,7 @@ class LLMProxyAdapter(LLMPort):
             metadata={
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "has_streamed_text": has_streamed_text,
+                "has_streamed_response": has_streamed_response,
             },
         )
 

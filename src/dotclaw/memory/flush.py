@@ -160,7 +160,7 @@ class MemoryFlushManager:
 
         result = ""
         async for chunk in self._llm.chat(messages=llm_messages, stream=False):
-            result += chunk.content
+            result += "".join(delta.content for delta in chunk.text_deltas)
 
         return self._parse_decision(result.strip())
 

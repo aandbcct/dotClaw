@@ -10,15 +10,15 @@ def test_cli_uses_service_entry_and_returns_run_result() -> None:
     """CLI 仅通过 SessionInteractionService 提交普通消息、审批决定、取消与重试/放弃。"""
     source = (Path(__file__).resolve().parents[2] / "src/dotclaw/main.py").read_text(encoding="utf-8")
 
-    assert "service.submit(current_session, user_input, text_stream_port)" in source
-    assert "service.resolve_approval(result.approval_id, approved, text_stream_port)" in source
+    assert "service.submit(current_session, user_input, output_port)" in source
+    assert "service.resolve_approval(result.approval_id, approved, output_port)" in source
     assert "service.cancel(args, \"用户通过 CLI 取消\")" in source
-    assert "service.retry_interrupted(args, text_stream_port)" in source
+    assert "service.retry_interrupted(args, output_port)" in source
     assert "service.abandon_interrupted(args)" in source
     assert "service.get_identity(" in source
     assert "Runtime.run" not in source
     assert "channel.print_markdown(" in source
-    assert "has_streamed_text" in source
+    assert "has_streamed_response" in source
     assert "await channel.stream(\"\\n\")" in source
     # 不得重新引入运行时 Agent 门面。
     assert "agent.process(" not in source
@@ -67,3 +67,66 @@ async def test_refresh_banner_resolves_current_session_identity(tmp_path: Path, 
     _refresh_banner(service, s2, _FakeConfig())
     assert captured["agent_name"] == "A2"
     assert captured["session_title"] == s2.title
+
+
+async def test_render_result_suppresses_final_when_response_streamed() -> None:
+    """response 已流式发送时 _render_result 只补换行，不得重复打印最终回答。"""
+    from dotclaw.main import _render_result
+    from dotclaw.runtime.application.dto import ConversationMessage, RunResult
+    from dotclaw.runtime.domain.facts import MessageRole, RunStatus
+
+    class _FakeChannel:
+        def __init__(self) -> None:
+            self.streamed: list[str] = []
+            self.markdowns: list[str] = []
+
+        async def stream(self, chunk: str) -> None:
+            self.streamed.append(chunk)
+
+        async def print_markdown(self, text: str) -> None:
+            self.markdowns.append(text)
+
+    result = RunResult(
+        run_id="run-1",
+        status=RunStatus.COMPLETED,
+        final_message=ConversationMessage("m1", MessageRole.ASSISTANT, "已通过流式展示", "t"),
+        has_streamed_response=True,
+    )
+    channel = _FakeChannel()
+    await _render_result(channel, result)
+
+    # 终态只补齐换行，最终回答已由输出端口流式呈现，不得重复打印。
+    assert channel.streamed == ["\n"]
+    assert channel.markdowns == []
+
+
+async def test_render_result_prints_final_when_response_not_streamed() -> None:
+    """response 未流式发送（如 reasoning-only）时 _render_result 必须打印最终回答。"""
+    from dotclaw.main import _render_result
+    from dotclaw.runtime.application.dto import ConversationMessage, RunResult
+    from dotclaw.runtime.domain.facts import MessageRole, RunStatus
+
+    class _FakeChannel:
+        def __init__(self) -> None:
+            self.streamed: list[str] = []
+            self.markdowns: list[str] = []
+
+        async def stream(self, chunk: str) -> None:
+            self.streamed.append(chunk)
+
+        async def print_markdown(self, text: str) -> None:
+            self.markdowns.append(text)
+
+    # reasoning-only 场景下 LLMProxyAdapter 不标记 has_streamed_response。
+    result = RunResult(
+        run_id="run-2",
+        status=RunStatus.COMPLETED,
+        final_message=ConversationMessage("m1", MessageRole.ASSISTANT, "最终结论", "t"),
+        has_streamed_response=False,
+    )
+    channel = _FakeChannel()
+    await _render_result(channel, result)
+
+    # 未流式展示 response，必须由 CLI 渲染最终回答，仅补换行不得触发。
+    assert channel.streamed == []
+    assert channel.markdowns == ["最终结论"]

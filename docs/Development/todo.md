@@ -76,7 +76,8 @@
 - [ ] Provider Client 存在严重的并发安全问题
 
   ```
-  Provider Client 存在严重的并发安全问题
+  Q：LLM Provider Client 存在严重的并发安全问题，只有一个客户端，多session对话时会串流
+  A：
   ```
 
   

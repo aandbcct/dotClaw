@@ -5,6 +5,7 @@ from __future__ import annotations
 from openai import AsyncOpenAI
 
 from ..openai_compat import OpenAICompatibleClient
+from ..reasoning import ReasoningPolicy
 from . import register
 
 
@@ -12,8 +13,14 @@ from . import register
 class DeepSeekClient(OpenAICompatibleClient):
     """DeepSeek API 客户端（OpenAI 兼容）"""
 
-    def __init__(self, api_key: str, base_url: str, model: str):
-        super().__init__()
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        policy: ReasoningPolicy | None = None,
+    ):
+        super().__init__(policy)
         self._api_key = api_key
         self._base_url = base_url
         self._model = model

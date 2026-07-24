@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from dotclaw.llm.base import ChatChunk, Message, ToolDefinition
+from dotclaw.llm.base import ChatChunk, ChatTextDelta, Message, TextDeltaKind, ToolDefinition
 from dotclaw.runtime.adapters.llm_context_compactor import LLMContextCompactor
 from dotclaw.runtime.application.context_compaction import ContextCompactionRequest, ContextCompactionResult, ContextFragment
 from dotclaw.runtime.domain.facts import ContextCompactionScope, MessageRole
@@ -32,8 +32,8 @@ class CompressionProxy:
         self.tools = tools
         self.stream = stream
         self.purpose = purpose
-        yield ChatChunk(content="保留目标和约束。")
-        yield ChatChunk(content="保留工具结论。", is_final=True)
+        yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "保留目标和约束。"),))
+        yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "保留工具结论。"),), finish_reason="stop")
 
 
 async def test_llm_context_compactor_uses_non_streaming_tool_free_call() -> None:

@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from dotclaw.agent.identity import AgentIdentity
-from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
+from dotclaw.channel.runtime_llm_output import ChannelLLMOutputAdapter
 from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.runtime.adapters.approval_repository import ApprovalRepositoryAdapter
 from dotclaw.runtime.adapters.run_repository import RunRepositoryAdapter
@@ -168,7 +168,7 @@ async def test_unknown_identity_submission_is_rejected(tmp_path: Path) -> None:
 
     # 入口必须在提交前校验 session.agent_id 属于已注册 Identity，拒绝未知身份。
     with pytest.raises(ValueError):
-        await service.submit(session.id, "你好", text_stream_port=None)
+        await service.submit(session.id, "你好", output_port=None)
 
 
 # ============================================================================
@@ -181,7 +181,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
 
     目标（开发计划阶段3）：输出端口仅属于本次提交/Run，Runtime 实例可被多个
     Channel 安全共享；LLMProxyAdapter 不再在构造期绑定单一 Channel，文本流只在
-    ``complete(context, execution, text_stream_port)`` 调用时按提交隔离。
+    ``complete(context, execution, output_port)`` 调用时按提交隔离。
 
     本测试用真实 RuntimeEngine + SessionRunCoordinator + LLMProxyAdapter（旧 LLM
     替身）装配 Runtime，对两个不同 Session 并发提交、各自携带本次输出收集器，
@@ -193,7 +193,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
     from dotclaw.bootstrap.runtime_factory import build_runtime_services
     from dotclaw.bootstrap.session_interaction import SessionInteractionService
     from dotclaw.config.settings import Config
-    from dotclaw.llm.base import ChatChunk
+    from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind, TokenUsage
     from dotclaw.tools.executor import ToolExecutor
     from dotclaw.tools.registry import ToolRegistry
 
@@ -203,7 +203,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
         """统一返回固定文本的极简 LLM 替身。"""
 
         async def chat(self, messages, tools, model, stream) -> AsyncIterator[ChatChunk]:
-            yield ChatChunk(content="answer", is_final=True, input_tokens=1, output_tokens=1)
+            yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "answer"),), finish_reason="stop", usage=TokenUsage(1, 1))
 
     config = Config()
     config.session.directory = str(tmp_path)
@@ -236,7 +236,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
 
     async def submit_one(session_id: str, collector: ChannelCollector) -> str:
         return await service.submit(
-            session_id, "你好", text_stream_port=ChannelTextStreamAdapter(collector)
+            session_id, "你好", output_port=ChannelLLMOutputAdapter(collector)
         )
 
     # 两个 Session 并发提交，各自携带本次输出收集器（不同 Session 走不同串行锁）。
@@ -246,8 +246,9 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
     )
 
     # 每个收集器只应收到本 Run 的分片，绝不得串流到对方的 Channel。
-    assert collector_a.chunks == ["answer"]
-    assert collector_b.chunks == ["answer"]
+    # 适配器为 response 首次出现各打印一次「回答：」标题，再拼接正文。
+    assert collector_a.chunks == ["\n回答：\n", "answer"]
+    assert collector_b.chunks == ["\n回答：\n", "answer"]
 
 
 # ============================================================================

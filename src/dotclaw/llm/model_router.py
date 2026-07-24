@@ -16,6 +16,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .base import LLMClient
+from .reasoning import ReasoningPolicy
 
 if TYPE_CHECKING:
     from ..config.settings import RouterConfig
@@ -267,4 +268,5 @@ class ModelRouter:
             api_key=api_key,
             base_url=base_url,
             model=model_id,
+            policy=ReasoningPolicy.from_config(model_cfg.reasoning),
         )

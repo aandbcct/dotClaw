@@ -51,8 +51,8 @@ class LLMContextCompactor:
         content_parts: list[str] = []
         try:
             async for chunk in chunks:
-                if chunk.content:
-                    content_parts.append(chunk.content)
+                for delta in chunk.text_deltas:
+                    content_parts.append(delta.content)
         except Exception as error:
             raise HistoryCompactorUnavailable("上下文压缩服务不可用") from error
         summary: str = "".join(content_parts).strip()

@@ -16,7 +16,7 @@ from ..orchestration.registry import AgentRegistry
 from ..runtime.adapters.approval_repository import ApprovalRepositoryAdapter
 from ..runtime.adapters.run_repository import RunRepositoryAdapter
 from ..runtime.application.dto import RunRequest, RunResult
-from ..runtime.application.ports import ContextPort, TextStreamPort
+from ..runtime.application.ports import ContextPort, LLMOutputPort
 from ..runtime.application.request_factory import create_run_request
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.domain.context import ContextOwner
@@ -101,10 +101,10 @@ class SessionInteractionService:
 
     # ── 提交与控制 ──
 
-    async def submit(self, session: Session | str, user_message: str, text_stream_port: TextStreamPort | None = None) -> RunResult:
+    async def submit(self, session: Session | str, user_message: str, output_port: LLMOutputPort | None = None) -> RunResult:
         """提交一次普通消息，按 Session 路由到对应 Identity 并冻结 RunRequest。
 
-        ``text_stream_port`` 为本提交的运行级输出端口，透传至 Runtime 执行参数。
+        ``output_port`` 为本提交的运行级输出端口，透传至 Runtime 执行参数。
         冻结请求在 Coordinator 取得 Session 租约后创建（见 ``submit_prepared``），
         保持历史压缩、Conversation 快照与 Run 创建的原有并发语义。
         """
@@ -118,19 +118,19 @@ class SessionInteractionService:
         async def _make_request() -> RunRequest:
             return create_run_request(session, identity.agent_id, user_message)
 
-        return await self._coordinator.submit_prepared(session.id, _make_request, text_stream_port)
+        return await self._coordinator.submit_prepared(session.id, _make_request, output_port)
 
-    async def resolve_approval(self, approval_id: str, approved: bool, text_stream_port: TextStreamPort | None = None) -> RunResult:
+    async def resolve_approval(self, approval_id: str, approved: bool, output_port: LLMOutputPort | None = None) -> RunResult:
         """提交审批决定并返回恢复后的结构化结果；透传运行级输出端口。"""
-        return await self._coordinator.resolve_approval(approval_id, approved, text_stream_port)
+        return await self._coordinator.resolve_approval(approval_id, approved, output_port)
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
-    async def retry_interrupted(self, run_id: str, text_stream_port: TextStreamPort | None = None) -> RunResult:
+    async def retry_interrupted(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
         """重试可恢复中断 Run，并返回结构化结果；透传运行级输出端口。"""
-        return await self._coordinator.retry_interrupted(run_id, text_stream_port)
+        return await self._coordinator.retry_interrupted(run_id, output_port)
 
     async def abandon_interrupted(self, run_id: str) -> RunResult:
         """放弃可恢复中断 Run，并返回结构化结果。"""

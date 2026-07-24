@@ -128,7 +128,7 @@ class ApplicationHost:
 
         # ── 装配 Runtime（Host 私有组装函数）──
         # 文本流端口不再在构造期绑定到 LLMProxyAdapter；改为 CLI 每次消息构造
-        # 本次的 ChannelTextStreamAdapter 并作为运行级参数透传（总体设计 §4.4）。
+        # 本次的 ChannelLLMOutputAdapter 并作为运行级参数透传（总体设计 §4.4/§6）。
         self._runtime_services = build_runtime_services(
             config=config,
             project_root=root,
