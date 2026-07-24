@@ -42,6 +42,7 @@ from dotclaw.mcp.provider import MCPToolProvider
 from dotclaw.memory.dream import DeepDream
 from dotclaw.skills.registry import SkillRegistry
 from dotclaw.runtime.application.dto import RunResult
+from dotclaw.runtime.application.ports import LLMOutputPort
 from dotclaw.runtime.domain.facts import RunErrorCode, RunStatus
 from dotclaw.tools.base import ToolDefinition, ToolSource
 from dotclaw.tools.executor import ToolExecutor
@@ -75,8 +76,8 @@ async def _run_cli() -> None:
                 if not user_input.strip():
                     continue
 
-                # 本次消息的运行级文本流端口：CLI 每次消息构造，只服务本 Run。
-                text_stream_port = ChannelTextStreamAdapter(channel)
+                # 本次消息的运行级输出端口：CLI 每次消息构造，只服务本 Run。
+                output_port: LLMOutputPort = ChannelTextStreamAdapter(channel)
 
                 # 每次交互按当前 Session 绑定的 Identity 路由，提交严格由 Session 权威驱动。
 
@@ -142,7 +143,7 @@ async def _run_cli() -> None:
                             channel.print_error("用法: /cancel <run_id>")
                     elif cmd == "/retry":
                         if args:
-                            result: RunResult = await service.retry_interrupted(args, text_stream_port)
+                            result: RunResult = await service.retry_interrupted(args, output_port)
                             await _render_result(channel, result)
                         else:
                             channel.print_error("用法: /retry <run_id>")
@@ -166,8 +167,8 @@ async def _run_cli() -> None:
                     continue
 
                 # ── 正常对话 ──
-                result: RunResult = await service.submit(current_session, user_input, text_stream_port)
-                result = await _resolve_pending_approvals(channel, service, result, text_stream_port)
+                result: RunResult = await service.submit(current_session, user_input, output_port)
+                result = await _resolve_pending_approvals(channel, service, result, output_port)
                 await _render_result(channel, result)
 
                 sys.stdout.flush()
@@ -295,7 +296,7 @@ async def _resolve_pending_approvals(
     channel: CLIChannel,
     service: SessionInteractionService,
     result: RunResult,
-    text_stream_port=None,
+    output_port: LLMOutputPort | None = None,
 ) -> RunResult:
     """循环处理等待审批的运行：仅向服务提交 approval_id 与决定，返回最终 RunResult。
 
@@ -304,13 +305,13 @@ async def _resolve_pending_approvals(
     while result.status is RunStatus.WAITING_APPROVAL and result.approval_id:
         decision = await channel.ask_user("⚠️ 工具需要审批，确认执行？(y/n): ")
         approved = decision.strip().lower() in ("y", "yes")
-        result = await service.resolve_approval(result.approval_id, approved, text_stream_port)
+        result = await service.resolve_approval(result.approval_id, approved, output_port)
     return result
 
 
 async def _render_result(channel: CLIChannel, result: RunResult) -> None:
     """将结构化 RunResult 渲染给用户：流式已在运行期间输出则仅补换行，否则打印文本。"""
-    if result.has_streamed_text:
+    if result.has_streamed_response:
         # 文本增量已在运行期间输出，此处仅补齐终端换行，避免重复显示最终回复。
         await channel.stream("\n")
     else:

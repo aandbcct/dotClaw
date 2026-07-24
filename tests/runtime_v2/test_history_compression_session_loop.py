@@ -13,7 +13,7 @@ from dotclaw.runtime.application.dto import ContextBundle, RunRequest, RunResult
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
-from dotclaw.runtime.application.ports import HistoryCompactorPort, LLMPort, RunPolicyPort, ToolPort
+from dotclaw.runtime.application.ports import HistoryCompactorPort, LLMPort, LLMOutputPort, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.request_factory import create_run_request
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, RunStatus
 from dotclaw.session.session import Conversation, HistoryCompression, Session, SessionManager
@@ -62,7 +62,7 @@ class SessionLoopCompactor(HistoryCompactorPort):
 class FinalLLM(LLMPort):
     """成功结束运行，驱动 SessionConversationProjector 提交候选。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """返回最终回答。"""
         return RunMessage("final", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "本轮回答")
 

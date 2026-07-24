@@ -16,7 +16,7 @@ from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointReposi
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine
-from dotclaw.runtime.application.ports import ContextPort, DelegationPort, LLMPort, RunPolicyPort, ToolPort
+from dotclaw.runtime.application.ports import ContextPort, DelegationPort, LLMPort, LLMOutputPort, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.dto import (
@@ -95,7 +95,7 @@ class DelegatingLLM(LLMPort):
     def __init__(self) -> None:
         self._calls: int = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """模拟父运行的 delegation 控制循环。"""
         self._calls += 1
         if self._calls == 1:
@@ -131,7 +131,7 @@ class NoToolExecution(ToolPort):
 class FinalLLM(LLMPort):
     """用于验证子运行摘要关系的最小完成模型。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """立即返回普通终态回答。"""
         return RunMessage("child-answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "子运行完成")
 
@@ -145,7 +145,7 @@ class ParentChildLLM(LLMPort):
     def __init__(self) -> None:
         self._parent_calls: int = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """父运行先委派，子运行和父运行后续调用均返回最终文本。"""
         if execution.policy.agent_id == "parent-agent" and self._parent_calls == 0:
             self._parent_calls += 1
@@ -177,7 +177,7 @@ class BlockingChildLLM(LLMPort):
         self.parent_run_id: str = ""
         self.cancelled_run_ids: list[str] = []
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """父运行发起委派，子运行等待取消信号后才返回。"""
         if execution.policy.agent_id == "parent-agent" and not self.parent_run_id:
             self.parent_run_id = execution.run_id

@@ -168,7 +168,7 @@ async def test_unknown_identity_submission_is_rejected(tmp_path: Path) -> None:
 
     # 入口必须在提交前校验 session.agent_id 属于已注册 Identity，拒绝未知身份。
     with pytest.raises(ValueError):
-        await service.submit(session.id, "你好", text_stream_port=None)
+        await service.submit(session.id, "你好", output_port=None)
 
 
 # ============================================================================
@@ -181,7 +181,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
 
     目标（开发计划阶段3）：输出端口仅属于本次提交/Run，Runtime 实例可被多个
     Channel 安全共享；LLMProxyAdapter 不再在构造期绑定单一 Channel，文本流只在
-    ``complete(context, execution, text_stream_port)`` 调用时按提交隔离。
+    ``complete(context, execution, output_port)`` 调用时按提交隔离。
 
     本测试用真实 RuntimeEngine + SessionRunCoordinator + LLMProxyAdapter（旧 LLM
     替身）装配 Runtime，对两个不同 Session 并发提交、各自携带本次输出收集器，
@@ -236,7 +236,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
 
     async def submit_one(session_id: str, collector: ChannelCollector) -> str:
         return await service.submit(
-            session_id, "你好", text_stream_port=ChannelTextStreamAdapter(collector)
+            session_id, "你好", output_port=ChannelTextStreamAdapter(collector)
         )
 
     # 两个 Session 并发提交，各自携带本次输出收集器（不同 Session 走不同串行锁）。

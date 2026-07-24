@@ -80,12 +80,12 @@ async def test_submit_writes_conversation_through_coordinator_and_projector(tmp_
     )
     session = await session_manager.create(agent_id=identity.agent_id)
 
-    result = await service.submit(session, "你好", text_stream_port=ChannelTextStreamAdapter(channel))
+    result = await service.submit(session, "你好", output_port=ChannelTextStreamAdapter(channel))
     projected = await session_manager.load(session.id)
 
     assert result.final_message is not None
     assert result.final_message.content == "已通过新版入口"
-    assert result.has_streamed_text is True
+    assert result.has_streamed_response is True
     assert channel.chunks == ["已通过新版入口"]
     assert projected is not None
     assert [(item.user_query, item.final_answer) for item in projected.conversations] == [("你好", "已通过新版入口")]

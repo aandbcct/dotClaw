@@ -78,8 +78,8 @@ class RunExecution:
     pending_control: PendingControl | None = None
     run_messages: tuple[RunMessage, ...] = ()
     """当前 Run 已持久化的执行消息，仅供 Port 构造后续上下文。"""
-    has_streamed_text: bool = False
-    """本次运行是否已向入口发送过模型文本增量。"""
+    has_streamed_response: bool = False
+    """本次运行是否已向入口发送过面向用户的 response 文本增量。"""
     active_context_version: ContextVersion | None = None
     """最近一次已落盘的上下文版本；后续轮次和审批恢复必须重放该事实。"""
     staged_history_compressions: tuple[StagedHistoryCompression, ...] = ()
@@ -102,6 +102,7 @@ class RunExecution:
             active_context_version=self.active_context_version,
             staged_history_compressions=self.staged_history_compressions,
             replay_active_context=self.replay_active_context,
+            session_id=self.request.session_id,
         )
 
     def update_state(self, state: AgentState, action: AgentAction) -> None:
@@ -115,9 +116,9 @@ class RunExecution:
         self.run_messages = messages
         self.message_cursor = len(messages)
 
-    def mark_text_streamed(self) -> None:
-        """记录入口已收到模型文本，避免终态重复呈现相同内容。"""
-        self.has_streamed_text = True
+    def mark_response_streamed(self) -> None:
+        """记录入口已收到面向用户的 response 文本，避免终态重复呈现最终回答。"""
+        self.has_streamed_response = True
 
     def activate_context_version(self, context_version: ContextVersion) -> None:
         """绑定已落盘的最新上下文版本，禁止回退或覆盖同版本事实。"""
@@ -166,3 +167,5 @@ class RunExecutionView:
     """尚未提交到 Session 的候选控制信息。"""
     replay_active_context: bool = False
     """是否要求 ContextPort 直接重放活动版本。"""
+    session_id: str = ""
+    """本次运行所属 Session 标识，供 LLMOutputEvent 填充（由 RunRequest.session_id 派生）。"""

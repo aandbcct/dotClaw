@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dotclaw.runtime.application.ports import ContextPort, LLMPort, ToolPort
+from dotclaw.runtime.application.ports import ContextPort, LLMPort, LLMOutputPort, ToolPort
 from dotclaw.runtime.application.execution import RunBudget, RunExecution, RunExecutionView
 from dotclaw.runtime.application.dto import (
     ContextBundle,
@@ -47,7 +47,7 @@ class FakeContextPort:
 class FakeLLMPort:
     """用于验证 LLMPort 标准响应的内存替身。"""
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """返回不依赖具体模型客户端的标准消息。"""
         return RunMessage(
             message_id="message-assistant-1",

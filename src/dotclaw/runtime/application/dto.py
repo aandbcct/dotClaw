@@ -93,8 +93,8 @@ class RunResult:
     final_message: ConversationMessage | None = None
     error: RunError | None = None
     approval_id: str | None = None
-    has_streamed_text: bool = False
-    """本次运行是否已通过 TextStreamPort 向入口输出过文本。"""
+    has_streamed_response: bool = False
+    """本次运行是否已通过 LLMOutputPort 向入口输出过面向用户的 response 文本。"""
 
     def to_dict(self) -> JSONMap:
         """转换为 Channel 或 API 可消费的结果数据。"""
@@ -104,8 +104,29 @@ class RunResult:
             "final_message": None if self.final_message is None else self.final_message.to_dict(),
             "error": None if self.error is None else self.error.to_dict(),
             "approval_id": self.approval_id,
-            "has_streamed_text": self.has_streamed_text,
+            "has_streamed_response": self.has_streamed_response,
         }
+
+
+class LLMOutputKind(StrEnum):
+    """LLM 增量输出的语义类别，由 Runtime 解释并交付入口层。"""
+
+    REASONING_DELTA = "reasoning_delta"
+    RESPONSE_DELTA = "response_delta"
+
+
+@dataclass(frozen=True)
+class LLMOutputEvent:
+    """一次 LLM 调用产生的有序增量输出事件。
+
+    不增加 sequence / call_index：单次调用交付顺序由串行异步迭代器保证，
+    Run 全局顺序继续由既有 RunEvent.sequence 表达（总体设计 §3.3）。
+    """
+
+    session_id: str
+    run_id: str
+    kind: LLMOutputKind
+    content: str
 
 
 @dataclass(frozen=True)

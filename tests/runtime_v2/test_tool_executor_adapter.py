@@ -7,7 +7,7 @@ from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointReposi
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine
-from dotclaw.runtime.application.ports import ContextPort, LLMPort, RunPolicyPort
+from dotclaw.runtime.application.ports import ContextPort, LLMPort, LLMOutputPort, RunPolicyPort
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.application.dto import (
     ContextBundle, ContextMetadata, ContextRefreshSignal, ConversationMessage, ConversationSnapshot,
@@ -132,7 +132,7 @@ class ToolThenFinalLLM(LLMPort):
         self._tool_name = tool_name
         self._calls = 0
 
-    async def complete(self, context: ContextBundle, execution: RunExecutionView, text_stream_port: TextStreamPort | None = None) -> RunMessage:
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         """依次返回工具调用和普通回答。"""
         self._calls += 1
         if self._calls == 1:

@@ -18,18 +18,22 @@ from ..domain.facts import (
 from .context_budget import TokenCountRequest, TokenCountResult
 from .context_compaction import ContextCompactionRequest, ContextCompactionResult
 from .history_compaction import HistoryCompactionRequest, HistoryCompactionResult
-from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, RunRequest, ToolInvocation, ToolResult
+from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, LLMOutputEvent, RunRequest, ToolInvocation, ToolResult
 
 
 class LLMUnavailableError(RuntimeError):
     """业务模型代理重试耗尽后的可恢复外部错误。"""
 
 
-class TextStreamPort(Protocol):
-    """将模型文本增量交付给入口层的应用协议。"""
+class LLMOutputPort(Protocol):
+    """接收一次 LLM 调用产生的有序增量输出事件的应用协议。
 
-    async def emit(self, run_id: str, chunk: str) -> None:
-        """输出指定运行的一段非空文本增量。"""
+    事件按语义分为 reasoning 与 response（见 ``LLMOutputEvent``）；入口层
+    据此决定如何分区展示，但本端口不关心展示细节。
+    """
+
+    async def emit(self, event: LLMOutputEvent) -> None:
+        """输出一条语义化增量事件（reasoning 或 response）。"""
 
 
 class ContextCompactionPort(Protocol):
@@ -185,9 +189,9 @@ class LLMPort(Protocol):
         self,
         context: ContextBundle,
         execution: RunExecutionView,
-        text_stream_port: TextStreamPort | None = None,
+        output_port: LLMOutputPort | None = None,
     ) -> RunMessage:
-        """返回一次完整模型响应消息；text_stream_port 为本次提交的运行级输出端口。"""
+        """返回一次完整模型响应消息；output_port 为本次提交的运行级输出端口。"""
 
     async def cancel(self, run_id: str) -> None:
         """尽力取消正在进行的模型调用。"""
