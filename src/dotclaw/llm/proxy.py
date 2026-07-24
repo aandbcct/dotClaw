@@ -115,6 +115,9 @@ class LLMProxy:
                             # 调用 client.chat()
                             chat_iter = client.chat(messages, tools, stream)
 
+                            # 可见输出边界：每次尝试重新计，避免跨重试误判
+                            visible_output_started = False
+
                             # 尝取第一个 chunk（区分 CallSetupError vs 流式异常）
                             first_chunk = await anext(chat_iter)
 
@@ -125,10 +128,15 @@ class LLMProxy:
                                 if journal:
                                     journal.llm_call_end()
 
+                            # 可见输出边界：只要交付过非空 reasoning/response delta，
+                            # 即视为“已输出”，此后流异常不得重试或降级（设计 §7）。
+                            if first_chunk.text_deltas:
+                                visible_output_started = True
                             yield first_chunk
                             try:
                                 async for chunk in chat_iter:
                                     if chunk.text_deltas:
+                                        visible_output_started = True
                                         output_token_count += sum(
                                             len(delta.content) for delta in chunk.text_deltas
                                         )
@@ -137,8 +145,14 @@ class LLMProxy:
                                         output_tokens = chunk.usage.output_tokens
                                     yield chunk
                             except Exception as e:
-                                raise NonRetryableStreamError(
-                                    f"流式响应中断 ({model_name}): {e}"
+                                if visible_output_started:
+                                    # 已展示 reasoning/response：不可降级，直接向上抛出
+                                    raise NonRetryableStreamError(
+                                        f"流式响应中断 ({model_name}): {e}"
+                                    ) from e
+                                # 尚未产生可见输出：允许既有重试与候选切换
+                                raise CallSetupError(
+                                    f"流开始但未产生可见输出即中断 ({model_name}): {e}"
                                 ) from e
 
                             # 成功 → 上报
