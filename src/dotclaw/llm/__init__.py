@@ -12,6 +12,7 @@ from .base import (
 )
 from .proxy import LLMProxy
 from .model_router import ModelRouter
+from .reasoning import ReasoningMode, ReasoningPolicy, ReasoningStreamParser
 from .rate_limiter import RateLimiter, RateLimitConfig, RateLimitTimeout
 from .circuit_breaker import CircuitBreaker, BreakerConfig, BreakerState
 
@@ -26,6 +27,9 @@ __all__ = [
     "ToolDefinition",
     "LLMProxy",
     "ModelRouter",
+    "ReasoningMode",
+    "ReasoningPolicy",
+    "ReasoningStreamParser",
     "RateLimiter",
     "RateLimitConfig",
     "RateLimitTimeout",
