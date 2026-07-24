@@ -86,6 +86,53 @@ class _FakeClient(OpenAICompatibleClient):
         return F()
 
 
+class _NonStreamMessage:
+    """非流式 ChatCompletion 的 choice.message。"""
+
+    def __init__(self, content: str, reasoning_content: str = ""):
+        self.content = content
+        self.reasoning_content = reasoning_content
+
+
+class _NonStreamChoice:
+    def __init__(self, message: _NonStreamMessage):
+        self.message = message
+
+
+class _NonStreamResponse:
+    def __init__(self, content: str, reasoning_content: str = "", in_tok: int = 0, out_tok: int = 0):
+        self.choices = [_NonStreamChoice(_NonStreamMessage(content, reasoning_content))]
+        self.usage = _usage(in_tok, out_tok)
+
+
+class _FakeNonStreamClient(OpenAICompatibleClient):
+    """注入非流式 ChatCompletion 响应的测试客户端（stream=False 调用）。"""
+
+    def __init__(self, content: str, reasoning_content: str = "", in_tok: int = 0, out_tok: int = 0,
+                 policy: ReasoningPolicy | None = None):
+        super().__init__(policy)
+        self._response = _NonStreamResponse(content, reasoning_content, in_tok, out_tok)
+
+    def _get_api_key(self) -> str:
+        return "test"
+
+    def _get_base_url(self) -> str:
+        return "https://test/v1"
+
+    def _get_model_id(self) -> str:
+        return "test-model"
+
+    def _get_client(self):
+        class F:  # noqa
+            class chat:
+                class completions:
+                    @staticmethod
+                    async def create(**kw):
+                        return self._response
+
+        return F()
+
+
 class _SeqClient(OpenAICompatibleClient):
     """每次 chat() 调用按顺序消费一份异步响应（用于交错/异常隔离测试）。"""
 
@@ -180,6 +227,16 @@ async def _collect(client, messages=None) -> list[ChatChunk]:
         c
         async for c in client.chat(
             messages or [Message(role="user", content="x")], stream=True
+        )
+    ]
+
+
+async def _collect_non_stream(client, messages=None) -> list[ChatChunk]:
+    """运行一次 chat(stream=False) 并收集所有 ChatChunk。"""
+    return [
+        c
+        async for c in client.chat(
+            messages or [Message(role="user", content="x")], stream=False
         )
     ]
 
@@ -474,3 +531,41 @@ async def test_proxy_visible_output_no_fallback():
             pass
     # 仅尝试一次，未切换其它候选
     assert router.attempted == ["only"]
+
+
+# ============================================================
+# 4. 非流式分支（stream=False）也必须按推理模式分离
+# ============================================================
+
+async def test_tags_mode_non_stream_label_parsing():
+    """tags 模式 + stream=False：复用同一解析器，标签不泄漏、分类正确。"""
+    client = _FakeNonStreamClient(
+        content="<think>想一下</think>回答",
+        policy=ReasoningPolicy(mode=ReasoningMode.TAGS),
+    )
+    results = await _collect_non_stream(client)
+    assert _text_deltas(results) == [("reasoning", "想一下"), ("response", "回答")]
+    # 协议标签本身不得出现在任何文本增量中
+    assert all(
+        "<think>" not in d.content and "</think>" not in d.content
+        for c in results
+        for d in c.text_deltas
+    )
+
+
+async def test_none_mode_non_stream_does_not_parse_tags():
+    """none 模式 + stream=False：不识别标签，整段作为 response。"""
+    client = _FakeNonStreamClient(content="<think>x</think>y")
+    results = await _collect_non_stream(client)
+    assert _text_deltas(results) == [("response", "<think>x</think>y")]
+
+
+async def test_native_mode_non_stream_reasoning_content():
+    """native 模式 + stream=False：reasoning_content 归 reasoning，content 归 response。"""
+    client = _FakeNonStreamClient(
+        content="答案",
+        reasoning_content="我在思考",
+        policy=ReasoningPolicy(mode=ReasoningMode.NATIVE),
+    )
+    results = await _collect_non_stream(client)
+    assert _text_deltas(results) == [("reasoning", "我在思考"), ("response", "答案")]

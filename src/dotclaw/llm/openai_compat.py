@@ -190,15 +190,14 @@ class OpenAICompatibleClient(LLMClient):
             message = choice.message
             reasoning_content = getattr(message, "reasoning_content", None) or ""
             content = message.content or ""
-            deltas: list[ChatTextDelta] = []
-            if self._policy.mode is ReasoningMode.NATIVE:
-                if reasoning_content:
-                    deltas.append(ChatTextDelta(TextDeltaKind.REASONING, reasoning_content))
-                if content:
-                    deltas.append(ChatTextDelta(TextDeltaKind.RESPONSE, content))
+            # 非流式分支同样必须按推理模式分离：tags 模式复用同一解析器
+            # （feed + flush），否则 <think>/<response> 标签会原样泄漏为 response，
+            # 与流式分支的已确认契约不一致。
+            if self._policy.mode is ReasoningMode.TAGS:
+                parser = ReasoningStreamParser(self._policy)
+                deltas = list(parser.feed(content)) + list(parser.flush())
             else:
-                if content:
-                    deltas.append(ChatTextDelta(TextDeltaKind.RESPONSE, content))
+                deltas = self._extract_text_deltas(content, reasoning_content, None)
             usage = getattr(response, "usage", None)
             in_tok = usage.prompt_tokens if usage else 0
             out_tok = usage.completion_tokens if usage else 0
