@@ -14,7 +14,7 @@ CLI / Channel
   → LLMPort → LLMProxyAdapter → LLMProxy → ModelRouter → Provider Client
 ```
 
-现有 `ChatChunk` 只携带 `content`、单个 `tool_call` 与 `is_final`。`LLMProxyAdapter` 将所有 `content` 聚合为最终回答，并通过 `TextStreamPort.emit(run_id, chunk)` 转发给 CLI。因此它无法区分模型的 reasoning 与面向用户的 response。
+> 以下为迁移前现状（双通道改造启动前的代码基线）：`ChatChunk` 只携带 `content`、单个 `tool_call` 与 `is_final`。`LLMProxyAdapter` 将所有 `content` 聚合为最终回答，并通过 `TextStreamPort.emit(run_id, chunk)` 转发给 CLI。因此它无法区分模型的 reasoning 与面向用户的 response。
 
 同时，`ModelRouter` 会缓存 Provider Client，而 `OpenAICompatibleClient` 将工具调用累计状态和 `finish_reason` 放在 Client 实例字段中。多个 Session 并发调用同一模型时，请求状态可能互相重置或串线。
 

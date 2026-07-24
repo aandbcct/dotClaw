@@ -272,8 +272,8 @@ class OpenAICompatibleClient(LLMClient):
                 if tc.function and tc.function.arguments:
                     pending["arguments"] += tc.function.arguments
 
-        is_final = choice.finish_reason is not None
-        if is_final:
+        finish_detected = choice.finish_reason is not None
+        if finish_detected:
             state.finish_reason = choice.finish_reason
 
         # 文本增量按模式分离（结束包与中间 chunk 同样处理，避免丢正文）
@@ -282,7 +282,7 @@ class OpenAICompatibleClient(LLMClient):
             yield ChatChunk(text_deltas=tuple(text_deltas))
 
         # 工具调用在结束包一次性写出（多个完成的工具调用一次写入，不逐条）
-        if is_final:
+        if finish_detected:
             completed = [
                 ToolCall(id=p["id"], name=p["name"], arguments=p["arguments"])
                 for p in state.pending_tool_calls.values()

@@ -4,7 +4,7 @@
 
 ## 1. 实施基线与迁移原则
 
-当前代码基线：`ChatChunk(content, tool_call, is_final)`、`TextStreamPort.emit(run_id, chunk)`、`ChannelTextStreamAdapter` 与 Client 实例级 `_pending_tool_calls` / `_stream_finish_reason`。
+（各阶段开始前）代码基线：`ChatChunk(content, tool_call, is_final)`、`TextStreamPort.emit(run_id, chunk)`、`ChannelTextStreamAdapter` 与 Client 实例级 `_pending_tool_calls` / `_stream_finish_reason`。以上均已在前序阶段被替代并物理删除（见 §7）。
 
 本任务没有数据迁移或持久化格式迁移：reasoning 不写入任何持久化容器。YAML 缺少 `reasoning` 时加载为 `mode=none`；内部 Python API 直接替换，不提供旧别名或双签名。
 
