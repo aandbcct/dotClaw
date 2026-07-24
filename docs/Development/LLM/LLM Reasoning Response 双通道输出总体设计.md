@@ -146,7 +146,7 @@ flowchart LR
 | Provider Client | 请求映射、原生字段提取、工具参数组装、标准化 Chunk | 知道 Runtime、CLI、Session/Run |
 | `LLMProxy` | 路由、重试、降级 | 解析 Provider 字段、展示输出 |
 | `LLMProxyAdapter` | `ChatTextDelta → LLMOutputEvent`、聚合 response | 解析标签、决定模型能力 |
-| Channel Adapter | 解释展示 kind 并调用通用 `Channel.stream()` | 依赖 `ChatChunk` 或 Provider |
+| Channel Adapter | 解释展示 kind 并调用通用 `Channel.stream()` | 依赖 `LLMOutputEvent` / `LLMOutputPort`；禁止依赖 `ChatChunk` 或 Provider |
 
 依赖方向固定为：`config` 不依赖 `llm`；`llm` 不依赖 `runtime`；Runtime adapter 可依赖 LLM 公共协议；Channel 只依赖 Runtime application DTO/Port；bootstrap 负责装配。
 

@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from dotclaw.agent.identity import AgentIdentity
-from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
+from dotclaw.channel.runtime_llm_output import ChannelLLMOutputAdapter
 from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.runtime.adapters.approval_repository import ApprovalRepositoryAdapter
 from dotclaw.runtime.adapters.run_repository import RunRepositoryAdapter
@@ -236,7 +236,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
 
     async def submit_one(session_id: str, collector: ChannelCollector) -> str:
         return await service.submit(
-            session_id, "你好", output_port=ChannelTextStreamAdapter(collector)
+            session_id, "你好", output_port=ChannelLLMOutputAdapter(collector)
         )
 
     # 两个 Session 并发提交，各自携带本次输出收集器（不同 Session 走不同串行锁）。
@@ -246,8 +246,9 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
     )
 
     # 每个收集器只应收到本 Run 的分片，绝不得串流到对方的 Channel。
-    assert collector_a.chunks == ["answer"]
-    assert collector_b.chunks == ["answer"]
+    # 适配器为 response 首次出现各打印一次「回答：」标题，再拼接正文。
+    assert collector_a.chunks == ["\n回答：\n", "answer"]
+    assert collector_b.chunks == ["\n回答：\n", "answer"]
 
 
 # ============================================================================

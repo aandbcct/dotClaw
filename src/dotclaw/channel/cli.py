@@ -40,11 +40,15 @@ class CLIChannel(Channel):
         )
 
     async def stream(self, chunk: str) -> None:
-        """流式输出一个 chunk（实时打印，不换行）"""
+        """流式输出一个 chunk（实时打印，不换行）。
+
+        使用 markup=False 使模型文本按纯文本渲染，避免把输出里的方括号内容
+        （如 ``[tool]``、``[/red]``）误当作 Rich 标记解释（开发计划阶段五）。
+        """
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
-            lambda: console.print(chunk, end="")
+            lambda: console.print(chunk, end="", markup=False)
         )
 
     async def ask_user(self, prompt: str) -> str:

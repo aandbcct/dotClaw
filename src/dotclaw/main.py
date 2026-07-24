@@ -29,7 +29,7 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from dotclaw.channel.cli import CLIChannel
-from dotclaw.channel.runtime_text_stream import ChannelTextStreamAdapter
+from dotclaw.channel.runtime_llm_output import ChannelLLMOutputAdapter
 from dotclaw.session import Session, SessionManager
 from dotclaw.bootstrap import ApplicationHost
 from dotclaw.bootstrap.session_interaction import (
@@ -76,8 +76,9 @@ async def _run_cli() -> None:
                 if not user_input.strip():
                     continue
 
-                # 本次消息的运行级输出端口：CLI 每次消息构造，只服务本 Run。
-                output_port: LLMOutputPort = ChannelTextStreamAdapter(channel)
+                # 本次消息的运行级输出端口：CLI 每次消息构造，只服务本 Run；
+                # 适配器按语义分区展示思考/回答，模型文本走纯文本路径。
+                output_port: LLMOutputPort = ChannelLLMOutputAdapter(channel)
 
                 # 每次交互按当前 Session 绑定的 Identity 路由，提交严格由 Session 权威驱动。
 

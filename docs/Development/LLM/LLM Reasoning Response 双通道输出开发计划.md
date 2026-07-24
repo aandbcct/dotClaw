@@ -119,12 +119,18 @@
 
 ## 7. 阶段六：统一切换、删除与文档收敛
 
-### 删除清单
+### 删除清单（已在前序阶段完成删除，阶段六只核验删除结果）
 
-- 删除 `TextStreamPort`、`ChannelTextStreamAdapter`、`runtime_text_stream.py`。
-- 删除 `ChatChunk.content`、`ChatChunk.tool_call`、`ChatChunk.is_final` 及 Client 实例流状态。
-- 删除 `has_streamed_text`、`mark_text_streamed()` 和相关 metadata/测试断言。
-- 不创建 `TextStreamPort = LLMOutputPort`、旧 `emit()` 重载或旧字段兼容属性。
+> 原计划把删除集中在阶段六，是为了保证依赖顺序与可验证性，并不要求把"已迁移、零调用方"的旧
+> 代码硬留到阶段六。实际执行采用 Ralph Loops 后压原则——迁移全部调用方 → 验证 → 立即删除旧路径——
+> 因此各旧路径在其对应替代阶段便已物理删除，阶段六自然收缩为：文档收敛、src 与 tests 全量零引用
+> 搜索、相关测试与最终验收。这属于"执行时机提前"，不是设计范围漂移。
+
+- `TextStreamPort`、`ChannelTextStreamAdapter`、`runtime_text_stream.py`：已于阶段四/五替代并物理删除。
+- `ChatChunk.content` / `ChatChunk.tool_call` / `ChatChunk.is_final` 及 Client 实例流状态
+  （`_pending_tool_calls` / `_stream_finish_reason` / `_reset_stream_state`）：已于阶段一/三替代并物理删除。
+- `has_streamed_text`、`mark_text_streamed()` 及相关 metadata/测试断言：已于阶段四替代并物理删除。
+- 约束（始终坚持，无任何兼容垫片）：不得创建 `TextStreamPort = LLMOutputPort`、旧 `emit()` 重载或旧字段兼容属性。
 
 ### 搜索验证
 
