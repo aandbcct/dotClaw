@@ -144,6 +144,26 @@ def test_tags_mode_with_custom_tags() -> None:
     assert reasoning.reasoning_end == "[[/think]]"
 
 
+def test_tags_mode_with_custom_response_tags() -> None:
+    """mode: tags 且显式覆盖 response 标签时，使用用户配置。"""
+    config = _load_inline(
+        """
+        models:
+          m1:
+            provider: qwen
+            model_id: m1
+            reasoning:
+              mode: tags
+              response_tags:
+                start: "[[resp]]"
+                end: "[[/resp]]"
+        """
+    )
+    reasoning = config.models["m1"].reasoning
+    assert reasoning.response_start == "[[resp]]"
+    assert reasoning.response_end == "[[/resp]]"
+
+
 # ── 配置加载失败 ───────────────────────────────────────────
 
 def test_invalid_mode_raises() -> None:

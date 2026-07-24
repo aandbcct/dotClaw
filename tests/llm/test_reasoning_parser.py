@@ -176,3 +176,111 @@ def test_plain_text_all_response() -> None:
     parser = ReasoningStreamParser(_policy())
     deltas = parser.feed("普通回答")
     assert _join(deltas) == [(TextDeltaKind.RESPONSE.value, "普通回答")]
+
+
+# ── response 标签生效（阶段二修订） ─────────────────────────
+
+def test_response_tag_strips_protocol_label() -> None:
+    """<response> 仅剥离协议标签，正文仍归 response（不创建新语义）。"""
+    parser = ReasoningStreamParser(_policy())
+    deltas = parser.feed("前<response>中</response>后")
+    assert _join(deltas) == [
+        (TextDeltaKind.RESPONSE.value, "前"),
+        (TextDeltaKind.RESPONSE.value, "中"),
+        (TextDeltaKind.RESPONSE.value, "后"),
+    ]
+
+
+def test_response_region_then_reasoning() -> None:
+    """<response> 区结束后再进入 <think> 区，状态正确切换。"""
+    parser = ReasoningStreamParser(_policy())
+    deltas = parser.feed("<response>答</response><think>想</think>回")
+    assert _join(deltas) == [
+        (TextDeltaKind.RESPONSE.value, "答"),
+        (TextDeltaKind.REASONING.value, "想"),
+        (TextDeltaKind.RESPONSE.value, "回"),
+    ]
+
+
+def test_think_inside_response_is_literal() -> None:
+    """显式 response 区内出现 <think>：作为 response 原文保留（不支持嵌套）。"""
+    parser = ReasoningStreamParser(_policy())
+    deltas = parser.feed("<response>答<think>假想</response>后")
+    assert _join(deltas) == [
+        (TextDeltaKind.RESPONSE.value, "答"),
+        (TextDeltaKind.RESPONSE.value, "<think>"),
+        (TextDeltaKind.RESPONSE.value, "假想"),
+        (TextDeltaKind.RESPONSE.value, "后"),
+    ]
+
+
+def test_response_inside_think_is_literal() -> None:
+    """reasoning 区内出现的 <response>/</response>：作为 reasoning 原文保留。"""
+    parser = ReasoningStreamParser(_policy())
+    deltas = parser.feed("<think>想<response>假应答</response>继续")
+    assert _join(deltas) == [
+        (TextDeltaKind.REASONING.value, "想"),
+        (TextDeltaKind.REASONING.value, "<response>"),
+        (TextDeltaKind.REASONING.value, "假应答"),
+        (TextDeltaKind.REASONING.value, "</response>"),
+        (TextDeltaKind.REASONING.value, "继续"),
+    ]
+
+
+def test_cross_chunk_response_tag() -> None:
+    """<response> 标签被拆到两次 feed，解析器跨调用缓冲不丢文本。"""
+    parser = ReasoningStreamParser(_policy())
+    first = parser.feed("a<res")                 # `` 被拆为 "<res" 前缀
+    second = parser.feed("ponse>中</response>后")  # 补全 `` + 正文
+    assert _join(first) == [(TextDeltaKind.RESPONSE.value, "a")]
+    assert _join(second) == [
+        (TextDeltaKind.RESPONSE.value, "中"),
+        (TextDeltaKind.RESPONSE.value, "后"),
+    ]
+
+
+def test_unclosed_response_tag() -> None:
+    """未闭合的 <response>：正文在 feed 阶段按 response 输出。"""
+    parser = ReasoningStreamParser(_policy())
+    fed = parser.feed("x<response>未闭合")
+    assert _join(fed) == [
+        (TextDeltaKind.RESPONSE.value, "x"),
+        (TextDeltaKind.RESPONSE.value, "未闭合"),
+    ]
+    assert parser.flush() == []  # 缓冲区已排空
+
+
+def test_unclosed_response_partial_tag_flushed_as_response() -> None:
+    """流结束时缓冲区残留 <response> 的部分前缀：flush 按 response 输出。"""
+    parser = ReasoningStreamParser(_policy())
+    fed = parser.feed("<response>答<res")  # "<res" 是 `` 的前缀，feed 阶段不输出
+    flushed = parser.flush()
+    assert _join(fed) == [(TextDeltaKind.RESPONSE.value, "答")]
+    assert _join(flushed) == [(TextDeltaKind.RESPONSE.value, "<res")]
+
+
+def test_unmatched_response_end_as_response() -> None:
+    """OUTSIDE 区出现未匹配 </response>：原样作为 response 输出。"""
+    parser = ReasoningStreamParser(_policy())
+    deltas = parser.feed("a</response>b")
+    assert _join(deltas) == [
+        (TextDeltaKind.RESPONSE.value, "a"),
+        (TextDeltaKind.RESPONSE.value, "</response>"),
+        (TextDeltaKind.RESPONSE.value, "b"),
+    ]
+
+
+def test_custom_response_tags() -> None:
+    """自定义 response 标签同样被识别与剥离。"""
+    policy = ReasoningPolicy(
+        mode=ReasoningMode.TAGS,
+        response_start="[[r]]",
+        response_end="[[/r]]",
+    )
+    parser = ReasoningStreamParser(policy)
+    deltas = parser.feed("前[[r]]中[[/r]]后")
+    assert _join(deltas) == [
+        (TextDeltaKind.RESPONSE.value, "前"),
+        (TextDeltaKind.RESPONSE.value, "中"),
+        (TextDeltaKind.RESPONSE.value, "后"),
+    ]
