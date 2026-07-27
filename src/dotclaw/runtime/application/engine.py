@@ -3,22 +3,29 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass, replace
 from hashlib import sha256
 
+logger = logging.getLogger(__name__)
+
 from ..domain.events import (
-    ApprovalResolved,
+    AgentRunEvent,
+    ApprovalGranted,
+    ApprovalRejected,
+    CancelRequested,
     DelegationCompleted,
     DelegationSubmitted,
-    LLMCompleted,
-    LLMCompletionKind,
+    LLMCallFailed,
+    LLMResponseProduced,
     RunEvent,
     RunEventType,
     RunStarted,
-    ToolCompleted,
+    ToolApprovalRequired,
     ToolAuditStatus,
-    ToolCompletionKind,
+    ToolBatchCompleted,
+    ToolBatchFailed,
 )
 from ..domain.context import (
     ContextContributionKind,
@@ -53,7 +60,18 @@ from ..domain.facts import (
     ToolCall,
     utc_now_iso,
 )
-from ..domain.state import AgentPhase, AgentState, RunOutcome
+from ..domain.state import (
+    AgentRunState,
+    Created,
+    InvalidTransition,
+    RunOutcome,
+    RunStage,
+    Running,
+    StateTransition,
+    Suspended,
+    SuspendReason,
+    transition,
+)
 from ..domain.control import AgentAction
 from .approval_service import ApprovalService
 from .cancellation_service import CancellationService
@@ -140,7 +158,7 @@ class RuntimeEngine:
             run_id=run_id,
             request=request,
             policy=policy,
-            state=AgentState(),
+            state=AgentRunState(mode=Created()),
             budget=RunBudget(max_iterations=policy.max_iterations),
         )
         run: AgentRun = AgentRun(
@@ -215,13 +233,14 @@ class RuntimeEngine:
             user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
             conversation=_conversation_from_context_version(active_context_version),
         )
-        state: AgentState = _state_from_checkpoint(checkpoint)
-        transition = state.transition(ApprovalResolved(approval_id, approved))
+        state: AgentRunState = _state_from_checkpoint(checkpoint)
+        approval_event = ApprovalGranted(approval_id) if approved else ApprovalRejected(approval_id)
+        tr = transition(state, approval_event)
         execution: RunExecution = RunExecution(
             run_id=run.run_id,
             request=request,
             policy=run.policy,
-            state=transition.state,
+            state=tr.state,
             budget=RunBudget(max_iterations=run.policy.max_iterations),
             message_cursor=checkpoint.message_sequence,
             run_messages=messages,
@@ -394,7 +413,7 @@ class RuntimeEngine:
         messages = await self._run_repository.load_messages(run.session_id, run.run_id)
         checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
         event_sequence: int = checkpoint.event_sequence if checkpoint is not None else 0
-        execution = RunExecution(run.run_id, RunRequest(run.session_id, "cancel", run.agent_id, ConversationMessage(run.input_message_id, MessageRole.USER, "", ""), ConversationSnapshot(run.session_id, (), 0)), run.policy, AgentState(), RunBudget(run.policy.max_iterations))
+        execution = RunExecution(run.run_id, RunRequest(run.session_id, "cancel", run.agent_id, ConversationMessage(run.input_message_id, MessageRole.USER, "", ""), ConversationSnapshot(run.session_id, (), 0)), run.policy, AgentRunState(mode=Created()), RunBudget(run.policy.max_iterations))
         result: RunResult = await self._finish_cancelled(execution, run, messages, event_sequence, reason)
         await self._release_run_context_if_terminal(result)
 
@@ -414,7 +433,12 @@ class RuntimeEngine:
                 await clear_run(result.run_id)
 
     async def _drive(self, execution: RunExecution, run: AgentRun, initial_messages: tuple[RunMessage, ...], pending_calls: tuple[ToolCall, ...], event_sequence: int = 0, output_port: LLMOutputPort | None = None, resume_approved_call_id: str | None = None) -> RunResult:
-        """驱动局部状态机，并在每个事实边界按顺序持久化。"""
+        """驱动局部状态机，并在每个事实边界按顺序持久化。
+
+        主循环消费 ``AgentRunState`` 当前分支对应的动作：``EXECUTING_TOOLS`` 走工具动作、
+        ``CALLING_LLM`` 走模型动作。任一动作的副作用完成后回灌为 ``AgentRunEvent``，
+        经 ``transition()`` 计算下一状态与动作，再进入下一轮。
+        """
         messages: list[RunMessage] = list(initial_messages)
         execution.replace_run_messages(tuple(messages))
         sequence: int = len(messages)
@@ -423,180 +447,101 @@ class RuntimeEngine:
             sequence += 1
             messages.append(RunMessage(execution.request.user_message.message_id, sequence, RunMessageKind.USER_INPUT, MessageRole.USER, execution.request.user_message.content))
             await self._save_messages(run, execution, messages)
-            start_transition = execution.state.transition(RunStarted(run.input_message_id))
+            start_transition = await self._apply_transition(execution, run, RunStarted(run.input_message_id), event_number)
+            if start_transition is None:
+                return await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 RunStarted 迁移")
             execution.update_state(start_transition.state, start_transition.action)
             event_number = await self._event(run, event_number, RunEventType.RUN_STARTED, (run.input_message_id,))
-        while not execution.state.is_terminal():
+        while not execution.state.is_ended():
             if execution.cancellation.cancelled:
+                cancel_transition = await self._apply_transition(execution, run, CancelRequested(), event_number)
+                if cancel_transition is not None:
+                    execution.update_state(cancel_transition.state, cancel_transition.action)
                 return await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
-            if execution.state.phase is AgentPhase.WAITING_TOOLS:
-                tool_calls: tuple[ToolCall, ...] = pending_calls
-                pending_calls = ()
-                if not tool_calls:
-                    return await self._fail(execution, run, tuple(messages), event_number, "缺少待执行工具调用")
-                completed_message_ids: list[str] = []
-                tool_index: int
-                tool_call: ToolCall
-                for tool_index, tool_call in enumerate(tool_calls):
-                    delegation_request: DelegationRequest | None = _delegation_request(
-                        execution.run_id,
-                        run.root_run_id or run.run_id,
-                        run.agent_id,
-                        run.session_id,
-                        tool_call,
-                    )
-                    if delegation_request is not None:
-                        event_number = await self._tool_started_event(run, event_number, messages, tool_call)
-                        delegation_result: DelegationDriveResult = await self._delegate(
-                            execution,
-                            run,
-                            messages,
-                            sequence,
-                            event_number,
-                            delegation_request,
-                            tool_call,
-                            manage_state=False,
-                        )
-                        if delegation_result.error is not None:
-                            return delegation_result.error
-                        run = delegation_result.run
-                        sequence = delegation_result.message_sequence
-                        event_number = delegation_result.event_sequence
-                        completed_message_ids.append(messages[-1].message_id)
-                        continue
-                    event_number = await self._tool_started_event(run, event_number, messages, tool_call)
-                    try:
-                        approved: bool = (
-                            resume_approved_call_id is not None
-                            and tool_call.call_id == resume_approved_call_id
-                        )
-                        tool_result: ToolResult = await self._tool_port.execute(
-                            ToolInvocation(execution.run_id, tool_call, approved=approved),
-                            execution.view(),
-                        )
-                    except Exception as error:
-                        event_number = await self._tool_completed_event(run, event_number, tool_call, None, ToolAuditStatus.FAILED, _safe_error_summary(error))
-                        return await self._fail(execution, run, tuple(messages), event_number, f"工具调用失败：{error}", RunErrorCode.TOOL_FAILURE)
-                    if execution.cancellation.cancelled:
-                        event_number = await self._tool_completed_event(
-                            run,
-                            event_number,
-                            tool_call,
-                            None,
-                            ToolAuditStatus.CANCELLED,
-                            "工具执行后已取消",
-                        )
-                        return await self._finish_cancelled(
-                            execution,
-                            run,
-                            tuple(messages),
-                            event_number,
-                            execution.cancellation.reason,
-                        )
-                    sequence += 1
-                    run = _with_tool_statistic(run)
-                    tool_message: RunMessage = RunMessage(
-                        f"tool-{execution.run_id}-{sequence}",
-                        sequence,
-                        RunMessageKind.TOOL_RESULT,
-                        MessageRole.TOOL,
-                        tool_result.output,
-                        tool_call_id=tool_result.call_id,
-                    )
-                    messages.append(tool_message)
-                    await self._save_messages(run, execution, messages)
-                    event_number = await self._tool_completed_event(run, event_number, tool_call, tool_message.message_id, _tool_audit_status(tool_result.status), _tool_error_summary(tool_result))
-                    if tool_result.status is ToolResultStatus.FAILED:
-                        error = tool_result.error.message if tool_result.error is not None else tool_result.output or "工具执行失败"
-                        return await self._fail(execution, run, tuple(messages), event_number, error, RunErrorCode.TOOL_FAILURE)
-                    if tool_result.status is ToolResultStatus.APPROVAL_REQUIRED:
-                        record = await self._approval_service.create(run.run_id, run.session_id, tool_result.approval_id)
-                        transition = execution.state.transition(ToolCompleted(
-                            ToolCompletionKind.APPROVAL_REQUIRED,
-                            (tool_message.message_id,),
-                            record.approval_id,
-                        ))
-                        execution.update_state(transition.state, transition.action)
-                        remaining_calls: tuple[ToolCall, ...] = tool_calls[tool_index:]
-                        checkpoint = RunCheckpoint(
-                            f"checkpoint-{run.run_id}",
-                            run.run_id,
-                            run.session_id,
-                            1,
-                            event_number + 1,
-                            sequence,
-                            execution.state.to_dict(),
-                            transition.action,
-                            {
-                                "approval_id": record.approval_id,
-                                "tool_calls": [call.to_dict() for call in remaining_calls],
-                            },
-                            execution.budget.to_dict(),
-                            active_context_version=(
-                                execution.active_context_version.version
-                                if execution.active_context_version is not None else None
-                            ),
-                        )
-                        await self._checkpoint_repository.save(checkpoint)
-                        waiting_run: AgentRun = replace(run, status=RunStatus.WAITING_APPROVAL, latest_checkpoint_id=checkpoint.checkpoint_id)
-                        await self._run_repository.save_run(waiting_run)
-                        event_number = await self._event(run, event_number, RunEventType.WAITING_APPROVAL, (tool_message.message_id,))
-                        return RunResult(run.run_id, RunStatus.WAITING_APPROVAL, approval_id=record.approval_id)
-                    completed_message_ids.append(tool_message.message_id)
-                transition = execution.state.transition(ToolCompleted(
-                    ToolCompletionKind.COMPLETED,
-                    tuple(completed_message_ids),
-                ))
-                execution.update_state(transition.state, transition.action)
-                continue
-            try:
-                prepared: _PreparedContext = await self._prepare_context(execution, run, messages)
-            except HistoryCompactorUnavailable as error:
-                await self._checkpoint_repository.save(
-                    _compaction_checkpoint(run, execution, event_number, sequence),
+            if isinstance(execution.state.mode, Running) and execution.state.mode.stage is RunStage.EXECUTING_TOOLS:
+                run, sequence, event_number, pending_calls, terminal = await self._execute_tools_action(
+                    execution, run, messages, sequence, event_number, pending_calls, resume_approved_call_id,
                 )
-                return await self._interrupt(execution, run, tuple(messages), event_number, str(error))
-            except ContextBudgetRejected as error:
-                return await self._fail(execution, run, tuple(messages), event_number, str(error), error.code)
-            except Exception as error:
-                return await self._fail(execution, run, tuple(messages), event_number, f"模型上下文构建失败：{error}")
-            context: ContextBundle = prepared.context
-            context_version: ContextVersion = await self._append_context_version(
-                run,
-                execution,
-                context,
-                messages,
+                if terminal is not None:
+                    return terminal
+                continue
+            run, sequence, event_number, pending_calls, terminal = await self._invoke_llm_action(
+                execution, run, messages, sequence, event_number, output_port,
             )
-            if prepared.candidate is not None:
-                run = await self._persist_staged_candidate(run, execution, prepared.candidate, context_version.version)
-            execution.activate_context_version(context_version)
-            await self._run_repository.set_active_context_version(
+            if terminal is not None:
+                return terminal
+        return await self._fail(execution, run, tuple(messages), event_number, "状态机意外结束")
+
+    async def _execute_tools_action(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        messages: list[RunMessage],
+        sequence: int,
+        event_number: int,
+        pending_calls: tuple[ToolCall, ...],
+        resume_approved_call_id: str | None,
+    ) -> tuple[AgentRun, int, int, tuple[ToolCall, ...], RunResult | None]:
+        """执行 ``EXECUTING_TOOLS`` 动作：逐个工具调用，回灌 ToolBatchCompleted / ToolApprovalRequired。
+
+        返回 (run, sequence, event_number, pending_calls, terminal)：``terminal`` 非 None 表示已
+        收口（审批挂起或失败），主循环直接返回；否则主循环以空 pending_calls 继续下一轮。
+        """
+        tool_calls: tuple[ToolCall, ...] = pending_calls
+        pending_calls = ()
+        if not tool_calls:
+            return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "缺少待执行工具调用")
+        completed_message_ids: list[str] = []
+        for tool_index, tool_call in enumerate(tool_calls):
+            delegation_request: DelegationRequest | None = _delegation_request(
+                execution.run_id,
+                run.root_run_id or run.run_id,
+                run.agent_id,
                 run.session_id,
-                run.run_id,
-                context_version.version,
+                tool_call,
             )
-            run = replace(run, active_context_version=context_version.version)
-            checkpoint: RunCheckpoint = _llm_checkpoint(run, execution, event_number, sequence, context_version.version)
-            await self._checkpoint_repository.save(checkpoint)
-            event_number = await self._event(
-                run,
-                event_number,
-                RunEventType.LLM_STARTED,
-                tuple(message.message_id for message in messages),
-                "模型调用开始",
-                _llm_started_data(run, context_version, messages, context),
-            )
-            await self._checkpoint_repository.save(replace(checkpoint, event_sequence=event_number))
+            if delegation_request is not None:
+                event_number = await self._tool_started_event(run, event_number, messages, tool_call)
+                delegation_result: DelegationDriveResult = await self._delegate(
+                    execution,
+                    run,
+                    messages,
+                    sequence,
+                    event_number,
+                    delegation_request,
+                    tool_call,
+                    manage_state=False,
+                )
+                if delegation_result.error is not None:
+                    return run, sequence, event_number, pending_calls, delegation_result.error
+                run = delegation_result.run
+                sequence = delegation_result.message_sequence
+                event_number = delegation_result.event_sequence
+                completed_message_ids.append(messages[-1].message_id)
+                continue
+            event_number = await self._tool_started_event(run, event_number, messages, tool_call)
             try:
-                response = await self._llm_port.complete(context, execution.view(), output_port)
-            except LLMUnavailableError as error:
-                return await self._interrupt(execution, run, tuple(messages), event_number, str(error))
+                approved: bool = (
+                    resume_approved_call_id is not None
+                    and tool_call.call_id == resume_approved_call_id
+                )
+                tool_result: ToolResult = await self._tool_port.execute(
+                    ToolInvocation(execution.run_id, tool_call, approved=approved),
+                    execution.view(),
+                )
             except Exception as error:
-                return await self._fail(execution, run, tuple(messages), event_number, f"模型调用失败：{error}", RunErrorCode.LLM_FAILURE)
-            if response.metadata.get("has_streamed_response") is True:
-                execution.mark_response_streamed()
+                event_number = await self._tool_completed_event(run, event_number, tool_call, None, ToolAuditStatus.FAILED, _safe_error_summary(error))
+                return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, f"工具调用失败：{error}", RunErrorCode.TOOL_FAILURE)
             if execution.cancellation.cancelled:
-                return await self._finish_cancelled(
+                event_number = await self._tool_completed_event(
+                    run,
+                    event_number,
+                    tool_call,
+                    None,
+                    ToolAuditStatus.CANCELLED,
+                    "工具执行后已取消",
+                )
+                return run, sequence, event_number, pending_calls, await self._finish_cancelled(
                     execution,
                     run,
                     tuple(messages),
@@ -604,46 +549,218 @@ class RuntimeEngine:
                     execution.cancellation.reason,
                 )
             sequence += 1
-            run = _with_llm_statistics(run, response)
-            final: bool = not response.tool_calls
-            response_message = replace(response, message_id=f"response-{execution.run_id}-{sequence}", sequence=sequence, kind=RunMessageKind.FINAL_RESPONSE if final else RunMessageKind.LLM_RESPONSE)
-            messages.append(response_message)
+            run = _with_tool_statistic(run)
+            tool_message: RunMessage = RunMessage(
+                f"tool-{execution.run_id}-{sequence}",
+                sequence,
+                RunMessageKind.TOOL_RESULT,
+                MessageRole.TOOL,
+                tool_result.output,
+                tool_call_id=tool_result.call_id,
+            )
+            messages.append(tool_message)
             await self._save_messages(run, execution, messages)
-            event_number = await self._event(run, event_number, RunEventType.LLM_COMPLETED, (response_message.message_id,))
-            transition = execution.state.transition(LLMCompleted(LLMCompletionKind.FINAL_RESPONSE if final else LLMCompletionKind.TOOL_CALLS, response_message.message_id, len(response.tool_calls)))
-            execution.update_state(transition.state, transition.action)
-            if final:
-                completed = replace(run, status=RunStatus.COMPLETED, ended_at=utc_now_iso(), final_message_id=response_message.message_id)
-                completed_event: RunEvent = RunEvent(
-                    run_id=run.run_id,
-                    sequence=event_number + 1,
-                    event_type=RunEventType.RUN_COMPLETED,
-                    occurred_at=utc_now_iso(),
-                    message_ids=(response_message.message_id,),
+            event_number = await self._tool_completed_event(run, event_number, tool_call, tool_message.message_id, _tool_audit_status(tool_result.status), _tool_error_summary(tool_result))
+            if tool_result.status is ToolResultStatus.FAILED:
+                error = tool_result.error.message if tool_result.error is not None else tool_result.output or "工具执行失败"
+                return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, error, RunErrorCode.TOOL_FAILURE)
+            if tool_result.status is ToolResultStatus.APPROVAL_REQUIRED:
+                return run, sequence, event_number, pending_calls, await self._suspend_action(
+                    execution, run, messages, sequence, event_number, tool_call, tool_calls, tool_index, tool_result,
                 )
-                success_intent: SuccessCommitIntent = SuccessCommitIntent(
-                    conversation_id=f"conversation-{run.run_id}",
-                    latest_candidate_id=_latest_staged_candidate_id(completed),
-                    target_outcome=RunOutcome.COMPLETED,
-                    run_id=run.run_id,
-                    session_id=run.session_id,
-                )
-                await self._run_repository.commit_success(
-                    completed,
-                    response_message,
-                    completed_event,
-                    success_intent,
-                )
-                if success_intent.latest_candidate_id is not None:
-                    self._context_port.request_refresh("history_compressions", ContextOwner.SESSION, run.session_id)
-                return RunResult(
-                    run.run_id,
-                    RunStatus.COMPLETED,
-                    ConversationMessage(response_message.message_id, MessageRole.ASSISTANT, response_message.content, completed.ended_at or ""),
-                    has_streamed_response=execution.has_streamed_response,
-                )
-            pending_calls = response.tool_calls
-        return await self._fail(execution, run, tuple(messages), event_number, "状态机意外结束")
+            completed_message_ids.append(tool_message.message_id)
+        batch_transition = await self._apply_transition(execution, run, ToolBatchCompleted(tuple(completed_message_ids)), event_number)
+        if batch_transition is None:
+            return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 ToolBatchCompleted 迁移")
+        execution.update_state(batch_transition.state, batch_transition.action)
+        return run, sequence, event_number, pending_calls, None
+
+    async def _suspend_action(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        messages: list[RunMessage],
+        sequence: int,
+        event_number: int,
+        tool_call: ToolCall,
+        tool_calls: tuple[ToolCall, ...],
+        tool_index: int,
+        tool_result: ToolResult,
+    ) -> RunResult:
+        """执行审批挂起动作：经 ToolApprovalRequired 迁移到 Suspended(APPROVAL) 并持久化检查点。"""
+        record = await self._approval_service.create(run.run_id, run.session_id, tool_result.approval_id)
+        suspend_transition = await self._apply_transition(execution, run, ToolApprovalRequired(record.approval_id), event_number)
+        if suspend_transition is None:
+            return await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 ToolApprovalRequired 迁移")
+        execution.update_state(suspend_transition.state, suspend_transition.action)
+        remaining_calls: tuple[ToolCall, ...] = tool_calls[tool_index:]
+        checkpoint = RunCheckpoint(
+            f"checkpoint-{run.run_id}",
+            run.run_id,
+            run.session_id,
+            1,
+            event_number + 1,
+            sequence,
+            execution.state.to_dict(),
+            suspend_transition.action,
+            {
+                "approval_id": record.approval_id,
+                "tool_calls": [call.to_dict() for call in remaining_calls],
+            },
+            execution.budget.to_dict(),
+            action=suspend_transition.action,
+            active_context_version=(
+                execution.active_context_version.version
+                if execution.active_context_version is not None else None
+            ),
+        )
+        await self._checkpoint_repository.save(checkpoint)
+        waiting_run: AgentRun = replace(run, status=RunStatus.WAITING_APPROVAL, latest_checkpoint_id=checkpoint.checkpoint_id)
+        await self._run_repository.save_run(waiting_run)
+        event_number = await self._event(run, event_number, RunEventType.WAITING_APPROVAL, (messages[-1].message_id,))
+        return RunResult(run.run_id, RunStatus.WAITING_APPROVAL, approval_id=record.approval_id)
+
+    async def _invoke_llm_action(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        messages: list[RunMessage],
+        sequence: int,
+        event_number: int,
+        output_port: LLMOutputPort | None,
+    ) -> tuple[AgentRun, int, int, tuple[ToolCall, ...], RunResult | None]:
+        """执行 ``CALLING_LLM`` 动作：构建上下文、调用模型、回灌 LLMResponseProduced。
+
+        返回 (run, sequence, event_number, pending_calls, terminal)：终态（收尾 / 失败 / 取消 /
+        中断）时 ``terminal`` 非 None；否则 ``pending_calls`` 为模型请求的工具调用，主循环继续。
+        """
+        try:
+            prepared: _PreparedContext = await self._prepare_context(execution, run, messages)
+        except HistoryCompactorUnavailable as error:
+            await self._checkpoint_repository.save(
+                _compaction_checkpoint(run, execution, event_number, sequence),
+            )
+            return run, sequence, event_number, (), await self._interrupt(execution, run, tuple(messages), event_number, str(error))
+        except ContextBudgetRejected as error:
+            return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, str(error), error.code)
+        except Exception as error:
+            return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, f"模型上下文构建失败：{error}")
+        context: ContextBundle = prepared.context
+        context_version: ContextVersion = await self._append_context_version(
+            run,
+            execution,
+            context,
+            messages,
+        )
+        if prepared.candidate is not None:
+            run = await self._persist_staged_candidate(run, execution, prepared.candidate, context_version.version)
+        execution.activate_context_version(context_version)
+        await self._run_repository.set_active_context_version(
+            run.session_id,
+            run.run_id,
+            context_version.version,
+        )
+        run = replace(run, active_context_version=context_version.version)
+        checkpoint: RunCheckpoint = _llm_checkpoint(run, execution, event_number, sequence, context_version.version)
+        await self._checkpoint_repository.save(checkpoint)
+        event_number = await self._event(
+            run,
+            event_number,
+            RunEventType.LLM_STARTED,
+            tuple(message.message_id for message in messages),
+            "模型调用开始",
+            _llm_started_data(run, context_version, messages, context),
+        )
+        await self._checkpoint_repository.save(replace(checkpoint, event_sequence=event_number))
+        try:
+            response = await self._llm_port.complete(context, execution.view(), output_port)
+        except LLMUnavailableError as error:
+            return run, sequence, event_number, (), await self._interrupt(execution, run, tuple(messages), event_number, str(error))
+        except Exception as error:
+            return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, f"模型调用失败：{error}", RunErrorCode.LLM_FAILURE)
+        if response.metadata.get("has_streamed_response") is True:
+            execution.mark_response_streamed()
+        if execution.cancellation.cancelled:
+            return run, sequence, event_number, (), await self._finish_cancelled(
+                execution,
+                run,
+                tuple(messages),
+                event_number,
+                execution.cancellation.reason,
+            )
+        sequence += 1
+        run = _with_llm_statistics(run, response)
+        final: bool = not response.tool_calls
+        response_message = replace(response, message_id=f"response-{execution.run_id}-{sequence}", sequence=sequence, kind=RunMessageKind.FINAL_RESPONSE if final else RunMessageKind.LLM_RESPONSE)
+        messages.append(response_message)
+        await self._save_messages(run, execution, messages)
+        event_number = await self._event(run, event_number, RunEventType.LLM_COMPLETED, (response_message.message_id,))
+        response_transition = await self._apply_transition(execution, run, LLMResponseProduced(final, response_message.message_id, len(response.tool_calls)), event_number)
+        if response_transition is None:
+            return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 LLMResponseProduced 迁移")
+        execution.update_state(response_transition.state, response_transition.action)
+        if final:
+            return run, sequence, event_number, (), await self._finalize_action(execution, run, response_message, event_number)
+        return run, sequence, event_number, response.tool_calls, None
+
+    async def _finalize_action(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        response_message: RunMessage,
+        event_number: int,
+    ) -> RunResult:
+        """执行 FINALIZE 动作：状态机已到 Ended(COMPLETED)，经 SuccessCommitIntent 收口对话与 Run。"""
+        completed = replace(run, status=RunStatus.COMPLETED, ended_at=utc_now_iso(), final_message_id=response_message.message_id)
+        completed_event: RunEvent = RunEvent(
+            run_id=run.run_id,
+            sequence=event_number + 1,
+            event_type=RunEventType.RUN_COMPLETED,
+            occurred_at=utc_now_iso(),
+            message_ids=(response_message.message_id,),
+        )
+        success_intent: SuccessCommitIntent = SuccessCommitIntent(
+            conversation_id=f"conversation-{run.run_id}",
+            latest_candidate_id=_latest_staged_candidate_id(completed),
+            target_outcome=RunOutcome.COMPLETED,
+            run_id=run.run_id,
+            session_id=run.session_id,
+        )
+        await self._run_repository.commit_success(
+            completed,
+            response_message,
+            completed_event,
+            success_intent,
+        )
+        if success_intent.latest_candidate_id is not None:
+            self._context_port.request_refresh("history_compressions", ContextOwner.SESSION, run.session_id)
+        return RunResult(
+            run.run_id,
+            RunStatus.COMPLETED,
+            ConversationMessage(response_message.message_id, MessageRole.ASSISTANT, response_message.content, completed.ended_at or ""),
+            has_streamed_response=execution.has_streamed_response,
+        )
+
+    async def _apply_transition(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        event: "AgentRunEvent",
+        event_sequence: int,
+    ) -> "StateTransition | None":
+        """调用纯状态机；若迁移非法则在 Application 边界记录审计并返回 None。
+
+        调用方应在返回 None 时收口为失败，并据此判断 ``execution.state`` 是否已被更新。
+        """
+        try:
+            return transition(execution.state, event)
+        except InvalidTransition as error:
+            logger.error(
+                "AgentRun 状态机拒绝迁移：mode=%s event=%s reason=%s run_id=%s",
+                error.current_mode, error.event_type, error.reason, run.run_id,
+            )
+            await self._event(run, event_sequence, RunEventType.STATE_TRANSITION_REJECTED, (error.event_type, error.reason))
+            return None
 
     async def _prepare_context(
         self,
@@ -790,7 +907,7 @@ class RuntimeEngine:
             child_run_id: str = submission.child_run_id
             self._cancellation_service.register_delegated_run(execution.run_id, child_run_id)
             if manage_state:
-                submitted_transition = execution.state.transition(DelegationSubmitted(child_run_id))
+                submitted_transition = transition(execution.state, DelegationSubmitted(child_run_id))
                 execution.update_state(submitted_transition.state, submitted_transition.action)
             next_event_sequence: int = await self._event(
                 run,
@@ -879,12 +996,8 @@ class RuntimeEngine:
         )
         succeeded: bool = child_result.status is RunStatus.COMPLETED
         if manage_state:
-            transition = execution.state.transition(DelegationCompleted(
-                child_result.child_run_id,
-                succeeded,
-                child_result.error,
-            ))
-            execution.update_state(transition.state, transition.action)
+            delegation_completed = transition(execution.state, DelegationCompleted(child_result.child_run_id))
+            execution.update_state(delegation_completed.state, delegation_completed.action)
         if not succeeded:
             if audit_tool_call is not None:
                 next_event_sequence = await self._tool_completed_event(delegated_run, next_event_sequence, audit_tool_call, result_message.message_id, ToolAuditStatus.FAILED, child_result.error.message if child_result.error is not None else "委派子运行失败")
@@ -1017,7 +1130,13 @@ class RuntimeEngine:
         message: str,
         code: RunErrorCode = RunErrorCode.INVALID_STATE,
     ) -> RunResult:
-        """持久化失败终态且不投影 Conversation。"""
+        """持久化失败终态且不投影 Conversation；先经状态机收口为 Ended(FAILED)。"""
+        failure_event: "AgentRunEvent" = (
+            ToolBatchFailed() if (isinstance(execution.state.mode, Running) and execution.state.mode.stage is RunStage.EXECUTING_TOOLS) else LLMCallFailed()
+        )
+        fail_transition = await self._apply_transition(execution, run, failure_event, event_sequence)
+        if fail_transition is not None:
+            execution.update_state(fail_transition.state, fail_transition.action)
         error = RunError(code, message)
         failed = replace(run, status=RunStatus.FAILED, ended_at=utc_now_iso(), error=error)
         await self._run_repository.save_run(failed)
@@ -1026,13 +1145,47 @@ class RuntimeEngine:
         return RunResult(run.run_id, RunStatus.FAILED, error=error)
 
 
-def _state_from_checkpoint(checkpoint: RunCheckpoint) -> AgentState:
-    """从最小检查点控制字段恢复纯领域状态。"""
-    from ..domain.state import AgentPhase
-    phase = AgentPhase(str(checkpoint.agent_state.get("phase", AgentPhase.IDLE.value)))
-    iteration_value = checkpoint.agent_state.get("iteration", 0)
-    iteration = iteration_value if isinstance(iteration_value, int) else 0
-    return AgentState(phase=phase, iteration=iteration, waiting_control_id=checkpoint.pending.get("approval_id") if isinstance(checkpoint.pending.get("approval_id"), str) else None)
+def _state_from_checkpoint(checkpoint: RunCheckpoint) -> AgentRunState:
+    """从检查点恢复运行控制状态（新状态机）。
+
+    优先解析新 ``AgentRunState``（``mode`` 字典）；对迁移期仍可能落盘的旧
+    ``phase`` 字典做最佳努力映射，保证既有检查点与恢复入口继续可用。
+    """
+    from ..domain.state import (
+        AgentPhase,
+        AgentRunState,
+        Created,
+        Ended,
+        RunOutcome,
+        RunStage,
+        Running,
+        Suspended,
+        SuspendReason,
+    )
+
+    raw: object = checkpoint.agent_state
+    if isinstance(raw, dict) and "mode" in raw:
+        return AgentRunState.from_dict(raw)
+    phase_value: str = str(raw.get("phase", AgentPhase.IDLE.value)) if isinstance(raw, dict) else AgentPhase.IDLE.value
+    phase: AgentPhase = AgentPhase(phase_value)
+    approval_id: object = checkpoint.pending.get("approval_id") if isinstance(checkpoint.pending, dict) else None
+    control_id: str = approval_id if isinstance(approval_id, str) else ""
+    mode = {
+        AgentPhase.IDLE: Created(),
+        AgentPhase.WAITING_LLM: Running(RunStage.CALLING_LLM),
+        AgentPhase.WAITING_TOOLS: Running(RunStage.EXECUTING_TOOLS),
+        AgentPhase.WAITING_APPROVAL: Suspended(SuspendReason.APPROVAL, control_id, RunStage.EXECUTING_TOOLS),
+        AgentPhase.WAITING_DELEGATION: Suspended(SuspendReason.DELEGATION, control_id, RunStage.CALLING_LLM),
+        AgentPhase.FINALIZING: Running(RunStage.CALLING_LLM),
+        AgentPhase.COMPLETED: Ended(RunOutcome.COMPLETED),
+        AgentPhase.FAILED: Ended(RunOutcome.FAILED),
+        AgentPhase.CANCELLED: Ended(RunOutcome.CANCELLED),
+        AgentPhase.INTERRUPTED: Running(RunStage.CALLING_LLM),
+        AgentPhase.ABANDONED: Ended(RunOutcome.ABANDONED),
+    }.get(phase, Created())
+    iteration_value: object = raw.get("iteration") if isinstance(raw, dict) else 0
+    iteration: int = iteration_value if isinstance(iteration_value, int) else 0
+    return AgentRunState(mode=mode, iteration=iteration)
 
 
 def _calls_from_checkpoint(checkpoint: RunCheckpoint) -> tuple[ToolCall, ...]:
@@ -1093,6 +1246,7 @@ def _llm_checkpoint(
         message_sequence=message_sequence,
         agent_state=execution.state.to_dict(),
         next_action=AgentAction.INVOKE_LLM,
+        action=AgentAction.INVOKE_LLM,
         pending={},
         budget=_checkpoint_budget(execution),
         active_context_version=context_version,
@@ -1118,6 +1272,7 @@ def _compaction_checkpoint(
         message_sequence=message_sequence,
         agent_state=execution.state.to_dict(),
         next_action=AgentAction.INVOKE_LLM,
+        action=AgentAction.INVOKE_LLM,
         pending={},
         budget=_checkpoint_budget(execution),
         staged_history_compression_ids=tuple(

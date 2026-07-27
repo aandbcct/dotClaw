@@ -8,7 +8,7 @@ from enum import StrEnum
 from ..domain.control import AgentAction
 from ..domain.context import ContextVersion, StagedHistoryCompression
 from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage
-from dotclaw.runtime.domain.state import AgentState
+from dotclaw.runtime.domain.state import AgentRunState
 from .context_budget import ContextBudgetDecision
 from .dto import RunRequest
 
@@ -71,7 +71,7 @@ class RunExecution:
     run_id: str
     request: RunRequest
     policy: AgentPolicySnapshot
-    state: AgentState
+    state: AgentRunState
     budget: RunBudget
     message_cursor: int = 0
     cancellation: CancellationToken = field(default_factory=CancellationToken)
@@ -105,10 +105,10 @@ class RunExecution:
             session_id=self.request.session_id,
         )
 
-    def update_state(self, state: AgentState, action: AgentAction) -> None:
+    def update_state(self, state: AgentRunState, action: AgentAction) -> None:
         """在 Runtime 处理完状态机转移后更新内存控制状态。"""
         self.state = state
-        if action is not AgentAction.WAIT:
+        if action is not AgentAction.SUSPEND:
             self.pending_control = None
 
     def replace_run_messages(self, messages: tuple[RunMessage, ...]) -> None:
@@ -155,7 +155,7 @@ class RunExecutionView:
     run_id: str
     policy: AgentPolicySnapshot
     """本次运行冻结的 Agent 身份与上下文策略。"""
-    state: AgentState
+    state: AgentRunState
     budget: RunBudget
     message_cursor: int
     pending_control: PendingControl | None
