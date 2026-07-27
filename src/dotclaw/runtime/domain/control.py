@@ -11,5 +11,8 @@ class AgentAction(StrEnum):
     INVOKE_LLM = "invoke_llm"
     EXECUTE_TOOLS = "execute_tools"
     FINALIZE = "finalize"
+    # WAIT 为旧状态机的等待动作，仍被未迁移的 execution.py 使用；
+    # 新状态机统一以 SUSPEND 表达外部等待（审批 / delegation），调用方清零后删除。
     WAIT = "wait"
+    SUSPEND = "suspend"
     HANDOFF_TARGET = "handoff_target"

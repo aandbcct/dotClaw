@@ -1,24 +1,42 @@
-"""不依赖外部实现的 Runtime v4 Agent 状态机。"""
+"""不依赖外部实现的 Runtime v4 Agent 状态机。
+
+本模块同时容纳两套状态机，属阶段迁移期的临时共存：
+
+* 旧状态机（``AgentPhase`` / ``AgentState``）：仍被未迁移的 engine / execution 使用，
+  调用方清零后在后续阶段物理删除。
+* 新状态机（``AgentRunState`` + 判别联合 ``AgentRunEvent`` + 模块级 ``transition()``）：
+  是《AgentRun 状态机总体设计》的目标契约，本次阶段 0 冻结其纯领域行为，
+  后续阶段将引擎、持久化与恢复入口迁到它，最终删除旧状态机。
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TypeAlias
 
+from .control import AgentAction
 from .events import (
-    ApprovalResolved,
-    DelegationSubmitted,
+    AbandonRequested,
+    ApprovalGranted,
+    ApprovalRejected,
     CancelRequested,
     DelegationCompleted,
-    DomainEvent,
-    LLMCompleted,
-    LLMCompletionKind,
+    DelegationRequested,
+    DelegationSubmitted,
+    LLMCallFailed,
+    LLMResponseProduced,
     RunStarted,
     TimeoutReached,
-    ToolCompleted,
-    ToolCompletionKind,
+    ToolApprovalRequired,
+    ToolBatchCompleted,
+    ToolBatchFailed,
 )
-from .control import AgentAction
+
+
+# ============================================================================
+# 旧状态机（迁移期临时共存，调用方清零后删除）
+# ============================================================================
 
 
 class AgentPhase(StrEnum):
@@ -48,8 +66,19 @@ class AgentState:
     loop_fingerprint: str = ""
     waiting_control_id: str | None = None
 
-    def transition(self, event: DomainEvent) -> StateTransition:
+    def transition(self, event: object) -> StateTransition:
         """根据领域事件返回新的状态与下一项执行动作。"""
+        from .events import (
+            ApprovalResolved,
+            CancelRequested,
+            DelegationCompleted,
+            DelegationSubmitted,
+            LLMCompleted,
+            RunStarted,
+            TimeoutReached,
+            ToolCompleted,
+        )
+
         if isinstance(event, CancelRequested):
             return StateTransition(self._cancel(), AgentAction.FINALIZE)
         if isinstance(event, TimeoutReached):
@@ -95,7 +124,9 @@ class AgentState:
         next_state: AgentState = AgentState(phase=AgentPhase.WAITING_LLM, iteration=1)
         return StateTransition(next_state, AgentAction.INVOKE_LLM)
 
-    def _on_llm_completed(self, event: LLMCompleted) -> StateTransition:
+    def _on_llm_completed(self, event: object) -> StateTransition:
+        from .events import LLMCompletionKind
+
         self._require_phase(AgentPhase.WAITING_LLM)
         if event.kind is LLMCompletionKind.FINAL_RESPONSE:
             return StateTransition(self._with_phase(AgentPhase.FINALIZING), AgentAction.FINALIZE)
@@ -103,7 +134,9 @@ class AgentState:
             return StateTransition(self._with_phase(AgentPhase.WAITING_TOOLS), AgentAction.EXECUTE_TOOLS)
         return StateTransition(self._with_phase(AgentPhase.FAILED), AgentAction.FINALIZE)
 
-    def _on_tool_completed(self, event: ToolCompleted) -> StateTransition:
+    def _on_tool_completed(self, event: object) -> StateTransition:
+        from .events import ToolCompletionKind
+
         self._require_phase(AgentPhase.WAITING_TOOLS)
         if event.kind is ToolCompletionKind.COMPLETED:
             next_state: AgentState = AgentState(
@@ -122,7 +155,9 @@ class AgentState:
             return StateTransition(waiting_state, AgentAction.WAIT)
         return StateTransition(self._with_phase(AgentPhase.FAILED), AgentAction.FINALIZE)
 
-    def _on_approval_resolved(self, event: ApprovalResolved) -> StateTransition:
+    def _on_approval_resolved(self, event: object) -> StateTransition:
+        from .events import ApprovalResolved
+
         self._require_phase(AgentPhase.WAITING_APPROVAL)
         if event.approval_id != self.waiting_control_id:
             raise RuntimeError("审批事件不属于当前等待控制项")
@@ -131,12 +166,12 @@ class AgentState:
             return StateTransition(next_state, AgentAction.EXECUTE_TOOLS)
         return StateTransition(self._with_phase(AgentPhase.CANCELLED), AgentAction.FINALIZE)
 
-    def _on_delegation_submitted(self, event: DelegationSubmitted) -> StateTransition:
+    def _on_delegation_submitted(self, event: object) -> StateTransition:
         """进入等待子运行结果的状态，由 Engine 继续查询 DelegationPort。"""
         self._require_phase(AgentPhase.WAITING_TOOLS)
         return StateTransition(self._with_phase(AgentPhase.WAITING_DELEGATION), AgentAction.WAIT)
 
-    def _on_delegation_completed(self, event: DelegationCompleted) -> StateTransition:
+    def _on_delegation_completed(self, event: object) -> StateTransition:
         self._require_phase(AgentPhase.WAITING_DELEGATION)
         if event.succeeded:
             return StateTransition(self._with_phase(AgentPhase.WAITING_LLM), AgentAction.INVOKE_LLM)
@@ -162,7 +197,343 @@ class AgentState:
 
 @dataclass(frozen=True)
 class StateTransition:
-    """状态机处理一个领域事件后的结果。"""
+    """状态机处理一个领域事件后的结果。
 
-    state: AgentState
+    迁移期内 ``state`` 同时承载旧 ``AgentState`` 与新 ``AgentRunState``；两种状态机
+    均通过本容器返回「下一状态 + 下一项动作」，调用方清零旧类型后收敛为仅 ``AgentRunState``。
+    """
+
+    state: AgentState | AgentRunState
     action: AgentAction
+
+
+# ============================================================================
+# 新状态机（目标契约）
+# ============================================================================
+
+
+class RunStage(StrEnum):
+    """运行进入具体执行阶段后的活动子状态。"""
+
+    PREPARING = "preparing"
+    CALLING_LLM = "calling_llm"
+    EXECUTING_TOOLS = "executing_tools"
+
+
+class SuspendReason(StrEnum):
+    """运行被挂起等待外部输入的语义原因。"""
+
+    APPROVAL = "approval"
+    DELEGATION = "delegation"
+
+
+class RunOutcome(StrEnum):
+    """运行终态的业务结果类别。"""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    ABANDONED = "abandoned"
+
+
+@dataclass(frozen=True)
+class Created:
+    """运行已被持久化但尚未开始；不含业务字段。"""
+
+
+@dataclass(frozen=True)
+class Running:
+    """运行正在执行，``stage`` 表示当前活动子阶段。"""
+
+    stage: RunStage
+
+
+@dataclass(frozen=True)
+class Suspended:
+    """运行挂起等待外部输入；``control_id`` 仅用于校验唤醒事件归属当前等待项。"""
+
+    reason: SuspendReason
+    control_id: str
+    resume_stage: RunStage
+
+
+@dataclass(frozen=True)
+class Ended:
+    """运行终态根类型；``outcome`` 区分成功与非成功结果。"""
+
+    outcome: RunOutcome
+
+
+# 联合状态：同一时刻只能为四种分支之一，避免生命周期、阶段、等待原因、结果的非法笛卡尔积。
+RunMode: TypeAlias = Created | Running | Suspended | Ended
+
+
+@dataclass(frozen=True)
+class AgentRunState:
+    """单个 AgentRun 唯一的持久化控制状态。
+
+    仅持有当前状态分支与累计控制/统计值；进入 ``Ended`` 后保留最终值但不再修改。
+    ``is_ended()`` 是仓储筛选、Session 占用判断和入口结果判断的唯一标准。
+    """
+
+    mode: RunMode
+    iteration: int = 0
+    retry_count: int = 0
+    truncate_count: int = 0
+    loop_fingerprint: str = ""
+
+    def is_ended(self) -> bool:
+        """判断运行是否已进入终态。"""
+        return isinstance(self.mode, Ended)
+
+    def is_active(self) -> bool:
+        """判断运行是否尚未结束，可继续接受事件。"""
+        return not self.is_ended()
+
+
+class InvalidTransition(Exception):
+    """状态机拒绝非法迁移时抛出；不修改任何状态。
+
+    携带 ``current_mode`` / ``event_type`` / ``reason`` 供 Application 边界追加
+    ``STATE_TRANSITION_REJECTED`` 审计事实，且不包含敏感负载。
+    """
+
+    def __init__(self, message: str, *, current_mode: str, event_type: str, reason: str) -> None:
+        """保存审计所需的稳定引用与安全原因。"""
+        super().__init__(message)
+        self.current_mode: str = current_mode
+        self.event_type: str = event_type
+        self.reason: str = reason
+
+
+def transition(state: AgentRunState, event: AgentRunEvent) -> StateTransition:
+    """按联合状态与事件计算下一状态与下一项动作；非法输入抛 ``InvalidTransition``。
+
+    状态机只计算状态与动作，不构造 LLM 请求、ToolCall、审批记录、checkpoint 或审计。
+    取消、超时与放弃适用于任意未结束状态；已结束状态收到任何事件均拒绝。
+    """
+    if isinstance(event, CancelRequested):
+        return _finalize_if_active(state, RunOutcome.CANCELLED, "cancel_requested")
+    if isinstance(event, TimeoutReached):
+        return _finalize_if_active(state, RunOutcome.FAILED, "timeout_reached")
+    if isinstance(event, AbandonRequested):
+        return _finalize_if_active(state, RunOutcome.ABANDONED, "abandon_requested")
+
+    match state.mode:
+        case Created():
+            return _on_created(state, event)
+        case Running():
+            return _on_running(state, event)
+        case Suspended():
+            return _on_suspended(state, event)
+        case Ended():
+            raise InvalidTransition(
+                "已结束的运行不再接受事件",
+                current_mode=_mode_name(state.mode),
+                event_type=type(event).__name__,
+                reason="run_already_ended",
+            )
+
+
+def _finalize_if_active(state: AgentRunState, outcome: RunOutcome, reason: str) -> StateTransition:
+    """取消/超时/放弃：未结束运行收口为对应终态，已结束运行拒绝。"""
+    if state.is_ended():
+        raise InvalidTransition(
+            "已结束的运行不再接受控制事件",
+            current_mode=_mode_name(state.mode),
+            event_type=reason,
+            reason="run_already_ended",
+        )
+    return StateTransition(_end(state, outcome), AgentAction.FINALIZE)
+
+
+def _on_created(state: AgentRunState, event: AgentRunEvent) -> StateTransition:
+    """Created 仅接受 RunStarted，进入首个实际阶段 CALLING_LLM。"""
+    if isinstance(event, RunStarted):
+        return StateTransition(
+            AgentRunState(
+                mode=Running(RunStage.CALLING_LLM),
+                iteration=1,
+                retry_count=state.retry_count,
+                truncate_count=state.truncate_count,
+                loop_fingerprint=state.loop_fingerprint,
+            ),
+            AgentAction.INVOKE_LLM,
+        )
+    raise InvalidTransition(
+        "Created 状态仅接受 RunStarted",
+        current_mode=_mode_name(state.mode),
+        event_type=type(event).__name__,
+        reason="created_expects_run_started",
+    )
+
+
+def _on_running(state: AgentRunState, event: AgentRunEvent) -> StateTransition:
+    """Running 按当前 stage 匹配有限个合法事件。"""
+    running: Running = state.mode
+    if running.stage is RunStage.CALLING_LLM:
+        if isinstance(event, LLMResponseProduced):
+            if event.final:
+                return StateTransition(_end(state, RunOutcome.COMPLETED), AgentAction.FINALIZE)
+            return StateTransition(
+                AgentRunState(
+                    mode=Running(RunStage.EXECUTING_TOOLS),
+                    iteration=state.iteration,
+                    retry_count=state.retry_count,
+                    truncate_count=state.truncate_count,
+                    loop_fingerprint=state.loop_fingerprint,
+                ),
+                AgentAction.EXECUTE_TOOLS,
+            )
+        if isinstance(event, LLMCallFailed):
+            return StateTransition(_end(state, RunOutcome.FAILED), AgentAction.FINALIZE)
+        raise InvalidTransition(
+            "CALLING_LLM 只接受 LLM 响应或失败事件",
+            current_mode=_mode_name(state.mode),
+            event_type=type(event).__name__,
+            reason="calling_llm_expects_llm_event",
+        )
+    if running.stage is RunStage.EXECUTING_TOOLS:
+        if isinstance(event, ToolBatchCompleted):
+            return StateTransition(
+                AgentRunState(
+                    mode=Running(RunStage.CALLING_LLM),
+                    iteration=state.iteration + 1,
+                    retry_count=state.retry_count,
+                    truncate_count=state.truncate_count,
+                    loop_fingerprint=state.loop_fingerprint,
+                ),
+                AgentAction.INVOKE_LLM,
+            )
+        if isinstance(event, ToolApprovalRequired):
+            return StateTransition(
+                AgentRunState(
+                    mode=Suspended(SuspendReason.APPROVAL, event.approval_id, RunStage.EXECUTING_TOOLS),
+                    iteration=state.iteration,
+                    retry_count=state.retry_count,
+                    truncate_count=state.truncate_count,
+                    loop_fingerprint=state.loop_fingerprint,
+                ),
+                AgentAction.SUSPEND,
+            )
+        if isinstance(event, ToolBatchFailed):
+            return StateTransition(_end(state, RunOutcome.FAILED), AgentAction.FINALIZE)
+        if isinstance(event, DelegationRequested):
+            # 状态不变，交由 Engine 执行 HANDOFF_TARGET 提交子运行。
+            return StateTransition(state, AgentAction.HANDOFF_TARGET)
+        if isinstance(event, DelegationSubmitted):
+            return StateTransition(
+                AgentRunState(
+                    mode=Suspended(SuspendReason.DELEGATION, event.child_run_id, RunStage.CALLING_LLM),
+                    iteration=state.iteration,
+                    retry_count=state.retry_count,
+                    truncate_count=state.truncate_count,
+                    loop_fingerprint=state.loop_fingerprint,
+                ),
+                AgentAction.SUSPEND,
+            )
+        raise InvalidTransition(
+            "EXECUTING_TOOLS 只接受工具批次或 delegation 事件",
+            current_mode=_mode_name(state.mode),
+            event_type=type(event).__name__,
+            reason="executing_tools_expects_tool_event",
+        )
+    # PREPARING 等预留阶段当前未激活，不接受任何事件。
+    raise InvalidTransition(
+        "预留阶段尚未激活",
+        current_mode=_mode_name(state.mode),
+        event_type=type(event).__name__,
+        reason="preparing_stage_not_active",
+    )
+
+
+def _on_suspended(state: AgentRunState, event: AgentRunEvent) -> StateTransition:
+    """Suspended 按挂起原因匹配唤醒事件，并校验 control_id 归属。"""
+    suspended: Suspended = state.mode
+    if suspended.reason is SuspendReason.APPROVAL:
+        if isinstance(event, ApprovalGranted):
+            if event.approval_id != suspended.control_id:
+                raise InvalidTransition(
+                    "审批标识不匹配当前等待项",
+                    current_mode=_mode_name(state.mode),
+                    event_type=type(event).__name__,
+                    reason="approval_id_mismatch",
+                )
+            return StateTransition(
+                AgentRunState(
+                    mode=Running(RunStage.EXECUTING_TOOLS),
+                    iteration=state.iteration,
+                    retry_count=state.retry_count,
+                    truncate_count=state.truncate_count,
+                    loop_fingerprint=state.loop_fingerprint,
+                ),
+                AgentAction.EXECUTE_TOOLS,
+            )
+        if isinstance(event, ApprovalRejected):
+            if event.approval_id != suspended.control_id:
+                raise InvalidTransition(
+                    "审批标识不匹配当前等待项",
+                    current_mode=_mode_name(state.mode),
+                    event_type=type(event).__name__,
+                    reason="approval_id_mismatch",
+                )
+            return StateTransition(_end(state, RunOutcome.CANCELLED), AgentAction.FINALIZE)
+        raise InvalidTransition(
+            "APPROVAL 挂起仅接受审批结果事件",
+            current_mode=_mode_name(state.mode),
+            event_type=type(event).__name__,
+            reason="suspended_approval_expects_approval_event",
+        )
+    if suspended.reason is SuspendReason.DELEGATION:
+        if isinstance(event, DelegationCompleted):
+            if event.child_run_id != suspended.control_id:
+                raise InvalidTransition(
+                    "子运行标识不匹配当前等待项",
+                    current_mode=_mode_name(state.mode),
+                    event_type=type(event).__name__,
+                    reason="child_run_id_mismatch",
+                )
+            return StateTransition(
+                AgentRunState(
+                    mode=Running(RunStage.CALLING_LLM),
+                    iteration=state.iteration + 1,
+                    retry_count=state.retry_count,
+                    truncate_count=state.truncate_count,
+                    loop_fingerprint=state.loop_fingerprint,
+                ),
+                AgentAction.INVOKE_LLM,
+            )
+        raise InvalidTransition(
+            "DELEGATION 挂起仅接受子运行完成事件",
+            current_mode=_mode_name(state.mode),
+            event_type=type(event).__name__,
+            reason="suspended_delegation_expects_delegation_completed",
+        )
+    raise InvalidTransition(
+        "未知挂起原因",
+        current_mode=_mode_name(state.mode),
+        event_type=type(event).__name__,
+        reason="unknown_suspend_reason",
+    )
+
+
+def _end(state: AgentRunState, outcome: RunOutcome) -> AgentRunState:
+    """保留累计统计值，收口为 Ended(outcome)。"""
+    return AgentRunState(
+        mode=Ended(outcome),
+        iteration=state.iteration,
+        retry_count=state.retry_count,
+        truncate_count=state.truncate_count,
+        loop_fingerprint=state.loop_fingerprint,
+    )
+
+
+def _mode_name(mode: RunMode) -> str:
+    """返回供审计使用的稳定 mode 字符串。"""
+    if isinstance(mode, Created):
+        return "created"
+    if isinstance(mode, Running):
+        return f"running:{mode.stage.value}"
+    if isinstance(mode, Suspended):
+        return f"suspended:{mode.reason.value}"
+    return f"ended:{mode.outcome.value}"

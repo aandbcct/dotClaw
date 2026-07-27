@@ -30,6 +30,9 @@ class RunEventType(StrEnum):
     RUN_CANCELLED = "run_cancelled"
     RUN_INTERRUPTED = "run_interrupted"
     RUN_ABANDONED = "run_abandoned"
+    # 状态机拒绝非法迁移时记录的审计事实：只保存当前 mode/detail、事件类型与安全原因，
+    # 不记录消息正文、完整工具参数等敏感负载。
+    STATE_TRANSITION_REJECTED = "state_transition_rejected"
 
 
 class LLMCompletionKind(StrEnum):
@@ -130,6 +133,9 @@ class DelegationCompleted:
     succeeded: bool
     error: RunError | None = None
     occurred_at: str = field(default_factory=utc_now_iso)
+    # 子运行已固化的 DELEGATION_RESULT 消息 ID，供父运行回灌；新状态机仅用
+    # child_run_id 校验挂起控制标识，其余字段供下游恢复使用。
+    result_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -157,3 +163,106 @@ class TimeoutReached:
 
 
 DomainEvent = RunStarted | LLMCompleted | ToolCompleted | ApprovalResolved | DelegationSubmitted | DelegationCompleted | CancelRequested | TimeoutReached
+
+
+# ============================================================================
+# 新状态机（目标契约）判别联合事件
+# ----------------------------------------------------------------------------
+# 以下事件仅经 transition() 消费，表达「发生在 Engine 或外部控制边界的瞬时决策
+# 事实」，不携带消息正文等审计负载；与上面的审计 RunEvent / RunEventType 严格区分。
+# 旧 DomainEvent 与旧事件类仍被未迁移的应用层使用，调用方清零后删除。
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class LLMResponseProduced:
+    """模型调用已完成并产出响应；``final`` 区分终态回答与需要继续调用工具。"""
+
+    final: bool
+    response_message_id: str | None = None
+    tool_call_count: int = 0
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class LLMCallFailed:
+    """模型调用不可恢复地失败；``error`` 仅用于下游诊断，不进入状态机。"""
+
+    error: RunError | None = None
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class ToolBatchCompleted:
+    """工具批次已执行完成，可以回到模型调用。"""
+
+    result_message_ids: tuple[str, ...] = ()
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class ToolApprovalRequired:
+    """工具批次需要人工审批；``approval_id`` 用于唤醒时校验归属。"""
+
+    approval_id: str
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class ToolBatchFailed:
+    """工具批次执行失败；``error`` 仅用于下游诊断，不进入状态机。"""
+
+    error: RunError | None = None
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class ApprovalGranted:
+    """审批交互层批准了等待中的审批；``approval_id`` 必须匹配挂起控制标识。"""
+
+    approval_id: str
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class ApprovalRejected:
+    """审批交互层拒绝了等待中的审批；``approval_id`` 必须匹配挂起控制标识。"""
+
+    approval_id: str
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class DelegationRequested:
+    """模型请求把当前工具调用派发给子运行；由 Engine 执行 HANDOFF_TARGET。"""
+
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class AbandonRequested:
+    """显式放弃一个未结束的运行；由状态机收口为 Ended(ABANDONED)。"""
+
+    reason: str = ""
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+
+# 新状态机输入事件的判别联合类型。复用 RunStarted / DelegationSubmitted /
+# DelegationCompleted / CancelRequested / TimeoutReached 这些字段已满足迁移需要
+# 的既有事件类，避免重复定义；其余为新增分支。
+AgentRunEvent = (
+    RunStarted
+    | LLMResponseProduced
+    | LLMCallFailed
+    | ToolBatchCompleted
+    | ToolApprovalRequired
+    | ToolBatchFailed
+    | ApprovalGranted
+    | ApprovalRejected
+    | DelegationRequested
+    | DelegationSubmitted
+    | DelegationCompleted
+    | CancelRequested
+    | TimeoutReached
+    | AbandonRequested
+)
