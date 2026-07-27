@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeAlias
 
-from .facts import JSONMap, JSONValue, MessageRole, RunStatus, get_integer, get_string, require_json_map, utc_now_iso
+from .facts import JSONMap, JSONValue, MessageRole, get_integer, get_string, require_json_map, utc_now_iso
+from .state import RunOutcome
 
 
 class ContextContributionKind(StrEnum):
@@ -215,13 +216,13 @@ class SuccessCommitIntent:
 
     conversation_id: str
     latest_candidate_id: str | None
-    target_status: RunStatus
+    target_outcome: RunOutcome
     run_id: str = ""
     session_id: str = ""
 
     def to_dict(self) -> JSONMap:
         """转换为 run.json 可恢复控制字段。"""
-        return {"conversation_id": self.conversation_id, "latest_candidate_id": self.latest_candidate_id, "target_status": self.target_status.value, "run_id": self.run_id, "session_id": self.session_id}
+        return {"conversation_id": self.conversation_id, "latest_candidate_id": self.latest_candidate_id, "target_outcome": self.target_outcome.value, "run_id": self.run_id, "session_id": self.session_id}
 
 
 def context_version_from_dict(data: JSONMap) -> ContextVersion:

@@ -76,6 +76,8 @@ class CheckpointRepositoryAdapter:
 def _checkpoint_from_dict(data: JSONMap) -> RunCheckpoint:
     """将 checkpoint.json 反序列化为领域检查点。"""
     _require_v4_format(data, "checkpoint.json")
+    stored_action: str = get_string(data, "action")
+    action: AgentAction = AgentAction(stored_action) if stored_action else AgentAction(get_string(data, "next_action"))
     return RunCheckpoint(
         checkpoint_id=get_string(data, "checkpoint_id"),
         run_id=get_string(data, "run_id"),
@@ -85,6 +87,7 @@ def _checkpoint_from_dict(data: JSONMap) -> RunCheckpoint:
         message_sequence=get_integer(data, "message_sequence"),
         agent_state=_json_map_or_empty(data.get("agent_state")),
         next_action=AgentAction(get_string(data, "next_action")),
+        action=action,
         pending=_json_map_or_empty(data.get("pending")),
         budget=_json_map_or_empty(data.get("budget")),
         active_context_version=_optional_positive_integer(data.get("active_context_version")),

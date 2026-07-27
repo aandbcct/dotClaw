@@ -36,6 +36,7 @@ from dotclaw.runtime.domain.facts import (
     RunStatus,
     require_json_map,
 )
+from dotclaw.runtime.domain.state import RunOutcome
 from dotclaw.session.session import Session, SessionManager
 
 
@@ -87,7 +88,7 @@ async def _prepare_pending_success(
     intent: SuccessCommitIntent = SuccessCommitIntent(
         conversation_id="conversation-run-e5",
         latest_candidate_id=None,
-        target_status=RunStatus.COMPLETED,
+        target_outcome=RunOutcome.COMPLETED,
         run_id=completed.run_id,
         session_id=completed.session_id,
     )
@@ -191,7 +192,7 @@ async def test_success_commit_projects_only_latest_history_candidate(tmp_path: P
     intent: SuccessCommitIntent = SuccessCommitIntent(
         "conversation-run-e5",
         latest.candidate_id,
-        RunStatus.COMPLETED,
+        RunOutcome.COMPLETED,
         completed.run_id,
         completed.session_id,
     )

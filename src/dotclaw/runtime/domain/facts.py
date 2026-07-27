@@ -11,6 +11,7 @@ from .control import AgentAction
 
 if TYPE_CHECKING:
     from .context import StagedHistoryCompression, SuccessCommitIntent
+    from .state import AgentRunState
 
 
 JSONPrimitive: TypeAlias = str | int | float | bool | None
@@ -272,6 +273,7 @@ class AgentRun:
             "parent_run_id": self.parent_run_id,
             "root_run_id": self.root_run_id,
             "status": self.status.value,
+            "state": self.state.to_dict(),
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "resume_count": self.resume_count,
@@ -288,6 +290,16 @@ class AgentRun:
             "error": None if self.error is None else self.error.to_dict(),
         }
 
+    @property
+    def state(self) -> AgentRunState:
+        """当前控制状态的统一投影。
+
+        迁移期过渡桥：``AgentRun`` 仍以 ``status`` 为权威字段（引擎在阶段 2 前仍驱动旧
+        状态机），``state`` 由 ``status`` 派生，使仓储可统一以 ``state.is_ended()`` 判断
+        活跃/终态而不触碰引擎。阶段 2 引擎改为直接维护 ``state`` 后，此投影将翻转。
+        """
+        return _agent_run_state_from_status(self.status)
+
 
 @dataclass(frozen=True)
 class RunCheckpoint:
@@ -303,6 +315,7 @@ class RunCheckpoint:
     next_action: AgentAction
     pending: JSONMap
     budget: JSONMap
+    action: AgentAction = AgentAction.INVOKE_LLM
     active_context_version: int | None = None
     staged_history_compression_ids: tuple[str, ...] = ()
 
@@ -317,6 +330,7 @@ class RunCheckpoint:
             "message_sequence": self.message_sequence,
             "agent_state": self.agent_state,
             "next_action": self.next_action.value,
+            "action": self.action.value,
             "pending": self.pending,
             "budget": self.budget,
             "active_context_version": self.active_context_version,
@@ -370,3 +384,33 @@ def get_integer(data: Mapping[str, JSONValue], field_name: str, default: int = 0
     """从 JSON 对象读取整数字段，避免布尔值误判为整数。"""
     value: JSONValue | None = data.get(field_name)
     return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
+def _agent_run_state_from_status(status: RunStatus) -> AgentRunState:
+    """迁移期过渡桥：将旧 ``RunStatus`` 投影为新 ``AgentRunState``。
+
+    仅用于仓储以 ``state.is_ended()`` 判断活跃/终态；``WAITING_APPROVAL`` 因缺少
+    审批标识退化为占位 ``Suspended``，``INTERRUPTED`` 视为活动 ``Running``。阶段 2
+    引擎直接维护 ``state`` 后此投影移除。
+    """
+    from .state import (
+        AgentRunState,
+        Created,
+        Ended,
+        RunOutcome,
+        RunStage,
+        Running,
+        Suspended,
+        SuspendReason,
+    )
+
+    mode_by_status = {
+        RunStatus.RUNNING: Running(RunStage.CALLING_LLM),
+        RunStatus.COMPLETED: Ended(RunOutcome.COMPLETED),
+        RunStatus.FAILED: Ended(RunOutcome.FAILED),
+        RunStatus.CANCELLED: Ended(RunOutcome.CANCELLED),
+        RunStatus.ABANDONED: Ended(RunOutcome.ABANDONED),
+        RunStatus.WAITING_APPROVAL: Suspended(SuspendReason.APPROVAL, "", RunStage.EXECUTING_TOOLS),
+        RunStatus.INTERRUPTED: Running(RunStage.CALLING_LLM),
+    }
+    return AgentRunState(mode=mode_by_status.get(status, Running(RunStage.CALLING_LLM)))

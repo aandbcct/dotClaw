@@ -36,6 +36,7 @@ from dotclaw.runtime.domain.facts import (
     RunStatus,
     require_json_map,
 )
+from dotclaw.runtime.domain.state import RunOutcome
 
 
 class ContextVersionRepository(Protocol):
@@ -132,7 +133,7 @@ async def _assert_run_control_contract(repository: RunRepository) -> None:
     intent: SuccessCommitIntent = SuccessCommitIntent(
         conversation_id="conversation-2",
         latest_candidate_id=candidate.candidate_id,
-        target_status=RunStatus.COMPLETED,
+        target_outcome=RunOutcome.COMPLETED,
     )
     await repository.create_run(run)
     await repository.append_context_version(run.session_id, run.run_id, _context_version(1))

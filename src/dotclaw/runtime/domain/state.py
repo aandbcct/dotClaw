@@ -290,6 +290,76 @@ class AgentRunState:
         """判断运行是否尚未结束，可继续接受事件。"""
         return not self.is_ended()
 
+    def to_dict(self) -> dict[str, object]:
+        """序列化为 JSON 兼容字典（含四模式判别与累计统计）。"""
+        return {
+            "mode": _mode_to_dict(self.mode),
+            "iteration": self.iteration,
+            "retry_count": self.retry_count,
+            "truncate_count": self.truncate_count,
+            "loop_fingerprint": self.loop_fingerprint,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> AgentRunState:
+        """从 JSON 兼容字典恢复；拒绝非 v4 状态格式以避免隐式迁移。"""
+        if not isinstance(data, dict):
+            raise ValueError("AgentRunState 必须是对象")
+        mode: RunMode = _mode_from_dict(data.get("mode"))
+        return cls(
+            mode=mode,
+            iteration=_as_int(data.get("iteration")),
+            retry_count=_as_int(data.get("retry_count")),
+            truncate_count=_as_int(data.get("truncate_count")),
+            loop_fingerprint=_as_str(data.get("loop_fingerprint")),
+        )
+
+
+def _mode_to_dict(mode: RunMode) -> dict[str, object]:
+    """四模式分别序列化为带 type 判别的字典。"""
+    if isinstance(mode, Created):
+        return {"type": "created"}
+    if isinstance(mode, Running):
+        return {"type": "running", "stage": mode.stage.value}
+    if isinstance(mode, Suspended):
+        return {
+            "type": "suspended",
+            "reason": mode.reason.value,
+            "control_id": mode.control_id,
+            "resume_stage": mode.resume_stage.value,
+        }
+    return {"type": "ended", "outcome": mode.outcome.value}
+
+
+def _mode_from_dict(value: object) -> RunMode:
+    """从判别字典恢复四模式之一。"""
+    if not isinstance(value, dict):
+        raise ValueError("AgentRunState.mode 必须是对象")
+    kind: object = value.get("type")
+    if kind == "created":
+        return Created()
+    if kind == "running":
+        return Running(RunStage(_as_str(value.get("stage"), "calling_llm")))
+    if kind == "suspended":
+        return Suspended(
+            SuspendReason(_as_str(value.get("reason"), "approval")),
+            _as_str(value.get("control_id")),
+            RunStage(_as_str(value.get("resume_stage"), "calling_llm")),
+        )
+    if kind == "ended":
+        return Ended(RunOutcome(_as_str(value.get("outcome"), "completed")))
+    raise ValueError(f"未知 AgentRunState 模式：{kind}")
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    """从 JSON 值收窄为整数，拒绝布尔。"""
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
+def _as_str(value: object, default: str = "") -> str:
+    """从 JSON 值收窄为字符串。"""
+    return value if isinstance(value, str) else default
+
 
 class InvalidTransition(Exception):
     """状态机拒绝非法迁移时抛出；不修改任何状态。

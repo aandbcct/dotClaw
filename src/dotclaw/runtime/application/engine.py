@@ -53,7 +53,7 @@ from ..domain.facts import (
     ToolCall,
     utc_now_iso,
 )
-from ..domain.state import AgentPhase, AgentState
+from ..domain.state import AgentPhase, AgentState, RunOutcome
 from ..domain.control import AgentAction
 from .approval_service import ApprovalService
 from .cancellation_service import CancellationService
@@ -624,7 +624,7 @@ class RuntimeEngine:
                 success_intent: SuccessCommitIntent = SuccessCommitIntent(
                     conversation_id=f"conversation-{run.run_id}",
                     latest_candidate_id=_latest_staged_candidate_id(completed),
-                    target_status=RunStatus.COMPLETED,
+                    target_outcome=RunOutcome.COMPLETED,
                     run_id=run.run_id,
                     session_id=run.session_id,
                 )

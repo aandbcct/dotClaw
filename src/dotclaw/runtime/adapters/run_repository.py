@@ -12,6 +12,7 @@ from pathlib import Path
 from ..application.ports import ConversationProjectionPort, SuccessCommitFaultPort
 from ..application.dto import ConversationMessage
 from ..domain.events import RunEvent, RunEventType
+from ..domain.state import Ended, RunOutcome
 from ..domain.context import (
     ContextContributionKind,
     ContextOwner,
@@ -465,17 +466,11 @@ class RunRepositoryAdapter:
         directory: Path = self._root_directory / safe_session_id / "agent_runs"
         if not directory.is_dir():
             return ()
-        terminal: frozenset[RunStatus] = frozenset({
-            RunStatus.COMPLETED,
-            RunStatus.FAILED,
-            RunStatus.CANCELLED,
-            RunStatus.ABANDONED,
-        })
         runs: list[AgentRun] = []
         path: Path
         for path in directory.glob(f"*/{RunStorageFileName.RUN.value}"):
             run: AgentRun = _agent_run_from_dict(load_json_map(path))
-            if run.status not in terminal:
+            if not run.state.is_ended():
                 runs.append(run)
         return tuple(runs)
 
@@ -537,7 +532,7 @@ class RunRepositoryAdapter:
 
     def _validate_success_and_get_input_sync(self, run: AgentRun, final_message: RunMessage) -> RunMessage:
         """校验成功提交条件，并定位已持久化的用户输入消息。"""
-        if run.status is not RunStatus.COMPLETED:
+        if not (isinstance(run.state.mode, Ended) and run.state.mode.outcome is RunOutcome.COMPLETED):
             raise ValueError("只有已完成的运行才能提交 Conversation 投影")
         if final_message.role is not MessageRole.ASSISTANT:
             raise ValueError("最终 Conversation 投影必须是 assistant 消息")
@@ -837,7 +832,7 @@ def _run_success_commit_intent_from_dict(data: JSONMap) -> RunSuccessCommitInten
     return RunSuccessCommitIntent(
         conversation_id=get_string(data, "conversation_id"),
         latest_candidate_id=latest_candidate_id,
-        target_status=RunStatus(get_string(data, "target_status")),
+        target_outcome=RunOutcome(get_string(data, "target_outcome", RunOutcome.COMPLETED.value)),
         run_id=get_string(data, "run_id"),
         session_id=get_string(data, "session_id"),
     )
@@ -858,7 +853,7 @@ def _completed_run_from_intent(run: AgentRun, intent: RunSuccessCommitIntent) ->
     )
     return replace(
         run,
-        status=intent.target_status,
+        status=RunStatus(intent.target_outcome.value),
         staged_history_compressions=candidates,
         success_commit_intent=None,
     )
