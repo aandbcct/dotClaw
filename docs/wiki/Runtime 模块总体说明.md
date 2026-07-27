@@ -1,37 +1,64 @@
 # Runtime 模块总体说明
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
-> 扫描基准：2026-07-24，包含 ApplicationHost 收口、ContextVersion、精确上下文预算、staged 历史压缩与 reasoning/response 双通道输出  
+> 扫描基准：2026-07-24，包含 ApplicationHost 收口、ContextVersion、确定性 Token 预算、staged 历史压缩与 reasoning/response 双通道输出  
 > 文档定位：自顶向下解释 Runtime 在系统中的位置、逻辑组件、核心类、运行事实、依赖与恢复流程，并记录当前设计取舍、真实痛点和演进方向。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
+
+
+**快速导航**
+
+| 需要回答的问题 | 阅读位置 |
+|---|---|
+| Runtime 为什么存在、与 Session/Agent/Context 如何分工 | 第 1～2 节 |
+| Runtime 有哪些逻辑组件 | 第 3 节 |
+| 每个组件有哪些核心类、协议和数据对象 | 第 4 节 |
+| 普通执行、审批、压缩、恢复、提交和委派如何运行 | 第 5 节 |
+| Run、Message、Event、ContextVersion、Checkpoint 如何分工 | 第 6 节 |
+| 修改某项功能从哪里开始 | 第 7 节 |
+| 当前设计为何如此、存在哪些问题、如何演进 | 第 8 节 |
+| 具体源码在哪里 | 第 9 节 |
+
+```text
+Session / Identity
+→ SessionRunCoordinator
+→ RuntimeEngine + RunExecution
+→ Context / LLM / Tool / Delegation Ports
+→ RunMessage / RunEvent / Checkpoint
+→ SuccessCommitIntent
+→ Session Conversation
+```
+
+阅读时应先区分三个层次：
+
+- `AgentPhase`：一次执行中的控制阶段；
+- `RunStatus`：持久化的业务状态；
+- `Session Conversation`：仅由成功 Run 投影的长期对话语义。
 
 ---
 
 ## 1. 模块定位与边界
 
-Runtime 是 dotClaw 的**执行内核**。它接收一份已经确定 Session、Agent Identity、当前用户输入和历史快照的 `RunRequest`，为本次请求创建独立的 `AgentRun` 与 `RunExecution`，然后按照领域状态机驱动 Context、LLM、Tool 和 Delegation 等外部能力，直到运行进入成功、失败、取消、审批等待、中断或放弃状态。
+Runtime 是 dotClaw 的**执行内核**。它接收已经确定 Session、Agent Identity、用户输入和历史快照的 `RunRequest`，为本次请求创建独立的 `AgentRun` 与 `RunExecution`，驱动 Context、LLM、Tool 和 Delegation，直到运行成功、失败、取消、等待审批、中断或放弃。
 
 Runtime 解决的核心问题不是“如何调用一次大模型”，而是：
 
-> 如何将一次可能经历多轮 LLM、工具调用、审批、上下文压缩和子 Agent 委派的请求，组织成隔离、可审计、可恢复且提交边界明确的 AgentRun。
+> 如何把一次可能包含多轮 LLM、工具调用、审批、上下文压缩和子 Agent 委派的请求，组织成隔离、可审计、可恢复且提交边界明确的 AgentRun。
 
-### 1.1 对外提供的稳定能力
+### 1.1 核心职责
 
-Runtime 当前对外提供：
+Runtime 的稳定职责可归纳为七组：
 
-1. **新建运行**：普通用户消息创建新的 `AgentRun`。
-2. **执行协调**：驱动 LLM、Tool、Context 和 Delegation 的调用顺序。
-3. **Session 级并发控制**：同一 Session 串行，不同 Session 可并行。
-4. **状态转换**：使用纯 `AgentState` 将领域事件转换为下一阶段和动作。
-5. **运行事实保存**：持久化 `AgentRun`、`RunMessage`、`RunEvent`、`ContextVersion` 和 `RunCheckpoint`。
-6. **审批暂停与恢复**：保存审批记录和最小 Checkpoint，并在原 `run_id` 上继续。
-7. **可恢复中断**：将模型或压缩服务暂时不可用映射为 `INTERRUPTED`，允许重试或放弃。
-8. **成功提交补偿**：通过 `SuccessCommitIntent` 幂等补齐 Conversation、完成事件和 Run 终态。
-9. **运行级输出**：通过 `LLMOutputPort` 将 reasoning 和 response 增量按语义交给入口层。
-10. **取消传播**：向当前 LLM、Tool 和子 Run 发送尽力取消。
-11. **上下文预算保护**：精确统计真实输入 Token，必要时暂存历史压缩候选。
-12. **多 Agent 委派接入**：通过 `DelegationPort` 将 `delegate` Tool Call 映射为目标 Agent 的子 Run。
+1. **运行隔离与协调**：每次请求创建独立 RunExecution，共享 Engine 不保存当前 Session 或当前 Agent。
+2. **Session 级顺序**：同一 Session 的普通执行串行，不同 Session 可以并行。
+3. **状态与外部能力驱动**：使用 AgentState 约束流程，由 Engine 调用 Context、LLM、Tool 和 Delegation Ports。
+4. **运行事实管理**：保存 AgentRun、RunMessage、RunEvent、ContextVersion 和最小 Checkpoint。
+5. **暂停、恢复与取消**：处理审批、中断重试、放弃、进程重启遗留 Run 和尽力取消。
+6. **上下文预算保护**：使用显式 tokenizer 对 Runtime 当前可计数的输入组成进行确定性统计，必要时暂存历史压缩候选。
+7. **成功语义提交**：通过 SuccessCommitIntent 幂等补齐 Conversation、完成事件和 Run 终态。
+
+reasoning 和 response 的增量输出通过 `LLMOutputPort` 交给入口层；reasoning 不成为 Conversation 或恢复事实。
 
 ### 1.2 主要使用者
 
@@ -41,7 +68,7 @@ Runtime 当前对外提供：
 | Channel / CLI | 提交普通消息与控制事件，消费 `RunResult` 和运行级输出事件 |
 | Orchestration | 通过 `DelegationPort` 创建和等待子 Run |
 | ApplicationHost | 创建 Runtime 的 Port、Adapter、Repository 和生命周期资源 |
-| Context | 根据 `RunRequest` 与 `RunExecutionView` 构造模型实际输入 |
+| Context | 根据 `RunRequest` 与 `RunExecutionView` 构造模型输入 |
 | LLM / Tool | 作为 Runtime 调用的外部能力，经 Adapter 实现 Port |
 | Session | 仅在成功提交时接收 Conversation 和最新历史压缩投影 |
 
@@ -49,18 +76,13 @@ Runtime 当前对外提供：
 
 Runtime 不负责：
 
-- 解析 CLI 命令或渲染 Markdown；
-- 直接读取用户自然语言来判断审批是同意还是拒绝；
-- 管理具体 LLM Provider、重试、限流和熔断；
-- 声明、注册或执行具体 Builtin/MCP 工具的安全策略；
-- 决定 Context Slot 的内容来源和缓存实现；
-- 管理 MCP Server 的连接生命周期；
-- 保存长期 Memory 或扫描 Skills；
-- 维护 Agent 配置文件和 Identity 目录；
-- 将 Journal 作为恢复事实源；
-- 提供跨进程或多节点 Session 租约；
-- 保证有副作用 Tool 跨崩溃 exactly-once；
-- 持久化或展示 LLM reasoning 正文。
+1. CLI 命令解析、自然语言审批判断或最终界面渲染；
+2. 具体 LLM Provider 的路由、协议、重试、限流和熔断；
+3. Tool 的声明、Capability、Policy、Handler 和 MCP 连接生命周期；
+4. Context Slot、Memory、Skills 和 Agent Identity 的具体加载实现；
+5. 将 Journal、Channel 输出或 reasoning 作为恢复事实源；
+6. 跨进程、多节点 Session 租约和分布式事务；
+7. 有副作用 Tool 的跨崩溃 exactly-once 或正在执行操作的强制终止。
 
 ### 1.4 与相邻模块的职责边界
 
@@ -74,9 +96,7 @@ Runtime 不负责：
 | Tool | 规定 Tool Call 的执行、审批需求和结果 DTO | 参数校验、Capability、Policy、Handler 和外部调用 |
 | Orchestration | 提交、等待和取消子执行 | Task、Broker、目标 Session 和子 Run 映射 |
 | Channel | 提供运行级输出端口和结构化控制输入 | 用户交互、增量展示和最终结果渲染 |
-| Journal | 不依赖其恢复运行 | 可选的观测、报告和额外 Trace 投影 |
-
----
+| Journal | 不依赖其恢复运行 | 可选观测、报告和额外 Trace 投影 |
 
 ## 2. 模块在项目中的位置
 
@@ -171,53 +191,25 @@ flowchart TB
 ### 2.2 一次普通请求在系统中的位置
 
 ```mermaid
-sequenceDiagram
-    actor User as 用户
-    participant Channel as Channel
-    participant App as SessionInteractionService
-    participant Coord as SessionRunCoordinator
-    participant Engine as RuntimeEngine
-    participant Context as ContextPort
-    participant LLM as LLMPort
-    participant Output as LLMOutputPort
-    participant Tool as ToolPort
-    participant Repo as RunRepository
-    participant Session as Session Conversation
-
-    User->>Channel: 输入普通消息
-    Channel->>App: submit(session, text, output_port)
-    App->>App: 校验 session.agent_id
-    App->>Coord: submit_prepared(session_id, request_factory)
-    Coord->>Coord: 获取 Session 进程内锁
-    Coord->>Coord: await request_factory()，冻结 ConversationSnapshot
-    Coord->>Engine: execute(RunRequest, output_port)
-
-    Engine->>Repo: create AgentRun(RUNNING)
-    loop ReAct
-        Engine->>Context: build(request, RunExecutionView)
-        Context-->>Engine: ContextBundle
-        Engine->>Repo: 保存 ContextVersion 与 LLM Checkpoint
-        Engine->>LLM: complete(context, execution, output_port)
-        LLM->>Output: reasoning / response 增量
-        LLM-->>Engine: 完整 response 或 ToolCall
-        Engine->>Repo: 保存 RunMessage 与 RunEvent
-
-        alt 返回 ToolCall
-            Engine->>Tool: execute(invocation)
-            Tool-->>Engine: completed / failed / approval_required
-            Engine->>Repo: 保存 ToolResult 与工具审计事件
-        else 返回最终回答
-            Engine->>Repo: commit_success()
-            Repo->>Session: 幂等投影成功 Conversation
-            Engine-->>Coord: RunResult(COMPLETED)
-        end
-    end
-    Coord-->>App: RunResult
-    App-->>Channel: 结构化结果
-    Channel-->>User: 最终展示
+flowchart LR
+    User["用户消息"] --> Channel["Channel"]
+    Channel --> App["SessionInteractionService"]
+    App --> Coord["SessionRunCoordinator<br/>Session 锁内冻结请求"]
+    Coord --> Engine["RuntimeEngine"]
+    Engine --> Ports["Context / LLM / Tool / Delegation Ports"]
+    Ports --> Facts["RunMessage / RunEvent / Checkpoint"]
+    Facts --> Commit["SuccessCommitIntent"]
+    Commit --> Session["Session Conversation"]
+    Engine -.reasoning / response.-> Output["LLMOutputPort → Channel"]
 ```
 
-普通用户消息**总是创建新 Run**。只有审批恢复、重试中断、放弃和取消等结构化控制操作才定位已有 Run。
+**结论：**
+
+- 发起者是 Channel，应用入口是 `SessionInteractionService`，执行协调者是 `RuntimeEngine`。
+- `SessionRunCoordinator` 在获取 Session 锁后才冻结 `RunRequest`，避免并发请求基于同一历史版本运行。
+- 普通用户消息总是创建新 Run；只有审批恢复、重试、放弃和取消会定位已有 Run。
+- Tool、LLM、Context 和 Delegation 不能直接修改 AgentRun 或 Session Conversation。
+- response 成功后才能投影 Conversation；reasoning 只沿输出端口返回。
 
 ### 2.3 reasoning 与 response 的输出边界
 
@@ -366,7 +358,7 @@ flowchart TB
 | 执行内核 | 执行期事务 | 保存一次 Run 的内存控制数据 | `RunExecution` |
 | 执行内核 | 状态规则 | 领域事件 → 新状态与下一动作 | `AgentState` |
 | 上下文控制 | Context 版本 | 冻结 LLM 调用前的稳定 Slot | `ContextVersion` |
-| 上下文控制 | Token 预算 | 精确判断继续、压缩或拒绝 | `ContextBudgetPlanner` |
+| 上下文控制 | Token 预算 | 确定性判断继续、压缩或拒绝 | `ContextBudgetPlanner` |
 | 上下文控制 | 历史压缩 | 生成、暂存并成功后提交摘要 | `HistoryCompactorPort` |
 | 运行控制 | 审批 | approval_id 与原 Run 的一次性关联 | `ApprovalService` |
 | 运行控制 | 取消 | 活动 Run 令牌和父子取消映射 | `CancellationService` |
@@ -783,7 +775,7 @@ Runtime 不直接拼接 Memory、Skills、Agent 或 Workspace 内容。
 
 #### 4.4.2 `ContextBudgetPlanner`
 
-**职责与用途：**`ContextBudgetPlanner` 在每次业务 LLM 调用前，对真实结构化输入进行精确预算判断。它消除字符数估算与模型真实 Token 之间的偏差，明确返回继续、压缩或拒绝。
+**职责与用途：**`ContextBudgetPlanner` 在每次业务 LLM 调用前，对 Runtime 当前能够枚举的结构化输入组成进行确定性 Token 预算判断。它使用显式 tokenizer，拒绝字符数估算回退，并明确返回继续、压缩或拒绝。
 
 结果：
 
@@ -797,9 +789,11 @@ Runtime 不直接拼接 Memory、Skills、Agent 或 Workspace 内容。
 
 #### 4.4.3 `TiktokenTokenCounter`
 
-**职责与用途：**`TiktokenTokenCounter` 是 `TokenCounterPort` 的当前实现。它使用 Agent Policy 中冻结的显式 tokenizer encoding 统计系统内容、历史摘要、历史原文、当前输入、RunMessage 和 Tool Schema。
+**职责与用途：**`TiktokenTokenCounter` 是 `TokenCounterPort` 的当前实现。它使用 Agent Policy 中冻结的显式 tokenizer encoding，统计系统正文、历史摘要、历史正文、当前输入、RunMessage 正文和 Tool Schema JSON。
 
 它不提供字符估算回退。encoding 缺失或不可用时返回确定性错误，由 Runtime 映射为 `TOKENIZER_UNAVAILABLE`。
+
+当前统计不是 Provider wire-level 的完整精确计数：消息 role/name、Tool Call 参数、Chat Template 和 Provider 协议开销尚未完整纳入，`protocol_overhead_tokens` 当前也为 0。因此该结果应理解为 Runtime 输入组成的确定性预算，而不是供应商最终计费 Token 的严格等值。
 
 #### 4.4.4 `LLMContextCompactor`
 
@@ -1265,7 +1259,13 @@ sequenceDiagram
     end
 ```
 
-普通请求没有“自动接续旧 Run”的自然语言分支。用户后续消息创建新 Run，模型通过 Conversation 理解上下文关系。
+**结论：**
+
+- `SessionInteractionService` 发起提交，Coordinator 负责 Session 顺序，Engine 负责 ReAct 协调。
+- `AgentPolicySnapshot` 在 Run 创建时冻结；ContextVersion 和 LLM Checkpoint 在每次业务 LLM 调用前保存。
+- Tool Call 按模型返回顺序执行，开始和完成事件必须成对出现。
+- 最终 response 保存后才进入 SuccessCommit；失败、审批等待和中断不写 Conversation。
+- 普通请求不会自然语言续接旧 Run，用户后续消息创建新 Run，并通过 Conversation 获得上下文。
 
 ### 5.3 状态机与当前 Engine 驱动
 
@@ -1336,7 +1336,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Build["ContextPort.build"] --> Count["TokenCounterPort 精确计数"]
+    Build["ContextPort.build"] --> Count["TokenCounterPort 确定性计数"]
     Count --> Decision{"ContextBudgetDecision"}
 
     Decision -->|WITHIN_BUDGET| Version["保存或复用 ContextVersion"]
@@ -1347,7 +1347,7 @@ flowchart TD
     Available -->|否| Fail
     Available -->|是| Compact["HistoryCompactorPort"]
     Compact --> Rebuild["重建 RunRequest 与 ContextBundle"]
-    Rebuild --> Recount["再次精确计数"]
+    Rebuild --> Recount["重建后再次计数"]
     Recount -->|仍超限| Fail
     Recount -->|通过| Stage["保存 StagedHistoryCompression"]
     Stage --> Version
@@ -1359,7 +1359,12 @@ flowchart TD
     Success -->|否| KeepAudit["候选只留 Run 审计，不改变 Session"]
 ```
 
-压缩只作用于最旧完整 Conversation，不静默裁掉当前输入、最新 Conversation 或 Tool Schema。
+**结论：**
+
+- Engine 是预算流程协调者，TokenCounter 和 HistoryCompactor 只通过 Port 提供能力。
+- 压缩只作用于最旧完整 Conversation，不静默裁掉当前输入、最新 Conversation 或 Tool Schema。
+- 压缩候选先写入 Run，只有 Run 成功时才提交 Session。
+- 当前计数覆盖 Runtime 可枚举的正文与 Tool Schema，但不等于 Provider wire-level 完整 Token。
 
 ### 5.6 审批暂停与恢复
 
@@ -1385,9 +1390,12 @@ sequenceDiagram
     Coord->>Coord: 获取同一 Session 锁
     Coord->>Engine: resolve_approval()
 
-    Engine->>RunRepo: load Run / Messages / ContextVersions
-    Engine->>Checkpoint: load()
+    Engine->>RunRepo: load Run / ContextVersions
+    Engine->>Engine: 校验活动 ContextVersion
     Engine->>Approval: consume()
+    Engine->>RunRepo: reload Run / Messages
+    Engine->>Checkpoint: load()
+    Engine->>Engine: 校验 WAITING_APPROVAL、Checkpoint 与 pending ToolCalls
     alt 拒绝
         Engine->>RunRepo: CANCELLED，不投影 Conversation
     else 通过
@@ -1407,7 +1415,12 @@ ApprovalRecord
 + RunMessage
 ```
 
-Adapter 的内存 waiting 集合不是恢复事实源。
+**结论：**
+
+- Coordinator 先通过 pending ApprovalRecord 定位 Session，并在同一 Session 锁内调用 Engine。
+- ContextVersion、RunMessage 和 Checkpoint 是恢复事实；Adapter 的内存 waiting 集合不是恢复事实源。
+- 恢复必须继续原 run_id，并依据 Checkpoint 中的剩余 ToolCalls 执行。
+- 当前实现会在完成全部 Run/Checkpoint/pending 校验之前消费审批记录；后续校验失败时不能再次提交，属于第 8 节 R5。
 
 ### 5.7 中断、重试和新请求替代
 
@@ -1428,7 +1441,12 @@ flowchart TD
     Abandoned --> NewRun["创建新 Run"]
 ```
 
-Coordinator 在新普通请求前自动放弃旧 `INTERRUPTED` Run；其他非终态占用返回 `SESSION_BUSY`。
+**结论：**
+
+- 中断只在 LLM 调用前安全点保留可重试 Checkpoint。
+- `retry` 继续原 run_id；`abandon` 保留审计事实但释放 Session 占用。
+- Coordinator 在新普通请求前自动放弃旧 `INTERRUPTED` Run；其他非终态占用返回 `SESSION_BUSY`。
+- 不允许依据普通 LLM Checkpoint 自动重放已经开始的有副作用 Tool。
 
 ### 5.8 成功提交补偿
 
@@ -1446,7 +1464,12 @@ flowchart LR
     Recover --> Projection
 ```
 
-成功提交采用“先意图、后补偿、最后完成标记”。失败、取消和中断不进入此协议。
+**结论：**
+
+- `RunRepositoryAdapter` 是成功提交协调者，Session Projector 和完成事件写入都必须幂等。
+- `success_commit.json` 是临时恢复意图，不是长期业务事实。
+- `run.json=COMPLETED` 最后写入；进程在此前崩溃时由 Host 或 Repository 补偿。
+- 失败、取消、审批等待和中断不进入成功提交协议。
 
 ### 5.9 取消流程
 
@@ -1468,7 +1491,12 @@ flowchart TD
     Waiting -->|否| Ignore["不重复修改既有终态或未知 Run"]
 ```
 
-当前 LLM 和 Tool Adapter 没有真实底层执行句柄，取消属于尽力协议。
+**结论：**
+
+- 取消发起者可以绕过 Session 锁，以避免活动 Run 持锁时形成死锁。
+- `CancellationService` 只保存进程内控制引用，终态仍由 Engine 持久化。
+- 当前 LLM 和 Tool Adapter 没有真实底层执行句柄，取消属于尽力协议。
+- 等待审批 Run 的直接取消与审批恢复之间尚无跨进程原子协调，见第 8 节痛点。
 
 ### 5.10 Delegation 流程
 
@@ -1494,7 +1522,12 @@ sequenceDiagram
     Parent->>Parent: 保存 DELEGATION_RESULT 并继续 LLM
 ```
 
-父子 Run 使用不同 Session 锁，因此可以并行。取消可沿 parent → child 传播。
+**结论：**
+
+- Parent RuntimeEngine 是委派发起者，`RuntimeDelegationAdapter` 负责 Orchestration 和子 Session 映射。
+- 子执行仍通过同一个 Coordinator 和 RuntimeEngine，不在父 Run 中原地切换 Identity。
+- 父子 Run 使用不同 Session 锁，因此可以并行；取消可沿 parent → child 传播。
+- 当前 child Task、结果和绑定只保存在内存，进程重启后不能恢复等待关系。
 
 ---
 
@@ -1532,7 +1565,7 @@ AgentRun
 | `CheckpointRepository` | 最小恢复快照 | `CheckpointRepositoryAdapter` |
 | `ApprovalRepository` | 审批关联与一次消费 | `ApprovalRepositoryAdapter` |
 | `ConversationProjectionPort` | 成功语义投影 Session | `SessionConversationProjector` |
-| `TokenCounterPort` | 精确结构化输入计数 | `TiktokenTokenCounter` |
+| `TokenCounterPort` | 对当前可枚举输入组成进行确定性计数 | `TiktokenTokenCounter` |
 | `HistoryCompactorPort` | 完整 Conversation 滚动摘要 | `LLMContextCompactor` |
 
 ### 6.3 `AgentPhase` 与 `RunStatus` 的区别
@@ -1629,9 +1662,9 @@ data/sessions/
 | 修改 Agent 策略冻结 | `AgentPolicyResolver` | Identity、Config、Tool Registry | Run 内模型可见定义稳定 |
 | 新增上下文来源 | `context/` Slot | Context Plan、Owner、缓存 | Runtime 不直接加载来源 |
 | 修改 Context Version | `domain/context.py`、Engine helpers | Repository、恢复 | 版本连续且不可覆盖 |
-| 修改 Token 预算 | `context_budget.py` | TokenCounter、Policy 配置 | 使用真实输入，不静默字符估算 |
+| 修改 Token 预算 | `context_budget.py` | TokenCounter、Policy 配置 | 使用显式 tokenizer，并明确未计入的协议开销 |
 | 修改历史压缩 | `history_compaction.py`、Compactor Adapter | Context、Session 投影 | 只压缩完整旧 Conversation |
-| 修改审批恢复 | `ApprovalService`、`resolve_approval()` | Checkpoint、Tool Adapter | approval_id 一次消费、原 run_id |
+| 修改审批恢复 | `ApprovalService`、`resolve_approval()` | Checkpoint、Tool Adapter、Coordinator | 恢复前置条件与消费边界一致，继续原 run_id |
 | 修改取消 | `CancellationService`、`Engine.cancel` | LLM/Tool/Delegation Adapter | 终态由 Engine 持久化 |
 | 修改中断重试 | `retry_interrupted()` | Checkpoint、ContextVersion | 只从明确安全点重试 |
 | 修改成功提交 | `RunRepositoryAdapter.commit_success` | Projector、Fault tests | COMPLETED 最后写入 |
@@ -1644,654 +1677,170 @@ data/sessions/
 
 ## 8. 设计取舍、痛点和演进方向
 
-本节严格区分已经实现的设计、作出的工程选择、当前代码中的真实问题和未来候选方案。
+本节只保留理解 Runtime 架构所必需的设计判断。当前事实、真实问题和候选方案分别陈述，候选方案不代表已经实现。
 
-### 8.1 当前设计
+### 8.1 当前架构承诺
 
-当前 master 已实现：
+当前 master 可以确认以下八项承诺：
 
-1. ApplicationHost 是唯一公开组合根和生命周期宿主。
-2. 普通请求经 `SessionInteractionService → SessionRunCoordinator → RuntimeEngine`。
-3. 已移除无独立生命周期和执行权的运行时 Agent 门面。
-4. RuntimeEngine 是共享执行器，每次创建独立 RunExecution。
-5. 同 Session 使用进程内锁串行，不同 Session 可并行。
-6. AgentState 是无外部依赖的纯转换对象。
-7. Runtime Application 通过 Port 隔离 Context、LLM、Tool、Repository 和 Delegation。
-8. RunRequest 冻结 Session Conversation 和 Identity。
-9. AgentPolicySnapshot 冻结模型、提示词、工具定义和预算设置。
-10. ContextVersion 保存快照型 Slot，RunMessage 保存动态 ReAct 证据。
-11. 每次 LLM 调用前精确计数 Token，并在必要时压缩最旧完整 Conversation。
-12. 历史压缩先暂存 Run，成功后才提交 Session。
-13. Tool 调用写入成对审计事件。
-14. 审批使用 ApprovalRecord、Checkpoint、ContextVersion 和 RunMessage 恢复原 Run。
-15. LLM 暂时不可用可形成 INTERRUPTED，并支持重试或放弃。
-16. 成功提交使用临时意图和幂等补偿。
-17. reasoning 与 response 使用运行级输出端口分流。
-18. Delegation 创建独立目标 Session 和子 Run，并复用同一 Coordinator。
-19. Run 终态释放 RUN Context 和 Tool Adapter 短期缓存。
-20. Journal 不参与恢复。
+1. `ApplicationHost` 是唯一公开组合根；Runtime Application 只依赖 Port。
+2. Runtime 的隔离单位是 Run：共享 Engine 不保存当前 Session 或当前 Agent。
+3. 同一 Session 的普通执行串行，不同 Session 可以并行。
+4. `AgentState` 提供纯领域转换，副作用、持久化和终态收口由 Engine 执行。
+5. Session Conversation 只保存成功语义；完整执行事实分布在 AgentRun、RunMessage、RunEvent、ContextVersion 和 Checkpoint。
+6. 审批与中断只从明确安全边界恢复，不盲目重放有副作用 Tool。
+7. 历史压缩候选先暂存 Run，只有成功提交后才更新 Session。
+8. reasoning 仅沿运行级输出端口传递，不进入 Conversation、RunMessage 正文和后续 Context。
 
-### 8.2 设计取舍
+### 8.2 核心设计取舍
 
-#### 8.2.1 共享无 Run 状态的 Engine，而不是每个 Agent 持有 Runtime
+#### 8.2.1 共享无 Run 状态的 Engine
 
-**原问题：**
+**问题与选择：**如果 Agent 对象持有 Runtime、Session 和当前状态，多 Session 并发时容易串扰。当前采用共享 `RuntimeEngine`，每次请求创建独立 `RunExecution`，Identity 仅以冻结策略进入 Run。
 
-如果 Agent 对象持有 Runtime、Session、当前状态和外部资源，多 Session 并发时容易出现共享字段串扰，生命周期也会被 Agent 门面和应用入口重复管理。
+**未选择：**每个 Agent 创建一套 Runtime、Engine 保存 `_current_session_id`、运行时 Agent 门面拥有执行权。
 
-**选择：**
+**收益：**Run 成为明确隔离单元；多 Session 复用同一 Engine；生命周期统一归 Host。
 
-保留一个可复用 `RuntimeEngine`，每次请求创建独立 `RunExecution`，Identity 只作为冻结策略数据进入 Run。
+**代价与边界：**所有单 Run 数据必须显式传递；恢复必须从 Repository 重建。Engine 无 Run 状态不代表整个进程无状态，Coordinator、CancellationService、Tool Adapter 和 DelegationAdapter 仍有内存控制数据。
 
-**未选择的方案：**
+#### 8.2.2 同 Session 串行
 
-- 每个 AgentIdentity 创建一套 Runtime；
-- RuntimeEngine 保存 `_current_session_id`；
-- 由运行时 Agent 门面协调 LLM、Tool 和 Session；
-- 将 Session 对象长期挂在 Engine。
+**问题与选择：**两个 Run 若并发读取同一 Conversation 基线并分别提交，会产生顺序和压缩冲突。当前以 `session_id → asyncio.Lock` 将请求冻结与执行放在同一锁内。
 
-**收益：**
+**未选择：**同 Session 并行后合并、只锁保存、全局单锁、把后续消息自动注入活动 Run。
 
-- 真正隔离单位变为 Run；
-- 多 Session 可安全复用同一 Engine；
-- Identity 是配置和策略，不成为资源宿主；
-- 生命周期统一归 ApplicationHost。
+**收益：**Conversation 顺序和压缩基线稳定，不同 Session 仍可并行。
 
-**代价：**
-
-- 所有单 Run 数据都必须显式传入；
-- Adapter 和 DTO 数量增加；
-- 恢复必须从 Repository 重建 RunExecution。
-
-**当前边界：**
-
-Engine 无共享 Run 状态不等于整个进程无状态；Coordinator、CancellationService、Tool Adapter 和 DelegationAdapter仍有进程内控制缓存。
-
-#### 8.2.2 同 Session 串行，而不是 Conversation 并发合并
-
-**原问题：**
-
-两个 Run 同时读取同一 Conversation 基线并分别提交，会造成顺序歧义、压缩候选覆盖和历史投影冲突。
-
-**选择：**
-
-每个 session_id 使用独立 `asyncio.Lock`，请求冻结和执行都在同一锁内。
-
-**未选择的方案：**
-
-- 允许同 Session 多 Run 并行，再合并 Conversation；
-- 只锁 Session 保存，不锁执行；
-- 全局单锁串行所有 Session；
-- 将普通消息自动注入当前运行中的消息队列。
-
-**收益：**
-
-- Conversation 顺序确定；
-- 压缩基线稳定；
-- 不同 Session 仍可并行；
-- 审批和重试也复用相同边界。
-
-**代价：**
-
-- 长 Run 会阻塞同 Session 后续普通请求；
-- 需要特殊处理取消，避免等待锁；
-- 当前进程内锁不能覆盖多进程竞争。
-
-**当前边界：**
-
-文件中的活动 Run 检查不是分布式 lease。多进程部署需要真正的条件写、fencing token 或数据库事务。
+**代价与边界：**长 Run 会阻塞同 Session 后续请求；取消必须旁路锁。该锁仅保证单进程顺序，不是跨进程 lease。
 
 #### 8.2.3 纯状态规则与副作用 Engine 分离
 
-**原问题：**
+**问题与选择：**状态判断、外部调用和文件写入若混在同一对象中，非法转换和恢复难以验证。`AgentState.transition(event)` 只返回新状态和 `AgentAction`，Engine 执行 I/O。
 
-将状态判断、LLM 调用、工具调用和文件写入混在一个 if/else Loop 中，难以验证非法转换，也不利于恢复。
+**未选择：**状态对象直接调用 Port、Repository 自动触发流程、散落字符串状态、重量级工作流引擎。
 
-**选择：**
+**收益：**Domain 可纯测试，Checkpoint 可以保存最小控制状态。
 
-`AgentState.transition(event)` 只返回新状态和 `AgentAction`；RuntimeEngine 执行 I/O。
-
-**未选择的方案：**
-
-- 状态对象内部调用 Port；
-- Repository 根据状态自动触发下一步；
-- 用散落的 status 字符串替代状态转换；
-- 将全部流程建成重量级工作流引擎。
-
-**收益：**
-
-- 状态规则可以纯单测；
-- Domain 不依赖技术实现；
-- Checkpoint 可以保存最小控制字段；
-- 事件与下一动作语义更清楚。
-
-**代价：**
-
-- Engine 仍需解释状态和动作；
-- 当前状态机和 Engine 分支存在部分双重控制；
-- 持久化 RunStatus 与内存 AgentPhase 需要明确边界。
-
-**当前边界：**
-
-当前实现尚未做到“AgentAction 是唯一执行计划来源”，详见痛点 8.3.2。
+**代价与边界：**当前 Engine 仍主要根据 `AgentPhase` 分支，状态机尚未成为唯一执行计划来源。
 
 #### 8.2.4 运行事实与成功 Conversation 分离
 
-**原问题：**
+**问题与选择：**若 Tool、失败、审批和中间 LLM 响应都写入 Conversation，用户历史与执行审计会混在一起。当前由不同容器分别承担长期语义、正文事实、时序事实、上下文快照和恢复控制。
 
-如果将工具过程、失败、审批和中间 LLM 响应都写入 Conversation，后续模型历史会充满执行噪声，用户语义与运行审计也会混为一体。
+**未选择：**所有消息直接追加 Conversation、单一巨型 Run JSON、Journal 同时承担恢复、失败 Run 投影对话。
 
-**选择：**
+**收益：**用户历史保持干净，失败和 Tool 过程仍可审计，成功投影可幂等补偿。
 
-- Conversation 只保存成功用户输入和最终回答；
-- AgentRun 保存索引与终态；
-- RunMessage 保存完整执行正文；
-- RunEvent 保存顺序事实；
-- Checkpoint 保存恢复控制。
+**代价与边界：**排障需要联合读取多个容器，Repository 必须维护引用和顺序不变量。
 
-**未选择的方案：**
+#### 8.2.5 最小 Checkpoint 与成功提交意图
 
-- 所有消息直接追加 Session Conversation；
-- 一个 AgentRun JSON 保存全部内容；
-- 用 Journal 同时承担历史和恢复；
-- 失败 Run 也写入 assistant 对话记录。
+**问题与选择：**完整 prompt 和 Tool Result 若复制进 Checkpoint 会产生多份事实；文件系统又没有跨文件事务。当前 Checkpoint 只保存控制引用，成功则通过 `SuccessCommitIntent` 幂等补齐 Conversation、完成事件和 Run 终态。
 
-**收益：**
+**未选择：**完整 prompt Checkpoint、Python pickle、先写 COMPLETED、仅记录提交异常。
 
-- 用户历史干净；
-- 失败和工具过程仍可审计；
-- 容器各自回答一个问题；
-- 成功投影可以幂等补偿。
+**收益：**恢复使用当时事实；Checkpoint 更小；成功提交可补偿。
 
-**代价：**
+**代价与边界：**恢复依赖多个文件；Repository 承担事务协调职责；这仍是单机文件协议，不是数据库 ACID 或多节点共识。
 
-- 文件数量和引用关系增加；
-- 排障需要联合读取多个容器；
-- Repository 必须维护引用和顺序不变量。
+#### 8.2.6 确定性预算与 staged 历史压缩
 
-**当前边界：**
+**问题与选择：**字符数估算和静默截断会造成输入边界不确定。当前使用显式 tokenizer 统计 Runtime 可枚举的正文和 Tool Schema；超限时只压缩最旧完整 Conversation，重建后再次计数，候选先暂存 Run。
 
-Conversation 不是完整执行记录；需要调试 Tool 或 Context 时必须读取 Run 目录。
+**未选择：**字符估算、直接丢弃消息、压缩后不重计、失败 Run 立即更新 Session。
 
-#### 8.2.5 最小 Checkpoint + ContextVersion/RunMessage 重建
+**收益：**不静默丢数据，候选来源和 hash 可审计，失败不会污染 Session。
 
-**原问题：**
+**代价与边界：**需要额外压缩模型调用和显式 tokenizer 配置。当前结果不是 Provider wire-level 完整精确 Token：消息协议字段、Tool Call 参数、Chat Template 和 Provider 开销尚未完整纳入。
 
-把完整 prompt、Tool Result 和全部消息复制进 Checkpoint，会形成多个事实副本，恢复时容易漂移，也增加敏感内容暴露面。
+#### 8.2.7 运行级输出端口
 
-**选择：**
+**问题与选择：**共享 Adapter 若在构造期绑定 Channel，会使并发run输出串扰；reasoning 也不应与最终回答混成同一事实。当前每次执行传入可选 `LLMOutputPort`，事件携带 session_id、run_id 和语义 kind。
 
-Checkpoint 只保存状态、游标、pending 控制和活动 ContextVersion 引用；正文留在 ContextVersion 和 RunMessage。
+**未选择：**Engine 直接依赖 CLI、Adapter 全局绑定 Channel、reasoning 写入 Conversation。
 
-**未选择的方案：**
+**收益：**输出按 Run 隔离，reasoning/response 可分区展示，response 仍形成最终事实。
 
-- 每个安全点保存完整 prompt；
-- Python 对象 pickle；
-- 只保存 state，不保存版本和消息游标；
-- 从最新 Session 重新构造恢复输入。
+**代价与边界：**输出与持久化存在两个通道；reasoning 不可恢复或回放；当前输出端口异常可能被误映射为模型不可用。
 
-**收益：**
+#### 8.2.8 子 Agent 委派为独立 Run
 
-- 恢复使用当时事实，而不是可变 Session；
-- 减少重复和敏感数据；
-- Checkpoint 体积小；
-- 可验证 message/event/version 引用。
+**问题与选择：**父 Run 原地切换 Identity 会模糊权限、Context、审计和取消边界。当前每次 delegation 创建目标 Agent 的独立 Session 和 child Run，父 Run只接收标准化结果。
 
-**代价：**
+**未选择：**父 Run 原地换 Agent、多 Agent 共用 Conversation、直接调用目标 Agent 对象。
 
-- 恢复依赖多个文件完整；
-- 反序列化和版本校验更复杂；
-- 必须维护 ContextVersion 连续性。
+**收益：**父子事实分离，各自冻结 Policy，子 Run 仍受 Coordinator 和 Runtime 规则约束。
 
-**当前边界：**
-
-仅承诺从明确安全边界恢复，不承诺恢复正在执行中的非幂等副作用。
-
-#### 8.2.6 文件系统使用成功提交意图，而不是假装存在事务
-
-**原问题：**
-
-成功需要同时写 Conversation、RUN_COMPLETED 和 AgentRun 终态；文件系统没有跨文件原子事务。
-
-**选择：**
-
-先写 `success_commit.json`，再按幂等顺序补齐事实，最后写 `COMPLETED` 并删除意图。
-
-**未选择的方案：**
-
-- 先把 run.json 写为 COMPLETED；
-- 捕获异常后仅记录日志；
-- 将全部 Session 和 Run 数据放在一个巨型 JSON；
-- 引入数据库但仍沿用非事务多步写。
-
-**收益：**
-
-- 崩溃后可补偿；
-- 不会出现 Run 已完成但 Conversation 缺失；
-- 重复恢复不会重复 Conversation；
-- 可在测试中注入每个故障边界。
-
-**代价：**
-
-- Repository 承担事务协调职责；
-- 需要扫描未决意图；
-- 本地文件锁和恢复仍不是多节点事务。
-
-**当前边界：**
-
-这是单机文件存储的恢复协议，不是数据库 ACID 或跨节点共识。
-
-#### 8.2.7 精确预算和 staged 压缩，而不是静默截断
-
-**原问题：**
-
-字符数估算不等于模型 Token；直接截断可能丢失系统约束、最新目标或完整对话边界；失败 Run 产生的摘要也不应污染 Session。
-
-**选择：**
-
-- 使用显式 tokenizer 精确计数；
-- 超限时只压缩最旧完整 Conversation；
-- 重建后再次计数；
-- 候选先暂存 Run；
-- 只有成功提交才更新 Session。
-
-**未选择的方案：**
-
-- 字符数估算；
-- 直接删除最旧消息；
-- 压缩后不重新计数；
-- 每次压缩立即写 Session；
-- Tokenizer 不可用时继续调用模型。
-
-**收益：**
-
-- 输入边界确定；
-- 不静默丢数据；
-- 失败不会提交摘要；
-- 压缩来源和 hash 可审计。
-
-**代价：**
-
-- 多一次或多次压缩 LLM 调用；
-- Tokenizer 配置成为必要依赖；
-- Engine 中的上下文控制流程变复杂。
-
-**当前边界：**
-
-压缩摘要仍由模型生成，语义保真需要 Prompt、测试和未来质量评估保障。
-
-#### 8.2.8 运行级输出端口，而不是构造期绑定 Channel
-
-**原问题：**
-
-共享 Adapter 若持有全局流输出状态，并发 Run 会产生输出归属和状态串扰；reasoning 也不应与最终回答混为同一正文。
-
-**选择：**
-
-每次 `execute/resolve/retry` 传入可选 `LLMOutputPort`，事件包含 session_id、run_id 和语义 kind。
-
-**未选择的方案：**
-
-- LLMProxyAdapter 构造时绑定一个 Channel；
-- RuntimeEngine 直接依赖 CLI；
-- reasoning 与 response 一起写 RunMessage；
-- 将所有增量都持久化为 Conversation。
-
-**收益：**
-
-- 输出按 Run 隔离；
-- reasoning/response 可分区展示；
-- response 仍形成可靠最终事实；
-- Channel 可替换。
-
-**代价：**
-
-- 输出与事实存在两个通道；
-- 入口必须处理最终去重；
-- 输出失败当前可能影响 LLM 调用错误语义。
-
-**当前边界：**
-
-reasoning 不可恢复、不可回放，也不作为业务审计事实。
-
-#### 8.2.9 Port 由 Runtime 定义，具体模块通过 Adapter 接入
-
-**原问题：**
-
-Runtime 若直接依赖 LLMProxy、ToolExecutor、SessionManager、Dispatcher 和文件路径，就会重新成为巨型耦合中心。
-
-**选择：**
-
-Application 定义最小 Protocol；Adapter 负责 DTO 和错误翻译；Bootstrap 负责创建并注入。
-
-**未选择的方案：**
-
-- Engine import 所有具体模块；
-- 外部模块返回 Runtime 可变对象；
-- 每种 Tool 或 Provider在 Engine 中增加分支；
-- Service Locator 或全局单例。
-
-**收益：**
-
-- 核心可以使用内存 Fake 测试；
-- 存储和外部能力可替换；
-- 依赖方向明确；
-- Runtime 不管理外部生命周期。
-
-**代价：**
-
-- DTO 和映射层增加；
-- Adapter 可能压缩错误语义；
-- 组合根更复杂。
-
-**当前边界：**
-
-Port 只隔离依赖，不自动保证 Adapter 正确、幂等或可恢复。
-
-#### 8.2.10 委派仍创建子 Run，而不是在父 Run 内切换 Agent
-
-**原问题：**
-
-若父 Run 在执行中替换 Agent Identity、Session 或 Context，隔离、权限、审计和取消边界都会变得模糊。
-
-**选择：**
-
-每次 delegation 创建目标 Agent 的独立 Session 和 child AgentRun，父 Run 只接收标准化结果。
-
-**未选择的方案：**
-
-- 父 Run 原地切换 Identity；
-- 多 Agent 共用一个 Conversation；
-- RuntimeEngine 直接调用目标 Agent 对象；
-- 将子执行作为普通 Python 函数调用。
-
-**收益：**
-
-- 父子运行事实分离；
-- 每个 Identity 有独立 Policy；
-- 子 Run 仍受 Session 串行和 Runtime 可靠性规则约束；
-- 取消关系可显式记录。
-
-**代价：**
-
-- 每次委派创建新 Session；
-- 进程内 Task 管理和结果缓存增加；
-- 当前缺少重启恢复。
-
-**当前边界：**
-
-这是同进程异步委派，不是持久化任务队列或远程 worker。
+**代价与边界：**每次委派创建新 Session；Task 和结果绑定当前只在进程内，不支持重启恢复。
 
 ### 8.3 已知痛点
 
-#### 8.3.1 `RuntimeEngine` 规模过大
+#### R1. `RuntimeEngine` 内部职责过密
 
-`engine.py` 当前约 1500 行，同时处理：
+`engine.py` 同时处理新建、恢复、ReAct、Tool、Delegation、ContextVersion、预算、压缩、审计和各类终态。仍应保持单执行中心，但内部用例边界过密。
 
-- 新建与恢复；
-- ReAct 主循环；
-- Tool/Delegation；
-- 上下文预算；
-- 历史压缩；
-- ContextVersion；
-- 审计事件；
-- 成功/失败/取消/中断提交。
+#### R2. 状态机与 Engine 双重控制
 
-它仍保持一个执行中心，但内部用例边界过密，后续修改容易产生跨分支回归。
+`AgentState` 返回 `AgentAction`，但 `_drive()` 主要按 `AgentPhase` 分支；最终回答转换到 `FINALIZING` 后直接提交，没有再经状态机进入 `COMPLETED`。`WAITING_DELEGATION` 已定义，但当前 `delegate` Tool Call 以 `manage_state=False` 执行；`HANDOFF_TARGET` 没有主路径。
 
-#### 8.3.2 状态机尚未成为唯一控制来源
+#### R3. 循环、超时和部分状态字段未贯通
 
-当前 `AgentState` 返回 `AgentAction`，但 Engine 主循环主要根据 `AgentPhase` 直接分支：
+`max_iterations` 被写入 `RunBudget`，但 `_drive()` 没有根据它终止循环；`timeout_ms`、`TimeoutReached` 和 `RunErrorCode.TIMEOUT` 也未形成运行控制闭环。`retry_count`、`truncate_count` 和 `loop_fingerprint` 没有稳定更新，Checkpoint 恢复也未完整重建这些字段。
 
-```text
-if phase == WAITING_TOOLS
-else 构建 Context 并调用 LLM
-```
+#### R4. Session 并发控制不是跨进程 lease
 
-此外：
+进程内 `asyncio.Lock` 与文件型活动 Run 检查不是原子条件写。两个进程可能同时通过检查，代码中“持久化占用保证跨进程串行”的表述超过当前能力。
 
-- 最终回答转换到 `FINALIZING` 后，Engine 直接提交并返回，没有再通过状态机进入 `COMPLETED`；
-- `INTERRUPTED`、`ABANDONED` 等持久化状态主要由 Engine 直接写入；
-- `WAITING_DELEGATION` 的领域转换已定义，但当前 `delegate` Tool Call 以 `manage_state=False` 执行，不进入该状态；
-- `HANDOFF_TARGET` 当前没有清晰执行路径。
+#### R5. 审批消费与恢复不是原子边界
 
-状态机提供合法转换约束，但当前不是完整的可执行流程模型。
+当前流程会先消费 ApprovalRecord，再读取并校验 Checkpoint、RunStatus 和待执行 Tool Call。后续恢复校验失败时，审批已经无法再次提交。文件型 consume 也缺少跨进程 CAS。
 
-#### 8.3.3 部分状态字段没有形成完整闭环
+等待审批 Run 的取消可绕过 Session 锁，而审批恢复会获取 Session 锁；二者之间没有事务型竞争协调。
 
-`AgentState` 包含：
+#### R6. 取消主要依赖安全点标记
 
-```text
-retry_count
-truncate_count
-loop_fingerprint
-```
+`LLMProxyAdapter.cancel()` 没有底层请求句柄，`ToolExecutorAdapter.cancel()` 不能终止正在执行的 Handler。长模型请求和有副作用 Tool 不一定立即停止。
 
-当前主流程没有清晰更新这些字段；Checkpoint 恢复函数也只重建 phase、iteration 和 waiting approval id。若未来启用循环检测或重试计数，现有恢复会丢失控制数据。
+#### R7. Tool 错误语义被压缩
 
-#### 8.3.4 Session 租约不是跨进程安全协议
+Tool 的 `INVALID_ARGUMENTS`、`POLICY_DENIED`、`TIMEOUT` 和网络错误进入 Runtime 后统一映射为 `TOOL_FAILURE`，限制重试判断、模型反馈、统计和用户展示。
 
-`SessionRunCoordinator` 使用进程内 `asyncio.Lock`。活动 Run 检查和新 Run 创建不是跨进程原子事务，因此两个进程仍可能同时通过检查。
+#### R8. 预算与统计事实边界不清
 
-代码注释中“以持久化占用保证跨进程串行”的表述超出了当前实现能力。
+`RunBudget` 与 `RunStatistics` 都含有 Token、调用次数或时长相关语义；当前更新和 Checkpoint 恢复缺少单一权威入口，`duration_ms` 也未形成统一计算路径。
 
-#### 8.3.5 审批消费缺少跨进程 CAS
+#### R9. 输出故障可能被误判为模型故障
 
-文件型 Approval Repository 的 consume 是“读取 pending 后写回 consumed”。单进程路径可以防止重复处理，但多个进程没有条件更新或文件锁，不能证明只有一个消费者成功。
+`LLMProxyAdapter` 在流循环内直接等待 `output_port.emit()`；输出端异常可能被捕获并映射为 `LLMUnavailableError`。
 
-#### 8.3.6 取消目前主要是安全点标记
+#### R10. Delegation 恢复能力不足
 
-`LLMProxyAdapter.cancel()` 没有真实 Provider 句柄；`ToolExecutorAdapter.cancel()` 只清理等待集合。长时间模型请求或正在运行的有副作用 Tool 不一定立即停止。
+`_running`、`_results` 和 `_task_bindings` 都是进程内字典。进程重启后父 Run 无法重新关联 child Run，当前也会为每次委派创建新的目标 Session。
 
-#### 8.3.7 Tool 错误语义进入 Runtime 后被压缩
+#### R11. 持久化与兼容噪声
 
-Tool 模块的 `INVALID_ARGUMENTS`、`POLICY_DENIED`、`TIMEOUT`、`NETWORK_ERROR` 等细粒度错误，在 `ToolExecutorAdapter` 中统一映射为 Runtime `TOOL_FAILURE`。
+按 run_id 查找、扫描未决提交和列举活动 Run 依赖目录遍历；`STATE_TRANSITION`、`CHECKPOINT_SAVED` 等事件已定义但未进入主事件流；恢复辅助 DTO 使用部分合成元数据；Runtime v2/v4 和两套 Context 压缩协议仍有历史残留。
 
-这限制了：
+#### R12. reasoning 的观测边界有限
 
-- Runtime 重试判断；
-- 模型获得精确反馈；
-- 事件统计；
-- 用户错误展示。
-
-#### 8.3.8 `RunBudget` 与 `RunStatistics` 存在重复语义
-
-`RunExecution.RunBudget` 定义 token 和 timeout 字段，`AgentRun.RunStatistics` 也保存 tokens 和调用次数。当前统计更新主要发生在 AgentRun，Checkpoint 又保存 RunBudget，两个对象的权威关系不够明确。
-
-`duration_ms` 当前也没有形成明显的统一计算和提交路径。
-
-#### 8.3.9 输出端口失败可能被归类为模型不可用
-
-`LLMProxyAdapter` 在流迭代中直接 `await output_port.emit()`。若 Channel 输出失败，该异常会落入模型调用异常捕获并映射为 `LLMUnavailableError`，导致 UI 传输故障与模型服务故障混淆。
-
-#### 8.3.10 reasoning 缺少持久化观测
-
-不保存 reasoning 是明确的隐私和上下文边界选择，但代价是：
-
-- 无法在重启后回放；
-- 无法从 RunEvent 分析 reasoning 输出时序；
-- 调试模型“思考已输出但 response 未完成”的场景信息有限。
-
-这不是必须修复的错误，但需要作为能力边界保持明确。
-
-#### 8.3.11 Delegation 控制状态只在内存
-
-`RuntimeDelegationAdapter` 的：
-
-```text
-_running
-_results
-_task_bindings
-```
-
-都是进程内字典。进程重启后，父 Run 无法重新关联和等待正在执行的 child Run；当前也会为每次委派创建新的目标 Session。
-
-#### 8.3.12 定义的部分事件没有进入当前事件流
-
-`RunEventType` 中保留 `STATE_TRANSITION` 和 `CHECKPOINT_SAVED`，当前 Engine 主路径主要写业务边界事件，没有对应发射点。事件枚举与实际审计时间线存在范围差异。
-
-#### 8.3.13 恢复辅助对象使用合成元数据
-
-审批恢复从 ContextVersion 重建 `ConversationSnapshot` 时，部分 session/version/历史压缩边界数据使用合成默认值。当前恢复依赖 `replay_active_context=True` 和 ContextVersion 作为权威，因此可以工作，但 DTO 语义不够直观，也不适合未来扩展更多恢复分支。
-
-#### 8.3.14 文件仓储查找和恢复依赖目录扫描
-
-按 run_id 查找 Run、扫描未决成功提交和列举活动 Run 都需要遍历目录。对于本地轻量场景可接受，但随着 Session/Run 数量增加，启动恢复和控制操作会变慢。
-
-#### 8.3.15 Runtime v2 / v4 命名仍不一致
-
-当前公开模块、Domain 和存储格式称 Runtime v4，但部分：
-
-- docstring；
-- 错误文本；
-- Adapter 描述；
-- Delegation 标题；
-- `build_runtime_services` 文案
-
-仍使用 Runtime v2。它们通常指同一套架构的不同演进阶段，容易让读者误以为存在两套并行 Runtime。
-
-#### 8.3.16 Context 压缩协议存在兼容层重叠
-
-Application 同时保留较通用的 `ContextCompactionPort` 和当前 Engine 实际使用的 `HistoryCompactorPort`。`LLMContextCompactor` 同时实现两种语义，增加了理解和维护成本。
+不保存 reasoning 是当前明确选择，但意味着无法重启后回放，也无法从 RunEvent 分析 reasoning 输出时序。这是能力限制，不等同于必须持久化全文。
 
 ### 8.4 演进方向
 
-以下均为候选方案，尚未视为当前实现。
-
-#### 8.4.1 在保留单执行中心的前提下拆分 Engine 内部用例
-
-可以提取：
-
-```text
-RunLifecycleService
-LLMDriveService
-ToolDriveService
-ContextPreparationService
-SuccessCommitCoordinator
-RecoveryService
-```
-
-这些服务仍由 RuntimeEngine 统一调用，避免把主循环重新分散为多个互相触发的对象。
-
-#### 8.4.2 收口状态机与 Engine 的控制权
-
-需要在两种方向中明确选择：
-
-**方向 A：状态机成为权威执行计划**
-
-```text
-AgentState + DomainEvent
-→ AgentAction
-→ Engine 只分派 Action
-```
-
-补齐 FINALIZING → COMPLETED、中断、放弃、超时和委派动作。
-
-**方向 B：状态机只负责合法阶段校验**
-
-删除未使用 Action 和控制字段，避免表现为完整工作流引擎。
-
-不应继续维持“状态机和 Engine 同时部分决定流程”的中间状态。
-
-#### 8.4.3 建立版本化恢复 DTO
-
-Checkpoint 恢复应完整、显式地重建所有启用的状态字段，避免 `_state_from_checkpoint` 手工遗漏。可以为每个存储版本定义严格 parser 和 migration。
-
-#### 8.4.4 增加真正的跨进程 Session Lease
-
-数据库 Adapter 可提供：
-
-```text
-session_id
-lease_owner
-lease_version / fencing_token
-expires_at
-active_run_id
-```
-
-请求创建、审批恢复和 Run 终态应使用条件更新，而不是仅依赖本地 Lock 和目录扫描。
-
-#### 8.4.5 将审批消费改为事务条件更新
-
-新的 Approval Repository 需要原子执行：
-
-```text
-UPDATE approval
-SET status=CONSUMED
-WHERE approval_id=? AND status=PENDING
-```
-
-以受影响行数判断唯一消费者。
-
-#### 8.4.6 引入可取消 Operation Handle
-
-LLMPort、ToolPort 和 DelegationPort 可以在开始外部操作时注册可取消句柄，由 CancellationService 统一调用真实传输或子进程取消。
-
-有副作用 Tool 还需要持久化调用账本和幂等键，不能只依赖内存句柄。
-
-#### 8.4.7 贯通细粒度 Tool 错误
-
-Runtime Tool DTO 可保留：
-
-```text
-tool_error_code
-tool_error_type
-retryable
-```
-
-状态机仍可统一进入 Tool 失败，但重试、展示、模型反馈和审计不再丢失原因。
-
-#### 8.4.8 统一预算与统计事实
-
-明确：
-
-- RunBudget 是限制与实时消耗；
-- RunStatistics 是最终投影；
-
-或合并为一个受控对象。所有更新和 Checkpoint 恢复应有单一入口，并补齐 duration/timeout 语义。
-
-#### 8.4.9 分离输出故障与模型故障
-
-`LLMOutputPort.emit()` 可以采用：
-
-- 非阻断的独立输出队列；
-- 明确 `OutputDeliveryError`；
-- 输出失败降级但继续聚合最终 response；
-- 按配置决定是否保存有限输出事件。
-
-任何方案都应保持 response 最终事实不依赖 UI 连接。
-
-#### 8.4.10 持久化 Delegation Binding
-
-将：
-
-```text
-parent_run_id
-child_run_id
-task_id
-target_session_id
-status
-```
-
-写入 Repository，使重启后可以查询 child Run 终态并恢复父 Run，而不是依赖 `_running` Task 对象。
-
-#### 8.4.11 使用索引型存储 Adapter
-
-SQLite/PostgreSQL Adapter 可为：
-
-- run_id；
-- session_id + status；
-- pending success commits；
-- approval_id；
-- parent/root run id
-
-建立索引，减少全目录扫描。Domain 和 Application Port 无需因此改变。
-
-#### 8.4.12 清理版本和兼容命名
-
-统一对外称“Runtime”，将 v4 仅用于持久化格式版本；删除代码注释中的阶段号、Runtime v2 文案和旧 Task 工具兼容常量，避免 Wiki 与源码再次产生历史噪声。
-
----
+| 编号 | 解决的痛点 | 候选方向 | 影响模块与代价 |
+|---|---|---|---|
+| E1 | R1 | 在单执行中心下提取 LLMDrive、ToolDrive、ContextPreparation、Recovery 和 SuccessCommit 等内部服务 | Runtime Application；需防止服务互相触发形成新状态机 |
+| E2 | R2、R3 | 明确状态机定位：要么让 AgentAction 成为唯一执行计划并补齐终态/超时/委派，要么删除未使用动作和字段，仅保留合法阶段校验 | Runtime Domain、Engine、Checkpoint；涉及较大控制流调整 |
+| E3 | R3、R8 | 统一运行限制与统计：明确 max_iterations、deadline、Token 消耗和最终统计的单一更新入口 | Execution、Facts、Engine、测试；需要存储兼容 |
+| E4 | R4 | 为数据库 Adapter 增加 session lease、fencing token 和条件更新 | Repository、Coordinator、Bootstrap；本地文件模式仍可保留单进程语义 |
+| E5 | R5 | 将审批“验证恢复条件 + 消费记录 + 更新 Run”纳入事务；文件模式至少增加进程锁和失败补偿 | Approval、Checkpoint、Run Repository、Coordinator |
+| E6 | R6 | LLM、Tool 和 Delegation 注册可取消 Operation Handle；有副作用 Tool 增加持久化调用账本和幂等键 | LLM、Tool、Runtime、外部 Provider；无法替代外部系统幂等 |
+| E7 | R7 | Runtime Tool DTO 保留 tool_error_code、tool_error_type 和 retryable | Tool、Runtime Adapter、状态机和输出展示 |
+| E8 | R9 | 将 OutputDeliveryError 与 LLMUnavailableError 分离，或采用非阻断输出队列；输出失败不影响最终 response 聚合 | Channel、LLM Adapter、Runtime |
+| E9 | R10 | 持久化 parent/child/task/session binding，重启后按 child Run 终态恢复父 Run | Orchestration、Runtime Repository、Session |
+| E10 | R11 | 引入 SQLite/PostgreSQL 索引型 Adapter；清理未使用事件、旧版本命名和重复压缩契约 | Runtime、Bootstrap、迁移工具；需要明确格式迁移 |
+| E11 | R12 | 仅在明确隐私策略下增加有限 reasoning 元数据或摘要事件，而非默认保存全文 | LLM、Runtime Events、配置；需权衡隐私和存储 |
 
 ## 9. 源码索引
 
@@ -2357,7 +1906,7 @@ src/dotclaw/runtime/
 | `application/session_run_coordinator.py` | Session 协调 | 进程内锁、普通提交和控制串行化 |
 | `application/approval_service.py` | 审批 | approval_id 创建、定位和消费 |
 | `application/cancellation_service.py` | 取消 | 活动 Run token 和 child 映射 |
-| `application/context_budget.py` | 预算 | 精确 Token 预算契约和 Planner |
+| `application/context_budget.py` | 预算 | 确定性 Token 预算契约和 Planner |
 | `application/history_compaction.py` | 压缩 | Conversation 批次选择与摘要协议 |
 | `application/context_compaction.py` | 兼容压缩契约 | 通用 fragment 压缩 DTO |
 
@@ -2372,7 +1921,7 @@ src/dotclaw/runtime/
 | `adapters/session_conversation_projector.py` | ConversationProjectionPort | 成功 Run → Session |
 | `adapters/llm_proxy_adapter.py` | LLMPort | 业务模型、reasoning/response 输出 |
 | `adapters/llm_context_compactor.py` | HistoryCompactorPort | 历史摘要模型调用 |
-| `adapters/tiktoken_token_counter.py` | TokenCounterPort | 精确 Token 统计 |
+| `adapters/tiktoken_token_counter.py` | TokenCounterPort | 显式 tokenizer 的确定性输入计数 |
 | `adapters/tool_executor_adapter.py` | ToolPort | ToolExecutor、审批和结果转换 |
 | `adapters/agent_policy_resolver.py` | RunPolicyPort | Identity、工具和模型策略冻结 |
 
@@ -2392,7 +1941,7 @@ src/dotclaw/
 ├── orchestration/
 │   └── runtime_delegation_adapter.py
 ├── channel/
-│   └── adapters.py
+│   └── runtime_llm_output.py
 ├── session/
 │   └── session.py
 ├── llm/
@@ -2408,37 +1957,9 @@ src/dotclaw/
 | `bootstrap/session_interaction.py` | Session/Identity 应用入口 |
 | `context/provider.py` | ContextPort 当前实现 |
 | `orchestration/runtime_delegation_adapter.py` | DelegationPort 当前实现 |
-| `channel/adapters.py` | 运行级 LLMOutputPort 实现 |
+| `channel/runtime_llm_output.py` | 运行级 LLMOutputPort 实现 |
 | `session/session.py` | 长期 Session 和 Conversation |
 | `llm/proxy.py` | LLMPort 背后的模型代理 |
 | `tools/executor.py` | ToolPort 背后的工具安全执行器 |
 
 ---
-
-## 阅读总结
-
-理解 Runtime 时应保持以下主线：
-
-```text
-Session 中的普通消息
-→ 在 Session 锁内冻结 RunRequest
-→ 冻结 AgentPolicySnapshot
-→ 创建 AgentRun 与 RunExecution
-→ AgentState 约束阶段
-→ ContextVersion + RunMessage 构造真实 LLM 输入
-→ LLM / Tool / Delegation 经 Port 执行
-→ RunEvent 记录边界
-→ Checkpoint 只保存最小恢复控制
-→ 成功通过 SuccessCommitIntent 投影 Conversation
-```
-
-最重要的判断是：
-
-1. Runtime 的隔离单位是 Run，不是 Agent 对象。
-2. Session 负责长期成功语义，Runtime 负责一次执行事实。
-3. AgentState 负责规则，RuntimeEngine 负责副作用和提交。
-4. Context、LLM、Tool 和 Delegation 都通过 Port 接入。
-5. reasoning 是即时输出，不是 Conversation 或恢复事实。
-6. 审批和中断只从安全边界恢复，不盲目重放副作用。
-7. SuccessCommitIntent 提供单机文件存储的补偿能力，不代表分布式事务。
-8. 当前架构已经具备清晰的可恢复执行基础，但 Engine 规模、状态机权威性、跨进程租约、真实取消和持久化 Delegation 仍需继续收口。
