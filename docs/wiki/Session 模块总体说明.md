@@ -2,6 +2,7 @@
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
 > 扫描基准：2026-07-26，包含 Session/Conversation/HistoryCompression、SessionManager、SessionInteractionService、RunRequest Factory、SessionRunCoordinator、成功 Conversation 投影、成功提交恢复和完整删除流程  
+> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
 > 文档定位：自顶向下解释 Session 作为长期对话容器的领域边界、持久化结构、并发语义、成功投影、历史压缩、恢复与删除协议，并记录当前实现中的真实限制。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -2313,7 +2314,7 @@ src/dotclaw/runtime/adapters/
 
 | 文件 | Session 视角 |
 |---|---|
-| `runtime/adapters/_file_support.py` | Runtime v4 文件名、路径段校验和原子 JSON 写入 |
+| `runtime/adapters/_file_support.py` | Runtime 文件名、路径段校验和原子 JSON 写入 |
 | `runtime/adapters/run_repository.py` | Run 事实、success_commit 意图与恢复 |
 | `runtime/adapters/session_conversation_projector.py` | COMPLETED Run→Session Conversation/Compression |
 | `runtime/adapters/approval_repository.py` | 审批持久化和按 Session 清理 |

@@ -2,6 +2,7 @@
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
 > 扫描基准：2026-07-26，包含 Task Domain、TaskMessageBroker、AgentDispatcher、RuntimeDelegationAdapter、Runtime DelegationPort、`delegate` ToolCall 特殊路径、父子 Run 关系、结果回填和取消传播  
+> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
 > 文档定位：自顶向下解释 dotClaw 当前同进程多 Agent 委托如何建立 Task 投影、创建目标 Session 和子 Run、同步等待结果并回填父 Run，以及 Task 状态与 Runtime 状态之间的真实边界。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -492,7 +493,7 @@ expected_deliverables
 当前 RuntimeDelegationAdapter 构造的 TaskSpecification 只使用：
 
 ```text
-title = "Runtime v2 delegation"
+title = "Runtime v2 delegation"  # 当前代码中的历史字面量
 objective = DelegationRequest.input_message.content
 ```
 
@@ -1932,7 +1933,7 @@ Task CANCELLED
 
 #### 8.2.12 旧 Task 工具暂时排除
 
-**问题与选择：**旧 `wait_task` 等工具没有接入 Runtime v4 的安全和恢复链。当前 Policy Resolver 排除它们。
+**问题与选择：**旧 `wait_task` 等工具没有接入 Runtime 的安全和恢复链。当前 Policy Resolver 排除它们。
 
 **未选择：**继续向模型暴露不完整协议。
 
@@ -1996,7 +1997,7 @@ Engine 在普通 ToolPort 前按名称特殊拦截，因此 Capability、Policy�
 
 #### O10. 结构化任务契约在 Runtime 适配中丢失
 
-Runtime 将 title/objective 拼为文本；Adapter 又用固定标题 `"Runtime v2 delegation"` 创建 TaskSpecification。materials、constraints 和 expected_deliverables 虽已存在于 Domain，但没有进入 ToolCall、DelegationRequest 或生产 Task。
+Runtime 将 title/objective 拼为文本；Adapter 又用固定标题 `"Runtime v2 delegation"`（历史字面量） 创建 TaskSpecification。materials、constraints 和 expected_deliverables 虽已存在于 Domain，但没有进入 ToolCall、DelegationRequest 或生产 Task。
 
 #### O11. Broker 中途通信和 WAITING_DELEGATION 状态未接入生产主链
 

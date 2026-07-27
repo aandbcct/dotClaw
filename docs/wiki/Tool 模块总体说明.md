@@ -2,7 +2,8 @@
 
 > 适用代码：`aandbcct/dotClaw` 默认分支 `master`  
 > 文档定位：自顶向下解释 Tool 在系统中的位置、完整组成、核心类、依赖与使用流程，并记录设计取舍、痛点和演进方向。  
-> 编写基准：遵循《dotClaw Wiki 编写规范与验收准则》，保留必要的跨模块上下文和不同层次的有意义重复。  
+> 扫描基准：2026-07-27，以 `master@3d343abea03c58e68fdcdf5fc8271352bafc988c` 为事实基线。  
+> 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》。  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
 
 ## 1. 模块定位与边界
@@ -162,9 +163,9 @@ sequenceDiagram
 相关文档：
 
 - [Runtime 模块总体说明](./Runtime%20模块总体说明.md)
-- [MCP 模块说明](./MCP%20模块说明.md)
-- [Skills 模块说明](./Skills%20模块说明.md)
-- [Config 模块说明](./Config%20模块说明.md)
+- [MCP 模块说明](./MCP%20模块总体说明.md)
+- [Skills 模块说明](./Skills%20模块总体说明.md)
+- [Config 模块说明](./Config%20模块总体说明.md)
 
 ---
 
@@ -456,7 +457,7 @@ MCP 是独立模块。Tool 模块只依赖它提供的两项接入结果：
 - `MCPToolProvider` 将发现到的 MCP tools 注册进同一个 `ToolRegistry`；
 - `McpToolAdapter` 实现 `ToolHandler`，使用 `mcp.<server>.<tool>` 名称。
 
-MCP resources 和 prompts 不进入 Tool Registry。连接状态机、重连和 Server 生命周期详见 [MCP 模块说明](./MCP%20模块说明.md)。
+MCP resources 和 prompts 不进入 Tool Registry。连接状态机、重连和 Server 生命周期详见 [MCP 模块说明](./MCP%20模块总体说明.md)。
 
 #### 4.3.4 `ToolProvider`
 
@@ -879,7 +880,7 @@ flowchart LR
 
 它不把 Skill 注册为 Tool，也不影响 Tool 的放行结果，只用于观测。
 
-该组件属于 Tool 与 Skills 的交界处。Skill 扫描与生命周期详见 [Skills 模块说明](./Skills%20模块说明.md)。
+该组件属于 Tool 与 Skills 的交界处。Skill 扫描与生命周期详见 [Skills 模块说明](./Skills%20模块总体说明.md)。
 
 ---
 
@@ -1710,7 +1711,7 @@ ToolResult(is_error=False)
 - `tool_end`；
 - 网络审计。
 
-`ToolExecutorAdapter` 当前调用 `execute_approved()` 时没有传入 Journal。因此 Runtime v4 主路径主要依赖自己的 RunEvent 事实，不会自动获得 ToolExecutor 的完整 Journal 事件。
+`ToolExecutorAdapter` 当前调用 `execute_approved()` 时没有传入 Journal。因此 Runtime 主路径主要依赖自己的 RunEvent 事实，不会自动获得 ToolExecutor 的完整 Journal 事件。
 
 #### 8.3.6 进程内去重不等于持久化幂等
 
@@ -2014,7 +2015,7 @@ src/dotclaw/
 
 ---
 
-## 阅读总结
+### 9.11 阅读总结
 
 理解 Tool 模块时应保持以下主线：
 

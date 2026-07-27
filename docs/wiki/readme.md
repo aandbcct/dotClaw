@@ -3,8 +3,8 @@
 > 本 Wiki 面向参与 dotClaw 开发、扩展和排障的开发者。  
 > 阅读顺序遵循“项目地图 → 核心链路 → 模块 → 逻辑组件 → 核心类 → 修改入口”，不要求读者先理解源码目录。
 
-> [!NOTE]
-> 当前首页中的模块链接按文档重写后的目标结构编排。已有的 Runtime、Context 和 Tool 文档沿用当前文件名；其他链接会在对应模块文档建立后生效。
+> 审计基准：`master@3d343abea03c58e68fdcdf5fc8271352bafc988c`（2026-07-27）  
+> 当前已完成 12 篇核心模块 Wiki；Channel 待补充，Journal 需先完成与 RunEvent 的边界审计，Scheduler 当前代码与配置存在但未进入 ApplicationHost。
 
 ## 1. 项目代码地图
 
@@ -15,7 +15,7 @@ flowchart TB
     Bootstrap["Bootstrap / Composition<br/>ApplicationHost<br/>对象装配与生命周期"]
 
     subgraph Entry["交互与应用服务"]
-        Channel["Channel<br/>输入、输出、流式文本、审批交互"]
+        Channel["Channel<br/>输入、审批交互与 reasoning/response 输出"]
         Interaction["SessionInteractionService<br/>Session 路由与应用用例"]
         Session["Session<br/>成功对话语义与会话元数据"]
         Agent["Agent<br/>Identity 与运行约束"]
@@ -46,8 +46,8 @@ flowchart TB
 
     subgraph Support["支撑设施"]
         Config["Config<br/>配置模型与加载"]
-        Journal["Journal<br/>Trace / Report / Snapshot"]
-        Scheduler["Scheduler<br/>轻量进程内提醒"]
+        Journal["Journal<br/>代码与配置存在，未进入 Runtime 主链"]
+        Scheduler["Scheduler<br/>代码与配置存在，当前未装配"]
     end
 
     Channel --> Interaction
@@ -84,7 +84,6 @@ flowchart TB
     Bootstrap -.装配.-> MCP
 
     Config -.提供配置.-> Bootstrap
-    Scheduler --> Channel
 ```
 
 从这张图应当先建立四个判断：
@@ -92,7 +91,7 @@ flowchart TB
 1. `RuntimeEngine` 是一次运行的执行协调器，不是整个应用的组合根。
 2. `SessionRunCoordinator` 处理多个 Run 之间的 Session 占用，`AgentState` 处理单个 Run 内部的状态转换。
 3. Memory、Skills 和 Agent Directory 主要通过 Context 进入模型输入；MCP 主要通过 Tool 进入工具注册表。
-4. Bootstrap、Config、Journal 不应被误画成请求主链中的业务步骤。
+4. Bootstrap 与 Config 是装配和配置支撑；Journal、Scheduler 当前没有进入 ApplicationHost 主链。
 
 ---
 
@@ -171,52 +170,62 @@ flowchart LR
 
 ## 3. 逻辑子系统与模块索引
 
-这里的“子系统”只用于建立阅读地图，不要求源码存在同名目录。模块文档应以逻辑组件组织，并在文末映射回实际文件。
+这里的“子系统”用于建立阅读地图，不要求源码存在同名目录。状态列区分“代码存在”和“当前已进入生产主链”。
+
+状态含义：
+
+| 状态 | 含义 |
+|---|---|
+| 主链已装配 | ApplicationHost 创建，并被正常请求链消费 |
+| 可选已装配 | 满足配置或资源条件时由 Host 创建 |
+| 默认空能力 | 主链支持，但当前仓库默认没有可用资源 |
+| 代码存在、未装配 | 类型或配置存在，但 Host 当前不创建 |
+| 待补充 | 生产代码存在，尚未完成独立 Wiki |
 
 ### 3.1 交互与应用服务
 
-| 模块 | 定位 | 主要入口 | 详细文档 |
-|---|---|---|---|
-| Bootstrap 与应用入口 | 进程启动、对象装配、生命周期和 Session 级应用用例 | `ApplicationHost`、`SessionInteractionService` | [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块说明.md) |
-| Channel | 外部输入、输出、流式文本和审批交互适配 | `Channel`、`CLIChannel`、`ChannelTextStreamAdapter` | [Channel](./Channel%20模块说明.md) |
+| 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
+|---|---|---|---|---|
+| Bootstrap 与应用入口 | 进程启动、对象装配、生命周期和 Session 级应用用例 | `ApplicationHost`、`SessionInteractionService` | 主链已装配 | [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块总体说明.md) |
+| Channel | 外部输入、审批交互和 reasoning/response 运行级输出适配 | `Channel`、`CLIChannel`、`ChannelLLMOutputAdapter` | 主链已装配；Wiki 待补充 | 待补充 |
 
 ### 3.2 身份与会话
 
-| 模块 | 定位 | 主要入口 | 详细文档 |
-|---|---|---|---|
-| Agent | 声明 Agent Identity、行为、模型、权限和 Context 计划 | `AgentIdentity`、`AgentRegistry` | [Agent](./Agent%20模块说明.md) |
-| Session | 保存成功对话语义、历史压缩和会话元数据 | `Session`、`Conversation`、`SessionManager` | [Session](./Session%20模块说明.md) |
+| 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
+|---|---|---|---|---|
+| Agent 与 Identity | 声明 Agent Identity、行为、模型、权限和 Context 计划 | `AgentIdentity`、`AgentRegistry` | 主链已装配 | [Agent 与 Identity](./Agent%20与%20Identity%20模块总体说明.md) |
+| Session | 保存成功对话语义、历史压缩和会话元数据 | `Session`、`Conversation`、`SessionManager` | 主链已装配 | [Session](./Session%20模块总体说明.md) |
 
 ### 3.3 执行内核
 
-| 模块 | 定位 | 主要入口 | 详细文档 |
-|---|---|---|---|
-| Runtime | 驱动 AgentRun 状态、外部能力调用、恢复和可靠提交 | `SessionRunCoordinator`、`RuntimeEngine`、`RunExecution`、`AgentState` | [Runtime](./Runtime%20模块总体说明.md) |
+| 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
+|---|---|---|---|---|
+| Runtime | 驱动 AgentRun 状态、外部能力调用、恢复和可靠提交 | `SessionRunCoordinator`、`RuntimeEngine`、`RunExecution`、`AgentState` | 主链已装配 | [Runtime](./Runtime%20模块总体说明.md) |
 
 ### 3.4 Agent 能力系统
 
-| 模块 | 定位 | 主要入口 | 详细文档 |
-|---|---|---|---|
-| Context | 按 Owner 和 Slot Plan 构造模型上下文、工具快照和动态事实引用 | `ContextProvider`、`ContextPlanResolver`、`ContextSlotManager` | [Context](./上下文工程说明.md) |
-| LLM | Provider 接入、候选路由、限流、熔断、重试和降级 | `LLMProxy`、`ModelRouter` | [LLM](./LLM%20模块说明.md) |
-| Tool | 工具声明、发现、注册、安全决策、审批和统一执行 | `ToolExecutor`、`ToolRegistry`、`CapabilityBroker`、`PolicyEngine` | [Tool](./Tool%20模块总体说明.md) |
-| MCP | MCP Server 生命周期、能力发现和 ToolHandler 适配 | `McpClient`、`MCPToolProvider`、`McpToolAdapter` | [MCP](./MCP%20模块说明.md) |
-| Memory | 文件同步、混合检索、日记忆写入和长期蒸馏 | `MemoryManager`、`MemoryStorage`、`DeepDream` | [Memory](./Memory%20模块说明.md) |
-| Skills | SKILL.md 扫描、元数据注册和 Context 暴露 | `SkillScanner`、`SkillRegistry` | [Skills](./Skills%20模块说明.md) |
+| 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
+|---|---|---|---|---|
+| Context | 按 Owner 和 Slot Plan 构造模型上下文、工具快照和动态事实引用 | `ContextProvider`、`ContextPlanResolver`、`ContextSlotManager` | 主链已装配 | [Context](./Context%20模块总体说明.md) |
+| LLM | Provider 接入、候选路由、限流、熔断、重试和降级 | `LLMProxy`、`ModelRouter` | 主链已装配 | [LLM](./LLM%20模块总体说明.md) |
+| Tool | 工具声明、发现、注册、安全决策、审批和统一执行 | `ToolExecutor`、`ToolRegistry`、`CapabilityBroker`、`PolicyEngine` | 主链已装配 | [Tool](./Tool%20模块总体说明.md) |
+| MCP | MCP Server 生命周期、能力发现和 ToolHandler 适配 | `McpClient`、`MCPToolProvider`、`McpToolAdapter` | 可选已装配；默认无 Server | [MCP](./MCP%20模块总体说明.md) |
+| Memory | 文件同步、混合检索、日记忆写入和长期蒸馏 | `MemoryManager`、`MemoryStorage`、`DeepDream` | 可选已装配；Dream 仅手动入口 | [Memory](./Memory%20模块总体说明.md) |
+| Skills | SKILL.md 扫描、元数据注册和 Context 暴露 | `SkillScanner`、`SkillRegistry` | 可选已装配；默认 Registry 为空 | [Skills](./Skills%20模块总体说明.md) |
 
 ### 3.5 多 Agent 编排
 
-| 模块 | 定位 | 主要入口 | 详细文档 |
-|---|---|---|---|
-| Orchestration | 保存委派 Task 事实、传递消息并将委派映射为目标子 Run | `RuntimeDelegationAdapter`、`AgentDispatcher`、`TaskMessageBroker` | [Orchestration](./Orchestration%20模块说明.md) |
+| 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
+|---|---|---|---|---|
+| Orchestration 与 Delegation | 保存委派 Task 事实、传递消息并将委派映射为目标子 Run | `RuntimeDelegationAdapter`、`AgentDispatcher`、`TaskMessageBroker` | 主链已装配 | [Orchestration 与 Delegation](./Orchestration%20与%20Delegation%20模块总体说明.md) |
 
 ### 3.6 支撑设施
 
-| 模块 | 定位 | 主要入口 | 详细文档 |
-|---|---|---|---|
-| Config | 加载全局配置、模型路由配置、环境变量和兼容迁移 | `Config`、`RouterConfig`、`get_config` | [Config](./Config%20模块说明.md) |
-| Journal | 可选的 Trace、Report 和 Snapshot 观测 | `Journal`、`AgentEvent` | [Journal](./Journal%20模块说明.md) |
-| Scheduler | 当前提供轻量、进程内的一次性提醒 | `ReminderManager` | [Scheduler](./Scheduler%20模块说明.md) |
+| 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
+|---|---|---|---|---|
+| Config | 加载全局配置、模型路由配置、环境变量和兼容迁移 | `Config`、`RouterConfig`、`get_config` | 主链已装配 | [Config](./Config%20模块总体说明.md) |
+| Journal | Trace、Report 和 Snapshot 观测代码 | `Journal`、`AgentEvent` | 代码存在、未进入 Runtime 主链 | 边界审计后决定是否建立 Observability Wiki |
+| Scheduler | 进程内一次性提醒代码 | `ReminderManager` | 代码存在、当前未装配 | 暂不建立独立 Wiki |
 
 ---
 
@@ -302,7 +311,6 @@ flowchart TB
     Config -.配置模型.-> MCP
     Config -.配置模型.-> Memory
 
-    Scheduler["Scheduler"] --> Channel["Channel"]
 ```
 
 这张图中的箭头表示源码层面的主要依赖或装配关系：
@@ -333,26 +341,26 @@ flowchart TB
 
 | 开发目标 | 首先阅读 | 主要代码入口 | 需要同时关注 |
 |---|---|---|---|
-| 新增一种交互通道 | [Channel](./Channel%20模块说明.md) | `channel/base.py`、新 Channel 实现 | `main.py` 或新的应用入口、`TextStreamPort` |
-| 修改 Session 到 Agent 的路由 | [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块说明.md) | `SessionInteractionService` | AgentRegistry、Session.agent_id |
+| 新增一种交互通道 | Runtime 4.7、Bootstrap 与应用入口；Channel Wiki 待补充 | `channel/base.py`、新 Channel 实现 | `main.py`、`LLMOutputPort`、`LLMOutputEvent` |
+| 修改 Session 到 Agent 的路由 | [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块总体说明.md) | `SessionInteractionService` | AgentRegistry、Session.agent_id |
 | 修改 Run 状态或状态迁移 | [Runtime](./Runtime%20模块总体说明.md) | `runtime/domain/state.py`、`events.py`、`control.py` | Engine 驱动逻辑、Checkpoint |
 | 修改一次 Run 的执行顺序 | [Runtime](./Runtime%20模块总体说明.md) | `runtime/application/engine.py` | Ports、RunExecution、持久化事实 |
 | 修改同 Session 的并发规则 | [Runtime](./Runtime%20模块总体说明.md) | `session_run_coordinator.py` | 活跃 Run 查询、取消和审批恢复 |
-| 新增 Context Slot | [Context](./上下文工程说明.md) | `context/slots.py`、`registry.py`、默认计划 | Owner、缓存范围、刷新和快照模式 |
-| 修改历史压缩 | [Runtime](./Runtime%20模块总体说明.md) + [Context](./上下文工程说明.md) | `context_budget.py`、`history_compaction.py` | Session 压缩版本、成功提交 |
-| 新增 LLM Provider | [LLM](./LLM%20模块说明.md) | `llm/providers/`、Provider 注册表 | RouterConfig、重试和错误分类 |
-| 修改模型路由或降级 | [LLM](./LLM%20模块说明.md) | `model_router.py`、`proxy.py` | RateLimiter、CircuitBreaker |
+| 新增 Context Slot | [Context](./Context%20模块总体说明.md) | `context/slots.py`、`registry.py`、默认计划 | Owner、缓存范围、刷新和快照模式 |
+| 修改历史压缩 | [Runtime](./Runtime%20模块总体说明.md) + [Context](./Context%20模块总体说明.md) | `context_budget.py`、`history_compaction.py` | Session 压缩版本、成功提交 |
+| 新增 LLM Provider | [LLM](./LLM%20模块总体说明.md) | `llm/providers/`、Provider 注册表 | RouterConfig、重试和错误分类 |
+| 修改模型路由或降级 | [LLM](./LLM%20模块总体说明.md) | `model_router.py`、`proxy.py` | RateLimiter、CircuitBreaker |
 | 新增 builtin 工具 | [Tool](./Tool%20模块总体说明.md) | `tools/builtin/`、`@tool` | Schema、Capability、Policy 和测试 |
 | 新增 ToolPolicy 或资源类型 | [Tool](./Tool%20模块总体说明.md) | `decorator.py`、`capability.py`、`policy.py` | Config、Agent 级策略收窄 |
 | 新增固定网络 Provider | [Tool](./Tool%20模块总体说明.md) | `tools/providers/`、`network.py` | HttpClient、服务开关和主机白名单 |
-| 接入新的 MCP Server | [MCP](./MCP%20模块说明.md) | MCP 配置、`MCPToolProvider` | ToolRegistry、连接策略和命名空间 |
-| 修改记忆同步或检索 | [Memory](./Memory%20模块说明.md) | `memory/manager.py`、`storage.py` | LLM embedding、Context 注入 |
-| 新增或修改 Skill | [Skills](./Skills%20模块说明.md) | SKILL.md、`SkillScanner`、`SkillRegistry` | Context SkillsSlot、Tool SkillParser |
-| 修改子 Agent 委派 | [Orchestration](./Orchestration%20模块说明.md) | `runtime_delegation_adapter.py`、`dispatcher.py` | Runtime DelegationPort、Session、取消传播 |
-| 修改配置结构 | [Config](./Config%20模块说明.md) | `config/settings.py` | ApplicationHost Builder、目标模块 |
+| 接入新的 MCP Server | [MCP](./MCP%20模块总体说明.md) | MCP 配置、`MCPToolProvider` | ToolRegistry、连接策略和命名空间 |
+| 修改记忆同步或检索 | [Memory](./Memory%20模块总体说明.md) | `memory/manager.py`、`storage.py` | LLM embedding、Context 注入 |
+| 新增或修改 Skill | [Skills](./Skills%20模块总体说明.md) | SKILL.md、`SkillScanner`、`SkillRegistry` | Context SkillsSlot、Tool SkillParser |
+| 修改子 Agent 委派 | [Orchestration 与 Delegation](./Orchestration%20与%20Delegation%20模块总体说明.md) | `runtime_delegation_adapter.py`、`dispatcher.py` | Runtime DelegationPort、Session、取消传播 |
+| 修改配置结构 | [Config](./Config%20模块总体说明.md) | `config/settings.py` | ApplicationHost Builder、目标模块 |
 | 排查 Run 执行事实 | [Runtime](./Runtime%20模块总体说明.md) | Session 下 `agent_runs/{run_id}/` | RunMessage、RunEvent、Checkpoint |
-| 排查观测输出 | [Journal](./Journal%20模块说明.md) | `journal/` | 当前 Runtime v4 的实际接入范围 |
-| 扩展提醒能力 | [Scheduler](./Scheduler%20模块说明.md) | `scheduler/reminder.py` | Channel、持久化和 Host 装配 |
+| 排查观测输出 | [Runtime](./Runtime%20模块总体说明.md) + [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块总体说明.md) | `runtime` RunEvent、`journal/` | Journal 当前未进入 Runtime 主链 |
+| 评估提醒能力 | [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块总体说明.md) + [Config](./Config%20模块总体说明.md) | `scheduler/reminder.py` | 当前 Host 未装配、无持久化和关闭管理 |
 
 ---
 
@@ -436,15 +444,37 @@ AgentIdentity / AgentRegistry
 - Session、Run、Checkpoint 和审批数据当前主要使用本地文件存储。
 - Tool 的安全链路提供参数校验、资源解释和 allow/ask/deny 决策，但不是 OS 级强沙箱。
 - MCP 只将 tools 接入 Tool Registry；resources 和 prompts 当前不作为模型工具暴露。
-- Journal 是可选观测设施，Runtime 的恢复依据是 Run Repository 和 Checkpoint，而不是 Journal。
-- Scheduler 当前只是内存中的一次性提醒，尚未形成持久化调度系统。
-- `AgentRegistry` 的物理目录与逻辑归属不完全一致；Wiki 按 Agent Identity Directory 解释。
-- Runtime adapters 的完整说明主归属 Runtime，能力模块只解释自身对外接口，避免重复维护。
-- 当前部分模块文档尚未建立或仍需重写；首页链接将随模块文档落地逐步生效。
+- Journal 代码和配置存在，但当前没有进入 ApplicationHost 或 Runtime 主链；Runtime 的恢复依据是 Run Repository 和 Checkpoint。
+- Scheduler 代码和配置存在，但 ApplicationHost 当前不创建 ReminderManager，也不管理其 Task 生命周期。
+- MCP 主链接入存在，但当前默认 `mcp_servers=[]`，不会连接 Server 或注册 MCP Tool。
+- Skills 主链接入存在，但当前默认跳过 `_example`，Registry 为空。
+- Memory 主链接入存在；DeepDream 当前只由手动入口触发，不是普通 Run 自动阶段。
+- `AgentRegistry` 的物理目录与逻辑归属不完全一致；Wiki 将其完整说明归入 Agent 与 Identity。
+- Runtime Adapter 的完整说明主归属 Runtime，能力模块只保留接入摘要。
+- 12 篇核心模块 Wiki 已完成；Channel 待补充，Journal 需先完成 Observability 边界审计，Scheduler 暂不建立独立 Wiki。
 
 ---
 
-## 8. 文档维护约定
+## 8. 项目级问题索引
+
+项目级问题只在这里建立统一索引；模块 Wiki 保留本模块影响和详细根因。
+
+| 项目级 ID | 问题 | 完整说明主归属 |
+|---|---|---|
+| `SYS-CFG-01` | LLMProxy 与 AgentPolicyResolver 没有共享唯一 EffectiveRouterConfig | Config、Bootstrap |
+| `SYS-CFG-02` | 配置字段存在声明、解析和消费三层漂移 | Config |
+| `SYS-PATH-01` | project_root 与相对路径解析权威分散 | Config、Bootstrap |
+| `SYS-ID-01` | Agent Registry 与 Tool Policy Identity 加载边界分裂 | Agent 与 Identity、Bootstrap |
+| `SYS-OBS-01` | Journal 与 Runtime RunEvent 的观测边界尚未收口 | Bootstrap；后续 Observability 审计 |
+| `SYS-SCH-01` | Scheduler 代码和配置存在但未进入组合根 | Bootstrap、Config |
+| `SYS-OUT-01` | Channel 已进入主链，但缺少独立模块 Wiki | Runtime、Bootstrap；后续 Channel Wiki |
+| `SYS-DEL-01` | 委派运行态等待关系不能跨进程重启恢复 | Orchestration 与 Delegation |
+| `SYS-TOOL-01` | Tool、MCP 和 disabled_tools 的装配顺序影响最终注册结果 | Config、Bootstrap、MCP |
+| `SYS-STORE-01` | Session 锁和文件事务仅满足本地单进程边界 | Runtime、Session |
+
+---
+
+## 9. 文档维护约定
 
 为避免 Wiki 再次变成大量信息的堆积，各模块文档统一遵循以下结构：
 
@@ -461,3 +491,19 @@ AgentIdentity / AgentRegistry
 ```
 
 同一事实只在一个主要文档中完整维护；其他文档保留理解本模块所需的摘要，并链接到主归属章节。
+
+
+### 9.1 发布前自动验收
+
+每次修改 Wiki 至少检查：
+
+```text
+相对链接全部存在
+已删除接口零引用
+当前架构不使用 Runtime v2 / Runtime v4 作为版本名
+未装配模块不得画成运行调用关系
+项目级问题使用 SYS-* 索引
+模块 Wiki 标明扫描提交
+```
+
+当前审计基线：`3d343abea03c58e68fdcdf5fc8271352bafc988c`。

@@ -2,6 +2,7 @@
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
 > 扫描基准：2026-07-27，包含 Skill 数据模型、递归扫描、注册表、Bootstrap、Context 注入、Agent Context Plan、Tool SkillParser、Journal 观测、Config、CLI 与测试配置  
+> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
 > 文档定位：自顶向下解释 dotClaw 当前 Skill 如何从 `SKILL.md` 变成模型可见的技能目录，正文、references 和 scripts 如何依赖通用 Tool 渐进读取，以及当前哪些元数据只是预留、哪些观测链尚未真正生效。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -1189,7 +1190,7 @@ SKILL_SCRIPT_EXEC
 
 **说明：**Journal 的 `prompt_built()` 接受 skills_injected 列表。
 
-当前 ContextProvider/Runtime v4 的 SkillsSlot 主链没有把实际 Skill 名称列表传给该字段；该观测接口与当前 ContextVersion 机制没有闭环。
+当前 ContextProvider/Runtime 的 SkillsSlot 主链没有把实际 Skill 名称列表传给该字段；该观测接口与当前 ContextVersion 机制没有闭环。
 
 ---
 

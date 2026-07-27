@@ -2,6 +2,7 @@
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
 > 扫描基准：2026-07-27，包含 MCP Client、Tool Provider、Tool Adapter、Config、Bootstrap、Tool 安全链、Agent 工具快照、CLI 与当前测试  
+> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
 > 文档定位：自顶向下解释 dotClaw 如何连接 MCP Server、发现并注册 MCP Tools、经过统一 Tool 安全链执行调用，同时明确 resources/prompts、重连、动态刷新和结果内容类型中哪些已经接入、哪些仅保留底层接口。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)

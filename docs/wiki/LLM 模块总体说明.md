@@ -2,6 +2,7 @@
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
 > 扫描基准：2026-07-26，包含 Purpose 路由、Provider 级限流与熔断、流式 Tool Call 组装、reasoning/response 双通道、Runtime LLMPort Adapter、上下文压缩和 Embedding 接入  
+> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
 > 文档定位：自顶向下解释 LLM 模块在系统中的位置、完整组件、核心类、路由和恢复性边界，并记录当前实现、真实痛点和演进方向。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)

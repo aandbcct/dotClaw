@@ -2,6 +2,7 @@
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
 > 扫描基准：2026-07-26，包含 SQLite/FTS5 存储、文本分块、Embedding、混合检索、MemoryManager、日记忆 Flush、DeepDream、Context 接入、Bootstrap、Config 与 Builtin Memory Tool 边界  
+> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
 > 文档定位：自顶向下解释 dotClaw 当前 Memory 如何同步工作区知识和长期记忆、执行混合检索并进入 Context，同时明确日记忆写入、长期蒸馏、定时任务、索引更新和隔离能力中哪些已经接入主链、哪些仅有组件实现。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)

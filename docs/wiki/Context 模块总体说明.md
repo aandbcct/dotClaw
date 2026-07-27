@@ -2,6 +2,7 @@
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
 > 扫描基准：2026-07-25，包含多 Owner Context Plan、结构化 Slot、ContextVersion、精确 Owner 生命周期释放与定向刷新信号  
+> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
 > 文档定位：自顶向下解释 Context 在系统中的位置、完整组件、核心类、数据来源、注入与版本边界，并记录当前设计取舍、真实痛点和演进方向。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -90,7 +91,8 @@ Context 不负责：
 | Memory | 通过最小 Port 读取检索结果并格式化为贡献 | 保存、索引、搜索和蒸馏长期记忆 |
 | Skills | 读取技能描述摘要 | 扫描、解析和维护 Skill Registry |
 | Tool | 接收经过 Agent Policy 筛选的 Tool Definitions | 注册 Handler、生成定义、执行和安全策略 |
-| Orchestration | 读取可委派 Agent 目录摘要 | 管理 AgentRegistry、Task 和子 Run |
+| Agent / Agent Directory | 读取可委派 Agent 目录摘要 | 管理 AgentIdentity 与 AgentRegistry |
+| Orchestration | 不管理 Identity 目录，只消费可委派目标 | 管理 Task、Broker、目标 Session 与子 Run 映射 |
 | LLM | 提供标准 messages 和 tools | Provider 协议、流式输出、reasoning 和重试 |
 | Bootstrap | 暴露构建辅助函数和依赖容器 | 选择具体依赖、创建 Provider、控制关闭顺序 |
 

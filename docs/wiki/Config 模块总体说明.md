@@ -1,7 +1,7 @@
 # Config 模块总体说明
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
-> 扫描基准：2026-07-27，包含 `config.yaml`、`model_router_config.yaml`、`.env` 展开、Config/RouterConfig 数据模型、Agent Identity 相邻配置、Bootstrap 实际消费、CLI、各模块配置使用与当前测试  
+> 扫描基准：2026-07-27，包含 `config.yaml`、`model_router_config.yaml`、`.env` 展开、Config/RouterConfig 数据模型、Agent Identity 相邻配置、Bootstrap 实际消费、CLI、各模块配置使用与当前测试
 > 文档定位：自顶向下解释 dotClaw 如何从多份 YAML 和环境变量生成启动期配置对象，哪些字段真正控制运行行为，哪些字段只在兼容路径生效、被解析但未消费，或因解析与装配缺口而失效。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -145,7 +145,7 @@ Config 当前不负责：
 | Skills | 提供目录与开关 | 扫描、解析和注册 |
 | Memory | 提供路径与参数 | 索引、检索、Flush 和 Dream |
 | Session | 提供存储目录 | Session 文件与 Run 事实持久化 |
-| Journal | 声明旧 JournalConfig | 事件写入；当前 Runtime v2 主链主要使用 RunEvent 仓储 |
+| Journal | 声明旧 JournalConfig | 事件写入；当前 Runtime 主链主要使用 RunEvent 仓储 |
 | CLI | 提供可读取值 | 日志级别调整和状态展示 |
 | `.env` | 决定加载位置与优先级 | python-dotenv 执行变量注入 |
 
@@ -286,7 +286,7 @@ flowchart TB
 
 - Config 聚合对象比当前主链实际消费的配置面更大。
 - SchedulerConfig 当前没有进入 ApplicationHost。
-- JournalConfig 没有进入 Runtime v2 的装配链。
+- JournalConfig 没有进入 Runtime 的装配链。
 - Debug level 在 Host 就绪后才应用。
 - 字段是否生效仍取决于 Loader、Builder 和目标组件三层是否全部闭合。
 
@@ -426,7 +426,7 @@ flowchart TB
 | Session | `./data/sessions` | Session 与 Runtime 存储根 |
 | Scheduler | true | 当前 Host 未构造 Scheduler |
 | Debug | INFO + log_file | level 后置生效；log_file 当前硬编码路径碰巧一致 |
-| Journal | trace/snapshot 开关 | 当前 Runtime v2 主链未注入 JournalConfig |
+| Journal | trace/snapshot 开关 | 当前 Runtime 主链未注入 JournalConfig |
 
 ---
 
@@ -550,7 +550,7 @@ stream
 - 其余字段不参与 `_build_llm()`；
 - Router 文件缺失时，clients/retry 转换为 RouterConfig；
 - fallbacks 没有真正进入转换结果；
-- stream 没有进入 Runtime v2 调用，Adapter 固定 `stream=True`。
+- stream 没有进入 Runtime 调用，Adapter 固定 `stream=True`。
 
 `AgentConfig`：
 
@@ -566,7 +566,7 @@ rules
 
 - system_prompt：Identity Prompt 为空时回退；
 - max_context_tokens：模型预算信息缺失时回退；
-- keep_recent_messages：当前 Context v4 未使用；
+- keep_recent_messages：当前 Context 未使用；
 - truncated_continue：`_raw_to_config()` 没有读取 YAML；
 - rules：会被解析，但未进入 AgentPolicySnapshot。
 
@@ -635,7 +635,7 @@ JournalConfig
 - SchedulerConfig 没有进入 ApplicationHost；
 - Debug level 在 Host 就绪后设置；
 - Debug log_file 没有进入 logging.basicConfig；
-- JournalConfig 没有进入 Runtime v2 组合根；
+- JournalConfig 没有进入 Runtime 组合根；
 - `_raw_to_config()` 只读取 Journal 的 console/trace/snapshot，不读取 history/state。
 
 ---
@@ -1469,7 +1469,7 @@ context_slot_ids:
 | `llm.stream` | 是 | Runtime Adapter 固定 true | **未消费** |
 | `agent.system_prompt` | 是 | AgentPolicyResolver | **有效** |
 | `agent.max_context_tokens` | 是 | Budget fallback | **有效** |
-| `agent.keep_recent_messages` | 是 | 当前 Context v4 无消费者 | **未消费** |
+| `agent.keep_recent_messages` | 是 | 当前 Context 无消费者 | **未消费** |
 | `agent.truncated_continue` | **未读取 YAML** | 当前无主链消费者 | **配置失效** |
 | `agent.rules` | 是 | 未进入 Policy Snapshot | **未消费** |
 | `tools.builtin_enabled` | 是 | `_build_tools` | **有效** |
@@ -1489,9 +1489,9 @@ context_slot_ids:
 | `scheduler.enabled` | 是 | Host 未构造 Scheduler | **未消费** |
 | `debug.level` | 是 | CLI 在 Host 就绪后设置 | **部分有效** |
 | `debug.log_file` | 是 | main.py 使用硬编码路径 | **未消费** |
-| `journal.trace_dir/snapshot_dir` | 是 | Runtime v2 未注入 JournalConfig | **未消费于主链** |
-| `journal.console/trace/snapshot` | 是 | Runtime v2 未注入 | **未消费于主链** |
-| `journal.history/state` | **未读取 YAML** | Runtime v2 未注入 | **配置失效** |
+| `journal.trace_dir/snapshot_dir` | 是 | Runtime 未注入 JournalConfig | **未消费于主链** |
+| `journal.console/trace/snapshot` | 是 | Runtime 未注入 | **未消费于主链** |
+| `journal.history/state` | **未读取 YAML** | Runtime 未注入 | **配置失效** |
 
 ### 6.10 MemoryConfig 字段消费矩阵
 
@@ -1708,7 +1708,7 @@ ApplicationHost.shutdown()
 | 修改 Dream 调度 | MemoryConfig/SchedulerConfig | Host、Scheduler | 开关与 schedule 真正消费 |
 | 修改 Session 根 | SessionConfig | SessionManager、RuntimeFactory | 两套消费者使用同一 Path |
 | 修改 Debug 日志 | DebugConfig | main.py logging 初始化 | 启动日志也受配置控制 |
-| 修改 Journal 配置 | JournalConfig | Runtime v2 Event Repository | 不混用旧 Journal 和 RunEvent |
+| 修改 Journal 配置 | JournalConfig | Runtime Event Repository | 不混用旧 Journal 和 RunEvent |
 | 修改 Router Defaults | DefaultsConfig | ModelRouter、Proxy | defaults.model 必须存在 |
 | 修改 Provider 配置 | ProviderConfig | `_build_llm` | circuit breaker 必须投影 |
 | 修改 Model 配置 | ModelConfig | Router、Policy Resolver | provider 引用存在 |
@@ -2032,7 +2032,7 @@ main.py 在读取 Config 前以 WARNING 和硬编码日志文件初始化。`deb
 
 - SchedulerConfig 没有 Host 消费者；
 - Memory 多个 Embedding/Flush/Dream 字段未生效；
-- JournalConfig 没有进入 Runtime v2 主链；
+- JournalConfig 没有进入 Runtime 主链；
 - 配置文件给出的功能承诺超过当前运行能力。
 
 #### C16. 测试分散，缺少字段消费与配置快照验收
@@ -2187,7 +2187,7 @@ src/dotclaw/journal/journal.py
 |---|---|
 | `session/session.py` | 独立解析 Session directory |
 | `main.py` | debug.level 后置应用；日志文件硬编码 |
-| `journal/journal.py` | 旧 JournalConfig 消费接口，当前未进入 Runtime v2 主装配 |
+| `journal/journal.py` | 旧 JournalConfig 消费接口，当前未进入 Runtime 主装配 |
 
 ### 9.9 当前配置测试
 
