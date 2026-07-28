@@ -124,6 +124,10 @@ class SessionInteractionService:
         """提交审批决定并返回恢复后的结构化结果；透传运行级输出端口。"""
         return await self._coordinator.resolve_approval(approval_id, approved, output_port)
 
+    async def resume_delegation(self, child_run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """提交 delegation 子运行结果回灌并恢复父运行，返回结构化结果；透传运行级输出端口。"""
+        return await self._coordinator.resume_delegation(child_run_id, output_port)
+
     async def cancel(self, run_id: str, reason: str) -> None:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)

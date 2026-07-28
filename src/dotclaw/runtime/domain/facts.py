@@ -55,6 +55,7 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     WAITING_APPROVAL = "waiting_approval"
+    WAITING_DELEGATION = "waiting_delegation"
     INTERRUPTED = "interrupted"
     ABANDONED = "abandoned"
 
@@ -411,6 +412,7 @@ def _agent_run_state_from_status(status: RunStatus) -> AgentRunState:
         RunStatus.CANCELLED: Ended(RunOutcome.CANCELLED),
         RunStatus.ABANDONED: Ended(RunOutcome.ABANDONED),
         RunStatus.WAITING_APPROVAL: Suspended(SuspendReason.APPROVAL, "", RunStage.EXECUTING_TOOLS),
+        RunStatus.WAITING_DELEGATION: Suspended(SuspendReason.DELEGATION, "", RunStage.CALLING_LLM),
         RunStatus.INTERRUPTED: Running(RunStage.CALLING_LLM),
     }
     return AgentRunState(mode=mode_by_status.get(status, Running(RunStage.CALLING_LLM)))

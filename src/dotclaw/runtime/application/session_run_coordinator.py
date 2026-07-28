@@ -27,6 +27,12 @@ class RuntimeControlPort(RuntimeExecutionPort, Protocol):
     async def resolve_approval(self, approval_id: str, approved: bool, output_port: LLMOutputPort | None = None) -> RunResult:
         """恢复指定审批关联的运行；output_port 为本恢复的运行级输出端口。"""
 
+    async def get_delegation_session_id(self, child_run_id: str) -> str | None:
+        """定位 delegation 子运行所属的 Session（即父运行 Session）。"""
+
+    async def resume_delegation(self, child_run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """恢复指定 delegation 子运行关联的父运行；output_port 为本恢复的运行级输出端口。"""
+
     async def get_run_session_id(self, run_id: str) -> str | None:
         """定位运行所属的 Session。"""
 
@@ -89,6 +95,15 @@ class SessionRunCoordinator:
         lock: asyncio.Lock = await self._get_lock(session_id)
         async with lock:
             return await self._engine.resolve_approval(approval_id, approved, output_port)
+
+    async def resume_delegation(self, child_run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """在 delegation 父运行所属 Session 的租约内恢复父运行；output_port 为本恢复运行级端口。"""
+        session_id: str | None = await self._engine.get_delegation_session_id(child_run_id)
+        if session_id is None:
+            return await self._engine.resume_delegation(child_run_id, output_port)
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        async with lock:
+            return await self._engine.resume_delegation(child_run_id, output_port)
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """立即发送取消信号，避免等待运行自身占用的 Session 租约。

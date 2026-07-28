@@ -220,7 +220,11 @@ class RuntimeEngine:
             return RunResult("", RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在或已消费"))
         run = await self._run_repository.load_run(record.session_id, record.run_id)
         checkpoint = await self._checkpoint_repository.load(record.session_id, record.run_id)
-        if run is None or checkpoint is None or run.status is not RunStatus.WAITING_APPROVAL:
+        if run is None or checkpoint is None:
+            return RunResult(record.run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "审批恢复状态无效"))
+        # 阶段3：审批恢复改走状态机校验，不再依赖 RunStatus.WAITING_APPROVAL。
+        state: AgentRunState = _state_from_checkpoint(checkpoint)
+        if not (isinstance(state.mode, Suspended) and state.mode.reason is SuspendReason.APPROVAL):
             return RunResult(record.run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "审批恢复状态无效"))
         messages = await self._run_repository.load_messages(record.session_id, record.run_id)
         input_message = next((message for message in messages if message.message_id == run.input_message_id), None)
@@ -233,7 +237,6 @@ class RuntimeEngine:
             user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
             conversation=_conversation_from_context_version(active_context_version),
         )
-        state: AgentRunState = _state_from_checkpoint(checkpoint)
         approval_event = ApprovalGranted(approval_id) if approved else ApprovalRejected(approval_id)
         tr = transition(state, approval_event)
         execution: RunExecution = RunExecution(
@@ -289,10 +292,146 @@ class RuntimeEngine:
         finally:
             self._cancellation_service.unregister(run.run_id)
 
+    async def resume_delegation(
+        self,
+        child_run_id: str,
+        output_port: LLMOutputPort | None = None,
+    ) -> RunResult:
+        """查询子运行结果，回灌 delegation result 消息并经 DelegationCompleted 恢复父运行。
+
+        无论子运行成功、失败、取消或放弃，均生成父运行的 delegation result 消息并回到
+        ``Running(CALLING_LLM)``；child_run_id 不匹配经状态机拒绝并记录
+        ``STATE_TRANSITION_REJECTED``，父运行保持不变。
+        """
+        child_run: AgentRun | None = await self._run_repository.find_run(child_run_id)
+        if child_run is None or child_run.parent_run_id is None:
+            return RunResult("", RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "子运行不存在或缺少父运行关联"))
+        # 子运行由适配器创建在独立目标 Session，需经跨 Session 定位父运行取得其所属 Session。
+        parent_run_id: str = child_run.parent_run_id
+        parent_run: AgentRun | None = await self._run_repository.find_run(parent_run_id)
+        if parent_run is None:
+            return RunResult(parent_run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "父运行不存在"))
+        session_id: str = parent_run.session_id
+        checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(session_id, parent_run_id)
+        if checkpoint is None:
+            return RunResult(parent_run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "父运行或检查点不存在"))
+        state: AgentRunState = _state_from_checkpoint(checkpoint)
+        if not (isinstance(state.mode, Suspended) and state.mode.reason is SuspendReason.DELEGATION):
+            return RunResult(parent_run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "父运行不处于 delegation 挂起"))
+        child_result = await self._delegation_port.result(child_run_id) if self._delegation_port is not None else None
+        if child_result is None:
+            # 子运行尚未结束：父运行继续挂起，不修改任何持久化状态。
+            return RunResult(parent_run_id, RunStatus.WAITING_DELEGATION, child_run_id=child_run_id)
+        messages = list(await self._run_repository.load_messages(session_id, parent_run_id))
+        input_message = next((message for message in messages if message.message_id == parent_run.input_message_id), None)
+        if input_message is None:
+            return RunResult(parent_run_id, RunStatus.FAILED, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "缺少运行输入消息"))
+        context_versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(session_id, parent_run_id)
+        active_context_version: ContextVersion | None = next(
+            (item for item in context_versions if item.version == parent_run.active_context_version),
+            None,
+        )
+        if active_context_version is None:
+            return RunResult(parent_run_id, RunStatus.FAILED, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "父运行活动 Context Version 不存在"))
+        request: RunRequest = RunRequest(
+            session_id=session_id,
+            lease_id="delegation-resume",
+            agent_id=parent_run.agent_id,
+            user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
+            conversation=_conversation_from_context_version(active_context_version),
+        )
+        execution: RunExecution = RunExecution(
+            run_id=parent_run.run_id,
+            request=request,
+            policy=parent_run.policy,
+            state=state,
+            budget=RunBudget(max_iterations=parent_run.policy.max_iterations),
+            message_cursor=checkpoint.message_sequence,
+            run_messages=messages,
+            active_context_version=active_context_version,
+            staged_history_compressions=parent_run.staged_history_compressions,
+            replay_active_context=True,
+        )
+        pending: JSONMap = checkpoint.pending if isinstance(checkpoint.pending, dict) else {}
+        next_sequence: int = checkpoint.message_sequence + 1
+        child_output: str = child_result.output or (
+            child_result.error.message if child_result.error is not None else "delegation 未返回输出"
+        )
+        result_message: RunMessage = RunMessage(
+            message_id=f"delegation-{parent_run.run_id}-{next_sequence}",
+            sequence=next_sequence,
+            kind=RunMessageKind.DELEGATION_RESULT,
+            role=MessageRole.TOOL,
+            content=child_output,
+            tool_call_id=pending.get("source_tool_call_id") if isinstance(pending.get("source_tool_call_id"), str) else None,
+            metadata={
+                "child_run_id": child_run_id,
+                "target_agent_id": pending.get("target_agent_id"),
+                "target_session_id": pending.get("target_session_id"),
+            },
+        )
+        messages.append(result_message)
+        await self._save_messages(parent_run, execution, messages)
+        event_sequence: int = checkpoint.event_sequence
+        # 新状态机仅用 child_run_id 校验挂起控制标识；succeeded 供旧状态机兼容路径使用。
+        completion_transition = await self._apply_transition(
+            execution,
+            parent_run,
+            DelegationCompleted(child_run_id, child_result.outcome is RunOutcome.COMPLETED),
+            event_sequence,
+        )
+        if completion_transition is None:
+            # 非法迁移（child_run_id 不匹配等）：父运行不变，返回失败。
+            return RunResult(parent_run.run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "状态机拒绝 DelegationCompleted 迁移"))
+        execution.update_state(completion_transition.state, completion_transition.action)
+        source_tool_call_id = pending.get("source_tool_call_id")
+        if isinstance(source_tool_call_id, str):
+            await self._tool_completed_event(
+                parent_run,
+                event_sequence,
+                ToolCall(source_tool_call_id, "delegate", {}),
+                result_message.message_id,
+                ToolAuditStatus.FAILED if child_result.outcome is not RunOutcome.COMPLETED else ToolAuditStatus.COMPLETED,
+                child_result.error.message if child_result.error is not None else "",
+            )
+            event_sequence += 1
+        event_sequence = await self._event(
+            parent_run,
+            event_sequence,
+            RunEventType.DELEGATION_COMPLETED,
+            (result_message.message_id,),
+            "delegation 子运行已完成",
+            {
+                "child_run_id": child_run_id,
+                "outcome": child_result.outcome.value if child_result.outcome is not None else "",
+            },
+        )
+        resumed_run: AgentRun = replace(parent_run, status=RunStatus.RUNNING, resume_count=parent_run.resume_count + 1)
+        await self._run_repository.save_run(resumed_run)
+        event_sequence = await self._event(resumed_run, event_sequence, RunEventType.RUN_RESUMED, (), "delegation 恢复运行")
+        self._cancellation_service.register(parent_run.run_id, execution.cancellation)
+        try:
+            result = await self._drive(execution, resumed_run, messages, (), event_sequence, output_port)
+            await self._release_run_context_if_terminal(result)
+            return result
+        finally:
+            self._cancellation_service.unregister(parent_run.run_id)
+
     async def get_approval_session_id(self, approval_id: str) -> str | None:
         """返回待处理审批所属 Session，供协调器获取同一把租约锁。"""
         record = await self._approval_service.find_pending(approval_id)
         return record.session_id if record is not None else None
+
+    async def get_delegation_session_id(self, child_run_id: str) -> str | None:
+        """返回 delegation 父运行所属 Session，供协调器获取同一把租约锁。
+
+        子运行由适配器创建在独立目标 Session，故需经父运行标识跨 Session 反查其父 Session。
+        """
+        child_run: AgentRun | None = await self._run_repository.find_run(child_run_id)
+        if child_run is None or child_run.parent_run_id is None:
+            return None
+        parent_run: AgentRun | None = await self._run_repository.find_run(child_run.parent_run_id)
+        return parent_run.session_id if parent_run is not None else None
 
     async def get_run_session_id(self, run_id: str) -> str | None:
         """返回运行所属 Session，供取消操作遵守单 Session 串行约束。"""
@@ -408,7 +547,9 @@ class RuntimeEngine:
         if active:
             return
         run = await self._run_repository.find_run(run_id)
-        if run is None or run.status is not RunStatus.WAITING_APPROVAL:
+        # 阶段3：等待审批或等待 delegation 子运行的挂起 Run 取消时立即收口为取消终态；
+        # 子运行取消已由前面 _delegation_port.cancel 经取消服务传播。
+        if run is None or run.status not in (RunStatus.WAITING_APPROVAL, RunStatus.WAITING_DELEGATION):
             return
         messages = await self._run_repository.load_messages(run.session_id, run.run_id)
         checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
@@ -502,7 +643,7 @@ class RuntimeEngine:
             )
             if delegation_request is not None:
                 event_number = await self._tool_started_event(run, event_number, messages, tool_call)
-                delegation_result: DelegationDriveResult = await self._delegate(
+                submitted = await self._submit_delegation_action(
                     execution,
                     run,
                     messages,
@@ -510,15 +651,11 @@ class RuntimeEngine:
                     event_number,
                     delegation_request,
                     tool_call,
-                    manage_state=False,
+                    tool_calls,
+                    tool_index,
                 )
-                if delegation_result.error is not None:
-                    return run, sequence, event_number, pending_calls, delegation_result.error
-                run = delegation_result.run
-                sequence = delegation_result.message_sequence
-                event_number = delegation_result.event_sequence
-                completed_message_ids.append(messages[-1].message_id)
-                continue
+                # 提交后父 Run 持久化为 Suspended(DELEGATION) 并返回，交由外部 resume_delegation 恢复。
+                return run, sequence, event_number, pending_calls, submitted
             event_number = await self._tool_started_event(run, event_number, messages, tool_call)
             try:
                 approved: bool = (
@@ -759,7 +896,12 @@ class RuntimeEngine:
                 "AgentRun 状态机拒绝迁移：mode=%s event=%s reason=%s run_id=%s",
                 error.current_mode, error.event_type, error.reason, run.run_id,
             )
-            await self._event(run, event_sequence, RunEventType.STATE_TRANSITION_REJECTED, (error.event_type, error.reason))
+            # 拒绝迁移不产生新消息，故 message_ids 为空；审计信息写入 data，避免引用未保存消息。
+            await self._event(
+                run, event_sequence, RunEventType.STATE_TRANSITION_REJECTED, (),
+                summary=f"拒绝迁移：{error.event_type} / {error.reason}",
+                data={"event_type": error.event_type, "reason": error.reason, "current_mode": error.current_mode},
+            )
             return None
 
     async def _prepare_context(
@@ -878,7 +1020,7 @@ class RuntimeEngine:
         await self._run_repository.save_messages(run.session_id, run.run_id, stored_messages)
         execution.replace_run_messages(stored_messages)
 
-    async def _delegate(
+    async def _submit_delegation_action(
         self,
         execution: RunExecution,
         run: AgentRun,
@@ -886,29 +1028,26 @@ class RuntimeEngine:
         sequence: int,
         event_sequence: int,
         request: DelegationRequest,
-        audit_tool_call: ToolCall | None = None,
-        manage_state: bool = True,
-    ) -> "DelegationDriveResult":
-        """提交、获取并持久化一次 delegation 结果，可选择是否推进独立 delegation 状态。"""
+        tool_call: ToolCall,
+        tool_calls: tuple[ToolCall, ...],
+        tool_index: int,
+    ) -> RunResult:
+        """执行 delegation 提交动作：经 DelegationSubmitted 迁移到 Suspended(DELEGATION) 并持久化检查点后返回。
+
+        不再内联等待子运行结果；子运行结果由独立的 ``resume_delegation`` 恢复入口回灌。
+        提交成功后将子运行注册到取消服务，使挂起期间的父运行取消能传播到子运行。
+        """
         if self._delegation_port is None:
-            if audit_tool_call is not None:
-                event_sequence = await self._tool_completed_event(run, event_sequence, audit_tool_call, None, ToolAuditStatus.FAILED, "未装配 DelegationPort")
-            failed: RunResult = await self._fail(
-                execution,
-                run,
-                tuple(messages),
-                event_sequence,
-                "当前 Runtime 未装配 DelegationPort",
-                RunErrorCode.INVALID_STATE,
-            )
-            return DelegationDriveResult(error=failed)
+            event_number = await self._tool_completed_event(run, event_sequence, tool_call, None, ToolAuditStatus.FAILED, "未装配 DelegationPort")
+            return await self._fail(execution, run, tuple(messages), event_number, "当前 Runtime 未装配 DelegationPort", RunErrorCode.INVALID_STATE)
         try:
             submission: DelegationSubmission = await self._delegation_port.submit(request)
             child_run_id: str = submission.child_run_id
             self._cancellation_service.register_delegated_run(execution.run_id, child_run_id)
-            if manage_state:
-                submitted_transition = transition(execution.state, DelegationSubmitted(child_run_id))
-                execution.update_state(submitted_transition.state, submitted_transition.action)
+            submit_transition = await self._apply_transition(execution, run, DelegationSubmitted(child_run_id), event_sequence)
+            if submit_transition is None:
+                return await self._fail(execution, run, tuple(messages), event_sequence, "状态机拒绝 DelegationSubmitted 迁移")
+            execution.update_state(submit_transition.state, submit_transition.action)
             next_event_sequence: int = await self._event(
                 run,
                 event_sequence,
@@ -922,101 +1061,41 @@ class RuntimeEngine:
                     "target_session_id": submission.target_session_id,
                 },
             )
-            child_result: DelegationResult | None = await self._delegation_port.result(child_run_id)
-        except Exception as error:
-            if audit_tool_call is not None:
-                event_sequence = await self._tool_completed_event(run, event_sequence, audit_tool_call, None, ToolAuditStatus.FAILED, _safe_error_summary(error))
-            failed = await self._fail(
-                execution,
-                run,
-                tuple(messages),
-                event_sequence,
-                f"delegation 调用失败：{error}",
-                RunErrorCode.TOOL_FAILURE,
+            if execution.cancellation.cancelled:
+                return await self._finish_cancelled(execution, run, tuple(messages), next_event_sequence, execution.cancellation.reason)
+            remaining_calls: tuple[ToolCall, ...] = tool_calls[tool_index + 1:]
+            checkpoint = RunCheckpoint(
+                f"checkpoint-{run.run_id}",
+                run.run_id,
+                run.session_id,
+                1,
+                next_event_sequence,
+                sequence,
+                execution.state.to_dict(),
+                submit_transition.action,
+                {
+                    "child_run_id": child_run_id,
+                    "source_tool_call_id": tool_call.call_id,
+                    "target_agent_id": request.target_agent_id,
+                    "target_session_id": submission.target_session_id,
+                    "tool_calls": [call.to_dict() for call in remaining_calls],
+                },
+                execution.budget.to_dict(),
+                action=submit_transition.action,
+                active_context_version=(
+                    execution.active_context_version.version
+                    if execution.active_context_version is not None else None
+                ),
             )
-            return DelegationDriveResult(error=failed)
-        finally:
+            await self._checkpoint_repository.save(checkpoint)
+            suspended_run: AgentRun = replace(run, status=RunStatus.WAITING_DELEGATION, latest_checkpoint_id=checkpoint.checkpoint_id)
+            await self._run_repository.save_run(suspended_run)
+            return RunResult(run.run_id, RunStatus.WAITING_DELEGATION, child_run_id=child_run_id)
+        except Exception as error:
+            event_number = await self._tool_completed_event(run, event_sequence, tool_call, None, ToolAuditStatus.FAILED, _safe_error_summary(error))
             if 'child_run_id' in locals():
                 self._cancellation_service.clear_delegated_run(execution.run_id, child_run_id)
-        if execution.cancellation.cancelled:
-            if audit_tool_call is not None:
-                next_event_sequence = await self._tool_completed_event(run, next_event_sequence, audit_tool_call, None, ToolAuditStatus.CANCELLED, "委派执行期间已取消")
-            cancelled: RunResult = await self._finish_cancelled(
-                execution,
-                run,
-                tuple(messages),
-                next_event_sequence,
-                execution.cancellation.reason,
-            )
-            return DelegationDriveResult(error=cancelled)
-        if child_result is None:
-            if audit_tool_call is not None:
-                next_event_sequence = await self._tool_completed_event(run, next_event_sequence, audit_tool_call, None, ToolAuditStatus.FAILED, "委派未返回子运行结果")
-            failed = await self._fail(
-                execution,
-                run,
-                tuple(messages),
-                next_event_sequence,
-                "delegation 未返回子运行结果",
-                RunErrorCode.INVALID_STATE,
-            )
-            return DelegationDriveResult(error=failed)
-        next_sequence: int = sequence + 1
-        child_output: str = child_result.output or (
-            child_result.error.message if child_result.error is not None else "delegation 未返回输出"
-        )
-        result_message: RunMessage = RunMessage(
-            message_id=f"delegation-{execution.run_id}-{next_sequence}",
-            sequence=next_sequence,
-            kind=RunMessageKind.DELEGATION_RESULT,
-            role=MessageRole.TOOL,
-            content=child_output,
-            tool_call_id=request.source_tool_call_id,
-            metadata={
-                "task_id": submission.task_id,
-                "child_run_id": child_result.child_run_id,
-                "target_agent_id": request.target_agent_id,
-                "target_session_id": submission.target_session_id,
-            },
-        )
-        messages.append(result_message)
-        delegated_run: AgentRun = _with_tool_statistic(run)
-        await self._save_messages(delegated_run, execution, messages)
-        next_event_sequence = await self._event(
-            delegated_run,
-            next_event_sequence,
-            RunEventType.DELEGATION_COMPLETED,
-            (result_message.message_id,),
-            "delegation 子运行已完成",
-            {
-                "task_id": submission.task_id,
-                "child_run_id": child_result.child_run_id,
-                "status": child_result.status.value,
-            },
-        )
-        succeeded: bool = child_result.status is RunStatus.COMPLETED
-        if manage_state:
-            delegation_completed = transition(execution.state, DelegationCompleted(child_result.child_run_id))
-            execution.update_state(delegation_completed.state, delegation_completed.action)
-        if not succeeded:
-            if audit_tool_call is not None:
-                next_event_sequence = await self._tool_completed_event(delegated_run, next_event_sequence, audit_tool_call, result_message.message_id, ToolAuditStatus.FAILED, child_result.error.message if child_result.error is not None else "委派子运行失败")
-            failed = await self._fail(
-                execution,
-                delegated_run,
-                tuple(messages),
-                next_event_sequence,
-                child_result.error.message if child_result.error is not None else "delegation 子运行失败",
-                RunErrorCode.TOOL_FAILURE,
-            )
-            return DelegationDriveResult(error=failed)
-        if audit_tool_call is not None:
-            next_event_sequence = await self._tool_completed_event(delegated_run, next_event_sequence, audit_tool_call, result_message.message_id, ToolAuditStatus.COMPLETED)
-        return DelegationDriveResult(
-            run=delegated_run,
-            message_sequence=next_sequence,
-            event_sequence=next_event_sequence,
-        )
+            return await self._fail(execution, run, tuple(messages), event_number, f"delegation 提交失败：{error}", RunErrorCode.TOOL_FAILURE)
 
     async def _event(
         self,
@@ -1611,16 +1690,6 @@ def _with_tool_statistic(run: AgentRun) -> AgentRun:
         tokens_in=statistics.tokens_in,
         tokens_out=statistics.tokens_out,
     ))
-
-
-@dataclass(frozen=True)
-class DelegationDriveResult:
-    """单次 delegation 驱动后的局部持久化游标或终态结果。"""
-
-    run: AgentRun | None = None
-    message_sequence: int = 0
-    event_sequence: int = 0
-    error: RunResult | None = None
 
 
 def _delegation_request(
