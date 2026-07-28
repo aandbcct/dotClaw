@@ -17,6 +17,7 @@ from ..domain.events import (
     ApprovalRejected,
     CancelRequested,
     DelegationCompleted,
+    DelegationRequested,
     DelegationSubmitted,
     LLMCallFailed,
     LLMResponseProduced,
@@ -43,7 +44,7 @@ from ..domain.context import (
     SuccessCommitIntent,
     new_context_version,
 )
-from dotclaw.runtime.application.execution import RunBudget, RunExecution
+from dotclaw.runtime.application.execution import PendingDelegation, RunBudget, RunExecution
 from ..domain.facts import (
     AgentRun,
     ApprovalRecord,
@@ -642,8 +643,24 @@ class RuntimeEngine:
                 if terminal is not None:
                     return terminal
                 continue
-            # 其余动作（FINALIZE / SUSPEND / HANDOFF_TARGET）应在动作方法迁移后内部收口，
-            # 不应回到主循环分支；落入此处说明状态机返回了未预期的动作。
+            if action is AgentAction.HANDOFF_TARGET:
+                # 模型请求派发子运行：经状态机的 DelegationRequested→HANDOFF_TARGET 已暂存子运行上下文，
+                # 此处提交子运行并回灌 DelegationSubmitted 进入 Suspended(DELEGATION)（动作方法内部收口）。
+                if execution.pending_delegation is None:
+                    return await self._fail(execution, run, tuple(messages), event_number, "状态机返回 HANDOFF_TARGET 但缺少待提交子运行上下文")
+                terminal = await self._handoff_target_action(
+                    execution,
+                    run,
+                    messages,
+                    sequence,
+                    event_number,
+                    execution.pending_delegation,
+                )
+                if terminal is not None:
+                    return terminal
+                continue
+            # 其余动作（FINALIZE / SUSPEND）应在动作方法迁移后内部收口，不应回到主循环分支；
+            # 落入此处说明状态机返回了未预期的动作。
             return await self._fail(execution, run, tuple(messages), event_number, f"状态机返回未预期的动作：{action.value}")
         return await self._fail(execution, run, tuple(messages), event_number, "状态机意外结束")
 
@@ -677,19 +694,28 @@ class RuntimeEngine:
             )
             if delegation_request is not None:
                 event_number = await self._tool_started_event(run, event_number, messages, tool_call)
-                submitted = await self._submit_delegation_action(
-                    execution,
+                # 经状态机发送 DelegationRequested：产出 HANDOFF_TARGET 动作（状态保持 Running(EXECUTING_TOOLS)），
+                # 由 _drive 的 action dispatcher 消费该动作并提交子运行，确保 delegation 走设计确定的 action 契约。
+                request_transition = await self._apply_transition(execution, run, DelegationRequested(), event_number)
+                if request_transition is None:
+                    return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 DelegationRequested 迁移")
+                execution.update_state(request_transition.state, request_transition.action)
+                event_number = await self._event(
                     run,
-                    messages,
-                    sequence,
                     event_number,
-                    delegation_request,
-                    tool_call,
-                    tool_calls,
-                    tool_index,
+                    RunEventType.DELEGATION_REQUESTED,
+                    (messages[-1].message_id,) if messages else (),
+                    "模型请求派发子运行",
+                    {"tool_call_id": tool_call.call_id, "target_agent_id": delegation_request.target_agent_id},
                 )
-                # 提交后父 Run 持久化为 AgentRunState(mode=Suspended(DELEGATION)) 并返回，交由外部 resume_delegation 恢复。
-                return run, sequence, event_number, pending_calls, submitted
+                execution.pending_delegation = PendingDelegation(
+                    request=delegation_request,
+                    tool_call=tool_call,
+                    tool_calls=tool_calls,
+                    tool_index=tool_index,
+                )
+                # 不直接提交：返回空 terminal 让主循环按 HANDOFF_TARGET 分支调度 _handoff_target_action。
+                return run, sequence, event_number, pending_calls, None
             event_number = await self._tool_started_event(run, event_number, messages, tool_call)
             try:
                 approved: bool = (
@@ -1057,23 +1083,26 @@ class RuntimeEngine:
         await self._run_repository.save_messages(run.session_id, run.run_id, stored_messages)
         execution.replace_run_messages(stored_messages)
 
-    async def _submit_delegation_action(
+    async def _handoff_target_action(
         self,
         execution: RunExecution,
         run: AgentRun,
         messages: list[RunMessage],
         sequence: int,
         event_sequence: int,
-        request: DelegationRequest,
-        tool_call: ToolCall,
-        tool_calls: tuple[ToolCall, ...],
-        tool_index: int,
+        pending: PendingDelegation,
     ) -> RunResult:
-        """执行 delegation 提交动作：经 DelegationSubmitted 迁移到 AgentRunState(mode=Suspended(DELEGATION)) 并持久化检查点后返回。
+        """消费 ``HANDOFF_TARGET`` 动作：提交子运行并经 DelegationSubmitted 迁移到 Suspended(DELEGATION)。
 
-        不再内联等待子运行结果；子运行结果由独立的 ``resume_delegation`` 恢复入口回灌。
-        提交成功后将子运行注册到取消服务，使挂起期间的父运行取消能传播到子运行。
+        由 ``_drive`` 的状态机动作调度器调用（DelegationRequested→HANDOFF_TARGET 之后）。
+        子运行结果由独立的 ``resume_delegation`` 恢复入口回灌；提交成功后将子运行注册到取消服务，
+        使挂起期间的父运行取消能传播到子运行。
         """
+        request: DelegationRequest = pending.request
+        tool_call: ToolCall = pending.tool_call
+        tool_calls: tuple[ToolCall, ...] = pending.tool_calls
+        tool_index: int = pending.tool_index
+        execution.pending_delegation = None
         if self._delegation_port is None:
             event_number = await self._tool_completed_event(run, event_sequence, tool_call, None, ToolAuditStatus.FAILED, "未装配 DelegationPort")
             return await self._fail(execution, run, tuple(messages), event_number, "当前 Runtime 未装配 DelegationPort", RunErrorCode.INVALID_STATE)

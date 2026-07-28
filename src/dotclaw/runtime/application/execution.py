@@ -7,10 +7,24 @@ from enum import StrEnum
 
 from ..domain.control import AgentAction
 from ..domain.context import ContextVersion, StagedHistoryCompression
-from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage
+from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage, ToolCall
 from dotclaw.runtime.domain.state import AgentRunState
 from .context_budget import ContextBudgetDecision
-from .dto import RunRequest
+from .dto import DelegationRequest, RunRequest
+
+
+@dataclass(frozen=True)
+class PendingDelegation:
+    """``DelegationRequested`` 经状态机产出 ``HANDOFF_TARGET`` 后，暂存待提交的子运行上下文。
+
+    仅在内存执行事务内流转，不进入 checkpoint 序列化（HANDOFF_TARGET 动作执行完毕即随
+    子运行提交而持久化为 ``Suspended(DELEGATION)``，无需通过 checkpoint 恢复）。
+    """
+
+    request: DelegationRequest
+    tool_call: ToolCall
+    tool_calls: tuple[ToolCall, ...]
+    tool_index: int
 
 
 class PendingControlKind(StrEnum):
@@ -84,6 +98,8 @@ class RunExecution:
     """本次运行是否已向入口发送过面向用户的 response 文本增量。"""
     active_context_version: ContextVersion | None = None
     """最近一次已落盘的上下文版本；后续轮次和审批恢复必须重放该事实。"""
+    pending_delegation: PendingDelegation | None = None
+    """``HANDOFF_TARGET`` 动作待提交的子运行上下文；由 ``_drive`` 的 action dispatcher 消费。"""
     staged_history_compressions: tuple[StagedHistoryCompression, ...] = ()
     """本 Run 尚未提交到 Session 的历史压缩候选引用。"""
     replay_active_context: bool = False

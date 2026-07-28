@@ -650,3 +650,53 @@ async def test_child_run_persists_parent_and_root_relationship(tmp_path: Path) -
     assert run is not None
     assert run.parent_run_id == "parent-run"
     assert run.root_run_id == "root-run"
+
+
+async def test_engine_delegation_reaches_handoff_target_action(tmp_path: Path) -> None:
+    """阶段3核心链路：delegation 实际经 DelegationRequested→HANDOFF_TARGET→DelegationSubmitted 可达。
+
+    证明 HANDOFF_TARGET 不再是仅存在于领域状态机的死契约：模型发出 delegate 调用后，Engine 先
+    发送 ``delegation_requested`` 审计、经 ``HANDOFF_TARGET`` 动作提交子运行，最终持久化为
+    ``Suspended(DELEGATION)``，且事件序列严格包含 requested→submitted 两段。
+    """
+    delegation = CompletedDelegation()
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    engine = RuntimeEngine(
+        repository,
+        CheckpointRepositoryAdapter(tmp_path),
+        MinimalContext(),
+        DelegatingLLM(),
+        NoToolExecution(),
+        FixedPolicy(),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+        CancellationService(),
+        delegation_port=delegation,
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
+    )
+
+    result: RunResult = await engine.execute(_request())
+    events_path: Path = tmp_path / "parent-session" / "agent_runs" / result.run_id / "events.jsonl"
+    events: list[JSONMap] = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    event_types: list[str] = [event["event_type"] for event in events]
+
+    # HANDOFF_TARGET 链路的可达性证据：先有 requested（模型派发意图），后有 submitted（子运行落地）。
+    assert event_types.count("delegation_requested") == 1
+    assert event_types.count("delegation_submitted") == 1
+    assert event_types.index("delegation_requested") < event_types.index("delegation_submitted")
+    # requested 事件必须记录模型触发派发的工具调用与目标 Agent，证明它来自真实 delegate 调用。
+    requested_event: JSONMap = next(event for event in events if event["event_type"] == "delegation_requested")
+    assert requested_event["data"] == {
+        "tool_call_id": "call-delegate",
+        "target_agent_id": "target-agent",
+    }
+
+    # 提交后父运行持久化为 Suspended(DELEGATION)，HANDOFF_TARGET 动作已实际执行。
+    assert result.state.is_waiting_delegation()
+    assert result.child_run_id == "child-run"
+    parent_run = await repository.load_run("parent-session", result.run_id)
+    assert parent_run is not None
+    assert parent_run.state.is_waiting_delegation()
+    # delegation 端口必须收到由 HANDOFF_TARGET 动作提交的子运行请求。
+    assert delegation.request is not None
+    assert delegation.request.parent_run_id == result.run_id
