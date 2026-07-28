@@ -149,13 +149,13 @@ async def _run_cli(show_reasoning: bool = True) -> None:
                             channel.print_error("用法: /cancel <run_id>")
                     elif cmd == "/retry":
                         if args:
-                            result: RunResult = await service.retry_interrupted(args, output_port)
+                            result: RunResult = await service.resume_run(args, output_port)
                             await _render_result(channel, result)
                         else:
                             channel.print_error("用法: /retry <run_id>")
                     elif cmd == "/abandon":
                         if args:
-                            result = await service.abandon_interrupted(args)
+                            result = await service.abandon_run(args)
                             await _render_result(channel, result)
                         else:
                             channel.print_error("用法: /abandon <run_id>")

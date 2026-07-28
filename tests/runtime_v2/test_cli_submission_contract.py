@@ -13,8 +13,8 @@ def test_cli_uses_service_entry_and_returns_run_result() -> None:
     assert "service.submit(current_session, user_input, output_port)" in source
     assert "service.resolve_approval(result.approval_id, approved, output_port)" in source
     assert "service.cancel(args, \"用户通过 CLI 取消\")" in source
-    assert "service.retry_interrupted(args, output_port)" in source
-    assert "service.abandon_interrupted(args)" in source
+    assert "service.resume_run(args, output_port)" in source
+    assert "service.abandon_run(args)" in source
     assert "service.get_identity(" in source
     assert "Runtime.run" not in source
     assert "channel.print_markdown(" in source

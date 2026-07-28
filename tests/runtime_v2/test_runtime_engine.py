@@ -637,12 +637,12 @@ class OrderedEngine:
         """测试替身不占用 Session。"""
         return None
 
-    async def retry_interrupted(self, run_id: str, output_port=None) -> RunResult:
-        """测试替身不支持中断重试。"""
+    async def resume_run(self, run_id: str, output_port=None) -> RunResult:
+        """测试替身不支持运行恢复。"""
         return RunResult(run_id, RunStatus.FAILED)
 
-    async def abandon_interrupted(self, run_id: str) -> RunResult:
-        """测试替身不支持中断放弃。"""
+    async def abandon_run(self, run_id: str) -> RunResult:
+        """测试替身不支持运行放弃。"""
         return RunResult(run_id, RunStatus.FAILED)
 
 
@@ -701,12 +701,12 @@ class ControlOrderedEngine:
         """测试替身不占用 Session。"""
         return None
 
-    async def retry_interrupted(self, run_id: str, output_port=None) -> RunResult:
-        """测试替身不支持中断重试。"""
+    async def resume_run(self, run_id: str, output_port=None) -> RunResult:
+        """测试替身不支持运行恢复。"""
         return RunResult(run_id, RunStatus.FAILED)
 
-    async def abandon_interrupted(self, run_id: str) -> RunResult:
-        """测试替身不支持中断放弃。"""
+    async def abandon_run(self, run_id: str) -> RunResult:
+        """测试替身不支持运行放弃。"""
         return RunResult(run_id, RunStatus.FAILED)
 
 

@@ -11,6 +11,7 @@ from hashlib import sha256
 logger = logging.getLogger(__name__)
 
 from ..domain.events import (
+    AbandonRequested,
     AgentRunEvent,
     ApprovalGranted,
     ApprovalRejected,
@@ -58,6 +59,7 @@ from ..domain.facts import (
     RunStatistics,
     RunStatus,
     ToolCall,
+    _agent_run_state_from_status,
     utc_now_iso,
 )
 from ..domain.state import (
@@ -439,24 +441,14 @@ class RuntimeEngine:
         return run.session_id if run is not None else None
 
     async def recover_session(self, session_id: str) -> None:
-        """将进程重启遗留的 RUNNING Run 转为仍占用 Session 的 INTERRUPTED。"""
-        runs: tuple[AgentRun, ...] = await self._run_repository.list_active_runs(session_id)
-        run: AgentRun
-        for run in runs:
-            if run.status is not RunStatus.RUNNING:
-                continue
-            error: RunError = RunError(RunErrorCode.PROCESS_RESTART, "进程重启导致运行中断", retryable=True)
-            interrupted: AgentRun = replace(run, status=RunStatus.INTERRUPTED, error=error)
-            await self._run_repository.save_run(interrupted)
-            checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(run.session_id, run.run_id)
-            if checkpoint is not None:
-                event_sequence: int = await self._event(
-                    interrupted,
-                    checkpoint.event_sequence,
-                    RunEventType.RUN_INTERRUPTED,
-                    (),
-                )
-                await self._checkpoint_repository.save(replace(checkpoint, event_sequence=event_sequence))
+        """进程重启后的 Session 恢复入口。
+
+        阶段 4 起不再将遗留 ``RUNNING`` 改写为伪状态：未结束 Run 保持其最后持久化的
+        非终态（``Created`` / ``Running`` / ``Suspended``），占用判定与恢复均由
+        ``active_run`` 与 ``resume_run`` / ``abandon_run`` 负责，普通新消息只返回
+        ``SESSION_BUSY``，不会自动放弃旧 Run。
+        """
+        # 故意不改写领域状态：具体节点恢复继续委托 checkpoint/resume（见 resume_run）。
 
     async def active_run(self, session_id: str) -> AgentRun | None:
         """返回当前占用 Session 的唯一非终态 Run。"""
@@ -465,18 +457,22 @@ class RuntimeEngine:
             raise RuntimeError("同一 Session 存在多个未终态 Run")
         return runs[0] if runs else None
 
-    async def retry_interrupted(
+    async def resume_run(
         self,
         run_id: str,
         output_port: LLMOutputPort | None = None,
     ) -> RunResult:
-        """依据 checkpoint 和活动 Context Version 重试被外部服务中断的 Run。"""
+        """依据 checkpoint 和活动 Context Version 恢复未结束 Run（同一 run_id）。
+
+        前置条件：Run 未 ``Ended`` 且存在有效的 LLM checkpoint；具体节点恢复继续委托
+        checkpoint/resume，不会产生新的初始 Context Version。
+        """
         run: AgentRun | None = await self._run_repository.find_run(run_id)
-        if run is None or run.status is not RunStatus.INTERRUPTED:
-            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "Run 不处于可重试中断状态"))
+        if run is None or run.state.is_ended():
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "Run 不存在或已结束，无法恢复"))
         checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(run.session_id, run.run_id)
         if checkpoint is None or checkpoint.active_context_version is None or checkpoint.next_action is not AgentAction.INVOKE_LLM:
-            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "中断 Run 缺少可重试的 LLM checkpoint"))
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "Run 缺少可恢复的 LLM checkpoint"))
         versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(run.session_id, run.run_id)
         version: ContextVersion | None = next((item for item in versions if item.version == checkpoint.active_context_version), None)
         if version is None:
@@ -484,10 +480,10 @@ class RuntimeEngine:
         messages: tuple[RunMessage, ...] = await self._run_repository.load_messages(run.session_id, run.run_id)
         input_message: RunMessage | None = next((item for item in messages if item.message_id == run.input_message_id), None)
         if input_message is None:
-            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "中断 Run 缺少用户输入消息"))
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "Run 缺少用户输入消息"))
         request: RunRequest = RunRequest(
             run.session_id,
-            "retry-interrupted",
+            "resume-run",
             run.agent_id,
             ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
             _conversation_from_context_version(version),
@@ -507,7 +503,7 @@ class RuntimeEngine:
         )
         resumed: AgentRun = replace(run, status=RunStatus.RUNNING, resume_count=run.resume_count + 1)
         await self._run_repository.save_run(resumed)
-        event_sequence: int = await self._event(resumed, checkpoint.event_sequence, RunEventType.RUN_RESUMED, (), "重试中断 Run")
+        event_sequence: int = await self._event(resumed, checkpoint.event_sequence, RunEventType.RUN_RESUMED, (), "恢复未结束 Run")
         self._cancellation_service.register(run.run_id, execution.cancellation)
         try:
             result: RunResult = await self._drive(execution, resumed, messages, (), event_sequence, output_port)
@@ -516,22 +512,38 @@ class RuntimeEngine:
         finally:
             self._cancellation_service.unregister(run.run_id)
 
-    async def abandon_interrupted(self, run_id: str) -> RunResult:
-        """放弃中断 Run，保留审计事实并解除其 Session 占用。"""
+    async def abandon_run(self, run_id: str) -> RunResult:
+        """显式放弃未结束 Run：经状态机收口为 Ended(ABANDONED) 并删除检查点。"""
         run: AgentRun | None = await self._run_repository.find_run(run_id)
-        if run is None or run.status is not RunStatus.INTERRUPTED:
-            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "Run 不处于可放弃中断状态"))
+        if run is None or run.state.is_ended():
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "Run 不存在或已结束，无法放弃"))
         checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(run.session_id, run.run_id)
+        event_sequence: int = checkpoint.event_sequence if checkpoint is not None else 0
+        execution: RunExecution = RunExecution(
+            run.run_id,
+            RunRequest(
+                run.session_id,
+                "abandon",
+                run.agent_id,
+                ConversationMessage(run.input_message_id, MessageRole.USER, "", ""),
+                ConversationSnapshot(run.session_id, (), 0),
+            ),
+            run.policy,
+            run.state,
+            RunBudget(run.policy.max_iterations),
+        )
+        abandon_transition = await self._apply_transition(execution, run, AbandonRequested(), event_sequence)
+        if abandon_transition is None:
+            return RunResult(run_id, RunStatus.FAILED, error=RunError(RunErrorCode.INVALID_STATE, "放弃被状态机拒绝"))
         abandoned: AgentRun = replace(
             run,
             status=RunStatus.ABANDONED,
             ended_at=utc_now_iso(),
-            error=RunError(RunErrorCode.CANCELLED, "已被新的用户请求放弃"),
+            error=RunError(RunErrorCode.CANCELLED, "已被显式放弃"),
         )
         await self._run_repository.save_run(abandoned)
         await self._checkpoint_repository.delete(run.session_id, run.run_id)
-        if checkpoint is not None:
-            await self._event(abandoned, checkpoint.event_sequence, RunEventType.RUN_ABANDONED, ())
+        await self._event(abandoned, event_sequence, RunEventType.RUN_ABANDONED, ())
         result: RunResult = RunResult(run.run_id, RunStatus.ABANDONED, error=abandoned.error)
         await self._release_run_context_if_terminal(result)
         return result
@@ -777,7 +789,7 @@ class RuntimeEngine:
             await self._checkpoint_repository.save(
                 _compaction_checkpoint(run, execution, event_number, sequence),
             )
-            return run, sequence, event_number, (), await self._interrupt(execution, run, tuple(messages), event_number, str(error))
+            return run, sequence, event_number, (), await self._suspend_on_unavailable(execution, run, tuple(messages), event_number, str(error))
         except ContextBudgetRejected as error:
             return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, str(error), error.code)
         except Exception as error:
@@ -812,7 +824,7 @@ class RuntimeEngine:
         try:
             response = await self._llm_port.complete(context, execution.view(), output_port)
         except LLMUnavailableError as error:
-            return run, sequence, event_number, (), await self._interrupt(execution, run, tuple(messages), event_number, str(error))
+            return run, sequence, event_number, (), await self._suspend_on_unavailable(execution, run, tuple(messages), event_number, str(error))
         except Exception as error:
             return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, f"模型调用失败：{error}", RunErrorCode.LLM_FAILURE)
         if response.metadata.get("has_streamed_response") is True:
@@ -1177,7 +1189,7 @@ class RuntimeEngine:
         await self._event(run, event_sequence, RunEventType.RUN_CANCELLED, ())
         return RunResult(run.run_id, RunStatus.CANCELLED, error=cancelled.error)
 
-    async def _interrupt(
+    async def _suspend_on_unavailable(
         self,
         execution: RunExecution,
         run: AgentRun,
@@ -1185,20 +1197,15 @@ class RuntimeEngine:
         event_sequence: int,
         reason: str,
     ) -> RunResult:
-        """保留调用前 checkpoint，将可恢复外部不可用映射为 INTERRUPTED。"""
+        """外部服务瞬时不可用：保留最后一次持久化状态与检查点，不做终态收口、不产生中断事件。
+
+        进程重启、临时外部不可用不使 Run 进入 ``Ended``；Run 保持进入本次驱动前持久化的
+        非终态（通常为 ``Running``），后续由 ``resume_run`` 基于同一 ``run_id`` 与既有
+        checkpoint 继续。故不再映射为独立的伪中断状态。
+        """
         error: RunError = RunError(RunErrorCode.LLM_FAILURE, reason, retryable=True)
-        interrupted: AgentRun = replace(run, status=RunStatus.INTERRUPTED, error=error)
-        await self._run_repository.save_run(interrupted)
-        interrupted_event_sequence: int = await self._event(
-            interrupted,
-            event_sequence,
-            RunEventType.RUN_INTERRUPTED,
-            (),
-        )
-        checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(run.session_id, run.run_id)
-        if checkpoint is not None:
-            await self._checkpoint_repository.save(replace(checkpoint, event_sequence=interrupted_event_sequence))
-        return RunResult(run.run_id, RunStatus.INTERRUPTED, error=error)
+        # 不修改 run.status：保留既有非终态与检查点，使 Run 可被 resume_run 恢复。
+        return RunResult(run.run_id, run.status, error=error)
 
     async def _fail(
         self,
@@ -1259,7 +1266,6 @@ def _state_from_checkpoint(checkpoint: RunCheckpoint) -> AgentRunState:
         AgentPhase.COMPLETED: Ended(RunOutcome.COMPLETED),
         AgentPhase.FAILED: Ended(RunOutcome.FAILED),
         AgentPhase.CANCELLED: Ended(RunOutcome.CANCELLED),
-        AgentPhase.INTERRUPTED: Running(RunStage.CALLING_LLM),
         AgentPhase.ABANDONED: Ended(RunOutcome.ABANDONED),
     }.get(phase, Created())
     iteration_value: object = raw.get("iteration") if isinstance(raw, dict) else 0

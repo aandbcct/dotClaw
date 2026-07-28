@@ -56,7 +56,6 @@ class RunStatus(StrEnum):
     CANCELLED = "cancelled"
     WAITING_APPROVAL = "waiting_approval"
     WAITING_DELEGATION = "waiting_delegation"
-    INTERRUPTED = "interrupted"
     ABANDONED = "abandoned"
 
 
@@ -391,7 +390,7 @@ def _agent_run_state_from_status(status: RunStatus) -> AgentRunState:
     """迁移期过渡桥：将旧 ``RunStatus`` 投影为新 ``AgentRunState``。
 
     仅用于仓储以 ``state.is_ended()`` 判断活跃/终态；``WAITING_APPROVAL`` 因缺少
-    审批标识退化为占位 ``Suspended``，``INTERRUPTED`` 视为活动 ``Running``。阶段 2
+    审批标识退化为占位 ``Suspended``，未结束 Run 在迁移期视为活动 ``Running``。阶段 2
     引擎直接维护 ``state`` 后此投影移除。
     """
     from .state import (
@@ -413,6 +412,5 @@ def _agent_run_state_from_status(status: RunStatus) -> AgentRunState:
         RunStatus.ABANDONED: Ended(RunOutcome.ABANDONED),
         RunStatus.WAITING_APPROVAL: Suspended(SuspendReason.APPROVAL, "", RunStage.EXECUTING_TOOLS),
         RunStatus.WAITING_DELEGATION: Suspended(SuspendReason.DELEGATION, "", RunStage.CALLING_LLM),
-        RunStatus.INTERRUPTED: Running(RunStage.CALLING_LLM),
     }
     return AgentRunState(mode=mode_by_status.get(status, Running(RunStage.CALLING_LLM)))

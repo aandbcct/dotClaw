@@ -51,7 +51,6 @@ class AgentPhase(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
-    INTERRUPTED = "interrupted"
     ABANDONED = "abandoned"
 
 
@@ -103,7 +102,6 @@ class AgentState:
             AgentPhase.COMPLETED,
             AgentPhase.FAILED,
             AgentPhase.CANCELLED,
-            AgentPhase.INTERRUPTED,
             AgentPhase.ABANDONED,
         })
         return self.phase in terminal_phases

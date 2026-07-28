@@ -28,7 +28,6 @@ class RunEventType(StrEnum):
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
     RUN_CANCELLED = "run_cancelled"
-    RUN_INTERRUPTED = "run_interrupted"
     RUN_ABANDONED = "run_abandoned"
     # 状态机拒绝非法迁移时记录的审计事实：只保存当前 mode/detail、事件类型与安全原因，
     # 不记录消息正文、完整工具参数等敏感负载。

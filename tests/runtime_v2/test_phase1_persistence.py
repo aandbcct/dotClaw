@@ -108,7 +108,6 @@ def test_agent_run_state_carries_statistics() -> None:
     [
         (RunStatus.RUNNING, False),
         (RunStatus.WAITING_APPROVAL, False),
-        (RunStatus.INTERRUPTED, False),
         (RunStatus.COMPLETED, True),
         (RunStatus.FAILED, True),
         (RunStatus.CANCELLED, True),
@@ -144,7 +143,7 @@ def test_agent_run_to_dict_includes_state() -> None:
 async def test_list_active_runs_uses_state_is_ended() -> None:
     """活跃判定统一基于 state.is_ended()，终态运行不再占用 Session。"""
     repository: InMemoryRunRepository = InMemoryRunRepository()
-    active_statuses = (RunStatus.RUNNING, RunStatus.WAITING_APPROVAL, RunStatus.INTERRUPTED)
+    active_statuses = (RunStatus.RUNNING, RunStatus.WAITING_APPROVAL)
     ended_statuses = (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.ABANDONED)
     for index, status in enumerate(active_statuses + ended_statuses):
         await repository.create_run(_run(status=status, run_id=f"run-{index}"))
@@ -173,7 +172,6 @@ async def test_file_repository_list_active_runs(tmp_path) -> None:
     [
         RunStatus.RUNNING,
         RunStatus.WAITING_APPROVAL,
-        RunStatus.INTERRUPTED,
         RunStatus.COMPLETED,
         RunStatus.FAILED,
         RunStatus.CANCELLED,

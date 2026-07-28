@@ -290,8 +290,8 @@ async def test_within_budget_does_not_create_history_compression_candidate(tmp_p
     assert run.staged_history_compressions == ()
 
 
-async def test_llm_unavailable_keeps_checkpoint_and_retry_reuses_context_version(tmp_path: Path) -> None:
-    """业务模型不可用转 INTERRUPTED；重试不生成新的初始上下文版本。"""
+async def test_llm_unavailable_keeps_checkpoint_and_resume_reuses_context_version(tmp_path: Path) -> None:
+    """业务模型不可用保留非终态；resume 不生成新的初始上下文版本。"""
     counter = ScriptedCounter(10)
     compactor = ScriptedCompactor()
     llm = FlakyLLM()
@@ -300,9 +300,9 @@ async def test_llm_unavailable_keeps_checkpoint_and_retry_reuses_context_version
     interrupted = await engine.execute(_request(1))
     checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-e4", interrupted.run_id)
     before_versions = await repository.load_context_versions("session-e4", interrupted.run_id)
-    completed = await engine.retry_interrupted(interrupted.run_id)
+    completed = await engine.resume_run(interrupted.run_id, None)
 
-    assert interrupted.status is RunStatus.INTERRUPTED
+    assert interrupted.status is RunStatus.RUNNING
     assert checkpoint is not None
     assert checkpoint.next_action.value == "invoke_llm"
     assert checkpoint.budget["context_budget"] == {
@@ -321,23 +321,25 @@ async def test_llm_unavailable_keeps_checkpoint_and_retry_reuses_context_version
     assert completed_run.active_context_version == 1
 
 
-async def test_new_request_abandons_interrupted_run_before_creating_replacement(tmp_path: Path) -> None:
-    """同 Session 新请求先放弃旧 INTERRUPTED Run，再允许创建替代 Run。"""
+async def test_new_request_returns_session_busy_when_active_run_exists(tmp_path: Path) -> None:
+    """同 Session 新请求遇到未结束 Run 一律 SESSION_BUSY，不自动放弃。"""
     counter = ScriptedCounter(10)
     compactor = ScriptedCompactor()
     engine, repository = _engine(tmp_path, counter, compactor, FlakyLLM())
-    interrupted = await engine.execute(_request(1))
+    active = await engine.execute(_request(1))
     coordinator = SessionRunCoordinator(engine)
     replacement = await coordinator.submit(_request(1))
-    old_run = await repository.find_run(interrupted.run_id)
+    old_run = await repository.find_run(active.run_id)
 
     assert old_run is not None
-    assert old_run.status is RunStatus.ABANDONED
-    assert replacement.status is RunStatus.COMPLETED
+    assert old_run.status is RunStatus.RUNNING
+    assert replacement.status is RunStatus.FAILED
+    assert replacement.error is not None
+    assert replacement.error.code is RunErrorCode.SESSION_BUSY
 
 
-async def test_compactor_unavailable_interrupts_without_half_finished_context_version_or_candidate(tmp_path: Path) -> None:
-    """压缩服务不可用保留可重试 checkpoint，但不生成 Context Version 或候选。"""
+async def test_compactor_unavailable_keeps_non_ended_state_without_half_finished_context_version_or_candidate(tmp_path: Path) -> None:
+    """压缩服务不可用保留非终态与可恢复 checkpoint，但不生成 Context Version 或候选。"""
     counter = ScriptedCounter(100)
     engine, repository = _engine(tmp_path, counter, UnavailableCompactor(), FinalLLM())
 
@@ -346,7 +348,7 @@ async def test_compactor_unavailable_interrupts_without_half_finished_context_ve
     run = await repository.find_run(result.run_id)
     checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-e4", result.run_id)
 
-    assert result.status is RunStatus.INTERRUPTED
+    assert result.status is RunStatus.RUNNING
     assert versions == ()
     assert run is not None
     assert run.staged_history_compressions == ()
@@ -452,8 +454,8 @@ async def test_invalid_context_window_fails_deterministically_without_checkpoint
     assert versions == ()
 
 
-async def test_recovery_turns_orphan_running_run_into_interrupted_and_new_request_abandons_it(tmp_path: Path) -> None:
-    """首次访问 Session 时遗留 RUNNING 必须转中断，并由新请求先放弃。"""
+async def test_recovery_preserves_orphan_running_run_and_new_request_returns_busy(tmp_path: Path) -> None:
+    """进程重启恢复入口保留遗留 RUNNING，新普通请求返回 SESSION_BUSY 而不自动放弃。"""
     counter = ScriptedCounter(10)
     compactor = ScriptedCompactor()
     engine, repository = _engine(tmp_path, counter, compactor, FinalLLM())
@@ -473,21 +475,19 @@ async def test_recovery_turns_orphan_running_run_into_interrupted_and_new_reques
         {},
     ))
     await engine.recover_session("session-e4")
-    interrupted = await repository.find_run(orphan.run_id)
+    recovered = await repository.find_run(orphan.run_id)
     coordinator = SessionRunCoordinator(engine)
 
-    replacement = await coordinator.submit(_request(1))
-    recovered = await repository.find_run(orphan.run_id)
+    new_request = await coordinator.submit(_request(1))
+    after = await repository.find_run(orphan.run_id)
 
-    assert interrupted is not None
-    assert interrupted.status is RunStatus.INTERRUPTED
-    assert interrupted.error is not None
-    assert interrupted.error.code is RunErrorCode.PROCESS_RESTART
     assert recovered is not None
-    assert recovered.status is RunStatus.ABANDONED
-    assert recovered.error is not None
-    assert recovered.error.code is RunErrorCode.CANCELLED
-    assert replacement.status is RunStatus.COMPLETED
+    assert recovered.status is RunStatus.RUNNING  # 恢复入口不再改写为伪状态
+    assert after is not None
+    assert after.status is RunStatus.RUNNING  # 新请求不自动放弃旧 Run
+    assert new_request.status is RunStatus.FAILED
+    assert new_request.error is not None
+    assert new_request.error.code is RunErrorCode.SESSION_BUSY
 
 
 async def test_waiting_approval_occupies_session_and_restores_prior_run_context(tmp_path: Path) -> None:
@@ -520,16 +520,49 @@ async def test_waiting_approval_occupies_session_and_restores_prior_run_context(
     assert len(versions) >= 1
 
 
-def test_channel_display_maps_busy_interrupted_and_abandoned_results() -> None:
+async def test_abandon_run_deletes_checkpoint_and_ends_run(tmp_path: Path) -> None:
+    """显式放弃未结束 Run：删除 checkpoint、收口为 ABANDONED 并释放 Session 占用。"""
+    counter = ScriptedCounter(10)
+    compactor = ScriptedCompactor()
+    engine, repository = _engine(tmp_path, counter, compactor, FlakyLLM())
+    active = await engine.execute(_request(1))  # 未结束（LLM 不可用）
+    coordinator = SessionRunCoordinator(engine)
+    result = await coordinator.abandon_run(active.run_id)
+    abandoned = await repository.find_run(active.run_id)
+    checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-e4", active.run_id)
+
+    assert result.status is RunStatus.ABANDONED
+    assert abandoned is not None
+    assert abandoned.status is RunStatus.ABANDONED
+    assert checkpoint is None  # 检查点已删除，释放 Session 占用
+    # 放弃后同 Session 可创建替代 Run，不再 SESSION_BUSY。
+    replacement = await coordinator.submit(_request(1))
+    assert replacement.status is RunStatus.COMPLETED
+
+
+async def test_abandon_run_rejects_already_ended_run(tmp_path: Path) -> None:
+    """已结束 Run 不能再被放弃，返回 INVALID_STATE 失败。"""
+    counter = ScriptedCounter(10)
+    compactor = ScriptedCompactor()
+    engine, repository = _engine(tmp_path, counter, compactor, FinalLLM())
+    completed = await engine.execute(_request(1))
+    result = await engine.abandon_run(completed.run_id)
+
+    assert result.status is RunStatus.FAILED
+    assert result.error is not None
+    assert result.error.code is RunErrorCode.INVALID_STATE
+
+
+def test_channel_display_maps_busy_active_and_abandoned_results() -> None:
     """入口展示将 E4 三类控制结果转换为用户可理解的文本。"""
     busy: RunResult = RunResult(
         "run-busy",
         RunStatus.FAILED,
         error=RunError(RunErrorCode.SESSION_BUSY, "Session 占用"),
     )
-    interrupted: RunResult = RunResult("run-interrupted", RunStatus.INTERRUPTED)
+    active: RunResult = RunResult("run-active", RunStatus.RUNNING)
     abandoned: RunResult = RunResult("run-abandoned", RunStatus.ABANDONED)
 
     assert "未完成运行" in format_run_result(busy)
-    assert "可重试" in format_run_result(interrupted)
+    assert "执行未完成" in format_run_result(active)
     assert "已放弃" in format_run_result(abandoned)

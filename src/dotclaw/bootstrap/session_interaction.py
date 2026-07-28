@@ -132,13 +132,13 @@ class SessionInteractionService:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
-    async def retry_interrupted(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
-        """重试可恢复中断 Run，并返回结构化结果；透传运行级输出端口。"""
-        return await self._coordinator.retry_interrupted(run_id, output_port)
+    async def resume_run(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """恢复未结束 Run，并返回结构化结果；透传运行级输出端口。"""
+        return await self._coordinator.resume_run(run_id, output_port)
 
-    async def abandon_interrupted(self, run_id: str) -> RunResult:
-        """放弃可恢复中断 Run，并返回结构化结果。"""
-        return await self._coordinator.abandon_interrupted(run_id)
+    async def abandon_run(self, run_id: str) -> RunResult:
+        """显式放弃未结束 Run，并返回结构化结果。"""
+        return await self._coordinator.abandon_run(run_id)
 
     # ── 删除协调 ──
 
@@ -207,8 +207,6 @@ def format_run_result(result: RunResult) -> str:
         return result.final_message.content
     if result.status is RunStatus.WAITING_APPROVAL:
         return f"运行等待审批：{result.run_id}"
-    if result.status is RunStatus.INTERRUPTED:
-        return f"运行已中断，可重试：{result.run_id}"
     if result.status is RunStatus.ABANDONED:
         return f"运行已放弃：{result.run_id}"
     if result.error is not None:
