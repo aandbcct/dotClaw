@@ -33,6 +33,141 @@ dotClaw 当前适合：
 
 ---
 
+## 总体架构
+
+```mermaid
+flowchart TB
+    User["用户 / 外部输入"] --> Channel["Channel / CLI"]
+    Channel --> App["SessionInteractionService"]
+    App --> Session["Session / Conversation"]
+    App --> Coordinator["SessionRunCoordinator"]
+    Coordinator --> Runtime["RuntimeEngine + RunExecution"]
+
+    Config["Config + AgentIdentity"] -.启动与策略输入.-> App
+    Config -.配置输入.-> Runtime
+
+    Runtime --> State["AgentRunState<br/>Created / Running / Suspended / Ended"]
+    State --> Transition["transition(event)<br/>next state + AgentAction"]
+    Transition -.驱动下一项动作.-> Runtime
+
+    Runtime --> Context["ContextPort"]
+    Runtime --> LLM["LLMPort"]
+    Runtime --> Tool["ToolPort"]
+    Runtime --> Delegation["DelegationPort"]
+    Runtime --> Facts["Run Repository<br/>State / Message / Event / ContextVersion / Checkpoint.action"]
+
+    Context --> Memory["Memory"]
+    Context --> Skills["Skills"]
+    Context --> AgentDir["Agent Directory"]
+
+    LLM --> Providers["Model Providers"]
+    Tool --> Builtin["Builtin Tools"]
+    Tool --> MCP["MCP Tools"]
+    Delegation --> Orchestration["Task / Broker / Async Child Run"]
+
+    Facts -.成功后投影.-> Session
+
+    Host["ApplicationHost<br/>组合根与生命周期"] -.装配.-> App
+    Host -.装配.-> Runtime
+    Host -.装配.-> Context
+    Host -.装配.-> LLM
+    Host -.装配.-> Tool
+    Host -.装配.-> MCP
+```
+
+关键边界：
+
+1. `ApplicationHost` 是组合根，不参与正常请求的业务处理；
+2. `SessionInteractionService` 是普通请求的应用入口；
+3. `SessionRunCoordinator` 保证同一 Session 串行，不同 Session 可以并行；
+4. `AgentRun.state` 是单个 Run 唯一的持久化控制状态；
+5. 所有状态变化来自 `transition()`，RuntimeEngine 只执行返回的 `AgentAction`；
+6. Runtime 只通过 Port 调用能力模块；
+7. MCP 是 Tool 来源，不在 Runtime 中建立独立调用分支；
+8. Journal 和 Scheduler 的代码与配置目前存在，但尚未进入 ApplicationHost 主链。
+
+---
+
+## 一次请求如何运行
+
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant Channel as CLI / Channel
+    participant App as SessionInteractionService
+    participant Coord as SessionRunCoordinator
+    participant Runtime as RuntimeEngine
+    participant State as AgentRunState / transition
+    participant Context as ContextPort
+    participant LLM as LLMPort
+    participant Tool as ToolPort
+    participant Delegation as DelegationPort
+    participant Repo as Run Repository
+    participant Session as Session
+
+    User->>Channel: 输入消息
+    Channel->>App: submit(session, message)
+    App->>Coord: submit_prepared()
+    Coord->>Coord: 获取 Session 锁并冻结 RunRequest
+    Coord->>Runtime: execute(request)
+    Runtime->>Repo: 创建 AgentRun 与输入事实
+    Runtime->>State: RunStarted
+    State-->>Runtime: Running(CALLING_LLM) + INVOKE_LLM
+    Runtime->>Repo: 持久化 state 与 checkpoint.action
+    Runtime->>Context: 构造 ContextBundle
+    Context-->>Runtime: messages + tools + metadata
+    Runtime->>LLM: 模型调用
+
+    alt 模型返回最终回答
+        LLM-->>Runtime: response
+        Runtime->>State: LLMResponseProduced(final=true)
+        State-->>Runtime: Ended(COMPLETED) + FINALIZE
+        Runtime->>Repo: 执行可补偿成功提交
+        Repo->>Session: 投影 Conversation
+    else 模型返回普通 Tool Call
+        LLM-->>Runtime: tool calls
+        Runtime->>State: LLMResponseProduced(final=false)
+        State-->>Runtime: Running(EXECUTING_TOOLS) + EXECUTE_TOOLS
+        Runtime->>Repo: 保存 state、action 与 pending calls
+        Runtime->>Tool: execute(invocation)
+
+        alt Tool 需要审批
+            Tool-->>Runtime: approval required
+            Runtime->>State: ToolApprovalRequired
+            State-->>Runtime: Suspended(APPROVAL) + SUSPEND
+            Runtime->>Repo: 保存审批记录与 Checkpoint
+        else Tool 执行完成
+            Tool-->>Runtime: ToolResult
+            Runtime->>State: ToolBatchCompleted
+            State-->>Runtime: Running(CALLING_LLM) + INVOKE_LLM
+        end
+    else 模型请求委派
+        Runtime->>State: DelegationRequested
+        State-->>Runtime: HANDOFF_TARGET
+        Runtime->>Delegation: 异步提交 child AgentRun
+        Delegation-->>Runtime: child_run_id
+        Runtime->>State: DelegationSubmitted
+        State-->>Runtime: Suspended(DELEGATION) + SUSPEND
+        Runtime->>Repo: 保存父 Run 挂起状态与 child 引用
+    end
+
+    Runtime-->>Coord: RunResult
+    Coord-->>App: RunResult
+    App-->>Channel: 结构化结果
+    Channel-->>User: reasoning / response / 状态
+```
+
+普通用户消息总是创建新 Run。已有 Run 的结构化控制入口包括：
+
+- `resolve_approval()`：恢复 `Suspended(APPROVAL)`；
+- `resume_delegation()`：子 Run 结束后恢复 `Suspended(DELEGATION)`；
+- `resume_run()`：根据 `Checkpoint.action` 恢复未结束 Run；
+- `cancel()` / `abandon_run()`：将未结束 Run 收口。
+
+CLI 的 `/retry <run_id>` 是 `resume_run()` 的交互命令名；可恢复性由未结束状态与有效 Checkpoint 共同决定。
+
+---
+
 ## 核心设计
 
 dotClaw 不是把 `LLM → Tool → Answer` 串起来的单次调用 Demo。项目重点处理的是 Agent 进入多轮工具调用、审批等待、上下文增长、进程重启恢复和子 Agent 协作后，如何保持执行隔离、事实一致和模块可替换。
@@ -241,141 +376,6 @@ resume_delegation(child_run_id)
 子 Run 的成功、失败、取消或放弃都会作为结构化结果回灌父模型，由父 Agent 决定后续；父 Run 取消时，取消信号可以传播到当前 child Run。
 
 **工程价值：**多 Agent 能力复用同一状态机、审批、Context 和持久化模型，不需要另建第二套 Runtime。父 Run 的外部等待被显式建模为 `Suspended(DELEGATION)`。当前 Task、等待映射和异步任务主要保存在内存，因此跨进程恢复仍是明确边界。
-
----
-
-## 总体架构
-
-```mermaid
-flowchart TB
-    User["用户 / 外部输入"] --> Channel["Channel / CLI"]
-    Channel --> App["SessionInteractionService"]
-    App --> Session["Session / Conversation"]
-    App --> Coordinator["SessionRunCoordinator"]
-    Coordinator --> Runtime["RuntimeEngine + RunExecution"]
-
-    Config["Config + AgentIdentity"] -.启动与策略输入.-> App
-    Config -.配置输入.-> Runtime
-
-    Runtime --> State["AgentRunState<br/>Created / Running / Suspended / Ended"]
-    State --> Transition["transition(event)<br/>next state + AgentAction"]
-    Transition -.驱动下一项动作.-> Runtime
-
-    Runtime --> Context["ContextPort"]
-    Runtime --> LLM["LLMPort"]
-    Runtime --> Tool["ToolPort"]
-    Runtime --> Delegation["DelegationPort"]
-    Runtime --> Facts["Run Repository<br/>State / Message / Event / ContextVersion / Checkpoint.action"]
-
-    Context --> Memory["Memory"]
-    Context --> Skills["Skills"]
-    Context --> AgentDir["Agent Directory"]
-
-    LLM --> Providers["Model Providers"]
-    Tool --> Builtin["Builtin Tools"]
-    Tool --> MCP["MCP Tools"]
-    Delegation --> Orchestration["Task / Broker / Async Child Run"]
-
-    Facts -.成功后投影.-> Session
-
-    Host["ApplicationHost<br/>组合根与生命周期"] -.装配.-> App
-    Host -.装配.-> Runtime
-    Host -.装配.-> Context
-    Host -.装配.-> LLM
-    Host -.装配.-> Tool
-    Host -.装配.-> MCP
-```
-
-关键边界：
-
-1. `ApplicationHost` 是组合根，不参与正常请求的业务处理；
-2. `SessionInteractionService` 是普通请求的应用入口；
-3. `SessionRunCoordinator` 保证同一 Session 串行，不同 Session 可以并行；
-4. `AgentRun.state` 是单个 Run 唯一的持久化控制状态；
-5. 所有状态变化来自 `transition()`，RuntimeEngine 只执行返回的 `AgentAction`；
-6. Runtime 只通过 Port 调用能力模块；
-7. MCP 是 Tool 来源，不在 Runtime 中建立独立调用分支；
-8. Journal 和 Scheduler 的代码与配置目前存在，但尚未进入 ApplicationHost 主链。
-
----
-
-## 一次请求如何运行
-
-```mermaid
-sequenceDiagram
-    actor User as 用户
-    participant Channel as CLI / Channel
-    participant App as SessionInteractionService
-    participant Coord as SessionRunCoordinator
-    participant Runtime as RuntimeEngine
-    participant State as AgentRunState / transition
-    participant Context as ContextPort
-    participant LLM as LLMPort
-    participant Tool as ToolPort
-    participant Delegation as DelegationPort
-    participant Repo as Run Repository
-    participant Session as Session
-
-    User->>Channel: 输入消息
-    Channel->>App: submit(session, message)
-    App->>Coord: submit_prepared()
-    Coord->>Coord: 获取 Session 锁并冻结 RunRequest
-    Coord->>Runtime: execute(request)
-    Runtime->>Repo: 创建 AgentRun 与输入事实
-    Runtime->>State: RunStarted
-    State-->>Runtime: Running(CALLING_LLM) + INVOKE_LLM
-    Runtime->>Repo: 持久化 state 与 checkpoint.action
-    Runtime->>Context: 构造 ContextBundle
-    Context-->>Runtime: messages + tools + metadata
-    Runtime->>LLM: 模型调用
-
-    alt 模型返回最终回答
-        LLM-->>Runtime: response
-        Runtime->>State: LLMResponseProduced(final=true)
-        State-->>Runtime: Ended(COMPLETED) + FINALIZE
-        Runtime->>Repo: 执行可补偿成功提交
-        Repo->>Session: 投影 Conversation
-    else 模型返回普通 Tool Call
-        LLM-->>Runtime: tool calls
-        Runtime->>State: LLMResponseProduced(final=false)
-        State-->>Runtime: Running(EXECUTING_TOOLS) + EXECUTE_TOOLS
-        Runtime->>Repo: 保存 state、action 与 pending calls
-        Runtime->>Tool: execute(invocation)
-
-        alt Tool 需要审批
-            Tool-->>Runtime: approval required
-            Runtime->>State: ToolApprovalRequired
-            State-->>Runtime: Suspended(APPROVAL) + SUSPEND
-            Runtime->>Repo: 保存审批记录与 Checkpoint
-        else Tool 执行完成
-            Tool-->>Runtime: ToolResult
-            Runtime->>State: ToolBatchCompleted
-            State-->>Runtime: Running(CALLING_LLM) + INVOKE_LLM
-        end
-    else 模型请求委派
-        Runtime->>State: DelegationRequested
-        State-->>Runtime: HANDOFF_TARGET
-        Runtime->>Delegation: 异步提交 child AgentRun
-        Delegation-->>Runtime: child_run_id
-        Runtime->>State: DelegationSubmitted
-        State-->>Runtime: Suspended(DELEGATION) + SUSPEND
-        Runtime->>Repo: 保存父 Run 挂起状态与 child 引用
-    end
-
-    Runtime-->>Coord: RunResult
-    Coord-->>App: RunResult
-    App-->>Channel: 结构化结果
-    Channel-->>User: reasoning / response / 状态
-```
-
-普通用户消息总是创建新 Run。已有 Run 的结构化控制入口包括：
-
-- `resolve_approval()`：恢复 `Suspended(APPROVAL)`；
-- `resume_delegation()`：子 Run 结束后恢复 `Suspended(DELEGATION)`；
-- `resume_run()`：根据 `Checkpoint.action` 恢复未结束 Run；
-- `cancel()` / `abandon_run()`：将未结束 Run 收口。
-
-CLI 的 `/retry <run_id>` 是 `resume_run()` 的交互命令名；可恢复性由未结束状态与有效 Checkpoint 共同决定。
 
 ---
 
