@@ -15,7 +15,7 @@ from ..runtime.application.dto import (
     DelegationSubmission,
     RunRequest,
     RunResult,
-    run_outcome_from_status,
+    run_outcome_from_state,
 )
 from ..runtime.application.ports import DelegationPort
 from ..runtime.domain.facts import RunError, RunErrorCode
@@ -192,7 +192,7 @@ def _to_delegation_result(result: RunResult) -> DelegationResult:
     output: str = result.final_message.content if result.final_message is not None else ""
     return DelegationResult(
         child_run_id=result.run_id,
-        outcome=run_outcome_from_status(result.status),
+        outcome=run_outcome_from_state(result.state),
         output=output,
         error=result.error,
     )

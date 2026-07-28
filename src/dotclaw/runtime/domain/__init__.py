@@ -24,11 +24,9 @@ from .events import (
     ToolBatchFailed,
 )
 from .context import ContextVersion
-from .facts import AgentRun, ContextCompactionScope, RunStatus
+from .facts import AgentRun, ContextCompactionScope
 from .state import (
-    AgentPhase,
     AgentRunState,
-    AgentState,
     Created,
     Ended,
     InvalidTransition,
@@ -45,11 +43,9 @@ from .state import (
 __all__ = [
     "AbandonRequested",
     "AgentAction",
-    "AgentPhase",
     "AgentRun",
     "AgentRunEvent",
     "AgentRunState",
-    "AgentState",
     "ApprovalGranted",
     "ApprovalRejected",
     "CancelRequested",
@@ -69,7 +65,6 @@ __all__ = [
     "RunOutcome",
     "RunStage",
     "RunStarted",
-    "RunStatus",
     "StateTransition",
     "Suspended",
     "SuspendReason",

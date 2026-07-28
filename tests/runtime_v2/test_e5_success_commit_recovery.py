@@ -33,10 +33,15 @@ from dotclaw.runtime.domain.facts import (
     RunCheckpoint,
     RunMessage,
     RunMessageKind,
-    RunStatus,
     require_json_map,
 )
-from dotclaw.runtime.domain.state import RunOutcome
+from dotclaw.runtime.domain.state import (
+    AgentRunState,
+    Ended,
+    RunOutcome,
+    RunStage,
+    Running,
+)
 from dotclaw.session.session import Session, SessionManager
 
 
@@ -74,10 +79,10 @@ async def _prepare_pending_success(
     )
     checkpoint_repository: CheckpointRepositoryAdapter = CheckpointRepositoryAdapter(root)
     policy: AgentPolicySnapshot = AgentPolicySnapshot("agent-e5", "policy-e5", "model-e5", 4)
-    running: AgentRun = AgentRun("run-e5", session.id, "agent-e5", RunStatus.RUNNING, "", policy, "input-e5")
+    running: AgentRun = AgentRun("run-e5", session.id, "agent-e5", AgentRunState(mode=Running(RunStage.CALLING_LLM)), "", policy, "input-e5")
     user_message: RunMessage = RunMessage("input-e5", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "测试问题")
     final_message: RunMessage = RunMessage("final-e5", 2, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, "测试回答")
-    completed: AgentRun = replace(running, status=RunStatus.COMPLETED, ended_at="2026-07-20T00:00:00+00:00", final_message_id=final_message.message_id)
+    completed: AgentRun = replace(running, state=AgentRunState(mode=Ended(RunOutcome.COMPLETED)), ended_at="2026-07-20T00:00:00+00:00", final_message_id=final_message.message_id)
     completed_event: RunEvent = RunEvent(
         completed.run_id,
         1,
@@ -93,16 +98,15 @@ async def _prepare_pending_success(
         session_id=completed.session_id,
     )
     checkpoint: RunCheckpoint = RunCheckpoint(
-        "checkpoint-e5",
-        completed.run_id,
-        completed.session_id,
-        1,
-        0,
-        2,
-        {"phase": "finalizing", "iteration": 1},
-        AgentAction.INVOKE_LLM,
-        {},
-        {},
+        checkpoint_id="checkpoint-e5",
+        run_id=completed.run_id,
+        session_id=completed.session_id,
+        checkpoint_sequence=1,
+        event_sequence=0,
+        message_sequence=2,
+        action=AgentAction.INVOKE_LLM,
+        pending={"phase": "finalizing", "iteration": 1},
+        budget={},
     )
     await repository.create_run(running)
     await repository.save_messages(session.id, running.run_id, (user_message, final_message))
@@ -138,7 +142,7 @@ async def test_success_commit_recovers_every_persistence_boundary_idempotently(t
         ]
 
         assert recovered is not None
-        assert recovered.status is RunStatus.COMPLETED
+        assert recovered.state.outcome() is RunOutcome.COMPLETED
         assert recovered.success_commit_intent is None
         assert session is not None
         assert len(session.conversations) == 1

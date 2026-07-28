@@ -17,7 +17,7 @@ from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, ToolCall,
 )
 from dotclaw.runtime.domain.context import ContextOwner
-from dotclaw.runtime.domain.state import AgentState
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 from dotclaw.tools.approval import ApprovalManager
 from dotclaw.tools.decorator import get_tool_meta, tool
 from dotclaw.tools.executor import ToolExecutor
@@ -28,7 +28,7 @@ from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, Une
 
 def _execution() -> RunExecutionView:
     """构造最小只读运行视图。"""
-    return RunExecutionView("run-1", AgentPolicySnapshot("agent", "v1", "model", 3), AgentState(), RunBudget(3), 0, None)
+    return RunExecutionView("run-1", AgentPolicySnapshot("agent", "v1", "model", 3), AgentRunState(mode=Running(RunStage.CALLING_LLM)), RunBudget(3), 0, None)
 
 
 async def test_tool_executor_adapter_requires_approval_without_channel_and_executes_once() -> None:
@@ -179,8 +179,8 @@ async def test_tool_executor_adapter_drives_engine_approval_resume_with_same_run
     completed = await engine.resolve_approval(waiting.approval_id or "", True)
     run = await repository.load_run("session", waiting.run_id)
 
-    assert waiting.status.value == "waiting_approval"
-    assert completed.status.value == "completed"
+    assert waiting.state.is_waiting_approval()
+    assert completed.state.outcome().value == "completed"
     assert completed.run_id == waiting.run_id
     assert executions == ["done"]
     assert run is not None

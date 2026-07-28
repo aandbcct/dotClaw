@@ -1,6 +1,7 @@
 """E4 LLM_STARTED 安全点、动态压缩与可恢复中断集成测试。"""
 
 from __future__ import annotations
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from dotclaw.runtime.application.ports import ContextPort, HistoryCompactorPort,
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.context import ContextOwner, ContextVersion
-from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, HistoryCompressionSnapshot, MessageRole, RunCheckpoint, RunError, RunErrorCode, RunMessage, RunMessageKind, RunStatus, ToolCall
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, HistoryCompressionSnapshot, MessageRole, RunCheckpoint, RunError, RunErrorCode, RunMessage, RunMessageKind, ToolCall
 from dotclaw.bootstrap.session_interaction import format_run_result
 
 
@@ -264,7 +265,7 @@ async def test_over_budget_compresses_oldest_conversations_then_recounts_and_sta
     run = await repository.find_run(result.run_id)
     versions = await repository.load_context_versions("session-e4", result.run_id)
 
-    assert result.status is RunStatus.COMPLETED
+    assert result.state.outcome() is RunOutcome.COMPLETED
     assert len(compactor.requests) == 1
     assert [batch.conversation_id for batch in compactor.requests[0].batches] == ["conversation-0-user", "conversation-1-user"]
     assert len(counter.requests) >= 5
@@ -284,7 +285,7 @@ async def test_within_budget_does_not_create_history_compression_candidate(tmp_p
     result = await engine.execute(_request(1))
     run = await repository.find_run(result.run_id)
 
-    assert result.status is RunStatus.COMPLETED
+    assert result.state.outcome() is RunOutcome.COMPLETED
     assert not compactor.requests
     assert run is not None
     assert run.staged_history_compressions == ()
@@ -302,9 +303,9 @@ async def test_llm_unavailable_keeps_checkpoint_and_resume_reuses_context_versio
     before_versions = await repository.load_context_versions("session-e4", interrupted.run_id)
     completed = await engine.resume_run(interrupted.run_id, None)
 
-    assert interrupted.status is RunStatus.RUNNING
+    assert isinstance(interrupted.state.mode, Running)
     assert checkpoint is not None
-    assert checkpoint.next_action.value == "invoke_llm"
+    assert checkpoint.action.value == "invoke_llm"
     assert checkpoint.budget["context_budget"] == {
         "status": "within_budget",
         "input_tokens": 8,
@@ -312,7 +313,7 @@ async def test_llm_unavailable_keeps_checkpoint_and_resume_reuses_context_versio
         "reason": "",
     }
     assert len(before_versions) == 1
-    assert completed.status is RunStatus.COMPLETED
+    assert completed.state.outcome() is RunOutcome.COMPLETED
     assert llm.calls == 2
     after_versions: tuple[ContextVersion, ...] = await repository.load_context_versions("session-e4", interrupted.run_id)
     completed_run: AgentRun | None = await repository.find_run(interrupted.run_id)
@@ -332,8 +333,8 @@ async def test_new_request_returns_session_busy_when_active_run_exists(tmp_path:
     old_run = await repository.find_run(active.run_id)
 
     assert old_run is not None
-    assert old_run.status is RunStatus.RUNNING
-    assert replacement.status is RunStatus.FAILED
+    assert isinstance(old_run.state.mode, Running)
+    assert replacement.state.outcome() is RunOutcome.FAILED
     assert replacement.error is not None
     assert replacement.error.code is RunErrorCode.SESSION_BUSY
 
@@ -348,7 +349,7 @@ async def test_compactor_unavailable_keeps_non_ended_state_without_half_finished
     run = await repository.find_run(result.run_id)
     checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-e4", result.run_id)
 
-    assert result.status is RunStatus.RUNNING
+    assert isinstance(result.state.mode, Running)
     assert versions == ()
     assert run is not None
     assert run.staged_history_compressions == ()
@@ -366,7 +367,7 @@ async def test_tokenizer_rejection_fails_without_checkpoint_or_context_version(t
     versions = await repository.load_context_versions("session-e4", result.run_id)
     checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-e4", result.run_id)
 
-    assert result.status is RunStatus.FAILED
+    assert result.state.outcome() is RunOutcome.FAILED
     assert result.error is not None
     assert result.error.code is RunErrorCode.TOKENIZER_UNAVAILABLE
     assert versions == ()
@@ -384,7 +385,7 @@ async def test_context_still_over_budget_after_compression_fails_without_candida
     versions = await repository.load_context_versions("session-e4", result.run_id)
     checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-e4", result.run_id)
 
-    assert result.status is RunStatus.FAILED
+    assert result.state.outcome() is RunOutcome.FAILED
     assert run is not None
     assert run.staged_history_compressions == ()
     assert versions == ()
@@ -426,7 +427,7 @@ async def test_repeated_compression_replaces_prior_summary_in_context_version(tm
     versions = await repository.load_context_versions(request.session_id, result.run_id)
     history_slot = next(slot for slot in versions[0].slots if slot.contribution_kind.value == "history_compressions")
 
-    assert result.status is RunStatus.COMPLETED
+    assert result.state.outcome() is RunOutcome.COMPLETED
     assert "已压缩的历史事实" in history_slot.content.text
     assert "旧摘要" not in history_slot.content.text
 
@@ -447,7 +448,7 @@ async def test_invalid_context_window_fails_deterministically_without_checkpoint
     checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-e4", result.run_id)
     versions = await repository.load_context_versions("session-e4", result.run_id)
 
-    assert result.status is RunStatus.FAILED
+    assert result.state.outcome() is RunOutcome.FAILED
     assert result.error is not None
     assert result.error.code is RunErrorCode.CONTEXT_BUDGET
     assert checkpoint is None
@@ -460,19 +461,18 @@ async def test_recovery_preserves_orphan_running_run_and_new_request_returns_bus
     compactor = ScriptedCompactor()
     engine, repository = _engine(tmp_path, counter, compactor, FinalLLM())
     policy = await BudgetPolicy().resolve(_request(1))
-    orphan = AgentRun("orphan-run", "session-e4", "agent-e4", RunStatus.RUNNING, "", policy, "input-orphan")
+    orphan = AgentRun("orphan-run", "session-e4", "agent-e4", AgentRunState(mode=Running(RunStage.CALLING_LLM)), "", policy, "input-orphan")
     await repository.create_run(orphan)
     await CheckpointRepositoryAdapter(tmp_path).save(RunCheckpoint(
-        "checkpoint-orphan",
-        orphan.run_id,
-        orphan.session_id,
-        1,
-        0,
-        0,
-        {"phase": "waiting_llm", "iteration": 1},
-        AgentAction.INVOKE_LLM,
-        {},
-        {},
+        checkpoint_id="checkpoint-orphan",
+        run_id=orphan.run_id,
+        session_id=orphan.session_id,
+        checkpoint_sequence=1,
+        event_sequence=0,
+        message_sequence=0,
+        action=AgentAction.INVOKE_LLM,
+        pending={"phase": "waiting_llm", "iteration": 1},
+        budget={},
     ))
     await engine.recover_session("session-e4")
     recovered = await repository.find_run(orphan.run_id)
@@ -482,10 +482,10 @@ async def test_recovery_preserves_orphan_running_run_and_new_request_returns_bus
     after = await repository.find_run(orphan.run_id)
 
     assert recovered is not None
-    assert recovered.status is RunStatus.RUNNING  # 恢复入口不再改写为伪状态
+    assert isinstance(recovered.state.mode, Running)  # 恢复入口不再改写为伪状态
     assert after is not None
-    assert after.status is RunStatus.RUNNING  # 新请求不自动放弃旧 Run
-    assert new_request.status is RunStatus.FAILED
+    assert isinstance(after.state.mode, Running)  # 新请求不自动放弃旧 Run
+    assert new_request.state.outcome() is RunOutcome.FAILED
     assert new_request.error is not None
     assert new_request.error.code is RunErrorCode.SESSION_BUSY
 
@@ -511,11 +511,11 @@ async def test_waiting_approval_occupies_session_and_restores_prior_run_context(
     messages = await repository.load_messages("session-e4", waiting.run_id)
     versions = await repository.load_context_versions("session-e4", waiting.run_id)
 
-    assert waiting.status is RunStatus.WAITING_APPROVAL
-    assert busy.status is RunStatus.FAILED
+    assert waiting.state.is_waiting_approval()
+    assert busy.state.outcome() is RunOutcome.FAILED
     assert busy.error is not None
     assert busy.error.code is RunErrorCode.SESSION_BUSY
-    assert completed.status is RunStatus.COMPLETED
+    assert completed.state.outcome() is RunOutcome.COMPLETED
     assert any(message.tool_call_id == "call-approval" for message in messages)
     assert len(versions) >= 1
 
@@ -531,13 +531,13 @@ async def test_abandon_run_deletes_checkpoint_and_ends_run(tmp_path: Path) -> No
     abandoned = await repository.find_run(active.run_id)
     checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-e4", active.run_id)
 
-    assert result.status is RunStatus.ABANDONED
+    assert result.state.outcome() is RunOutcome.ABANDONED
     assert abandoned is not None
-    assert abandoned.status is RunStatus.ABANDONED
+    assert abandoned.state.outcome() is RunOutcome.ABANDONED
     assert checkpoint is None  # 检查点已删除，释放 Session 占用
     # 放弃后同 Session 可创建替代 Run，不再 SESSION_BUSY。
     replacement = await coordinator.submit(_request(1))
-    assert replacement.status is RunStatus.COMPLETED
+    assert replacement.state.outcome() is RunOutcome.COMPLETED
 
 
 async def test_abandon_run_rejects_already_ended_run(tmp_path: Path) -> None:
@@ -548,7 +548,7 @@ async def test_abandon_run_rejects_already_ended_run(tmp_path: Path) -> None:
     completed = await engine.execute(_request(1))
     result = await engine.abandon_run(completed.run_id)
 
-    assert result.status is RunStatus.FAILED
+    assert result.state.outcome() is RunOutcome.FAILED
     assert result.error is not None
     assert result.error.code is RunErrorCode.INVALID_STATE
 
@@ -557,11 +557,11 @@ def test_channel_display_maps_busy_active_and_abandoned_results() -> None:
     """入口展示将 E4 三类控制结果转换为用户可理解的文本。"""
     busy: RunResult = RunResult(
         "run-busy",
-        RunStatus.FAILED,
+        AgentRunState(mode=Ended(RunOutcome.FAILED)),
         error=RunError(RunErrorCode.SESSION_BUSY, "Session 占用"),
     )
-    active: RunResult = RunResult("run-active", RunStatus.RUNNING)
-    abandoned: RunResult = RunResult("run-abandoned", RunStatus.ABANDONED)
+    active: RunResult = RunResult("run-active", AgentRunState(mode=Running(RunStage.CALLING_LLM)))
+    abandoned: RunResult = RunResult("run-abandoned", AgentRunState(mode=Ended(RunOutcome.ABANDONED)))
 
     assert "未完成运行" in format_run_result(busy)
     assert "执行未完成" in format_run_result(active)

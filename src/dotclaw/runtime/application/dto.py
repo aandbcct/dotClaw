@@ -11,10 +11,9 @@ from ..domain.facts import (
     MessageRole,
     RunError,
     RunMessage,
-    RunStatus,
     ToolCall,
 )
-from ..domain.state import RunOutcome
+from ..domain.state import AgentRunState, Ended, RunOutcome
 from ..domain.context import ContextOwner, ContextRefreshReason, ContextSlotSnapshot
 
 
@@ -90,7 +89,7 @@ class RunResult:
     """Application 返回给入口层的单次执行结果。"""
 
     run_id: str
-    status: RunStatus
+    state: AgentRunState
     final_message: ConversationMessage | None = None
     error: RunError | None = None
     approval_id: str | None = None
@@ -103,7 +102,7 @@ class RunResult:
         """转换为 Channel 或 API 可消费的结果数据。"""
         return {
             "run_id": self.run_id,
-            "status": self.status.value,
+            "state": self.state.to_dict(),
             "final_message": None if self.final_message is None else self.final_message.to_dict(),
             "error": None if self.error is None else self.error.to_dict(),
             "approval_id": self.approval_id,
@@ -252,7 +251,7 @@ class DelegationSubmission:
 class DelegationResult:
     """DelegationPort 返回给 Application 的子执行结果。
 
-    不再依赖 ``RunStatus``：以 ``outcome`` 暴露子运行是否已终态及结果类别，
+    不再依赖旧状态枚举：以 ``outcome`` 暴露子运行是否已终态及结果类别，
     未结束或不可判定时为 ``None``；其余字段供父运行回灌 delegation result 消息。
     """
 
@@ -262,11 +261,6 @@ class DelegationResult:
     error: RunError | None = None
 
 
-def run_outcome_from_status(status: RunStatus) -> RunOutcome | None:
-    """将终态 ``RunStatus`` 投影为 ``RunOutcome``；非终态返回 ``None``。"""
-    return {
-        RunStatus.COMPLETED: RunOutcome.COMPLETED,
-        RunStatus.FAILED: RunOutcome.FAILED,
-        RunStatus.CANCELLED: RunOutcome.CANCELLED,
-        RunStatus.ABANDONED: RunOutcome.ABANDONED,
-    }.get(status)
+def run_outcome_from_state(state: AgentRunState) -> RunOutcome | None:
+    """将终态 ``AgentRunState`` 投影为 ``RunOutcome``；非终态返回 ``None``。"""
+    return state.mode.outcome if isinstance(state.mode, Ended) else None

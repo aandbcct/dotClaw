@@ -42,7 +42,7 @@ from dotclaw.runtime.domain.facts import (
     ApprovalStatus,
     ToolCall,
 )
-from dotclaw.runtime.domain.state import AgentState
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 from dotclaw.session.session import SessionManager
 from dotclaw.tools.base import ToolExecutionContext, ToolResult
 
@@ -108,7 +108,7 @@ def _make_execution_view(run_id: str, agent_id: str) -> RunExecutionView:
     return RunExecutionView(
         run_id=run_id,
         policy=policy,
-        state=AgentState(),
+        state=AgentRunState(mode=Running(RunStage.CALLING_LLM)),
         budget=RunBudget(max_iterations=10),
         message_cursor=0,
         pending_control=None,

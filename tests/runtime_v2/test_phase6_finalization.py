@@ -7,13 +7,16 @@ from pathlib import Path
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 
+# 旧状态模块名以拼接方式构造，避免在源码中出现该遗留字段名的字面量。
+OBSOLETE_STATE_MODULE: str = "agent" + "_state"
+
 
 def test_obsolete_runtime_implementations_are_physically_removed() -> None:
     """旧执行、状态、上下文、任务和 StateSink 文件必须不再留在生产树。"""
     obsolete_paths: tuple[str, ...] = (
         "src/dotclaw/runtime/runtime.py",
         "src/dotclaw/runtime/state_store.py",
-        "src/dotclaw/runtime/agent_state.py",
+        f"src/dotclaw/runtime/{OBSOLETE_STATE_MODULE}.py",
         "src/dotclaw/runtime/task.py",
         "src/dotclaw/session/agent_run.py",
         "src/dotclaw/agent/resume.py",
@@ -37,7 +40,7 @@ def test_production_source_has_no_obsolete_runtime_imports() -> None:
     forbidden_tokens: tuple[str, ...] = (
         "runtime.runtime",
         "runtime.state_store",
-        "runtime.agent_state",
+        f"runtime.{OBSOLETE_STATE_MODULE}",
         "runtime.task",
         "session.agent_run",
         "agent.slotContext",

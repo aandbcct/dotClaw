@@ -26,7 +26,7 @@ from dotclaw.runtime.application.dto import ContextBundle, ConversationMessage, 
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
 from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent, ToolDefinitionsSlotContent
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
-from dotclaw.runtime.domain.state import AgentState
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
 
 @dataclass
@@ -155,7 +155,7 @@ def _execution(request: RunRequest, run_messages: tuple[RunMessage, ...] = ()) -
             "tools": [{"name": "lookup", "description": "查询", "parameters": {"type": "object"}}],
         },
     )
-    return RunExecution("run-1", request, policy, AgentState(), RunBudget(8), run_messages=run_messages)
+    return RunExecution("run-1", request, policy, AgentRunState(mode=Running(RunStage.CALLING_LLM)), RunBudget(8), run_messages=run_messages)
 
 
 async def test_bound_slots_are_snapshotted_and_unenabled_slot_is_absent() -> None:

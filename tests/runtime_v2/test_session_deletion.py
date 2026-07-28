@@ -6,6 +6,7 @@ Run/Session 范围 Context 缓存释放。使用真实仓储与最小替身，�
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,14 @@ from dotclaw.runtime.adapters.session_conversation_projector import (
 )
 from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.runtime.domain.facts import ApprovalRecord, ApprovalStatus
+from dotclaw.runtime.domain.state import (
+    AgentRunState,
+    Created,
+    Ended,
+    RunOutcome,
+    RunStage,
+    Running,
+)
 from dotclaw.session.session import SessionManager
 
 
@@ -53,13 +62,28 @@ def _service(
     return session_manager, service, run_repository, approval_repository
 
 
+def _state_from_status(status: str) -> AgentRunState:
+    """将旧 status 字符串映射为新的唯一控制状态 AgentRunState。"""
+    if status == "completed":
+        return AgentRunState(mode=Ended(RunOutcome.COMPLETED))
+    if status == "failed":
+        return AgentRunState(mode=Ended(RunOutcome.FAILED))
+    if status == "cancelled":
+        return AgentRunState(mode=Ended(RunOutcome.CANCELLED))
+    if status == "abandoned":
+        return AgentRunState(mode=Ended(RunOutcome.ABANDONED))
+    if status == "running":
+        return AgentRunState(mode=Running(RunStage.CALLING_LLM))
+    return AgentRunState(mode=Created())
+
+
 def _write_run(tmp_path: Path, session_id: str, run_id: str, status: str) -> None:
-    """写入一个最小可解析的 run.json（status 控制是否终态）。"""
+    """写入一个最小可解析的 run.json（state 控制是否终态）。"""
     run_dir: Path = tmp_path / session_id / "agent_runs" / run_id
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text(
-        '{"run_id": "%s", "session_id": "%s", "agent_id": "agent-1", "status": "%s"}'
-        % (run_id, session_id, status),
+        '{"run_id": "%s", "session_id": "%s", "agent_id": "agent-1", "state": %s}'
+        % (run_id, session_id, json.dumps(_state_from_status(status).to_dict(), ensure_ascii=False)),
         encoding="utf-8",
     )
 

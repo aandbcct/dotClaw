@@ -1,12 +1,8 @@
 """不依赖外部实现的 Runtime v4 Agent 状态机。
 
-本模块同时容纳两套状态机，属阶段迁移期的临时共存：
-
-* 旧状态机（``AgentPhase`` / ``AgentState``）：仍被未迁移的 engine / execution 使用，
-  调用方清零后在后续阶段物理删除。
-* 新状态机（``AgentRunState`` + 判别联合 ``AgentRunEvent`` + 模块级 ``transition()``）：
-  是《AgentRun 状态机总体设计》的目标契约，本次阶段 0 冻结其纯领域行为，
-  后续阶段将引擎、持久化与恢复入口迁到它，最终删除旧状态机。
+目标契约（见《AgentRun 状态机总体设计》）：``AgentRunState`` 判别联合 + 模块级
+``transition()`` 纯函数，由 Engine 与持久化、恢复入口消费；``is_ended()`` 是仓储筛选、
+Session 占用与入口结果判断的唯一标准。
 """
 
 from __future__ import annotations
@@ -35,173 +31,15 @@ from .events import (
 
 
 # ============================================================================
-# 旧状态机（迁移期临时共存，调用方清零后删除）
+# 状态机（目标契约）
 # ============================================================================
-
-
-class AgentPhase(StrEnum):
-    """状态机在一次运行中可处于的阶段。"""
-
-    IDLE = "idle"
-    WAITING_LLM = "waiting_llm"
-    WAITING_TOOLS = "waiting_tools"
-    WAITING_APPROVAL = "waiting_approval"
-    WAITING_DELEGATION = "waiting_delegation"
-    FINALIZING = "finalizing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    ABANDONED = "abandoned"
-
-
-@dataclass(frozen=True)
-class AgentState:
-    """只保存最小控制数据的纯领域状态。"""
-
-    phase: AgentPhase = AgentPhase.IDLE
-    iteration: int = 0
-    retry_count: int = 0
-    truncate_count: int = 0
-    loop_fingerprint: str = ""
-    waiting_control_id: str | None = None
-
-    def transition(self, event: object) -> StateTransition:
-        """根据领域事件返回新的状态与下一项执行动作。"""
-        from .events import (
-            ApprovalResolved,
-            CancelRequested,
-            DelegationCompleted,
-            DelegationSubmitted,
-            LLMCompleted,
-            RunStarted,
-            TimeoutReached,
-            ToolCompleted,
-        )
-
-        if isinstance(event, CancelRequested):
-            return StateTransition(self._cancel(), AgentAction.FINALIZE)
-        if isinstance(event, TimeoutReached):
-            return StateTransition(self._cancel(), AgentAction.FINALIZE)
-        if isinstance(event, RunStarted):
-            return self._on_run_started()
-        if isinstance(event, LLMCompleted):
-            return self._on_llm_completed(event)
-        if isinstance(event, ToolCompleted):
-            return self._on_tool_completed(event)
-        if isinstance(event, ApprovalResolved):
-            return self._on_approval_resolved(event)
-        if isinstance(event, DelegationSubmitted):
-            return self._on_delegation_submitted(event)
-        if isinstance(event, DelegationCompleted):
-            return self._on_delegation_completed(event)
-        raise RuntimeError("不支持的领域事件")
-
-    def is_terminal(self) -> bool:
-        """判断状态机是否已经进入终态。"""
-        terminal_phases: frozenset[AgentPhase] = frozenset({
-            AgentPhase.COMPLETED,
-            AgentPhase.FAILED,
-            AgentPhase.CANCELLED,
-            AgentPhase.ABANDONED,
-        })
-        return self.phase in terminal_phases
-
-    def to_dict(self) -> dict[str, str | int | None]:
-        """序列化为 Checkpoint 可保存的最小控制字段。"""
-        return {
-            "phase": self.phase.value,
-            "iteration": self.iteration,
-            "retry_count": self.retry_count,
-            "truncate_count": self.truncate_count,
-            "loop_fingerprint": self.loop_fingerprint,
-            "waiting_control_id": self.waiting_control_id,
-        }
-
-    def _on_run_started(self) -> StateTransition:
-        self._require_phase(AgentPhase.IDLE)
-        next_state: AgentState = AgentState(phase=AgentPhase.WAITING_LLM, iteration=1)
-        return StateTransition(next_state, AgentAction.INVOKE_LLM)
-
-    def _on_llm_completed(self, event: object) -> StateTransition:
-        from .events import LLMCompletionKind
-
-        self._require_phase(AgentPhase.WAITING_LLM)
-        if event.kind is LLMCompletionKind.FINAL_RESPONSE:
-            return StateTransition(self._with_phase(AgentPhase.FINALIZING), AgentAction.FINALIZE)
-        if event.kind is LLMCompletionKind.TOOL_CALLS:
-            return StateTransition(self._with_phase(AgentPhase.WAITING_TOOLS), AgentAction.EXECUTE_TOOLS)
-        return StateTransition(self._with_phase(AgentPhase.FAILED), AgentAction.FINALIZE)
-
-    def _on_tool_completed(self, event: object) -> StateTransition:
-        from .events import ToolCompletionKind
-
-        self._require_phase(AgentPhase.WAITING_TOOLS)
-        if event.kind is ToolCompletionKind.COMPLETED:
-            next_state: AgentState = AgentState(
-                phase=AgentPhase.WAITING_LLM,
-                iteration=self.iteration + 1,
-                retry_count=self.retry_count,
-                truncate_count=self.truncate_count,
-                loop_fingerprint=self.loop_fingerprint,
-            )
-            return StateTransition(next_state, AgentAction.INVOKE_LLM)
-        if event.kind is ToolCompletionKind.APPROVAL_REQUIRED:
-            waiting_state: AgentState = self._with_phase(
-                AgentPhase.WAITING_APPROVAL,
-                event.approval_id,
-            )
-            return StateTransition(waiting_state, AgentAction.WAIT)
-        return StateTransition(self._with_phase(AgentPhase.FAILED), AgentAction.FINALIZE)
-
-    def _on_approval_resolved(self, event: object) -> StateTransition:
-        from .events import ApprovalResolved
-
-        self._require_phase(AgentPhase.WAITING_APPROVAL)
-        if event.approval_id != self.waiting_control_id:
-            raise RuntimeError("审批事件不属于当前等待控制项")
-        if event.approved:
-            next_state: AgentState = self._with_phase(AgentPhase.WAITING_TOOLS)
-            return StateTransition(next_state, AgentAction.EXECUTE_TOOLS)
-        return StateTransition(self._with_phase(AgentPhase.CANCELLED), AgentAction.FINALIZE)
-
-    def _on_delegation_submitted(self, event: object) -> StateTransition:
-        """进入等待子运行结果的状态，由 Engine 继续查询 DelegationPort。"""
-        self._require_phase(AgentPhase.WAITING_TOOLS)
-        return StateTransition(self._with_phase(AgentPhase.WAITING_DELEGATION), AgentAction.WAIT)
-
-    def _on_delegation_completed(self, event: object) -> StateTransition:
-        self._require_phase(AgentPhase.WAITING_DELEGATION)
-        if event.succeeded:
-            return StateTransition(self._with_phase(AgentPhase.WAITING_LLM), AgentAction.INVOKE_LLM)
-        return StateTransition(self._with_phase(AgentPhase.FAILED), AgentAction.FINALIZE)
-
-    def _cancel(self) -> AgentState:
-        return self._with_phase(AgentPhase.CANCELLED)
-
-    def _with_phase(self, phase: AgentPhase, waiting_control_id: str | None = None) -> AgentState:
-        return AgentState(
-            phase=phase,
-            iteration=self.iteration,
-            retry_count=self.retry_count,
-            truncate_count=self.truncate_count,
-            loop_fingerprint=self.loop_fingerprint,
-            waiting_control_id=waiting_control_id,
-        )
-
-    def _require_phase(self, expected_phase: AgentPhase) -> None:
-        if self.phase is not expected_phase:
-            raise RuntimeError(f"无效状态转换：当前为 {self.phase.value}，期望为 {expected_phase.value}")
 
 
 @dataclass(frozen=True)
 class StateTransition:
-    """状态机处理一个领域事件后的结果。
+    """状态机处理一个领域事件后的结果：下一状态 + 下一项动作。"""
 
-    迁移期内 ``state`` 同时承载旧 ``AgentState`` 与新 ``AgentRunState``；两种状态机
-    均通过本容器返回「下一状态 + 下一项动作」，调用方清零旧类型后收敛为仅 ``AgentRunState``。
-    """
-
-    state: AgentState | AgentRunState
+    state: AgentRunState
     action: AgentAction
 
 
@@ -287,6 +125,30 @@ class AgentRunState:
     def is_active(self) -> bool:
         """判断运行是否尚未结束，可继续接受事件。"""
         return not self.is_ended()
+
+    def is_suspended(self) -> bool:
+        """判断运行是否因等待外部输入而挂起。"""
+        return isinstance(self.mode, Suspended)
+
+    def is_waiting_approval(self) -> bool:
+        """判断运行是否挂起等待工具审批。"""
+        return isinstance(self.mode, Suspended) and self.mode.reason is SuspendReason.APPROVAL
+
+    def is_abandoned(self) -> bool:
+        """判断运行是否已以放弃终态收口。"""
+        return isinstance(self.mode, Ended) and self.mode.outcome is RunOutcome.ABANDONED
+
+    def is_waiting_delegation(self) -> bool:
+        """判断运行是否挂起等待子运行（委托）完成。"""
+        return isinstance(self.mode, Suspended) and self.mode.reason is SuspendReason.DELEGATION
+
+    def outcome(self) -> RunOutcome | None:
+        """返回终态结果类别；未结束运行返回 ``None``。"""
+        return self.mode.outcome if isinstance(self.mode, Ended) else None
+
+    def describe(self) -> str:
+        """返回供日志与用户展示的稳定中文标签。"""
+        return _mode_name(self.mode)
 
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典（含四模式判别与累计统计）。"""
@@ -586,7 +448,7 @@ def _on_suspended(state: AgentRunState, event: AgentRunEvent) -> StateTransition
 
 
 def _end(state: AgentRunState, outcome: RunOutcome) -> AgentRunState:
-    """保留累计统计值，收口为 Ended(outcome)。"""
+    """保留累计统计值，收口为 AgentRunState(mode=Ended(outcome)。"""
     return AgentRunState(
         mode=Ended(outcome),
         iteration=state.iteration,

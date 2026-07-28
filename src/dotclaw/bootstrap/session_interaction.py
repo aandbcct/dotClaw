@@ -20,7 +20,7 @@ from ..runtime.application.ports import ContextPort, LLMOutputPort
 from ..runtime.application.request_factory import create_run_request
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.domain.context import ContextOwner
-from ..runtime.domain.facts import RunErrorCode, RunStatus
+from ..runtime.domain.facts import RunErrorCode
 from ..session.session import Session, SessionManager
 
 
@@ -205,12 +205,12 @@ def format_run_result(result: RunResult) -> str:
     """
     if result.final_message is not None:
         return result.final_message.content
-    if result.status is RunStatus.WAITING_APPROVAL:
+    if result.state.is_waiting_approval():
         return f"运行等待审批：{result.run_id}"
-    if result.status is RunStatus.ABANDONED:
+    if result.state.is_abandoned():
         return f"运行已放弃：{result.run_id}"
     if result.error is not None:
         if result.error.code is RunErrorCode.SESSION_BUSY:
             return "当前会话仍有未完成运行，请先完成审批、重试或取消后再发送消息。"
         return f"执行失败：{result.error.message}"
-    return f"执行未完成：{result.status.value}"
+    return f"执行未完成：{result.state.describe()}"

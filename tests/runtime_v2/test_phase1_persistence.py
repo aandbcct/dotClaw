@@ -2,10 +2,10 @@
 
 覆盖开发计划 §4 验收：
 - AgentRunState 往返序列化；
-- AgentRun.state 由 status 派生且 is_ended() 正确；
+- AgentRun.state 为唯一控制状态且 is_ended() 正确；
 - run.json 携带 state 并经仓储往返；
 - list_active_runs 仅按 state.is_ended() 判断；
-- checkpoint 携带 action 并经仓储往返（旧 next_action 仍可派生 action）；
+- checkpoint 携带 action 并经仓储往返；
 - 成功提交仅接受 Ended(COMPLETED)；
 - 仓储拒绝非 v4 旧格式。
 """
@@ -26,7 +26,6 @@ from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot,
     AgentRun,
     RunCheckpoint,
-    RunStatus,
     MessageRole,
 )
 from dotclaw.runtime.domain.control import AgentAction
@@ -46,12 +45,16 @@ def _policy() -> AgentPolicySnapshot:
     return AgentPolicySnapshot("agent-1", "identity-v1", "model-v1", 8)
 
 
-def _run(status: RunStatus = RunStatus.RUNNING, run_id: str = "run-1") -> AgentRun:
+def _state(mode) -> AgentRunState:
+    return AgentRunState(mode=mode)
+
+
+def _run(state: AgentRunState = _state(Running(RunStage.CALLING_LLM)), run_id: str = "run-1") -> AgentRun:
     return AgentRun(
         run_id=run_id,
         session_id="session-1",
         agent_id="agent-1",
-        status=status,
+        state=state,
         started_at="2026-07-20T00:00:00+00:00",
         policy=_policy(),
         input_message_id="user-1",
@@ -99,38 +102,38 @@ def test_agent_run_state_carries_statistics() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AgentRun.state 派生投影
+# AgentRun.state 为唯一控制状态
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "status,expected_ended",
+    "state,expected_ended",
     [
-        (RunStatus.RUNNING, False),
-        (RunStatus.WAITING_APPROVAL, False),
-        (RunStatus.COMPLETED, True),
-        (RunStatus.FAILED, True),
-        (RunStatus.CANCELLED, True),
-        (RunStatus.ABANDONED, True),
+        (_state(Running(RunStage.CALLING_LLM)), False),
+        (_state(Suspended(SuspendReason.APPROVAL, "a", RunStage.EXECUTING_TOOLS)), False),
+        (_state(Ended(RunOutcome.COMPLETED)), True),
+        (_state(Ended(RunOutcome.FAILED)), True),
+        (_state(Ended(RunOutcome.CANCELLED)), True),
+        (_state(Ended(RunOutcome.ABANDONED)), True),
     ],
 )
-def test_agent_run_state_derives_from_status(status: RunStatus, expected_ended: bool) -> None:
-    """迁移期 state 由 status 派生，is_ended() 与终态语义一致。"""
-    run: AgentRun = _run(status=status)
+def test_agent_run_state_is_ended(state: AgentRunState, expected_ended: bool) -> None:
+    """state.is_ended() 与终态语义一致，是仓储与入口判断的唯一标准。"""
+    run: AgentRun = _run(state=state)
     assert isinstance(run.state, AgentRunState)
     assert run.state.is_ended() is expected_ended
 
 
 def test_agent_run_state_completed_outcome() -> None:
-    """完成的运行投影为 Ended(COMPLETED)。"""
-    run: AgentRun = _run(status=RunStatus.COMPLETED)
+    """完成的运行状态为 Ended(COMPLETED)。"""
+    run: AgentRun = _run(state=_state(Ended(RunOutcome.COMPLETED)))
     assert isinstance(run.state.mode, Ended)
     assert run.state.mode.outcome is RunOutcome.COMPLETED
 
 
 def test_agent_run_to_dict_includes_state() -> None:
     """run.json 必须携带 state 字段。"""
-    run: AgentRun = _run(status=RunStatus.RUNNING)
+    run: AgentRun = _run(state=_state(Running(RunStage.CALLING_LLM)))
     assert "state" in run.to_dict()
     assert run.to_dict()["state"]["mode"]["type"] == "running"
 
@@ -143,21 +146,29 @@ def test_agent_run_to_dict_includes_state() -> None:
 async def test_list_active_runs_uses_state_is_ended() -> None:
     """活跃判定统一基于 state.is_ended()，终态运行不再占用 Session。"""
     repository: InMemoryRunRepository = InMemoryRunRepository()
-    active_statuses = (RunStatus.RUNNING, RunStatus.WAITING_APPROVAL)
-    ended_statuses = (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.ABANDONED)
-    for index, status in enumerate(active_statuses + ended_statuses):
-        await repository.create_run(_run(status=status, run_id=f"run-{index}"))
+    active_states = (
+        _state(Running(RunStage.CALLING_LLM)),
+        _state(Suspended(SuspendReason.APPROVAL, "a", RunStage.EXECUTING_TOOLS)),
+    )
+    ended_states = (
+        _state(Ended(RunOutcome.COMPLETED)),
+        _state(Ended(RunOutcome.FAILED)),
+        _state(Ended(RunOutcome.CANCELLED)),
+        _state(Ended(RunOutcome.ABANDONED)),
+    )
+    for index, state in enumerate(active_states + ended_states):
+        await repository.create_run(_run(state=state, run_id=f"run-{index}"))
 
     active: tuple[AgentRun, ...] = await repository.list_active_runs("session-1")
     active_ids: frozenset[str] = frozenset(run.run_id for run in active)
-    assert active_ids == {f"run-{i}" for i in range(len(active_statuses))}
+    assert active_ids == {f"run-{i}" for i in range(len(active_states))}
 
 
 async def test_file_repository_list_active_runs(tmp_path) -> None:
     """文件仓储同样按 state.is_ended() 过滤。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    await repository.create_run(_run(status=RunStatus.RUNNING, run_id="active-1"))
-    await repository.create_run(_run(status=RunStatus.COMPLETED, run_id="ended-1"))
+    await repository.create_run(_run(state=_state(Running(RunStage.CALLING_LLM)), run_id="active-1"))
+    await repository.create_run(_run(state=_state(Ended(RunOutcome.COMPLETED)), run_id="ended-1"))
     active: tuple[AgentRun, ...] = await repository.list_active_runs("session-1")
     assert {run.run_id for run in active} == {"active-1"}
 
@@ -168,27 +179,26 @@ async def test_file_repository_list_active_runs(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
-    "status",
+    "state",
     [
-        RunStatus.RUNNING,
-        RunStatus.WAITING_APPROVAL,
-        RunStatus.COMPLETED,
-        RunStatus.FAILED,
-        RunStatus.CANCELLED,
-        RunStatus.ABANDONED,
+        _state(Running(RunStage.CALLING_LLM)),
+        _state(Suspended(SuspendReason.APPROVAL, "a", RunStage.EXECUTING_TOOLS)),
+        _state(Ended(RunOutcome.COMPLETED)),
+        _state(Ended(RunOutcome.FAILED)),
+        _state(Ended(RunOutcome.CANCELLED)),
+        _state(Ended(RunOutcome.ABANDONED)),
     ],
 )
-async def test_agent_run_roundtrip_preserves_state(tmp_path, status: RunStatus) -> None:
-    """新建/审批等待/成功/失败/取消/放弃经 run.json 往返后 state 投影保持一致。"""
+async def test_agent_run_roundtrip_preserves_state(tmp_path, state: AgentRunState) -> None:
+    """运行中/审批等待/成功/失败/取消/放弃经 run.json 往返后 state 保持一致。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
-    run_id: str = f"run-{status.value}"
-    await repository.create_run(_run(status=status, run_id=run_id))
+    run_id: str = f"run-{state.describe().replace(':', '_')}"
+    await repository.create_run(_run(state=state, run_id=run_id))
 
     loaded: AgentRun | None = await repository.load_run("session-1", run_id)
     assert loaded is not None
-    assert loaded.status is status
-    assert loaded.state == _run(status=status).state
-    assert loaded.state.is_ended() == _run(status=status).state.is_ended()
+    assert loaded.state == _run(state=state).state
+    assert loaded.state.is_ended() == _run(state=state).state.is_ended()
 
 
 # ---------------------------------------------------------------------------
@@ -206,8 +216,6 @@ async def test_checkpoint_action_roundtrip(tmp_path) -> None:
         checkpoint_sequence=1,
         event_sequence=2,
         message_sequence=3,
-        agent_state={"phase": "waiting_llm"},
-        next_action=AgentAction.INVOKE_LLM,
         action=AgentAction.SUSPEND,
         pending={},
         budget={"max_iterations": 8},
@@ -219,31 +227,6 @@ async def test_checkpoint_action_roundtrip(tmp_path) -> None:
     assert loaded.action.value == "suspend"
 
 
-async def test_checkpoint_derives_action_from_next_action(tmp_path) -> None:
-    """旧格式 checkpoint（仅 next_action）仍能派生出 action。"""
-    payload: dict[str, object] = {
-        "version": 4,
-        "checkpoint_id": "checkpoint-old",
-        "run_id": "run-1",
-        "session_id": "session-1",
-        "checkpoint_sequence": 1,
-        "event_sequence": 2,
-        "message_sequence": 3,
-        "agent_state": {"phase": "waiting_llm"},
-        "next_action": "invoke_llm",
-        "pending": {},
-        "budget": {},
-    }
-    (tmp_path / "session-1" / "agent_runs" / "run-1").mkdir(parents=True)
-    (tmp_path / "session-1" / "agent_runs" / "run-1" / "checkpoint.json").write_text(
-        __import__("json").dumps(payload), encoding="utf-8",
-    )
-    loaded: RunCheckpoint | None = await CheckpointRepositoryAdapter(tmp_path).load("session-1", "run-1")
-    assert loaded is not None
-    assert loaded.action is loaded.next_action
-    assert loaded.action.value == "invoke_llm"
-
-
 # ---------------------------------------------------------------------------
 # 仓储：成功提交仅接受 Ended(COMPLETED)
 # ---------------------------------------------------------------------------
@@ -252,7 +235,7 @@ async def test_checkpoint_derives_action_from_next_action(tmp_path) -> None:
 async def test_success_commit_requires_completed_state() -> None:
     """成功提交投影必须基于 Ended(COMPLETED) 的运行。"""
     repository: InMemoryRunRepository = InMemoryRunRepository()
-    completed: AgentRun = _run(status=RunStatus.COMPLETED, run_id="ok-1")
+    completed: AgentRun = _run(state=_state(Ended(RunOutcome.COMPLETED)), run_id="ok-1")
     final_message: ConversationMessage = ConversationMessage("m1", MessageRole.ASSISTANT, "回答", "2026-07-20T00:00:00+00:00")
     completed_event: RunEvent = RunEvent(
         run_id="ok-1", sequence=1, event_type=RunEventType.RUN_COMPLETED, occurred_at="2026-07-20T00:00:00+00:00",
@@ -268,7 +251,7 @@ async def test_success_commit_requires_completed_state() -> None:
     await repository.create_run(completed)
     await repository.commit_success(completed, final_message, completed_event, intent)
 
-    running: AgentRun = _run(status=RunStatus.RUNNING, run_id="bad-1")
+    running: AgentRun = _run(state=_state(Running(RunStage.CALLING_LLM)), run_id="bad-1")
     bad_intent: SuccessCommitIntent = replace(intent, run_id="bad-1")
     with pytest.raises(ValueError, match="成功提交必须包含完成 Run"):
         await repository.commit_success(running, final_message, completed_event, bad_intent)

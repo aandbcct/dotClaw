@@ -1,6 +1,7 @@
 """真实 Session 历史压缩提交与下一次请求注入的端到端验收。"""
 
 from __future__ import annotations
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
 from dotclaw.runtime.application.ports import HistoryCompactorPort, LLMPort, LLMOutputPort, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.request_factory import create_run_request
-from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, RunStatus
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
 from dotclaw.session.session import Conversation, HistoryCompression, Session, SessionManager
 
 
@@ -107,7 +108,7 @@ async def test_real_session_history_compression_commits_and_is_injected_on_next_
     result: RunResult = await engine.execute(request)
     persisted: Session | None = await session_manager.load(session.id)
 
-    assert result.status is RunStatus.COMPLETED
+    assert result.state.outcome() is RunOutcome.COMPLETED
     assert [batch.conversation_id for batch in compactor.requests[0].batches] == [
         first.conversation_id,
         second.conversation_id,

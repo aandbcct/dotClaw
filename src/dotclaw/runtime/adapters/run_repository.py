@@ -12,7 +12,7 @@ from pathlib import Path
 from ..application.ports import ConversationProjectionPort, SuccessCommitFaultPort
 from ..application.dto import ConversationMessage
 from ..domain.events import RunEvent, RunEventType
-from ..domain.state import Ended, RunOutcome
+from ..domain.state import AgentRunState, Created, Ended, RunOutcome
 from ..domain.context import (
     ContextContributionKind,
     ContextOwner,
@@ -36,7 +36,6 @@ from ..domain.facts import (
     RunMessage,
     RunMessageKind,
     RunStatistics,
-    RunStatus,
     ToolCall,
     get_integer,
     get_string,
@@ -682,7 +681,7 @@ def _agent_run_from_dict(data: JSONMap) -> AgentRun:
         run_id=get_string(data, "run_id"),
         session_id=get_string(data, "session_id"),
         agent_id=get_string(data, "agent_id"),
-        status=RunStatus(get_string(data, "status", RunStatus.RUNNING.value)),
+        state=AgentRunState.from_dict(require_json_map(data["state"])) if "state" in data else AgentRunState(mode=Created()),
         started_at=get_string(data, "started_at"),
         policy=AgentPolicySnapshot(
             agent_id=get_string(policy_data, "agent_id"),
@@ -853,7 +852,7 @@ def _completed_run_from_intent(run: AgentRun, intent: RunSuccessCommitIntent) ->
     )
     return replace(
         run,
-        status=RunStatus(intent.target_outcome.value),
+        state=AgentRunState(mode=Ended(intent.target_outcome)),
         staged_history_compressions=candidates,
         success_commit_intent=None,
     )

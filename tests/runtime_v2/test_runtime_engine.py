@@ -1,6 +1,7 @@
 """RuntimeEngine 的正常执行、审批恢复与取消验收测试。"""
 
 from __future__ import annotations
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
 import asyncio
 import json
@@ -19,7 +20,7 @@ from dotclaw.runtime.application.dto import (
     ContextRefreshSignal, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
-    AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, RunStatus, ToolCall,
+    AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, ToolCall,
     require_json_map,
 )
 from dotclaw.context import (
@@ -150,7 +151,7 @@ async def test_engine_completes_clarification_as_normal_conversation(tmp_path: P
     engine = _engine(tmp_path)
     result = await engine.execute(_request("session-1"))
 
-    assert result.status.value == "completed"
+    assert result.state.outcome().value == "completed"
     assert result.final_message is not None
     assert result.final_message.content == "请补充信息"
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
@@ -309,8 +310,8 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
     waiting = await engine.execute(_request("session-approval"))
     completed = await engine.resolve_approval("approval-1", approved=True)
 
-    assert waiting.status.value == "waiting_approval"
-    assert completed.status.value == "completed"
+    assert waiting.state.is_waiting_approval()
+    assert completed.state.outcome().value == "completed"
     assert completed.run_id == waiting.run_id
     events_path: Path = tmp_path / "session-approval" / "agent_runs" / waiting.run_id / "events.jsonl"
     event_types: list[str] = [
@@ -407,7 +408,7 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
 
     result: RunResult = await engine.execute(_request_with_history("session-react"))
 
-    assert result.status is RunStatus.COMPLETED
+    assert result.state.outcome() is RunOutcome.COMPLETED
     assert [invocation.call.call_id for invocation in tool_port.calls] == ["call-1", "call-2"]
     second_context: ContextBundle = llm.contexts[1]
     assert [message.content for message in second_context.messages] == [
@@ -518,7 +519,7 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
     waiting: RunResult = await engine.execute(_request_with_history("session-approval-context"))
     completed: RunResult = await engine.resolve_approval(waiting.approval_id or "", approved=True)
 
-    assert completed.status is RunStatus.COMPLETED
+    assert completed.state.outcome() is RunOutcome.COMPLETED
     second_context: ContextBundle = llm.contexts[1]
     assert [message.content for message in second_context.messages] == [
         "这是之前的回答。",
@@ -554,7 +555,7 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
     waiting: RunResult = await engine.execute(_request_with_history("session-frozen-slots"))
     completed: RunResult = await engine.resolve_approval(waiting.approval_id or "", approved=True)
 
-    assert completed.status is RunStatus.COMPLETED
+    assert completed.state.outcome() is RunOutcome.COMPLETED
     assert changing_slot.calls == 1
     assert llm.contexts[0].messages[0].content == "system-1"
     assert llm.contexts[1].messages[0].content == "system-1"
@@ -584,7 +585,7 @@ async def test_rejected_approval_records_decision_and_cancels_without_conversati
         for line in events_path.read_text(encoding="utf-8").splitlines()
     ]
 
-    assert rejected.status is RunStatus.CANCELLED
+    assert rejected.state.outcome() is RunOutcome.CANCELLED
     assert rejected.run_id == waiting.run_id
     assert "approval_resolved" in event_types
     assert "run_cancelled" in event_types
@@ -611,7 +612,7 @@ async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) ->
 
     cancelled = await run_repository.load_run("session-cancel", waiting.run_id)
     assert cancelled is not None
-    assert cancelled.status.value == "cancelled"
+    assert cancelled.state.outcome().value == "cancelled"
     assert await run_repository.load_conversation("session-cancel") == ()
     assert await CheckpointRepositoryAdapter(tmp_path).load("session-cancel", waiting.run_id) is None
 
@@ -628,7 +629,7 @@ class OrderedEngine:
         self.started.append(request.lease_id)
         if request.lease_id == "lease-fifo-1":
             await self.release.wait()
-        return RunResult(request.lease_id, RunStatus.COMPLETED)
+        return RunResult(request.lease_id, AgentRunState(mode=Ended(RunOutcome.COMPLETED)))
 
     async def recover_session(self, session_id: str) -> None:
         """测试替身没有持久化遗留运行。"""
@@ -639,11 +640,11 @@ class OrderedEngine:
 
     async def resume_run(self, run_id: str, output_port=None) -> RunResult:
         """测试替身不支持运行恢复。"""
-        return RunResult(run_id, RunStatus.FAILED)
+        return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)))
 
     async def abandon_run(self, run_id: str) -> RunResult:
         """测试替身不支持运行放弃。"""
-        return RunResult(run_id, RunStatus.FAILED)
+        return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)))
 
 
 async def test_session_coordinator_serializes_same_session_fifo() -> None:
@@ -674,7 +675,7 @@ class ControlOrderedEngine:
     async def execute(self, request: RunRequest, output_port=None) -> RunResult:
         """记录普通请求何时真正获得执行机会。"""
         self.started.append(f"submit:{request.lease_id}")
-        return RunResult(request.lease_id, RunStatus.COMPLETED)
+        return RunResult(request.lease_id, AgentRunState(mode=Ended(RunOutcome.COMPLETED)))
 
     async def get_approval_session_id(self, approval_id: str) -> str | None:
         """将测试审批固定映射到同一 Session。"""
@@ -685,7 +686,7 @@ class ControlOrderedEngine:
         self.started.append(f"approval:{approval_id}")
         self.approval_entered.set()
         await self.release_approval.wait()
-        return RunResult("run-control", RunStatus.COMPLETED)
+        return RunResult("run-control", AgentRunState(mode=Ended(RunOutcome.COMPLETED)))
 
     async def get_run_session_id(self, run_id: str) -> str | None:
         """测试不触发取消路径。"""
@@ -703,11 +704,11 @@ class ControlOrderedEngine:
 
     async def resume_run(self, run_id: str, output_port=None) -> RunResult:
         """测试替身不支持运行恢复。"""
-        return RunResult(run_id, RunStatus.FAILED)
+        return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)))
 
     async def abandon_run(self, run_id: str) -> RunResult:
         """测试替身不支持运行放弃。"""
-        return RunResult(run_id, RunStatus.FAILED)
+        return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)))
 
 
 async def test_session_coordinator_serializes_approval_resume_with_new_message() -> None:

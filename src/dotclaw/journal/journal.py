@@ -291,7 +291,7 @@ class Journal:
         """记录 AgentState 变更事件到 trace.jsonl。
 
         Args:
-            phase: 当前 AgentPhase.value
+            phase: 当前控制阶段值
             end_status: AgentStatus.value
             iteration: 当前迭代次数
         """

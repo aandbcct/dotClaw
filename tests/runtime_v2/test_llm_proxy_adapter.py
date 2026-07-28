@@ -9,7 +9,7 @@ from dotclaw.runtime.adapters import LLMProxyAdapter
 from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, LLMOutputEvent, LLMOutputKind, ToolDefinition
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
-from dotclaw.runtime.domain.state import AgentState
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
 
 class StreamingProxy:
@@ -64,7 +64,7 @@ def _make_execution(run_id: str, session_id: str = "") -> RunExecutionView:
     return RunExecutionView(
         run_id,
         AgentPolicySnapshot("agent", "v1", "model-x", 3),
-        AgentState(),
+        AgentRunState(mode=Running(RunStage.CALLING_LLM)),
         RunBudget(3),
         0,
         None,

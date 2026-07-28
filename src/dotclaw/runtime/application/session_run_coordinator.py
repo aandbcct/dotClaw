@@ -6,7 +6,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from ..domain.facts import AgentRun, RunError, RunErrorCode, RunStatus
+from ..domain.facts import AgentRun, RunError, RunErrorCode
+from ..domain.state import AgentRunState, Ended, RunOutcome
 from .dto import RunRequest, RunResult
 from .ports import LLMOutputPort
 
@@ -140,7 +141,7 @@ class SessionRunCoordinator:
             return None
         return RunResult(
             active.run_id,
-            RunStatus.FAILED,
+            AgentRunState(mode=Ended(RunOutcome.FAILED)),
             error=RunError(RunErrorCode.SESSION_BUSY, "Session 存在未终态 Run，暂不接受普通请求"),
         )
 

@@ -42,11 +42,16 @@ from dotclaw.runtime.domain.facts import (
     MessageRole,
     RunMessage,
     RunMessageKind,
-    RunStatus,
     ToolCall,
     utc_now_iso,
 )
-from dotclaw.runtime.domain.state import RunOutcome
+from dotclaw.runtime.domain.state import (
+    AgentRunState,
+    Ended,
+    RunOutcome,
+    RunStage,
+    Running,
+)
 from dotclaw.session.session import SessionManager
 from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
@@ -220,7 +225,7 @@ class CompletedDelegation(DelegationPort):
         return DelegationSubmission(self.child_run_id, f"task-{self.child_run_id}", "child-session")
 
     async def result(self, child_run_id: str) -> DelegationResult | None:
-        """返回成功子运行的标准化结果（阶段3：使用 RunOutcome 而非 RunStatus）。"""
+        """返回成功子运行的标准化结果（阶段3：使用 RunOutcome 而非旧状态枚举）。"""
         return DelegationResult(child_run_id, RunOutcome.COMPLETED, "子运行输出")
 
     async def cancel(self, child_run_id: str) -> None:
@@ -285,7 +290,7 @@ async def test_engine_submits_delegation_and_suspends_parent(tmp_path: Path) -> 
     events: list[JSONMap] = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
 
     # 提交后父运行挂起在 delegation，execute() 立即返回而非等待子运行结果。
-    assert result.status is RunStatus.WAITING_DELEGATION
+    assert result.state.is_waiting_delegation()
     assert result.child_run_id == "child-run"
     assert delegation.request is not None
     assert delegation.request.parent_run_id == result.run_id
@@ -305,7 +310,7 @@ async def test_engine_submits_delegation_and_suspends_parent(tmp_path: Path) -> 
     # 父运行持久化状态必须为 WAITING_DELEGATION，供后续 resume_delegation 恢复。
     parent_run = await repository.load_run("parent-session", result.run_id)
     assert parent_run is not None
-    assert parent_run.status is RunStatus.WAITING_DELEGATION
+    assert parent_run.state.is_waiting_delegation()
 
 
 async def test_engine_resume_delegation_restores_parent_to_completed(tmp_path: Path) -> None:
@@ -334,13 +339,13 @@ async def test_engine_resume_delegation_restores_parent_to_completed(tmp_path: P
 
     # 阶段1：提交即挂起，返回 WAITING_DELEGATION 与子运行标识。
     submit_result: RunResult = await coordinator.submit(_request())
-    assert submit_result.status is RunStatus.WAITING_DELEGATION
+    assert submit_result.state.is_waiting_delegation()
     child_run_id: str = submit_result.child_run_id or ""
     assert child_run_id
 
     # 阶段2：子运行完成后经 resume_delegation 回灌并恢复父运行。
     resumed: RunResult = await coordinator.resume_delegation(child_run_id)
-    assert resumed.status is RunStatus.COMPLETED
+    assert resumed.state.outcome() is RunOutcome.COMPLETED
     events_path: Path = tmp_path / "parent-session" / "agent_runs" / submit_result.run_id / "events.jsonl"
     events: list[JSONMap] = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
     assert [event["event_type"] for event in events].count("delegation_submitted") == 1
@@ -370,7 +375,7 @@ async def test_engine_resume_delegation_rejects_mismatched_child_id(tmp_path: Pa
     )
 
     submit_result: RunResult = await engine.execute(_request())
-    assert submit_result.status is RunStatus.WAITING_DELEGATION
+    assert submit_result.state.is_waiting_delegation()
     assert submit_result.child_run_id == "child-A"
 
     # 构造一个归属同一父运行但标识不同的子运行（模拟错误回灌来源）。
@@ -378,7 +383,7 @@ async def test_engine_resume_delegation_rejects_mismatched_child_id(tmp_path: Pa
         run_id="child-B",
         session_id="parent-session",
         agent_id="target-agent",
-        status=RunStatus.RUNNING,
+        state=AgentRunState(mode=Running(RunStage.CALLING_LLM)),
         started_at=utc_now_iso(),
         policy=AgentPolicySnapshot("target-agent", "policy-v1", "model", 5),
         input_message_id="input",
@@ -388,10 +393,10 @@ async def test_engine_resume_delegation_rejects_mismatched_child_id(tmp_path: Pa
 
     # 传入错误子运行标识：find_run 成功但 control_id 不匹配，状态机拒绝。
     mismatch: RunResult = await engine.resume_delegation("child-B")
-    assert mismatch.status is RunStatus.FAILED
+    assert mismatch.state.outcome() is RunOutcome.FAILED
     parent_run = await repository.load_run("parent-session", submit_result.run_id)
     assert parent_run is not None
-    assert parent_run.status is RunStatus.WAITING_DELEGATION
+    assert parent_run.state.is_waiting_delegation()
 
 
 async def _submit_then_resume_with_outcome(tmp_path: Path, outcome: RunOutcome) -> tuple[RunResult, JSONMap, tuple[JSONMap, ...]]:
@@ -412,13 +417,13 @@ async def _submit_then_resume_with_outcome(tmp_path: Path, outcome: RunOutcome) 
         history_compactor=UnexpectedHistoryCompactor(),
     )
     submit_result: RunResult = await engine.execute(_request())
-    assert submit_result.status is RunStatus.WAITING_DELEGATION
+    assert submit_result.state.is_waiting_delegation()
     # 回灌入口经 find_run 定位子运行；fake 端口不真正创建子运行，此处补建以模拟 adapter 已落盘子运行。
     child_run = AgentRun(
         run_id="child-run",
         session_id="parent-session",
         agent_id="target-agent",
-        status=RunStatus.RUNNING,
+        state=AgentRunState(mode=Running(RunStage.CALLING_LLM)),
         started_at=utc_now_iso(),
         policy=AgentPolicySnapshot("target-agent", "policy-v1", "model", 5),
         input_message_id="input",
@@ -427,7 +432,7 @@ async def _submit_then_resume_with_outcome(tmp_path: Path, outcome: RunOutcome) 
     await repository.create_run(child_run)
     resumed: RunResult = await engine.resume_delegation(submit_result.child_run_id or "")
     # 非成功结局同样经 DelegationCompleted 回到源 Run 的 LLM 并继续收口。
-    assert resumed.status is RunStatus.COMPLETED
+    assert resumed.state.outcome() is RunOutcome.COMPLETED
     events_path: Path = tmp_path / "parent-session" / "agent_runs" / submit_result.run_id / "events.jsonl"
     events: list[JSONMap] = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
     messages: tuple[JSONMap, ...] = tuple(
@@ -483,7 +488,7 @@ class RecordingCoordinator:
         """返回已完成的 child Run，并保留请求用于断言。"""
         self.request = request
         answer: ConversationMessage = ConversationMessage("child-answer", MessageRole.ASSISTANT, "目标完成", "")
-        return RunResult("child-run", RunStatus.COMPLETED, answer)
+        return RunResult("child-run", AgentRunState(mode=Ended(RunOutcome.COMPLETED)), answer)
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """记录取消请求。"""
@@ -544,7 +549,7 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
     result: RunResult = await coordinator.submit(_request())
     parent_run = await repository.load_run("parent-session", result.run_id)
     # 阶段3：提交即挂起返回，不再内联等待子运行。
-    assert result.status is RunStatus.WAITING_DELEGATION
+    assert result.state.is_waiting_delegation()
     assert result.child_run_id
     child_run_id: str = result.child_run_id or ""
     assert parent_run is not None
@@ -561,7 +566,7 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
     # 子运行完成后经 resume_delegation 恢复父运行至 COMPLETED；回灌子结果时经适配器
     # finish 将 Task 收口为 COMPLETED（阶段3 提交即挂起，故 Task 完成发生在 resume 之后）。
     resumed: RunResult = await coordinator.resume_delegation(child_run_id)
-    assert resumed.status is RunStatus.COMPLETED
+    assert resumed.state.outcome() is RunOutcome.COMPLETED
     task = await dispatcher.broker.latest_task_for_source("parent-session")
     assert task is not None
     assert task.status is TaskStatus.COMPLETED
@@ -598,18 +603,18 @@ async def test_parent_cancellation_propagates_to_real_delegated_child_run(tmp_pa
     result: RunResult = await asyncio.wait_for(parent_task, timeout=1.0)
 
     # 阶段3：父运行提交即挂起返回，取消后将挂起的父运行收口为取消终态。
-    assert result.status is RunStatus.WAITING_DELEGATION
+    assert result.state.is_waiting_delegation()
     parent_run = await repository.load_run("parent-session", llm.parent_run_id)
     assert parent_run is not None
-    assert parent_run.status is RunStatus.CANCELLED
+    assert parent_run.state.outcome() is RunOutcome.CANCELLED
     assert len(llm.cancelled_run_ids) >= 2
     child_run_files: list[Path] = list(tmp_path.glob("*/agent_runs/*/run.json"))
     child_statuses: list[str] = [
-        json.loads(path.read_text(encoding="utf-8"))["status"]
+        AgentRunState.from_dict(json.loads(path.read_text(encoding="utf-8"))["state"]).outcome().value
         for path in child_run_files
         if json.loads(path.read_text(encoding="utf-8"))["run_id"] != result.run_id
     ]
-    assert child_statuses == [RunStatus.CANCELLED.value]
+    assert child_statuses == [RunOutcome.CANCELLED.value]
     task = await dispatcher.broker.latest_task_for_source("parent-session")
     assert task is not None
     assert task.status is TaskStatus.CANCELLED

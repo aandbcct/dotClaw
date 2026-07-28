@@ -16,7 +16,7 @@ from dotclaw.runtime.application.dto import (
 )
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
 from dotclaw.runtime.domain.context import ContextOwner
-from dotclaw.runtime.domain.state import AgentState
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
 
 class FakeContextPort:
@@ -88,7 +88,7 @@ def _build_execution() -> RunExecution:
         conversation=ConversationSnapshot("session-1", (user_message,), 1),
     )
     policy: AgentPolicySnapshot = AgentPolicySnapshot("agent-1", "identity-v1", "model-v1", 8)
-    return RunExecution("run-1", request, policy, AgentState(), RunBudget(8))
+    return RunExecution("run-1", request, policy, AgentRunState(mode=Running(RunStage.CALLING_LLM)), RunBudget(8))
 
 
 async def test_fake_ports_exchange_domain_types_only() -> None:

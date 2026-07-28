@@ -45,7 +45,7 @@ from dotclaw.memory.dream import DeepDream
 from dotclaw.skills.registry import SkillRegistry
 from dotclaw.runtime.application.dto import RunResult
 from dotclaw.runtime.application.ports import LLMOutputPort
-from dotclaw.runtime.domain.facts import RunErrorCode, RunStatus
+from dotclaw.runtime.domain.facts import RunErrorCode
 from dotclaw.tools.base import ToolDefinition, ToolSource
 from dotclaw.tools.executor import ToolExecutor
 
@@ -308,7 +308,7 @@ async def _resolve_pending_approvals(
 
     透传运行级输出端口；不保存任何 Agent 实例状态。
     """
-    while result.status is RunStatus.WAITING_APPROVAL and result.approval_id:
+    while result.state.is_waiting_approval() and result.approval_id:
         decision = await channel.ask_user("⚠️ 工具需要审批，确认执行？(y/n): ")
         approved = decision.strip().lower() in ("y", "yes")
         result = await service.resolve_approval(result.approval_id, approved, output_port)

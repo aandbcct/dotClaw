@@ -6,6 +6,8 @@
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
 
+> **状态模型说明（2026-07-27 迁移）**：本文档第 4/5/6/8 节中出现的 `AgentPhase`、`RunStatus`、`AgentState`、`INTERRUPTED`、`next_action`、`agent_state`、`retry_interrupted`、`abandon_interrupted` 描述的是「状态机分层重构」**之前**的模型。当前唯一控制状态为 `domain/state.py` 的 `AgentRunState`（生命周期 `Created`/`Running`/`Suspended`/`Ended` + `RunStage` + `SuspendReason` + `RunOutcome`），状态迁移由纯函数 `transition()` 定义；上述旧符号已从生产树物理删除。详细设计与迁移计划见 `docs/Development/runtime/statemachine/状态机分层重构总体设计.md` 与 `状态机分层重构开发计划.md`。
+
 
 **快速导航**
 
@@ -32,8 +34,8 @@ Session / Identity
 
 阅读时应先区分三个层次：
 
-- `AgentPhase`：一次执行中的控制阶段；
-- `RunStatus`：持久化的业务状态；
+- `AgentRunState`（`domain/state.py`）：唯一持久化控制状态，由生命周期（Created/Running/Suspended/Ended）、执行阶段（RunStage）、等待原因（SuspendReason）与终态结果（RunOutcome）组合而成；
+- `RunExecution`：单次执行的易变运行态（上下文版本、迭代计数、安全预算等）；
 - `Session Conversation`：仅由成功 Run 投影的长期对话语义。
 
 ---
