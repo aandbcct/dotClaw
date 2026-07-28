@@ -1,6 +1,7 @@
 """CLI 提交语义的静态契约测试。"""
 
 from __future__ import annotations
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
 import types
 from pathlib import Path
@@ -13,8 +14,8 @@ def test_cli_uses_service_entry_and_returns_run_result() -> None:
     assert "service.submit(current_session, user_input, output_port)" in source
     assert "service.resolve_approval(result.approval_id, approved, output_port)" in source
     assert "service.cancel(args, \"用户通过 CLI 取消\")" in source
-    assert "service.retry_interrupted(args, output_port)" in source
-    assert "service.abandon_interrupted(args)" in source
+    assert "service.resume_run(args, output_port)" in source
+    assert "service.abandon_run(args)" in source
     assert "service.get_identity(" in source
     assert "Runtime.run" not in source
     assert "channel.print_markdown(" in source
@@ -73,7 +74,7 @@ async def test_render_result_suppresses_final_when_response_streamed() -> None:
     """response 已流式发送时 _render_result 只补换行，不得重复打印最终回答。"""
     from dotclaw.main import _render_result
     from dotclaw.runtime.application.dto import ConversationMessage, RunResult
-    from dotclaw.runtime.domain.facts import MessageRole, RunStatus
+    from dotclaw.runtime.domain.facts import MessageRole
 
     class _FakeChannel:
         def __init__(self) -> None:
@@ -88,7 +89,7 @@ async def test_render_result_suppresses_final_when_response_streamed() -> None:
 
     result = RunResult(
         run_id="run-1",
-        status=RunStatus.COMPLETED,
+        state=AgentRunState(mode=Ended(RunOutcome.COMPLETED)),
         final_message=ConversationMessage("m1", MessageRole.ASSISTANT, "已通过流式展示", "t"),
         has_streamed_response=True,
     )
@@ -104,7 +105,7 @@ async def test_render_result_prints_final_when_response_not_streamed() -> None:
     """response 未流式发送（如 reasoning-only）时 _render_result 必须打印最终回答。"""
     from dotclaw.main import _render_result
     from dotclaw.runtime.application.dto import ConversationMessage, RunResult
-    from dotclaw.runtime.domain.facts import MessageRole, RunStatus
+    from dotclaw.runtime.domain.facts import MessageRole
 
     class _FakeChannel:
         def __init__(self) -> None:
@@ -120,7 +121,7 @@ async def test_render_result_prints_final_when_response_not_streamed() -> None:
     # reasoning-only 场景下 LLMProxyAdapter 不标记 has_streamed_response。
     result = RunResult(
         run_id="run-2",
-        status=RunStatus.COMPLETED,
+        state=AgentRunState(mode=Ended(RunOutcome.COMPLETED)),
         final_message=ConversationMessage("m1", MessageRole.ASSISTANT, "最终结论", "t"),
         has_streamed_response=False,
     )

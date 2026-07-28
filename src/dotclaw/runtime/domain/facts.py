@@ -11,6 +11,7 @@ from .control import AgentAction
 
 if TYPE_CHECKING:
     from .context import StagedHistoryCompression, SuccessCommitIntent
+    from .state import AgentRunState
 
 
 JSONPrimitive: TypeAlias = str | int | float | bool | None
@@ -44,18 +45,6 @@ class ContextCompactionScope(StrEnum):
     """版本化上下文摘要的持久化归属范围。"""
 
     SESSION_HISTORY = "session_history"
-
-
-class RunStatus(StrEnum):
-    """一次运行的生命周期状态。"""
-
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    WAITING_APPROVAL = "waiting_approval"
-    INTERRUPTED = "interrupted"
-    ABANDONED = "abandoned"
 
 
 class RunErrorCode(StrEnum):
@@ -247,7 +236,7 @@ class AgentRun:
     run_id: str
     session_id: str
     agent_id: str
-    status: RunStatus
+    state: AgentRunState
     started_at: str
     policy: AgentPolicySnapshot
     input_message_id: str
@@ -271,7 +260,7 @@ class AgentRun:
             "agent_id": self.agent_id,
             "parent_run_id": self.parent_run_id,
             "root_run_id": self.root_run_id,
-            "status": self.status.value,
+            "state": self.state.to_dict(),
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "resume_count": self.resume_count,
@@ -299,10 +288,9 @@ class RunCheckpoint:
     checkpoint_sequence: int
     event_sequence: int
     message_sequence: int
-    agent_state: JSONMap
-    next_action: AgentAction
     pending: JSONMap
     budget: JSONMap
+    action: AgentAction = AgentAction.INVOKE_LLM
     active_context_version: int | None = None
     staged_history_compression_ids: tuple[str, ...] = ()
 
@@ -315,8 +303,7 @@ class RunCheckpoint:
             "checkpoint_sequence": self.checkpoint_sequence,
             "event_sequence": self.event_sequence,
             "message_sequence": self.message_sequence,
-            "agent_state": self.agent_state,
-            "next_action": self.next_action.value,
+            "action": self.action.value,
             "pending": self.pending,
             "budget": self.budget,
             "active_context_version": self.active_context_version,

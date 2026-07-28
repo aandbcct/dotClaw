@@ -45,7 +45,7 @@ from dotclaw.memory.dream import DeepDream
 from dotclaw.skills.registry import SkillRegistry
 from dotclaw.runtime.application.dto import RunResult
 from dotclaw.runtime.application.ports import LLMOutputPort
-from dotclaw.runtime.domain.facts import RunErrorCode, RunStatus
+from dotclaw.runtime.domain.facts import RunErrorCode
 from dotclaw.tools.base import ToolDefinition, ToolSource
 from dotclaw.tools.executor import ToolExecutor
 
@@ -149,13 +149,13 @@ async def _run_cli(show_reasoning: bool = True) -> None:
                             channel.print_error("用法: /cancel <run_id>")
                     elif cmd == "/retry":
                         if args:
-                            result: RunResult = await service.retry_interrupted(args, output_port)
+                            result: RunResult = await service.resume_run(args, output_port)
                             await _render_result(channel, result)
                         else:
                             channel.print_error("用法: /retry <run_id>")
                     elif cmd == "/abandon":
                         if args:
-                            result = await service.abandon_interrupted(args)
+                            result = await service.abandon_run(args)
                             await _render_result(channel, result)
                         else:
                             channel.print_error("用法: /abandon <run_id>")
@@ -308,7 +308,7 @@ async def _resolve_pending_approvals(
 
     透传运行级输出端口；不保存任何 Agent 实例状态。
     """
-    while result.status is RunStatus.WAITING_APPROVAL and result.approval_id:
+    while result.state.is_waiting_approval() and result.approval_id:
         decision = await channel.ask_user("⚠️ 工具需要审批，确认执行？(y/n): ")
         approved = decision.strip().lower() in ("y", "yes")
         result = await service.resolve_approval(result.approval_id, approved, output_port)

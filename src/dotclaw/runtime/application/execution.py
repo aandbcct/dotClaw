@@ -7,10 +7,24 @@ from enum import StrEnum
 
 from ..domain.control import AgentAction
 from ..domain.context import ContextVersion, StagedHistoryCompression
-from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage
-from dotclaw.runtime.domain.state import AgentState
+from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage, ToolCall
+from dotclaw.runtime.domain.state import AgentRunState
 from .context_budget import ContextBudgetDecision
-from .dto import RunRequest
+from .dto import DelegationRequest, RunRequest
+
+
+@dataclass(frozen=True)
+class PendingDelegation:
+    """``DelegationRequested`` 经状态机产出 ``HANDOFF_TARGET`` 后，暂存待提交的子运行上下文。
+
+    仅在内存执行事务内流转，不进入 checkpoint 序列化（HANDOFF_TARGET 动作执行完毕即随
+    子运行提交而持久化为 ``Suspended(DELEGATION)``，无需通过 checkpoint 恢复）。
+    """
+
+    request: DelegationRequest
+    tool_call: ToolCall
+    tool_calls: tuple[ToolCall, ...]
+    tool_index: int
 
 
 class PendingControlKind(StrEnum):
@@ -71,8 +85,10 @@ class RunExecution:
     run_id: str
     request: RunRequest
     policy: AgentPolicySnapshot
-    state: AgentState
+    state: AgentRunState
     budget: RunBudget
+    action: AgentAction = AgentAction.INVOKE_LLM
+    """状态机经 ``transition()`` 计算出的下一项原子动作；``_drive`` 据此分支选执行器。"""
     message_cursor: int = 0
     cancellation: CancellationToken = field(default_factory=CancellationToken)
     pending_control: PendingControl | None = None
@@ -82,6 +98,8 @@ class RunExecution:
     """本次运行是否已向入口发送过面向用户的 response 文本增量。"""
     active_context_version: ContextVersion | None = None
     """最近一次已落盘的上下文版本；后续轮次和审批恢复必须重放该事实。"""
+    pending_delegation: PendingDelegation | None = None
+    """``HANDOFF_TARGET`` 动作待提交的子运行上下文；由 ``_drive`` 的 action dispatcher 消费。"""
     staged_history_compressions: tuple[StagedHistoryCompression, ...] = ()
     """本 Run 尚未提交到 Session 的历史压缩候选引用。"""
     replay_active_context: bool = False
@@ -95,6 +113,7 @@ class RunExecution:
             run_id=self.run_id,
             policy=self.policy,
             state=self.state,
+            action=self.action,
             budget=self.budget,
             message_cursor=self.message_cursor,
             pending_control=self.pending_control,
@@ -105,10 +124,11 @@ class RunExecution:
             session_id=self.request.session_id,
         )
 
-    def update_state(self, state: AgentState, action: AgentAction) -> None:
+    def update_state(self, state: AgentRunState, action: AgentAction) -> None:
         """在 Runtime 处理完状态机转移后更新内存控制状态。"""
         self.state = state
-        if action is not AgentAction.WAIT:
+        self.action = action
+        if action is not AgentAction.SUSPEND:
             self.pending_control = None
 
     def replace_run_messages(self, messages: tuple[RunMessage, ...]) -> None:
@@ -140,6 +160,7 @@ class RunExecution:
             "request": self.request.to_dict(),
             "policy": self.policy.to_dict(),
             "state": self.state.to_dict(),
+            "action": self.action.value,
             "budget": self.budget.to_dict(),
             "message_cursor": self.message_cursor,
             "cancelled": self.cancellation.cancelled,
@@ -155,10 +176,12 @@ class RunExecutionView:
     run_id: str
     policy: AgentPolicySnapshot
     """本次运行冻结的 Agent 身份与上下文策略。"""
-    state: AgentState
+    state: AgentRunState
     budget: RunBudget
     message_cursor: int
     pending_control: PendingControl | None
+    action: AgentAction = AgentAction.INVOKE_LLM
+    """状态机经 ``transition()`` 计算出的下一项原子动作；供 Port 读取当前阶段。"""
     run_messages: tuple[RunMessage, ...] = ()
     """本 Run 已持久化的消息证据；不包含 Session 可变对象。"""
     active_context_version: ContextVersion | None = None

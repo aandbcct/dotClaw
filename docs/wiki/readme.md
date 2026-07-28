@@ -152,7 +152,7 @@ flowchart LR
     Decision -->|ask| Approval["保存审批记录与 Checkpoint"]
     Decision -->|deny| Fail["返回拒绝结果"]
 
-    Approval --> Wait["Run 进入 WAITING_APPROVAL"]
+    Approval --> Wait["Run 进入 Suspended(APPROVAL)"]
     Wait --> Resolve["resolve_approval(approval_id)"]
     Resolve -->|通过| Resume["在原 run_id 恢复"]
     Resolve -->|拒绝| Cancelled["收口为 CANCELLED"]

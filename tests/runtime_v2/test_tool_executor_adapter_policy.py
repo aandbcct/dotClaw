@@ -15,7 +15,7 @@ from dotclaw.runtime.adapters import ToolExecutorAdapter
 from dotclaw.runtime.application.dto import ToolCall, ToolInvocation, ToolResultStatus
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot
-from dotclaw.runtime.domain.state import AgentState
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 from dotclaw.tools.approval import ApprovalManager
 from dotclaw.tools.decorator import ToolPolicy, get_tool_meta, tool
 from dotclaw.tools.executor import ToolExecutor
@@ -68,7 +68,7 @@ def _execution(agent_id: str) -> RunExecutionView:
     return RunExecutionView(
         "run-1",
         AgentPolicySnapshot(agent_id, "v1", "model", 3),
-        AgentState(),
+        AgentRunState(mode=Running(RunStage.CALLING_LLM)),
         RunBudget(3),
         0,
         None,

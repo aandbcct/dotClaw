@@ -7,7 +7,8 @@ from dataclasses import replace
 from ..application.dto import ConversationMessage
 from ..domain.context import ContextVersion, StagedHistoryCompression, StagedHistoryCompressionStatus, SuccessCommitIntent
 from ..domain.events import RunEvent
-from ..domain.facts import AgentRun, MessageRole, RunMessage, RunStatus
+from ..domain.facts import AgentRun, MessageRole, RunMessage
+from ..domain.state import Ended, RunOutcome
 
 
 class InMemoryRunRepository:
@@ -41,13 +42,10 @@ class InMemoryRunRepository:
 
     async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
         """返回仍占用 Session 的非终态 Run。"""
-        terminal: frozenset[RunStatus] = frozenset({
-            RunStatus.COMPLETED,
-            RunStatus.FAILED,
-            RunStatus.CANCELLED,
-            RunStatus.ABANDONED,
-        })
-        return tuple(run for run in self._runs.values() if run.session_id == session_id and run.status not in terminal)
+        return tuple(
+            run for run in self._runs.values()
+            if run.session_id == session_id and not run.state.is_ended()
+        )
 
     async def save_run(self, run: AgentRun) -> None:
         """覆盖已创建的 Run 摘要。"""
@@ -142,7 +140,7 @@ class InMemoryRunRepository:
         success_intent: SuccessCommitIntent,
     ) -> None:
         """以领域意图模拟幂等成功投影、终态事件与候选提交。"""
-        if run.status is not RunStatus.COMPLETED or final_message.role is not MessageRole.ASSISTANT:
+        if not (isinstance(run.state.mode, Ended) and run.state.mode.outcome is RunOutcome.COMPLETED) or final_message.role is not MessageRole.ASSISTANT:
             raise ValueError("成功提交必须包含完成 Run 与 assistant 最终消息")
         if success_intent.run_id != run.run_id or success_intent.session_id != run.session_id:
             raise ValueError("成功提交意图必须属于当前运行")

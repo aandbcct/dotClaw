@@ -6,7 +6,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from ..domain.facts import AgentRun, RunError, RunErrorCode, RunStatus
+from ..domain.facts import AgentRun, RunError, RunErrorCode
+from ..domain.state import AgentRunState, Ended, RunOutcome
 from .dto import RunRequest, RunResult
 from .ports import LLMOutputPort
 
@@ -27,6 +28,12 @@ class RuntimeControlPort(RuntimeExecutionPort, Protocol):
     async def resolve_approval(self, approval_id: str, approved: bool, output_port: LLMOutputPort | None = None) -> RunResult:
         """恢复指定审批关联的运行；output_port 为本恢复的运行级输出端口。"""
 
+    async def get_delegation_session_id(self, child_run_id: str) -> str | None:
+        """定位 delegation 子运行所属的 Session（即父运行 Session）。"""
+
+    async def resume_delegation(self, child_run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """恢复指定 delegation 子运行关联的父运行；output_port 为本恢复的运行级输出端口。"""
+
     async def get_run_session_id(self, run_id: str) -> str | None:
         """定位运行所属的 Session。"""
 
@@ -39,11 +46,11 @@ class RuntimeControlPort(RuntimeExecutionPort, Protocol):
     async def active_run(self, session_id: str) -> AgentRun | None:
         """读取持久化的当前 Session 占用。"""
 
-    async def retry_interrupted(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
-        """重试可恢复中断 Run；output_port 为本重试的运行级输出端口。"""
+    async def resume_run(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """恢复未结束 Run；output_port 为本恢复的运行级输出端口。"""
 
-    async def abandon_interrupted(self, run_id: str) -> RunResult:
-        """放弃可恢复中断 Run。"""
+    async def abandon_run(self, run_id: str) -> RunResult:
+        """显式放弃未结束 Run。"""
 
 
 class SessionRunCoordinator:
@@ -90,6 +97,15 @@ class SessionRunCoordinator:
         async with lock:
             return await self._engine.resolve_approval(approval_id, approved, output_port)
 
+    async def resume_delegation(self, child_run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """在 delegation 父运行所属 Session 的租约内恢复父运行；output_port 为本恢复运行级端口。"""
+        session_id: str | None = await self._engine.get_delegation_session_id(child_run_id)
+        if session_id is None:
+            return await self._engine.resume_delegation(child_run_id, output_port)
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        async with lock:
+            return await self._engine.resume_delegation(child_run_id, output_port)
+
     async def cancel(self, run_id: str, reason: str) -> None:
         """立即发送取消信号，避免等待运行自身占用的 Session 租约。
 
@@ -99,36 +115,33 @@ class SessionRunCoordinator:
         """
         await self._engine.cancel(run_id, reason)
 
-    async def retry_interrupted(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
-        """在所属 Session 锁内重试中断 Run，避免与普通请求并发；output_port 为本重试运行级端口。"""
+    async def resume_run(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """在所属 Session 锁内恢复未结束 Run，避免与普通请求并发；output_port 为本恢复运行级端口。"""
         session_id: str | None = await self._engine.get_run_session_id(run_id)
         if session_id is None:
-            return await self._engine.retry_interrupted(run_id, output_port)
+            return await self._engine.resume_run(run_id, output_port)
         lock: asyncio.Lock = await self._get_lock(session_id)
         async with lock:
-            return await self._engine.retry_interrupted(run_id, output_port)
+            return await self._engine.resume_run(run_id, output_port)
 
-    async def abandon_interrupted(self, run_id: str) -> RunResult:
-        """在所属 Session 锁内放弃中断 Run。"""
+    async def abandon_run(self, run_id: str) -> RunResult:
+        """在所属 Session 锁内显式放弃未结束 Run。"""
         session_id: str | None = await self._engine.get_run_session_id(run_id)
         if session_id is None:
-            return await self._engine.abandon_interrupted(run_id)
+            return await self._engine.abandon_run(run_id)
         lock: asyncio.Lock = await self._get_lock(session_id)
         async with lock:
-            return await self._engine.abandon_interrupted(run_id)
+            return await self._engine.abandon_run(run_id)
 
     async def _prepare_new_request(self, session_id: str) -> RunResult | None:
-        """以持久化占用表保证跨进程 Session 串行，并在新请求前放弃旧中断。"""
+        """以持久化占用表保证跨进程 Session 串行；任意非终态 Run 拒绝普通请求。"""
         await self._engine.recover_session(session_id)
         active: AgentRun | None = await self._engine.active_run(session_id)
         if active is None:
             return None
-        if active.status is RunStatus.INTERRUPTED:
-            await self._engine.abandon_interrupted(active.run_id)
-            return None
         return RunResult(
             active.run_id,
-            RunStatus.FAILED,
+            AgentRunState(mode=Ended(RunOutcome.FAILED)),
             error=RunError(RunErrorCode.SESSION_BUSY, "Session 存在未终态 Run，暂不接受普通请求"),
         )
 

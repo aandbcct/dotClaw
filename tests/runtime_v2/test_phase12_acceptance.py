@@ -1,8 +1,9 @@
 """Runtime 重构 Phase 1、Phase 2 持久化边界验收测试。"""
 
 from __future__ import annotations
+from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
-from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, JSONMap, RunStatus
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, JSONMap
 
 
 def test_phase2_runtime_v2_agent_run_is_summary_only() -> None:
@@ -12,7 +13,7 @@ def test_phase2_runtime_v2_agent_run_is_summary_only() -> None:
         run_id="run-1",
         session_id="session-1",
         agent_id="agent-1",
-        status=RunStatus.RUNNING,
+        state=AgentRunState(mode=Running(RunStage.CALLING_LLM)),
         started_at="2026-07-16T00:00:00+00:00",
         policy=policy,
         input_message_id="message-user-1",

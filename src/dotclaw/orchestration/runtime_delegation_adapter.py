@@ -15,9 +15,11 @@ from ..runtime.application.dto import (
     DelegationSubmission,
     RunRequest,
     RunResult,
+    run_outcome_from_state,
 )
 from ..runtime.application.ports import DelegationPort
-from ..runtime.domain.facts import RunError, RunErrorCode, RunStatus
+from ..runtime.domain.facts import RunError, RunErrorCode
+from ..runtime.domain.state import RunOutcome
 from ..session.session import SessionManager
 from .dispatcher import AgentDispatcher
 from .registry import AgentRegistry
@@ -137,13 +139,13 @@ class RuntimeDelegationAdapter(DelegationPort):
         except asyncio.CancelledError:
             delegated_result = DelegationResult(
                 child_run_id,
-                RunStatus.CANCELLED,
+                RunOutcome.CANCELLED,
                 error=RunError(RunErrorCode.CANCELLED, "delegation 子运行已取消"),
             )
         except Exception as error:
             delegated_result = DelegationResult(
                 child_run_id,
-                RunStatus.FAILED,
+                RunOutcome.FAILED,
                 error=RunError(RunErrorCode.TOOL_FAILURE, f"delegation 子运行异常：{error}"),
             )
         self._running.pop(child_run_id, None)
@@ -181,7 +183,7 @@ class RuntimeDelegationAdapter(DelegationPort):
             binding.task_id,
             child_run_id,
             output,
-            result.status is RunStatus.COMPLETED,
+            result.outcome is RunOutcome.COMPLETED,
         )
 
 
@@ -190,7 +192,7 @@ def _to_delegation_result(result: RunResult) -> DelegationResult:
     output: str = result.final_message.content if result.final_message is not None else ""
     return DelegationResult(
         child_run_id=result.run_id,
-        status=result.status,
+        outcome=run_outcome_from_state(result.state),
         output=output,
         error=result.error,
     )

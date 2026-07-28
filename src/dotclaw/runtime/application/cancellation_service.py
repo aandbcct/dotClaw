@@ -17,9 +17,13 @@ class CancellationService:
         self._tokens[run_id] = token
 
     def unregister(self, run_id: str) -> None:
-        """清理已结束 run 的取消令牌。"""
+        """清理已结束 run 的取消令牌。
+
+        注意：不再顺带清理 ``_delegated_runs``。父运行在 delegation 挂起（execute 提前返回）
+        时也会触发 unregister，但其仍在等待子运行，取消需经 delegated_run_id 向下传播到子运行。
+        delegated_run 映射改由 resume_delegation（恢复成功）与 cancel（挂起期取消）显式清理。
+        """
         self._tokens.pop(run_id, None)
-        self._delegated_runs.pop(run_id, None)
 
     def request(self, run_id: str, reason: str) -> bool:
         """向活动 run 发送取消请求；不存在时返回 False。"""

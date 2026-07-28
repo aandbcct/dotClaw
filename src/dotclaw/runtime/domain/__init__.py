@@ -6,18 +6,72 @@ Runtime v4 纯领域层公开接口，只导出事实、事件和状态规则。
 
 from .control import AgentAction
 from .events import RunEvent, RunEventType
+from .events import (
+    AbandonRequested,
+    AgentRunEvent,
+    ApprovalGranted,
+    ApprovalRejected,
+    CancelRequested,
+    DelegationCompleted,
+    DelegationRequested,
+    DelegationSubmitted,
+    LLMCallFailed,
+    LLMResponseProduced,
+    RunStarted,
+    TimeoutReached,
+    ToolApprovalRequired,
+    ToolBatchCompleted,
+    ToolBatchFailed,
+)
 from .context import ContextVersion
-from .facts import AgentRun, ContextCompactionScope, RunStatus
-from .state import AgentPhase, AgentState
+from .facts import AgentRun, ContextCompactionScope
+from .state import (
+    AgentRunState,
+    Created,
+    Ended,
+    InvalidTransition,
+    RunMode,
+    RunOutcome,
+    RunStage,
+    StateTransition,
+    Suspended,
+    SuspendReason,
+    Running,
+    transition,
+)
 
 __all__ = [
+    "AbandonRequested",
     "AgentAction",
-    "AgentPhase",
     "AgentRun",
-    "AgentState",
+    "AgentRunEvent",
+    "AgentRunState",
+    "ApprovalGranted",
+    "ApprovalRejected",
+    "CancelRequested",
     "ContextCompactionScope",
     "ContextVersion",
+    "Created",
+    "DelegationCompleted",
+    "DelegationRequested",
+    "DelegationSubmitted",
+    "Ended",
+    "InvalidTransition",
+    "LLMCallFailed",
+    "LLMResponseProduced",
     "RunEvent",
     "RunEventType",
-    "RunStatus",
+    "RunMode",
+    "RunOutcome",
+    "RunStage",
+    "RunStarted",
+    "StateTransition",
+    "Suspended",
+    "SuspendReason",
+    "TimeoutReached",
+    "ToolApprovalRequired",
+    "ToolBatchCompleted",
+    "ToolBatchFailed",
+    "Running",
+    "transition",
 ]

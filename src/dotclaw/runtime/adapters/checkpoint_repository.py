@@ -76,6 +76,7 @@ class CheckpointRepositoryAdapter:
 def _checkpoint_from_dict(data: JSONMap) -> RunCheckpoint:
     """将 checkpoint.json 反序列化为领域检查点。"""
     _require_v4_format(data, "checkpoint.json")
+    action: AgentAction = AgentAction(get_string(data, "action", AgentAction.INVOKE_LLM.value))
     return RunCheckpoint(
         checkpoint_id=get_string(data, "checkpoint_id"),
         run_id=get_string(data, "run_id"),
@@ -83,8 +84,7 @@ def _checkpoint_from_dict(data: JSONMap) -> RunCheckpoint:
         checkpoint_sequence=get_integer(data, "checkpoint_sequence"),
         event_sequence=get_integer(data, "event_sequence"),
         message_sequence=get_integer(data, "message_sequence"),
-        agent_state=_json_map_or_empty(data.get("agent_state")),
-        next_action=AgentAction(get_string(data, "next_action")),
+        action=action,
         pending=_json_map_or_empty(data.get("pending")),
         budget=_json_map_or_empty(data.get("budget")),
         active_context_version=_optional_positive_integer(data.get("active_context_version")),
@@ -99,7 +99,6 @@ def _json_map_or_empty(value: JSONValue | None) -> JSONMap:
 
 def _validate_checkpoint_payload(checkpoint: RunCheckpoint) -> None:
     """确保检查点只保存最小控制状态，不夹带完整上下文或工具结果。"""
-    _validate_json_value(checkpoint.agent_state, "agent_state")
     _validate_json_value(checkpoint.pending, "pending")
     _validate_json_value(checkpoint.budget, "budget")
 

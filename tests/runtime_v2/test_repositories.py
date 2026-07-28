@@ -33,8 +33,13 @@ from dotclaw.runtime.domain.facts import (
     RunCheckpoint,
     RunMessage,
     RunMessageKind,
-    RunStatus,
     require_json_map,
+)
+from dotclaw.runtime.domain.state import (
+    AgentRunState,
+    RunOutcome,
+    RunStage,
+    Running,
 )
 
 
@@ -57,7 +62,7 @@ def _run() -> AgentRun:
         run_id="run-1",
         session_id="session-1",
         agent_id="agent-1",
-        status=RunStatus.RUNNING,
+        state=AgentRunState(mode=Running(RunStage.CALLING_LLM)),
         started_at="2026-07-20T00:00:00+00:00",
         policy=AgentPolicySnapshot("agent-1", "identity-v1", "model-v1", 8),
         input_message_id="user-1",
@@ -132,7 +137,7 @@ async def _assert_run_control_contract(repository: RunRepository) -> None:
     intent: SuccessCommitIntent = SuccessCommitIntent(
         conversation_id="conversation-2",
         latest_candidate_id=candidate.candidate_id,
-        target_status=RunStatus.COMPLETED,
+        target_outcome=RunOutcome.COMPLETED,
     )
     await repository.create_run(run)
     await repository.append_context_version(run.session_id, run.run_id, _context_version(1))
@@ -221,8 +226,6 @@ async def test_checkpoint_writes_and_reads_v4_control_fields(tmp_path: Path) -> 
         checkpoint_sequence=1,
         event_sequence=2,
         message_sequence=3,
-        agent_state={"phase": "waiting_llm"},
-        next_action=AgentAction.INVOKE_LLM,
         pending={},
         budget={"max_iterations": 8},
         active_context_version=2,

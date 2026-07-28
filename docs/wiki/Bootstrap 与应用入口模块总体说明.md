@@ -1056,8 +1056,8 @@ ContextPort?
 |---|---|
 | `resolve_approval` | 用 approval_id 和决定恢复原 Run |
 | `cancel` | 请求活动/等待中的 Run 取消 |
-| `retry_interrupted` | 重试可恢复中断 |
-| `abandon_interrupted` | 放弃中断并释放 Session 占用 |
+| `resume_run`（恢复边界） | 从 Checkpoint.action 重放可恢复非终态 Run |
+| `abandon` / 取消 | 显式放弃并经 transition 进入 Ended(ABANDONED)，释放 Session 占用 |
 
 Service 不接收自然语言审批结论，也不查找“当前 Run”进行猜测。
 
@@ -1089,8 +1089,8 @@ Service 不接收自然语言审批结论，也不查找“当前 Run”进行�
 
 ```text
 final_message       → 正文
-WAITING_APPROVAL    → 等待审批提示
-INTERRUPTED         → 可重试提示
+Suspended(APPROVAL) → 等待审批提示
+非终态（恢复中）     → 可重试提示
 ABANDONED           → 放弃提示
 SESSION_BUSY        → 会话忙提示
 其他 error          → 执行失败
@@ -1171,7 +1171,7 @@ Process:
 **职责与用途：**CLI 审批循环负责向用户询问，并只把 approval_id 与布尔决定交给 SessionInteractionService。
 
 ```text
-RunResult.WAITING_APPROVAL
+RunResult.Suspended(APPROVAL)
 → Channel.ask_user
 → y/yes => approved
 → service.resolve_approval
@@ -1317,7 +1317,7 @@ success_commit.json
 → 清理临时意图
 ```
 
-它不在 Host 启动时扫描所有 Session 并把遗留 RUNNING Run 转为 INTERRUPTED。该恢复由 Coordinator 在具体 Session 下次提交前调用 `recover_session()`。
+它不在 Host 启动时改写遗留非终态 Run 的状态；该恢复由 Coordinator 在具体 Session 下次提交前调用 `recover_session()`，交由恢复边界按 Checkpoint 重放。
 
 #### 4.9.2 初始化失败清理
 
@@ -1492,7 +1492,7 @@ sequenceDiagram
     participant App as SessionInteractionService
     participant Coord as SessionRunCoordinator
 
-    Runtime-->>Main: RunResult(WAITING_APPROVAL, approval_id)
+    Runtime-->>Main: RunResult(Suspended(APPROVAL), approval_id)
     loop 仍等待审批
         Main->>Channel: ask_user(y/n)
         Channel-->>Main: 用户文本
@@ -1588,7 +1588,7 @@ flowchart LR
 - 该步骤是 Host 启动关键阶段，失败会阻止入口就绪。
 - 补偿依赖 Runtime Repository 和 SessionConversationProjector 已完成装配。
 - 它只恢复未决成功提交，不处理所有非终态 Run。
-- 遗留 RUNNING Run 在对应 Session 下次提交前由 Coordinator 转为 INTERRUPTED。
+- 遗留非终态 Run 在对应 Session 下次提交前由 Coordinator 调用 `recover_session()` 交由恢复边界重放。
 - Journal 不参与补偿。
 
 ### 5.8 初始化失败清理
@@ -1784,8 +1784,8 @@ get_identity
 submit
 resolve_approval
 cancel
-retry_interrupted
-abandon_interrupted
+resume_run（恢复边界）
+abandon（显式放弃）
 delete_session
 ```
 

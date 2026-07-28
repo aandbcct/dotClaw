@@ -12,6 +12,7 @@ from pathlib import Path
 from ..application.ports import ConversationProjectionPort, SuccessCommitFaultPort
 from ..application.dto import ConversationMessage
 from ..domain.events import RunEvent, RunEventType
+from ..domain.state import AgentRunState, Ended, RunOutcome
 from ..domain.context import (
     ContextContributionKind,
     ContextOwner,
@@ -35,7 +36,6 @@ from ..domain.facts import (
     RunMessage,
     RunMessageKind,
     RunStatistics,
-    RunStatus,
     ToolCall,
     get_integer,
     get_string,
@@ -465,17 +465,11 @@ class RunRepositoryAdapter:
         directory: Path = self._root_directory / safe_session_id / "agent_runs"
         if not directory.is_dir():
             return ()
-        terminal: frozenset[RunStatus] = frozenset({
-            RunStatus.COMPLETED,
-            RunStatus.FAILED,
-            RunStatus.CANCELLED,
-            RunStatus.ABANDONED,
-        })
         runs: list[AgentRun] = []
         path: Path
         for path in directory.glob(f"*/{RunStorageFileName.RUN.value}"):
             run: AgentRun = _agent_run_from_dict(load_json_map(path))
-            if run.status not in terminal:
+            if not run.state.is_ended():
                 runs.append(run)
         return tuple(runs)
 
@@ -537,7 +531,7 @@ class RunRepositoryAdapter:
 
     def _validate_success_and_get_input_sync(self, run: AgentRun, final_message: RunMessage) -> RunMessage:
         """校验成功提交条件，并定位已持久化的用户输入消息。"""
-        if run.status is not RunStatus.COMPLETED:
+        if not (isinstance(run.state.mode, Ended) and run.state.mode.outcome is RunOutcome.COMPLETED):
             raise ValueError("只有已完成的运行才能提交 Conversation 投影")
         if final_message.role is not MessageRole.ASSISTANT:
             raise ValueError("最终 Conversation 投影必须是 assistant 消息")
@@ -683,11 +677,14 @@ def _agent_run_from_dict(data: JSONMap) -> AgentRun:
     raw_candidates: JSONValue | None = data.get("staged_history_compressions")
     raw_success_intent: JSONValue | None = data.get("success_commit_intent")
     error: RunError | None = _run_error_from_dict(require_json_map(raw_error)) if raw_error is not None else None
+    # 只接受新格式：缺失 state 即视为非法持久化数据，不再静默兜底为 Created。
+    if "state" not in data:
+        raise ValueError("AgentRun 持久化数据缺少 state 字段（只接受 v4 状态格式）")
     return AgentRun(
         run_id=get_string(data, "run_id"),
         session_id=get_string(data, "session_id"),
         agent_id=get_string(data, "agent_id"),
-        status=RunStatus(get_string(data, "status", RunStatus.RUNNING.value)),
+        state=AgentRunState.from_dict(require_json_map(data["state"])),
         started_at=get_string(data, "started_at"),
         policy=AgentPolicySnapshot(
             agent_id=get_string(policy_data, "agent_id"),
@@ -837,14 +834,19 @@ def _run_success_commit_intent_from_dict(data: JSONMap) -> RunSuccessCommitInten
     return RunSuccessCommitIntent(
         conversation_id=get_string(data, "conversation_id"),
         latest_candidate_id=latest_candidate_id,
-        target_status=RunStatus(get_string(data, "target_status")),
+        target_outcome=RunOutcome(get_string(data, "target_outcome", RunOutcome.COMPLETED.value)),
         run_id=get_string(data, "run_id"),
         session_id=get_string(data, "session_id"),
     )
 
 
 def _completed_run_from_intent(run: AgentRun, intent: RunSuccessCommitIntent) -> AgentRun:
-    """以成功意图收敛终态 Run，并只提交最新的 staged 候选。"""
+    """以成功意图收敛终态 Run，并只提交最新的 staged 候选。
+
+    终态控制状态直接沿用提交时携带的 ``run.state``（已是 ``Ended(target_outcome)``，
+    且保留 ``iteration``/``retry_count`` 等循环计数），不在恢复时重建为
+    ``iteration=0`` 的空白终态，避免故障恢复后丢失循环安全计数。
+    """
     candidates: tuple[StagedHistoryCompression, ...] = tuple(
         replace(
             candidate,
@@ -858,7 +860,7 @@ def _completed_run_from_intent(run: AgentRun, intent: RunSuccessCommitIntent) ->
     )
     return replace(
         run,
-        status=intent.target_status,
+        state=run.state,
         staged_history_compressions=candidates,
         success_commit_intent=None,
     )

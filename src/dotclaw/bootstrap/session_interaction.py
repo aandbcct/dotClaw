@@ -20,7 +20,7 @@ from ..runtime.application.ports import ContextPort, LLMOutputPort
 from ..runtime.application.request_factory import create_run_request
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.domain.context import ContextOwner
-from ..runtime.domain.facts import RunErrorCode, RunStatus
+from ..runtime.domain.facts import RunErrorCode
 from ..session.session import Session, SessionManager
 
 
@@ -124,17 +124,21 @@ class SessionInteractionService:
         """提交审批决定并返回恢复后的结构化结果；透传运行级输出端口。"""
         return await self._coordinator.resolve_approval(approval_id, approved, output_port)
 
+    async def resume_delegation(self, child_run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """提交 delegation 子运行结果回灌并恢复父运行，返回结构化结果；透传运行级输出端口。"""
+        return await self._coordinator.resume_delegation(child_run_id, output_port)
+
     async def cancel(self, run_id: str, reason: str) -> None:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
-    async def retry_interrupted(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
-        """重试可恢复中断 Run，并返回结构化结果；透传运行级输出端口。"""
-        return await self._coordinator.retry_interrupted(run_id, output_port)
+    async def resume_run(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
+        """恢复未结束 Run，并返回结构化结果；透传运行级输出端口。"""
+        return await self._coordinator.resume_run(run_id, output_port)
 
-    async def abandon_interrupted(self, run_id: str) -> RunResult:
-        """放弃可恢复中断 Run，并返回结构化结果。"""
-        return await self._coordinator.abandon_interrupted(run_id)
+    async def abandon_run(self, run_id: str) -> RunResult:
+        """显式放弃未结束 Run，并返回结构化结果。"""
+        return await self._coordinator.abandon_run(run_id)
 
     # ── 删除协调 ──
 
@@ -201,14 +205,12 @@ def format_run_result(result: RunResult) -> str:
     """
     if result.final_message is not None:
         return result.final_message.content
-    if result.status is RunStatus.WAITING_APPROVAL:
+    if result.state.is_waiting_approval():
         return f"运行等待审批：{result.run_id}"
-    if result.status is RunStatus.INTERRUPTED:
-        return f"运行已中断，可重试：{result.run_id}"
-    if result.status is RunStatus.ABANDONED:
+    if result.state.is_abandoned():
         return f"运行已放弃：{result.run_id}"
     if result.error is not None:
         if result.error.code is RunErrorCode.SESSION_BUSY:
             return "当前会话仍有未完成运行，请先完成审批、重试或取消后再发送消息。"
         return f"执行失败：{result.error.message}"
-    return f"执行未完成：{result.status.value}"
+    return f"执行未完成：{result.state.describe()}"

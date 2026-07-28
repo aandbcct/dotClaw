@@ -11,5 +11,5 @@ class AgentAction(StrEnum):
     INVOKE_LLM = "invoke_llm"
     EXECUTE_TOOLS = "execute_tools"
     FINALIZE = "finalize"
-    WAIT = "wait"
+    SUSPEND = "suspend"
     HANDOFF_TARGET = "handoff_target"

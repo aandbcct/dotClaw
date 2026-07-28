@@ -11,9 +11,9 @@ from ..domain.facts import (
     MessageRole,
     RunError,
     RunMessage,
-    RunStatus,
     ToolCall,
 )
+from ..domain.state import AgentRunState, Ended, RunOutcome
 from ..domain.context import ContextOwner, ContextRefreshReason, ContextSlotSnapshot
 
 
@@ -89,10 +89,12 @@ class RunResult:
     """Application 返回给入口层的单次执行结果。"""
 
     run_id: str
-    status: RunStatus
+    state: AgentRunState
     final_message: ConversationMessage | None = None
     error: RunError | None = None
     approval_id: str | None = None
+    child_run_id: str | None = None
+    """delegation 挂起时携带的子运行标识，供入口层触发恢复。"""
     has_streamed_response: bool = False
     """本次运行是否已通过 LLMOutputPort 向入口输出过面向用户的 response 文本。"""
 
@@ -100,10 +102,11 @@ class RunResult:
         """转换为 Channel 或 API 可消费的结果数据。"""
         return {
             "run_id": self.run_id,
-            "status": self.status.value,
+            "state": self.state.to_dict(),
             "final_message": None if self.final_message is None else self.final_message.to_dict(),
             "error": None if self.error is None else self.error.to_dict(),
             "approval_id": self.approval_id,
+            "child_run_id": self.child_run_id,
             "has_streamed_response": self.has_streamed_response,
         }
 
@@ -246,9 +249,18 @@ class DelegationSubmission:
 
 @dataclass(frozen=True)
 class DelegationResult:
-    """DelegationPort 返回给 Application 的子执行结果。"""
+    """DelegationPort 返回给 Application 的子执行结果。
+
+    不再依赖旧状态枚举：以 ``outcome`` 暴露子运行是否已终态及结果类别，
+    未结束或不可判定时为 ``None``；其余字段供父运行回灌 delegation result 消息。
+    """
 
     child_run_id: str
-    status: RunStatus
+    outcome: RunOutcome | None
     output: str = ""
     error: RunError | None = None
+
+
+def run_outcome_from_state(state: AgentRunState) -> RunOutcome | None:
+    """将终态 ``AgentRunState`` 投影为 ``RunOutcome``；非终态返回 ``None``。"""
+    return state.mode.outcome if isinstance(state.mode, Ended) else None

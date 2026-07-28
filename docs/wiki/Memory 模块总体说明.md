@@ -1789,7 +1789,7 @@ sequenceDiagram
 flowchart TD
     First["首次 LLM Context"] --> Search["搜索当前 Memory"]
     Search --> Snapshot["MemorySlot 写入 ContextVersion"]
-    Snapshot --> Wait["WAITING_APPROVAL / INTERRUPTED"]
+    Snapshot --> Wait["Suspended(APPROVAL) / 非终态"]
     Wait --> Resume["恢复原 Run"]
     Resume --> Replay["replay_active_context"]
     Replay --> Frozen["复用已保存 Memory Slot"]
