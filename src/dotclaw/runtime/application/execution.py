@@ -73,6 +73,8 @@ class RunExecution:
     policy: AgentPolicySnapshot
     state: AgentRunState
     budget: RunBudget
+    action: AgentAction = AgentAction.INVOKE_LLM
+    """状态机经 ``transition()`` 计算出的下一项原子动作；``_drive`` 据此分支选执行器。"""
     message_cursor: int = 0
     cancellation: CancellationToken = field(default_factory=CancellationToken)
     pending_control: PendingControl | None = None
@@ -95,6 +97,7 @@ class RunExecution:
             run_id=self.run_id,
             policy=self.policy,
             state=self.state,
+            action=self.action,
             budget=self.budget,
             message_cursor=self.message_cursor,
             pending_control=self.pending_control,
@@ -108,6 +111,7 @@ class RunExecution:
     def update_state(self, state: AgentRunState, action: AgentAction) -> None:
         """在 Runtime 处理完状态机转移后更新内存控制状态。"""
         self.state = state
+        self.action = action
         if action is not AgentAction.SUSPEND:
             self.pending_control = None
 
@@ -140,6 +144,7 @@ class RunExecution:
             "request": self.request.to_dict(),
             "policy": self.policy.to_dict(),
             "state": self.state.to_dict(),
+            "action": self.action.value,
             "budget": self.budget.to_dict(),
             "message_cursor": self.message_cursor,
             "cancelled": self.cancellation.cancelled,
@@ -159,6 +164,8 @@ class RunExecutionView:
     budget: RunBudget
     message_cursor: int
     pending_control: PendingControl | None
+    action: AgentAction = AgentAction.INVOKE_LLM
+    """状态机经 ``transition()`` 计算出的下一项原子动作；供 Port 读取当前阶段。"""
     run_messages: tuple[RunMessage, ...] = ()
     """本 Run 已持久化的消息证据；不包含 Session 可变对象。"""
     active_context_version: ContextVersion | None = None

@@ -356,11 +356,12 @@ async def test_active_session_deletion_is_rejected(tmp_path: Path) -> None:
     )
 
     session = await session_manager.create(agent_id="agent-1")
-    # 模拟一个非终态（运行中）Run 遗留的 run.json。
+    # 模拟一个非终态（运行中）Run 遗留的 run.json（新 v4 状态格式）。
     run_dir: Path = tmp_path / session.id / "agent_runs" / "run-active"
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text(
-        '{"run_id": "run-active", "session_id": "%s", "agent_id": "agent-1", "status": "running"}'
+        '{"run_id": "run-active", "session_id": "%s", "agent_id": "agent-1", '
+        '"state": {"mode": {"type": "running", "stage": "calling_llm"}}}'
         % session.id,
         encoding="utf-8",
     )

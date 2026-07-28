@@ -12,7 +12,7 @@ from pathlib import Path
 from ..application.ports import ConversationProjectionPort, SuccessCommitFaultPort
 from ..application.dto import ConversationMessage
 from ..domain.events import RunEvent, RunEventType
-from ..domain.state import AgentRunState, Created, Ended, RunOutcome
+from ..domain.state import AgentRunState, Ended, RunOutcome
 from ..domain.context import (
     ContextContributionKind,
     ContextOwner,
@@ -677,11 +677,14 @@ def _agent_run_from_dict(data: JSONMap) -> AgentRun:
     raw_candidates: JSONValue | None = data.get("staged_history_compressions")
     raw_success_intent: JSONValue | None = data.get("success_commit_intent")
     error: RunError | None = _run_error_from_dict(require_json_map(raw_error)) if raw_error is not None else None
+    # 只接受新格式：缺失 state 即视为非法持久化数据，不再静默兜底为 Created。
+    if "state" not in data:
+        raise ValueError("AgentRun 持久化数据缺少 state 字段（只接受 v4 状态格式）")
     return AgentRun(
         run_id=get_string(data, "run_id"),
         session_id=get_string(data, "session_id"),
         agent_id=get_string(data, "agent_id"),
-        state=AgentRunState.from_dict(require_json_map(data["state"])) if "state" in data else AgentRunState(mode=Created()),
+        state=AgentRunState.from_dict(require_json_map(data["state"])),
         started_at=get_string(data, "started_at"),
         policy=AgentPolicySnapshot(
             agent_id=get_string(policy_data, "agent_id"),
@@ -838,7 +841,12 @@ def _run_success_commit_intent_from_dict(data: JSONMap) -> RunSuccessCommitInten
 
 
 def _completed_run_from_intent(run: AgentRun, intent: RunSuccessCommitIntent) -> AgentRun:
-    """以成功意图收敛终态 Run，并只提交最新的 staged 候选。"""
+    """以成功意图收敛终态 Run，并只提交最新的 staged 候选。
+
+    终态控制状态直接沿用提交时携带的 ``run.state``（已是 ``Ended(target_outcome)``，
+    且保留 ``iteration``/``retry_count`` 等循环计数），不在恢复时重建为
+    ``iteration=0`` 的空白终态，避免故障恢复后丢失循环安全计数。
+    """
     candidates: tuple[StagedHistoryCompression, ...] = tuple(
         replace(
             candidate,
@@ -852,7 +860,7 @@ def _completed_run_from_intent(run: AgentRun, intent: RunSuccessCommitIntent) ->
     )
     return replace(
         run,
-        state=AgentRunState(mode=Ended(intent.target_outcome)),
+        state=run.state,
         staged_history_compressions=candidates,
         success_commit_intent=None,
     )

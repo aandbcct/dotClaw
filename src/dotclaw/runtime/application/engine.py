@@ -155,18 +155,22 @@ class RuntimeEngine:
         """
         policy = await self._policy_port.resolve(request)
         run_id: str = request.run_id or uuid.uuid4().hex
+        # 起始态经状态机 ``Created`` → ``RunStarted`` 迁移计算，使 ``RunStarted`` 成为持久化态
+        # （唯一状态真相），而非硬编码 ``Running(CALLING_LLM)``。
+        start_transition: StateTransition = transition(AgentRunState(mode=Created()), RunStarted(request.user_message.message_id))
         execution: RunExecution = RunExecution(
             run_id=run_id,
             request=request,
             policy=policy,
-            state=AgentRunState(mode=Created()),
+            state=start_transition.state,
+            action=start_transition.action,
             budget=RunBudget(max_iterations=policy.max_iterations),
         )
         run: AgentRun = AgentRun(
             run_id=run_id,
             session_id=request.session_id,
             agent_id=request.agent_id,
-            state=AgentRunState(mode=Running(RunStage.CALLING_LLM)),
+            state=start_transition.state,
             started_at=utc_now_iso(),
             policy=policy,
             input_message_id=request.user_message.message_id,
@@ -245,6 +249,7 @@ class RuntimeEngine:
             request=request,
             policy=run.policy,
             state=tr.state,
+            action=tr.action,
             budget=RunBudget(max_iterations=run.policy.max_iterations),
             message_cursor=checkpoint.message_sequence,
             run_messages=messages,
@@ -268,7 +273,7 @@ class RuntimeEngine:
                 return result
             resumed_run: AgentRun = replace(
                 run,
-                state=AgentRunState(mode=Running(RunStage.CALLING_LLM)),
+                state=tr.state,
                 resume_count=run.resume_count + 1,
             )
             await self._run_repository.save_run(resumed_run)
@@ -407,7 +412,7 @@ class RuntimeEngine:
                 "outcome": child_result.outcome.value if child_result.outcome is not None else "",
             },
         )
-        resumed_run: AgentRun = replace(parent_run, state=AgentRunState(mode=Running(RunStage.CALLING_LLM)), resume_count=parent_run.resume_count + 1)
+        resumed_run: AgentRun = replace(parent_run, state=completion_transition.state, resume_count=parent_run.resume_count + 1)
         await self._run_repository.save_run(resumed_run)
         event_sequence = await self._event(resumed_run, event_sequence, RunEventType.RUN_RESUMED, (), "delegation 恢复运行")
         self._cancellation_service.register(parent_run.run_id, execution.cancellation)
@@ -470,8 +475,12 @@ class RuntimeEngine:
         if run is None or run.state.is_ended():
             return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "Run 不存在或已结束，无法恢复"))
         checkpoint: RunCheckpoint | None = await self._checkpoint_repository.load(run.session_id, run.run_id)
-        if checkpoint is None or checkpoint.active_context_version is None or checkpoint.action is not AgentAction.INVOKE_LLM:
-            return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "Run 缺少可恢复的 LLM checkpoint"))
+        # 恢复边界（阶段4）：依 checkpoint 当前 action 恢复，而非硬编码 Running(CALLING_LLM)。
+        # checkpoint.action 是状态机在挂起/中断点保存的下一项动作，决定恢复后的初始动作与阶段。
+        if checkpoint is None or checkpoint.active_context_version is None or checkpoint.action not in (AgentAction.INVOKE_LLM, AgentAction.EXECUTE_TOOLS):
+            return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "Run 缺少可恢复的 checkpoint"))
+        resume_action: AgentAction = checkpoint.action
+        resume_stage: RunStage = RunStage.EXECUTING_TOOLS if resume_action is AgentAction.EXECUTE_TOOLS else RunStage.CALLING_LLM
         versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(run.session_id, run.run_id)
         version: ContextVersion | None = next((item for item in versions if item.version == checkpoint.active_context_version), None)
         if version is None:
@@ -488,19 +497,24 @@ class RuntimeEngine:
             _conversation_from_context_version(version),
             run_id=run.run_id,
         )
+        resumed: AgentRun = replace(
+            run,
+            state=AgentRunState(mode=Running(resume_stage), iteration=run.state.iteration, retry_count=run.state.retry_count, truncate_count=run.state.truncate_count, loop_fingerprint=run.state.loop_fingerprint),
+            resume_count=run.resume_count + 1,
+        )
         execution: RunExecution = RunExecution(
             run.run_id,
             request,
             run.policy,
-            run.state,
+            resumed.state,
             RunBudget(run.policy.max_iterations),
+            resume_action,
             message_cursor=checkpoint.message_sequence,
             run_messages=messages,
             active_context_version=version,
             staged_history_compressions=run.staged_history_compressions,
             replay_active_context=True,
         )
-        resumed: AgentRun = replace(run, state=AgentRunState(mode=Running(RunStage.CALLING_LLM)), resume_count=run.resume_count + 1)
         await self._run_repository.save_run(resumed)
         event_sequence: int = await self._event(resumed, checkpoint.event_sequence, RunEventType.RUN_RESUMED, (), "恢复未结束 Run")
         self._cancellation_service.register(run.run_id, execution.cancellation)
@@ -536,14 +550,14 @@ class RuntimeEngine:
             return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "放弃被状态机拒绝"))
         abandoned: AgentRun = replace(
             run,
-            state=AgentRunState(mode=Ended(RunOutcome.ABANDONED)),
+            state=abandon_transition.state,
             ended_at=utc_now_iso(),
             error=RunError(RunErrorCode.CANCELLED, "已被显式放弃"),
         )
         await self._run_repository.save_run(abandoned)
         await self._checkpoint_repository.delete(run.session_id, run.run_id)
         await self._event(abandoned, event_sequence, RunEventType.RUN_ABANDONED, ())
-        result: RunResult = RunResult(run.run_id, AgentRunState(mode=Ended(RunOutcome.ABANDONED)), error=abandoned.error)
+        result: RunResult = RunResult(run.run_id, abandon_transition.state, error=abandoned.error)
         await self._release_run_context_if_terminal(result)
         return result
 
@@ -584,18 +598,24 @@ class RuntimeEngine:
     async def _drive(self, execution: RunExecution, run: AgentRun, initial_messages: tuple[RunMessage, ...], pending_calls: tuple[ToolCall, ...], event_sequence: int = 0, output_port: LLMOutputPort | None = None, resume_approved_call_id: str | None = None) -> RunResult:
         """驱动局部状态机，并在每个事实边界按顺序持久化。
 
-        主循环消费 ``AgentRunState`` 当前分支对应的动作：``EXECUTING_TOOLS`` 走工具动作、
-        ``CALLING_LLM`` 走模型动作。任一动作的副作用完成后回灌为 ``AgentRunEvent``，
-        经 ``transition()`` 计算下一状态与动作，再进入下一轮。
+        主循环消费 ``StateTransition.action``（存于 ``execution.action``）决定下一项动作：
+        ``INVOKE_LLM`` 走模型动作、``EXECUTE_TOOLS`` 走工具动作。任一动作的副作用完成后
+        回灌为 ``AgentRunEvent``，经 ``transition()`` 计算下一状态与动作（写入
+        ``execution.state`` / ``execution.action``），再进入下一轮。``SUSPEND`` / ``FINALIZE``
+        / ``HANDOFF_TARGET`` 由对应动作方法在迁移后内部收口或挂起，并以 ``terminal`` 返回。
         """
         messages: list[RunMessage] = list(initial_messages)
         execution.replace_run_messages(tuple(messages))
         sequence: int = len(messages)
         event_number: int = event_sequence
         if not messages:
+            # 首轮无已落盘消息：写入用户输入消息（始终执行）。RunStarted 迁移仅当内存态仍为
+            # Created（例如 resume 入口以 Created 构造 execution）；正常 execute 路径已在
+            # 持久化前经 transition() 完成 RunStarted 迁移，此处跳过以避免重复迁移失败。
             sequence += 1
             messages.append(RunMessage(execution.request.user_message.message_id, sequence, RunMessageKind.USER_INPUT, MessageRole.USER, execution.request.user_message.content))
             await self._save_messages(run, execution, messages)
+        if isinstance(execution.state.mode, Created):
             start_transition = await self._apply_transition(execution, run, RunStarted(run.input_message_id), event_number)
             if start_transition is None:
                 return await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 RunStarted 迁移")
@@ -607,18 +627,24 @@ class RuntimeEngine:
                 if cancel_transition is not None:
                     execution.update_state(cancel_transition.state, cancel_transition.action)
                 return await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
-            if isinstance(execution.state.mode, Running) and execution.state.mode.stage is RunStage.EXECUTING_TOOLS:
+            action: AgentAction = execution.action
+            if action is AgentAction.EXECUTE_TOOLS:
                 run, sequence, event_number, pending_calls, terminal = await self._execute_tools_action(
                     execution, run, messages, sequence, event_number, pending_calls, resume_approved_call_id,
                 )
                 if terminal is not None:
                     return terminal
                 continue
-            run, sequence, event_number, pending_calls, terminal = await self._invoke_llm_action(
-                execution, run, messages, sequence, event_number, output_port,
-            )
-            if terminal is not None:
-                return terminal
+            if action is AgentAction.INVOKE_LLM:
+                run, sequence, event_number, pending_calls, terminal = await self._invoke_llm_action(
+                    execution, run, messages, sequence, event_number, output_port,
+                )
+                if terminal is not None:
+                    return terminal
+                continue
+            # 其余动作（FINALIZE / SUSPEND / HANDOFF_TARGET）应在动作方法迁移后内部收口，
+            # 不应回到主循环分支；落入此处说明状态机返回了未预期的动作。
+            return await self._fail(execution, run, tuple(messages), event_number, f"状态机返回未预期的动作：{action.value}")
         return await self._fail(execution, run, tuple(messages), event_number, "状态机意外结束")
 
     async def _execute_tools_action(
@@ -760,12 +786,12 @@ class RuntimeEngine:
         await self._checkpoint_repository.save(checkpoint)
         waiting_run: AgentRun = replace(
             run,
-            state=AgentRunState(mode=Suspended(SuspendReason.APPROVAL, record.approval_id, RunStage.EXECUTING_TOOLS)),
+            state=suspend_transition.state,
             latest_checkpoint_id=checkpoint.checkpoint_id,
         )
         await self._run_repository.save_run(waiting_run)
         event_number = await self._event(run, event_number, RunEventType.WAITING_APPROVAL, (messages[-1].message_id,))
-        return RunResult(run.run_id, AgentRunState(mode=Suspended(SuspendReason.APPROVAL, record.approval_id, RunStage.EXECUTING_TOOLS)), approval_id=record.approval_id)
+        return RunResult(run.run_id, suspend_transition.state, approval_id=record.approval_id)
 
     async def _invoke_llm_action(
         self,
@@ -857,8 +883,9 @@ class RuntimeEngine:
         response_message: RunMessage,
         event_number: int,
     ) -> RunResult:
-        """执行 FINALIZE 动作：状态机已到 AgentRunState(mode=Ended(COMPLETED))，经 SuccessCommitIntent 收口对话与 Run。"""
-        completed = replace(run, state=AgentRunState(mode=Ended(RunOutcome.COMPLETED)), ended_at=utc_now_iso(), final_message_id=response_message.message_id)
+        """执行 FINALIZE 动作：状态机已由 ``LLMResponseProduced(final=True)`` 迁移到 ``Ended(COMPLETED)``，
+        此处直接使用 ``execution.state``（来自 ``transition()`` 的返回态）收口对话与 Run，不再重新构造终态。"""
+        completed = replace(run, state=execution.state, ended_at=utc_now_iso(), final_message_id=response_message.message_id)
         completed_event: RunEvent = RunEvent(
             run_id=run.run_id,
             sequence=event_number + 1,
@@ -883,7 +910,7 @@ class RuntimeEngine:
             self._context_port.request_refresh("history_compressions", ContextOwner.SESSION, run.session_id)
         return RunResult(
             run.run_id,
-            AgentRunState(mode=Ended(RunOutcome.COMPLETED)),
+            execution.state,
             ConversationMessage(response_message.message_id, MessageRole.ASSISTANT, response_message.content, completed.ended_at or ""),
             has_streamed_response=execution.has_streamed_response,
         )
@@ -1098,11 +1125,11 @@ class RuntimeEngine:
             await self._checkpoint_repository.save(checkpoint)
             suspended_run: AgentRun = replace(
                 run,
-                state=AgentRunState(mode=Suspended(SuspendReason.DELEGATION, child_run_id, RunStage.CALLING_LLM)),
+                state=submit_transition.state,
                 latest_checkpoint_id=checkpoint.checkpoint_id,
             )
             await self._run_repository.save_run(suspended_run)
-            return RunResult(run.run_id, AgentRunState(mode=Suspended(SuspendReason.DELEGATION, child_run_id, RunStage.CALLING_LLM)), child_run_id=child_run_id)
+            return RunResult(run.run_id, submit_transition.state, child_run_id=child_run_id)
         except Exception as error:
             event_number = await self._tool_completed_event(run, event_sequence, tool_call, None, ToolAuditStatus.FAILED, _safe_error_summary(error))
             if 'child_run_id' in locals():
@@ -1182,12 +1209,16 @@ class RuntimeEngine:
         return context_version
 
     async def _finish_cancelled(self, execution: RunExecution, run: AgentRun, messages: tuple[RunMessage, ...], event_sequence: int, reason: str) -> RunResult:
-        """持久化取消终态、删除检查点且不投影 Conversation。"""
-        cancelled = replace(run, state=AgentRunState(mode=Ended(RunOutcome.CANCELLED)), ended_at=utc_now_iso(), error=RunError(RunErrorCode.CANCELLED, reason))
+        """持久化取消终态、删除检查点且不投影 Conversation；取消状态经 ``transition()`` 收口。"""
+        if not execution.state.is_ended():
+            cancel_transition = await self._apply_transition(execution, run, CancelRequested(reason), event_sequence)
+            if cancel_transition is not None:
+                execution.update_state(cancel_transition.state, cancel_transition.action)
+        cancelled = replace(run, state=execution.state, ended_at=utc_now_iso(), error=RunError(RunErrorCode.CANCELLED, reason))
         await self._run_repository.save_run(cancelled)
         await self._checkpoint_repository.delete(run.session_id, run.run_id)
         await self._event(run, event_sequence, RunEventType.RUN_CANCELLED, ())
-        return RunResult(run.run_id, AgentRunState(mode=Ended(RunOutcome.CANCELLED)), error=cancelled.error)
+        return RunResult(run.run_id, execution.state, error=cancelled.error)
 
     async def _suspend_on_unavailable(
         self,
@@ -1216,7 +1247,7 @@ class RuntimeEngine:
         message: str,
         code: RunErrorCode = RunErrorCode.INVALID_STATE,
     ) -> RunResult:
-        """持久化失败终态且不投影 Conversation；先经状态机收口为 AgentRunState(mode=Ended(FAILED))。"""
+        """持久化失败终态且不投影 Conversation；状态经 ``transition()`` 收口为 ``Ended(FAILED)``。"""
         failure_event: "AgentRunEvent" = (
             ToolBatchFailed() if (isinstance(execution.state.mode, Running) and execution.state.mode.stage is RunStage.EXECUTING_TOOLS) else LLMCallFailed()
         )
@@ -1224,11 +1255,12 @@ class RuntimeEngine:
         if fail_transition is not None:
             execution.update_state(fail_transition.state, fail_transition.action)
         error = RunError(code, message)
-        failed = replace(run, state=AgentRunState(mode=Ended(RunOutcome.FAILED)), ended_at=utc_now_iso(), error=error)
+        failed_state: AgentRunState = fail_transition.state if fail_transition is not None else AgentRunState(mode=Ended(RunOutcome.FAILED))
+        failed = replace(run, state=failed_state, ended_at=utc_now_iso(), error=error)
         await self._run_repository.save_run(failed)
         await self._checkpoint_repository.delete(run.session_id, run.run_id)
         await self._event(run, event_sequence, RunEventType.RUN_FAILED, ())
-        return RunResult(run.run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=error)
+        return RunResult(run.run_id, failed_state, error=error)
 
 
 def _calls_from_checkpoint(checkpoint: RunCheckpoint) -> tuple[ToolCall, ...]:
