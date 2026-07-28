@@ -119,7 +119,7 @@ sequenceDiagram
     alt 本次调用需要审批
         Adapter-->>Engine: APPROVAL_REQUIRED
         Engine->>RuntimeApproval: 保存审批记录与 Checkpoint
-        Engine-->>App: RunResult(WAITING_APPROVAL)
+        Engine-->>App: RunResult(Suspended(APPROVAL), approval_id)
         App-->>Channel: 展示待审批操作
         User->>Channel: 批准或拒绝
         Channel->>App: 提交审批结果
@@ -1061,7 +1061,7 @@ sequenceDiagram
     Engine->>Adapter: execute(unapproved invocation)
     Adapter-->>Engine: APPROVAL_REQUIRED + stable approval_id
     Engine->>ApprovalRepo: 持久化审批记录、Run 状态与 Checkpoint
-    Engine-->>App: RunResult(WAITING_APPROVAL)
+    Engine-->>App: RunResult(Suspended(APPROVAL), approval_id)
     App-->>Channel: 展示待审批 Tool Call
     Channel-->>User: 请求决定
     User->>Channel: approve / deny

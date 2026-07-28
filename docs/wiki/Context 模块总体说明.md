@@ -1455,7 +1455,7 @@ Context 不拥有 MemoryManager 和 SkillRegistry 的关闭权。
 Run COMPLETED / FAILED / CANCELLED / ABANDONED
 → release_scope(RUN, run_id)
 
-Run WAITING_APPROVAL / INTERRUPTED
+Run 非终态（如 Suspended(APPROVAL)）
 → 不释放，保留恢复所需作用域
 
 Session 删除
@@ -1752,7 +1752,7 @@ flowchart TD
 
 **结论：**
 
-- RUN 缓存与单次执行终态绑定，WAITING_APPROVAL 和 INTERRUPTED 暂不释放。
+- RUN 缓存与单次执行绑定，非终态 AgentRunState 仍占用 Session。
 - SESSION 缓存只在 Session 删除时释放。
 - AGENT 缓存可跨多个 Session 复用，当前只在 Host 关闭时释放。
 - NONE Scope 实例不进入 `_instances`，当前 Manager 不会调用其 release()。

@@ -494,8 +494,10 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
         f"tool-{result.run_id}-4",
     ]
     tool_events: list[JSONMap] = [event for event in events if event["event_type"] in {"tool_started", "tool_completed"}]
-    assert [event["event_type"] for event in tool_events] == ["tool_started", "tool_completed", "tool_started", "tool_completed"]
-    assert [require_json_map(event["data"])["call_id"] for event in tool_events] == ["call-1", "call-1", "call-2", "call-2"]
+    # 恢复边界（§92）：所有 tool_started 在 EXECUTE_TOOLS 恢复检查点落盘前写入，故整批工具的
+    # tool_started 先于 tool_completed（而非逐工具交错），以保证 checkpoint.event_sequence 与最后落盘事件连续。
+    assert [event["event_type"] for event in tool_events] == ["tool_started", "tool_started", "tool_completed", "tool_completed"]
+    assert [require_json_map(event["data"])["call_id"] for event in tool_events] == ["call-1", "call-2", "call-1", "call-2"]
     assert all(event["event_type"] != "context_built" for event in events)
 
 

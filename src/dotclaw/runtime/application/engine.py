@@ -482,6 +482,10 @@ class RuntimeEngine:
             return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "Run 缺少可恢复的 checkpoint"))
         resume_action: AgentAction = checkpoint.action
         resume_stage: RunStage = RunStage.EXECUTING_TOOLS if resume_action is AgentAction.EXECUTE_TOOLS else RunStage.CALLING_LLM
+        # EXECUTE_TOOLS 节点在持久化时把待执行工具调用写入 checkpoint.pending；恢复时取回并交给主循环重放工具轮。
+        resume_pending_calls: tuple[ToolCall, ...] = (
+            _calls_from_checkpoint(checkpoint) if resume_action is AgentAction.EXECUTE_TOOLS else ()
+        )
         versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(run.session_id, run.run_id)
         version: ContextVersion | None = next((item for item in versions if item.version == checkpoint.active_context_version), None)
         if version is None:
@@ -520,7 +524,7 @@ class RuntimeEngine:
         event_sequence: int = await self._event(resumed, checkpoint.event_sequence, RunEventType.RUN_RESUMED, (), "恢复未结束 Run")
         self._cancellation_service.register(run.run_id, execution.cancellation)
         try:
-            result: RunResult = await self._drive(execution, resumed, messages, (), event_sequence, output_port)
+            result: RunResult = await self._drive(execution, resumed, messages, resume_pending_calls, event_sequence, output_port)
             await self._release_run_context_if_terminal(result)
             return result
         finally:
@@ -683,7 +687,7 @@ class RuntimeEngine:
         pending_calls = ()
         if not tool_calls:
             return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "缺少待执行工具调用")
-        completed_message_ids: list[str] = []
+        # 阶段一：为所有非委派工具写入 tool_started 审计事件；委派工具在此提前返回 HANDOFF_TARGET。
         for tool_index, tool_call in enumerate(tool_calls):
             delegation_request: DelegationRequest | None = _delegation_request(
                 execution.run_id,
@@ -717,6 +721,16 @@ class RuntimeEngine:
                 # 不直接提交：返回空 terminal 让主循环按 HANDOFF_TARGET 分支调度 _handoff_target_action。
                 return run, sequence, event_number, pending_calls, None
             event_number = await self._tool_started_event(run, event_number, messages, tool_call)
+        # 恢复边界：所有 tool_started 事件已落盘、进入工具外部调用前，先持久化 Running(EXECUTING_TOOLS)
+        # 状态与 EXECUTE_TOOLS 检查点（含待执行工具调用）。此时 event_sequence 恰好等于最后落盘的
+        # tool_started 事件序号，使崩溃恢复时 RUN_RESUMED 以连续序号接上，并以 EXECUTE_TOOLS 节点重放
+        # 工具轮而非退化回重调 LLM。
+        run = await self._persist_running_transition(
+            execution, run, execution.state, AgentAction.EXECUTE_TOOLS, event_number, sequence, tool_calls,
+        )
+        # 阶段二：逐个执行工具，回灌 ToolBatchCompleted / ToolApprovalRequired。
+        completed_message_ids: list[str] = []
+        for tool_index, tool_call in enumerate(tool_calls):
             try:
                 approved: bool = (
                     resume_approved_call_id is not None
@@ -770,6 +784,8 @@ class RuntimeEngine:
         if batch_transition is None:
             return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 ToolBatchCompleted 迁移")
         execution.update_state(batch_transition.state, batch_transition.action)
+        # 恢复边界：工具批次完成后、进入下一轮 LLM 外部调用前，先持久化新 state 与 INVOKE_LLM 检查点。
+        run = await self._persist_running_transition(execution, run, batch_transition.state, batch_transition.action, event_number, sequence)
         return run, sequence, event_number, pending_calls, None
 
     async def _suspend_action(
@@ -900,6 +916,9 @@ class RuntimeEngine:
         execution.update_state(response_transition.state, response_transition.action)
         if final:
             return run, sequence, event_number, (), await self._finalize_action(execution, run, response_message, event_number)
+        # 恢复边界：Running(EXECUTING_TOOLS) 状态与 EXECUTE_TOOLS 检查点的持久化移至 _execute_tools_action，
+        # 在工具开始的 tool_started 审计事件落盘之后再写入，确保 checkpoint.event_sequence 与最后落盘事件
+        # 连续，崩溃恢复以 EXECUTE_TOOLS 节点重放工具轮而非退化回重调 LLM。
         return run, sequence, event_number, response.tool_calls, None
 
     async def _finalize_action(
@@ -1290,6 +1309,54 @@ class RuntimeEngine:
         await self._checkpoint_repository.delete(run.session_id, run.run_id)
         await self._event(run, event_sequence, RunEventType.RUN_FAILED, ())
         return RunResult(run.run_id, failed_state, error=error)
+
+    async def _persist_running_transition(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        state: AgentRunState,
+        action: AgentAction,
+        event_sequence: int,
+        message_sequence: int,
+        pending_tool_calls: tuple[ToolCall, ...] = (),
+    ) -> AgentRun:
+        """在外部副作用前持久化非终态迁移：新 ``AgentRun.state`` 与 operation node 的 checkpoint action。
+
+        实现开发计划 §92 的恢复边界：``ToolBatchCompleted``（→ ``INVOKE_LLM``）与
+        ``LLMResponseProduced(not final)``（→ ``EXECUTE_TOOLS``）这两个驱动循环内部的非终态迁移
+        原本只更新内存 ``execution``，必须在此显式落盘，否则崩溃恢复会回放到错误的 operation node。
+
+        调用方负责在调用点已将其余前置事件（如工具开始的 ``tool_started`` 审计）落盘，使
+        ``event_sequence`` 恰好等于最后落盘事件的序号，恢复时 ``RUN_RESUMED`` 才能以连续序号接上。
+        ``EXECUTE_TOOLS`` 节点还需把待执行工具调用写入 checkpoint.pending，使恢复能重放工具轮而非
+        退化回重调 LLM（旧路径在工具执行期间 checkpoint 仍是 INVOKE_LLM，恢复被迫重调 LLM）。
+        """
+        persisted = replace(run, state=state)
+        await self._run_repository.save_run(persisted)
+        pending: JSONMap = (
+            {"tool_calls": [call.to_dict() for call in pending_tool_calls]}
+            if pending_tool_calls else {}
+        )
+        checkpoint = RunCheckpoint(
+            checkpoint_id=f"checkpoint-{run.run_id}",
+            run_id=run.run_id,
+            session_id=run.session_id,
+            checkpoint_sequence=1,
+            event_sequence=event_sequence,
+            message_sequence=message_sequence,
+            action=action,
+            pending=pending,
+            budget=_checkpoint_budget(execution),
+            active_context_version=(
+                execution.active_context_version.version
+                if execution.active_context_version is not None else None
+            ),
+            staged_history_compression_ids=tuple(
+                candidate.candidate_id for candidate in execution.staged_history_compressions
+            ),
+        )
+        await self._checkpoint_repository.save(checkpoint)
+        return persisted
 
 
 def _calls_from_checkpoint(checkpoint: RunCheckpoint) -> tuple[ToolCall, ...]:

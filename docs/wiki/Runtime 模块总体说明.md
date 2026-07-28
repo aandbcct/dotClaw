@@ -6,7 +6,7 @@
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
 
-> **状态模型说明（2026-07-27 迁移）**：本文档第 4/5/6/8 节中出现的 `AgentPhase`、`RunStatus`、`AgentState`、`INTERRUPTED`、`next_action`、`agent_state`、`retry_interrupted`、`abandon_interrupted` 描述的是「状态机分层重构」**之前**的模型。当前唯一控制状态为 `domain/state.py` 的 `AgentRunState`（生命周期 `Created`/`Running`/`Suspended`/`Ended` + `RunStage` + `SuspendReason` + `RunOutcome`），状态迁移由纯函数 `transition()` 定义；上述旧符号已从生产树物理删除。详细设计与迁移计划见 `docs/Development/runtime/statemachine/状态机分层重构总体设计.md` 与 `状态机分层重构开发计划.md`。
+> **状态模型说明**：本文档状态机相关章节（第 4/5/6/8 节）已按「状态机分层重构」**之后**的口径编写。当前唯一持久化控制状态位于 `domain/state.py` 的 `AgentRunState`，状态迁移由纯函数 `transition()` 定义，是合法状态变化的唯一事实来源。详细设计与迁移计划见 `docs/Development/runtime/statemachine/状态机分层重构总体设计.md` 与 `状态机分层重构开发计划.md`。
 
 
 **快速导航**
@@ -54,7 +54,7 @@ Runtime 的稳定职责可归纳为七组：
 
 1. **运行隔离与协调**：每次请求创建独立 RunExecution，共享 Engine 不保存当前 Session 或当前 Agent。
 2. **Session 级顺序**：同一 Session 的普通执行串行，不同 Session 可以并行。
-3. **状态与外部能力驱动**：使用 AgentState 约束流程，由 Engine 调用 Context、LLM、Tool 和 Delegation Ports。
+3. **状态与外部能力驱动**：使用 `AgentRunState` 状态机约束流程，由 Engine 调用 Context、LLM、Tool 和 Delegation Ports。
 4. **运行事实管理**：保存 AgentRun、RunMessage、RunEvent、ContextVersion 和最小 Checkpoint。
 5. **暂停、恢复与取消**：处理审批、中断重试、放弃、进程重启遗留 Run 和尽力取消。
 6. **上下文预算保护**：使用显式 tokenizer 对 Runtime 当前可计数的输入组成进行确定性统计，必要时暂存历史压缩候选。
@@ -112,7 +112,7 @@ flowchart TB
     Coordinator["SessionRunCoordinator<br/>同 Session 串行"]
     Engine["RuntimeEngine<br/>共享执行协调器"]
     Execution["RunExecution<br/>单 Run 内存事务"]
-    State["AgentState<br/>纯领域状态机"]
+    State["AgentRunState<br/>纯领域状态机"]
 
     subgraph Ports["Runtime Application Ports"]
         PolicyPort["RunPolicyPort"]
@@ -261,7 +261,7 @@ flowchart LR
 2. Application 定义 Port，不导入具体 Adapter。
 3. Adapter 可以依赖 Runtime 契约和外部模块。
 4. Bootstrap 创建对象并连接依赖。
-5. Context、LLM、Tool 和 Orchestration 不得直接修改 `AgentState` 或 `AgentRun`。
+5. Context、LLM、Tool 和 Orchestration 不得直接修改 `AgentRunState` 或 `AgentRun`。
 
 ---
 
@@ -280,7 +280,7 @@ flowchart TB
     subgraph Core["B. 执行内核"]
         Engine["RuntimeEngine"]
         Execution["RunExecution / View"]
-        State["AgentState / AgentAction"]
+        State["AgentRunState / AgentAction"]
     end
 
     subgraph ContextControl["C. 上下文与预算控制"]
@@ -358,13 +358,13 @@ flowchart TB
 | 入口与协调 | Session 租约 | 同 Session 串行、跨 Session 并行 | `SessionRunCoordinator` |
 | 执行内核 | 运行协调器 | 创建、恢复并驱动一个 Run | `RuntimeEngine` |
 | 执行内核 | 执行期事务 | 保存一次 Run 的内存控制数据 | `RunExecution` |
-| 执行内核 | 状态规则 | 领域事件 → 新状态与下一动作 | `AgentState` |
+| 执行内核 | 状态规则 | 领域事件 → 新状态与下一动作 | `AgentRunState` / `transition()` |
 | 上下文控制 | Context 版本 | 冻结 LLM 调用前的稳定 Slot | `ContextVersion` |
 | 上下文控制 | Token 预算 | 确定性判断继续、压缩或拒绝 | `ContextBudgetPlanner` |
 | 上下文控制 | 历史压缩 | 生成、暂存并成功后提交摘要 | `HistoryCompactorPort` |
 | 运行控制 | 审批 | approval_id 与原 Run 的一次性关联 | `ApprovalService` |
 | 运行控制 | 取消 | 活动 Run 令牌和父子取消映射 | `CancellationService` |
-| 运行控制 | 中断恢复 | 安全边界重试或放弃 | `retry_interrupted` |
+| 运行控制 | 中断恢复 | 安全边界重试或放弃 | `resume_run`（恢复边界） |
 | 事实持久化 | 运行事实 | Run 摘要、消息、事件、Checkpoint | Domain facts + Repository |
 | 事实持久化 | 成功提交 | 文件系统上的可恢复多事实提交 | `SuccessCommitIntent` |
 | 外部接入 | 运行策略 | 冻结 Identity、模型、工具和预算 | `AgentPolicyResolver` |
@@ -449,10 +449,8 @@ dict[session_id, asyncio.Lock]
 | `submit()` | 已有 RunRequest 的普通提交 |
 | `submit_prepared()` | 在 Session 锁内冻结请求并执行 |
 | `resolve_approval()` | 在审批所属 Session 锁内恢复 |
-| `retry_interrupted()` | 在所属 Session 锁内重试 |
-| `abandon_interrupted()` | 在所属 Session 锁内放弃 |
 | `cancel()` | 不等待 Session 锁，立即发送取消 |
-| `_prepare_new_request()` | 恢复旧 RUNNING、处理 INTERRUPTED、拒绝其他占用 |
+| `_prepare_new_request()` | 查询活动 Run：`AgentRunState` 非终态即视为占用并拒绝或返回 `SESSION_BUSY`，终态 Run 才允许新请求 |
 
 取消不能等待当前 Run 正持有的 Session 锁，否则会形成：
 
@@ -496,20 +494,18 @@ HistoryCompactorPort
 |---|---|
 | `execute()` | 创建新 Run 并执行 |
 | `resolve_approval()` | 消费审批并恢复原 Run |
-| `retry_interrupted()` | 从 LLM 安全点重试中断 Run |
-| `abandon_interrupted()` | 放弃中断 Run 并释放占用 |
 | `cancel()` | 尽力取消活动、等待审批或子 Run |
-| `recover_session()` | 将进程重启遗留 RUNNING 标记为 INTERRUPTED |
-| `active_run()` | 查询 Session 当前唯一非终态 Run |
+| `recover_session()` | 扫描遗留非终态 Run 并交由恢复边界按 Checkpoint 重放，不再改写状态 |
+| `active_run()` | 查询 Session 当前唯一非终态 Run（按 `AgentRunState.is_ended()` 判断） |
 
 `RuntimeEngine` 的基本工作方式是：
 
 ```text
-读取 AgentState.phase
-→ 执行当前阶段需要的副作用
+读取 AgentRunState
+→ 执行当前阶段需要的副作用（由 transition() 返回的 AgentAction 决定）
 → 将结果转换为 DomainEvent
-→ AgentState.transition(event)
-→ 保存消息、事件、Checkpoint 或终态
+→ transition(state, event) → (next state, next action)
+→ 持久化新 AgentRunState + Checkpoint（action 与之匹配）
 → 进入下一轮
 ```
 
@@ -567,64 +563,86 @@ Port 不应获得：
 - Session 可变对象；
 - Engine 内部循环控制。
 
-#### 4.2.4 `AgentState`、`AgentPhase` 与 `AgentAction`
+#### 4.2.4 `AgentRunState` 与 `AgentAction`
 
-**职责与用途：**`AgentState` 是不依赖外部实现的纯领域状态机。它将“当前最小控制状态 + 已发生领域事件”转换为“新状态 + Application 下一动作”，用于隔离流程规则与 I/O 副作用。
+**职责与用途：**`AgentRunState` 是 AgentRun 的单一持久化控制状态，由 `domain/state.py` 以 `@dataclass(frozen=True)` 定义。它将“当前最小控制状态 + 已发生领域事件”转换为“新状态 + Application 下一动作”，用于隔离流程规则与 I/O 副作用；状态迁移由纯函数 `transition(state, event) -> StateTransition` 计算，是合法状态变化的唯一事实来源。
 
-主要阶段：
-
-```text
-IDLE
-WAITING_LLM
-WAITING_TOOLS
-WAITING_APPROVAL
-WAITING_DELEGATION
-FINALIZING
-COMPLETED
-FAILED
-CANCELLED
-INTERRUPTED
-ABANDONED
-```
-
-主要动作：
+`AgentRunState.mode` 是一个判别联合，恰好取以下之一：
 
 ```text
-INVOKE_LLM
-EXECUTE_TOOLS
-WAIT
-FINALIZE
-HANDOFF_TARGET
+Created        # 运行已持久化但尚未开始（无业务字段）
+Running        # 正在执行；持有 RunStage 子阶段
+Suspended      # 等待外部输入；持有 SuspendReason + control_id + resume_stage
+Ended          # 终态；保留 RunOutcome 与最终统计
 ```
 
-典型转换：
+辅助类型：
 
 ```text
-RunStarted
-IDLE → WAITING_LLM / INVOKE_LLM
-
-LLMCompleted(tool_calls)
-WAITING_LLM → WAITING_TOOLS / EXECUTE_TOOLS
-
-ToolCompleted(completed)
-WAITING_TOOLS → WAITING_LLM / INVOKE_LLM
-
-ToolCompleted(approval_required)
-WAITING_TOOLS → WAITING_APPROVAL / WAIT
-
-ApprovalResolved(approved)
-WAITING_APPROVAL → WAITING_TOOLS / EXECUTE_TOOLS
-
-DelegationSubmitted
-WAITING_TOOLS → WAITING_DELEGATION / WAIT
-
-DelegationCompleted(success)
-WAITING_DELEGATION → WAITING_LLM / INVOKE_LLM
+RunStage       # PREPARING / CALLING_LLM / EXECUTING_TOOLS
+SuspendReason  # APPROVAL / DELEGATION
+RunOutcome     # COMPLETED / FAILED / CANCELLED / ABANDONED
+Created()                                  # 运行已持久化但未开始
+Running(stage)                             # 执行中，stage 为当前子阶段
+Suspended(reason, control_id, resume_stage) # 等待外部输入
+Ended(outcome)                             # 终态
+StateTransition(state, action)             # 一次迁移的结果
 ```
 
-状态机只做规则校验，不调用 LLM、Tool、Repository、Session 或 Channel。
+`AgentRunState` 的主要方法：`is_ended()`、`is_active()`、`is_suspended()`、`is_waiting_approval()`、`is_waiting_delegation()`、`is_abandoned()`、`outcome() -> RunOutcome | None`、`describe()`。
 
-需要注意：当前模型通过名为 `delegate` 的 Tool Call 进入委派路径时，Engine 调用 `_delegate(..., manage_state=False)`，因此主路径不会实际推进到 `WAITING_DELEGATION`；该阶段属于领域模型已经定义、但当前 tool-based delegation 尚未采用的独立转换分支。
+`AgentAction`（来自 `domain/control.py`）表达迁移后的下一步执行动作：
+
+```text
+INVOKE_LLM      # 调用业务模型
+EXECUTE_TOOLS   # 执行工具批次
+FINALIZE        # 收口终态（由对应 action 方法返回 RunResult）
+SUSPEND         # 挂起等待外部输入（由对应 action 方法返回 RunResult）
+HANDOFF_TARGET  # 向目标 Agent 委派
+```
+
+典型迁移（由 `transition()` 定义）：
+
+```text
+Created + RunStarted
+  → Running(CALLING_LLM)，action = INVOKE_LLM，iteration = 1
+
+Running(CALLING_LLM) + LLMResponseProduced(final=True)
+  → Ended(COMPLETED)，action = FINALIZE
+Running(CALLING_LLM) + LLMResponseProduced(final=False)
+  → Running(EXECUTING_TOOLS)，action = EXECUTE_TOOLS
+Running(CALLING_LLM) + LLMCallFailed
+  → Ended(FAILED)，action = FINALIZE
+
+Running(EXECUTING_TOOLS) + ToolBatchCompleted
+  → Running(CALLING_LLM)，action = INVOKE_LLM，iteration + 1
+Running(EXECUTING_TOOLS) + ToolApprovalRequired
+  → Suspended(APPROVAL, approval_id, EXECUTING_TOOLS)，action = SUSPEND
+Running(EXECUTING_TOOLS) + ToolBatchFailed
+  → Ended(FAILED)，action = FINALIZE
+Running(EXECUTING_TOOLS) + DelegationRequested
+  → 状态不变 Running(EXECUTING_TOOLS)，action = HANDOFF_TARGET
+    （Engine 随后提交子 Run，委派期间状态保持 Running）
+Running(EXECUTING_TOOLS) + DelegationSubmitted
+  → Suspended(DELEGATION, child_run_id, CALLING_LLM)，action = SUSPEND
+
+Suspended(APPROVAL) + ApprovalGranted(approval_id 匹配 control_id)
+  → Running(EXECUTING_TOOLS)，action = EXECUTE_TOOLS
+Suspended(APPROVAL) + ApprovalRejected(approval_id 匹配 control_id)
+  → Ended(CANCELLED)，action = FINALIZE
+
+Suspended(DELEGATION) + DelegationCompleted(child_run_id 匹配 control_id)
+  → Running(CALLING_LLM)，action = INVOKE_LLM，iteration + 1
+
+控制事件（任意非终态均有效）：
+  CancelRequested   → Ended(CANCELLED)，action = FINALIZE
+  TimeoutReached    → Ended(FAILED)，action = FINALIZE
+  AbandonRequested  → Ended(ABANDONED)，action = FINALIZE
+
+Ended + 任意事件 → InvalidTransition（拒绝）
+```
+
+`transition()` 只计算（next state, next action），不构造 LLM 请求、工具调用、审批、Checkpoint 或审计事件。
 
 ---
 
@@ -637,7 +655,7 @@ WAITING_DELEGATION → WAITING_LLM / INVOKE_LLM
 保存：
 
 - Session、Agent、父子 Run 归属；
-- `RunStatus`；
+- `AgentRunState`（含 `RunOutcome` 等控制字段）；
 - 冻结 `AgentPolicySnapshot`；
 - 输入、最终消息和 Checkpoint 引用；
 - 活动 ContextVersion；
@@ -713,8 +731,8 @@ TOOL_STARTED(call_id, tool_name)
 保存：
 
 ```text
-agent_state
-next_action
+state            # 当前 AgentRunState
+action           # 当前 AgentAction（与 Checkpoint 匹配，用于恢复重放）
 message_sequence
 event_sequence
 pending control
@@ -737,15 +755,13 @@ tool_results
 
 **职责与用途：**`RunRequest` 和 `RunResult` 是 Runtime 与应用入口之间的稳定用例 DTO。前者冻结一次执行输入，后者只返回入口层需要的终态、最终回答、错误、审批标识和流式展示信息。
 
-`RunResult` 可能表示：
+`RunResult` 通过 `.state`（`AgentRunState`）表达运行结果：
 
 ```text
-COMPLETED
-FAILED
-CANCELLED
-WAITING_APPROVAL
-INTERRUPTED
-ABANDONED
+终态 Ended(outcome)：COMPLETED / FAILED / CANCELLED / ABANDONED
+非终态（如 Suspended(APPROVAL) / Suspended(DELEGATION)）：表示等待外部输入
+  - 等待审批时返回 approval_id（与 control_id 对应）
+  - 等待委派时返回 child_run_id（与 control_id 对应）
 ```
 
 `has_streamed_response` 不是业务完成状态，只表示入口是否已经收到过 response 文本。
@@ -868,29 +884,29 @@ parent_run_id → child_run_id
 
 业务终态仍由 Engine 持久化。
 
-#### 4.5.4 中断、重试与放弃
+#### 4.5.4 恢复边界、重试与放弃
 
-**职责与用途：**可恢复中断用于区分“确定性业务失败”和“在安全边界发生的暂时外部不可用”。Runtime 仅允许从明确的 LLM 调用前 Checkpoint 重试。
+**职责与用途：**恢复边界用于区分“确定性业务失败”和“在安全边界发生的暂时外部不可用”。Runtime 不在进程重启时把遗留非终态 Run 改写为某个特殊状态——`recover_session()` 只扫描遗留的非终态 `AgentRunState`（Created/Running/Suspended），由 `_apply_transition` 包裹的 `transition()` 恢复边界在每次非终态迁移后先持久化新状态与 Checkpoint，再执行下一个外部副作用。崩溃后 `resume_run` 重新加载 Checkpoint 的 `action`（INVOKE_LLM 或 EXECUTE_TOOLS）并从正确节点重放；`EXECUTE_TOOLS` 恢复重放工具轮（待执行工具调用保存在 `checkpoint.pending`），而不是退化的 LLM 重调。
 
-当前中断来源主要包括：
+当前可恢复来源主要包括：
 
 - LLM 服务重试耗尽；
 - 历史压缩服务不可用；
-- 进程重启遗留 RUNNING Run。
+- 进程重启遗留的非终态 Run。
 
-重试要求：
+恢复要求：
 
 ```text
-RunStatus == INTERRUPTED
+AgentRunState 非 Ended
 checkpoint 存在
-checkpoint.next_action == INVOKE_LLM
+checkpoint.action ∈ {INVOKE_LLM, EXECUTE_TOOLS}
 active_context_version 存在
 用户输入 RunMessage 存在
 ```
 
-放弃中断 Run 会：
+放弃 Run 会：
 
-- 保存 `ABANDONED`；
+- 经 `transition()` 进入 `Ended(ABANDONED)`；
 - 删除 Checkpoint；
 - 保留 RunMessage 和 RunEvent 供审计；
 - 释放 Session 占用；
@@ -1269,35 +1285,51 @@ sequenceDiagram
 - 最终 response 保存后才进入 SuccessCommit；失败、审批等待和中断不写 Conversation。
 - 普通请求不会自然语言续接旧 Run，用户后续消息创建新 Run，并通过 Conversation 获得上下文。
 
-### 5.3 状态机与当前 Engine 驱动
+### 5.3 状态机与 Engine 驱动
 
 ```mermaid
 stateDiagram-v2
-    [*] --> IDLE
-    IDLE --> WAITING_LLM: RunStarted / INVOKE_LLM
+    [*] --> Created
+    Created : Created
 
-    WAITING_LLM --> WAITING_TOOLS: LLMCompleted(tool_calls) / EXECUTE_TOOLS
-    WAITING_LLM --> FINALIZING: LLMCompleted(final_response) / FINALIZE
-    WAITING_LLM --> FAILED: LLMCompleted(failed) / FINALIZE
+    Created --> R_LLM: RunStarted / INVOKE_LLM
+    R_LLM --> EndedC: LLMResponseProduced(final) / FINALIZE
+    R_LLM --> R_Tools: LLMResponseProduced(not final) / EXECUTE_TOOLS
+    R_LLM --> EndedF: LLMCallFailed / FINALIZE
 
-    WAITING_TOOLS --> WAITING_LLM: ToolCompleted(completed) / INVOKE_LLM
-    WAITING_TOOLS --> WAITING_APPROVAL: ToolCompleted(approval_required) / WAIT
-    WAITING_TOOLS --> FAILED: ToolCompleted(failed) / FINALIZE
-    WAITING_TOOLS --> WAITING_DELEGATION: DelegationSubmitted（领域支持） / WAIT
+    R_Tools --> R_LLM: ToolBatchCompleted / INVOKE_LLM
+    R_Tools --> S_Appr: ToolApprovalRequired / SUSPEND
+    R_Tools --> EndedF: ToolBatchFailed / FINALIZE
+    R_Tools --> R_Tools: DelegationRequested / HANDOFF_TARGET
+    R_Tools --> S_Del: DelegationSubmitted / SUSPEND
 
-    WAITING_APPROVAL --> WAITING_TOOLS: ApprovalResolved(approved) / EXECUTE_TOOLS
-    WAITING_APPROVAL --> CANCELLED: ApprovalResolved(rejected) / FINALIZE
+    S_Appr --> R_Tools: ApprovalGranted / EXECUTE_TOOLS
+    S_Appr --> EndedX: ApprovalRejected / FINALIZE
 
-    WAITING_DELEGATION --> WAITING_LLM: DelegationCompleted(success) / INVOKE_LLM
-    WAITING_DELEGATION --> FAILED: DelegationCompleted(failed) / FINALIZE
+    S_Del --> R_LLM: DelegationCompleted / INVOKE_LLM
 
-    WAITING_LLM --> CANCELLED: CancelRequested
-    WAITING_TOOLS --> CANCELLED: CancelRequested
-    WAITING_APPROVAL --> CANCELLED: CancelRequested
-    WAITING_DELEGATION --> CANCELLED: CancelRequested
+    R_LLM : Running(CALLING_LLM)
+    R_Tools : Running(EXECUTING_TOOLS)
+    S_Appr : Suspended(APPROVAL)
+    S_Del : Suspended(DELEGATION)
+    EndedC : Ended(COMPLETED)
+    EndedF : Ended(FAILED)
+    EndedX : Ended(CANCELLED)
+    EndedA : Ended(ABANDONED)
+
+    R_LLM --> EndedX: CancelRequested / FINALIZE
+    R_Tools --> EndedX: CancelRequested / FINALIZE
+    S_Appr --> EndedX: CancelRequested / FINALIZE
+    S_Del --> EndedX: CancelRequested / FINALIZE
+
+    R_LLM --> EndedF: TimeoutReached / FINALIZE
+    R_Tools --> EndedF: TimeoutReached / FINALIZE
+
+    S_Appr --> EndedA: AbandonRequested / FINALIZE
+    S_Del --> EndedA: AbandonRequested / FINALIZE
 ```
 
-当前 Engine 主要根据 `AgentPhase` 分支执行，`AgentAction` 同时用于表达转换结果和写入 Checkpoint。状态机提供合法转换约束，但尚不是唯一的可执行计划解释器。尤其是当前 `delegate` Tool Call 使用 `manage_state=False`，不会进入图中的 `WAITING_DELEGATION`；该转换是领域模型能力而非当前主路径事实。详见“已知痛点”。
+`transition()` 是合法状态变化的唯一事实来源；主循环 `_drive()` 消费 `StateTransition.action` 选择执行器（`INVOKE_LLM` → `_invoke_llm_action`，`EXECUTE_TOOLS` → `_execute_tools_action`，`HANDOFF_TARGET` → `_handoff_target_action`），`FINALIZE`/`SUSPEND` 由其 action 方法内部收口并返回 `RunResult`。每次非终态迁移后，应用边界 `_apply_transition` 先持久化新 `AgentRunState` 与 Checkpoint（其 `action` 与之匹配），再执行下一个外部副作用。详见第 4.2.4 节迁移表与“已知痛点”。
 
 ### 5.4 reasoning / response 双通道流程
 
@@ -1383,9 +1415,9 @@ sequenceDiagram
     Engine->>Tool: execute(ToolInvocation)
     Tool-->>Engine: APPROVAL_REQUIRED
     Engine->>Approval: create(run_id, session_id, approval_id)
-    Engine->>Checkpoint: save(state + remaining ToolCalls + active version)
-    Engine->>RunRepo: RunStatus=WAITING_APPROVAL
-    Engine-->>Entry: RunResult(WAITING_APPROVAL)
+    Engine->>Checkpoint: save(state=Suspended(APPROVAL) + pending ToolCalls + active version)
+    Engine->>RunRepo: AgentRunState=Suspended(APPROVAL, approval_id, EXECUTING_TOOLS)
+    Engine-->>Entry: RunResult(Suspended(APPROVAL), approval_id)
 
     Entry->>Coord: resolve_approval(approval_id, decision)
     Coord->>Approval: find pending → 定位 Session
@@ -1397,7 +1429,7 @@ sequenceDiagram
     Engine->>Approval: consume()
     Engine->>RunRepo: reload Run / Messages
     Engine->>Checkpoint: load()
-    Engine->>Engine: 校验 WAITING_APPROVAL、Checkpoint 与 pending ToolCalls
+    Engine->>Engine: 校验 Suspended(APPROVAL)、control_id 匹配、Checkpoint 与 pending ToolCalls
     alt 拒绝
         Engine->>RunRepo: CANCELLED，不投影 Conversation
     else 通过
@@ -1424,30 +1456,29 @@ ApprovalRecord
 - 恢复必须继续原 run_id，并依据 Checkpoint 中的剩余 ToolCalls 执行。
 - 当前实现会在完成全部 Run/Checkpoint/pending 校验之前消费审批记录；后续校验失败时不能再次提交，属于第 8 节 R5。
 
-### 5.7 中断、重试和新请求替代
+### 5.7 恢复边界、重试和新请求替代
 
 ```mermaid
 flowchart TD
     Failure["LLM / 压缩服务暂时不可用"] --> Safe{"是否已有 LLM 调用前安全点"}
-    Safe -->|是| Interrupted["AgentRun=INTERRUPTED<br/>保留 Checkpoint"]
-    Safe -->|否| Failed["FAILED"]
+    Safe -->|是| Keep["AgentRunState 保持非终态<br/>保留 Checkpoint"]
+    Safe -->|否| Failed["Ended(FAILED)"]
 
-    Restart["进程启动或新请求前扫描"] --> Running{"发现旧 RUNNING"}
-    Running -->|是| Interrupted
+    Restart["进程启动或新请求前扫描"] --> NonEnded{"发现遗留非终态 Run"}
+    NonEnded -->|是| Recover["由恢复边界按 Checkpoint.action 重放"]
 
-    Interrupted --> Choice{"用户控制或新普通请求"}
-    Choice -->|retry| Validate["校验 Checkpoint + ContextVersion"]
-    Validate --> Resume["原 run_id 重新调用 LLM"]
-    Choice -->|abandon| Abandoned["ABANDONED + 删除 Checkpoint"]
-    Choice -->|新普通请求| Abandoned
-    Abandoned --> NewRun["创建新 Run"]
+    NonEnded --> Choice{"用户控制或新普通请求"}
+    Choice -->|resume| Validate["校验 Checkpoint + ContextVersion"]
+    Validate --> Resume["原 run_id 从 Checkpoint.action 重放"]
+    Choice -->|abandon| Abandoned["Ended(ABANDONED) + 删除 Checkpoint"]
+    Choice -->|新普通请求且仍非终态| Busy["SESSION_BUSY，不自动放弃"]
 ```
 
 **结论：**
 
-- 中断只在 LLM 调用前安全点保留可重试 Checkpoint。
-- `retry` 继续原 run_id；`abandon` 保留审计事实但释放 Session 占用。
-- Coordinator 在新普通请求前自动放弃旧 `INTERRUPTED` Run；其他非终态占用返回 `SESSION_BUSY`。
+- 恢复边界只在 LLM 调用前安全点保留可重放 Checkpoint。
+- `resume` 继续原 run_id；`abandon` 保留审计事实但释放 Session 占用。
+- 非终态 Run 即占用；新普通请求遇到非终态 Run 返回 `SESSION_BUSY`，不再自动放弃遗留 Run。
 - 不允许依据普通 LLM Checkpoint 自动重放已经开始的有副作用 Tool。
 
 ### 5.8 成功提交补偿
@@ -1488,9 +1519,9 @@ flowchart TD
     Safe --> Terminal["CANCELLED + 删除 Checkpoint + RUN_CANCELLED"]
 
     Token -->|无| Lookup["查询持久化 AgentRun"]
-    Lookup --> Waiting{"WAITING_APPROVAL？"}
-    Waiting -->|是| Direct["直接加载事实并收口 CANCELLED"]
-    Waiting -->|否| Ignore["不重复修改既有终态或未知 Run"]
+    Lookup --> Waiting{"AgentRunState 非 Ended？"}
+    Waiting -->|是，Suspended 等待审批| Direct["直接加载事实并收口 Ended(CANCELLED)"]
+    Waiting -->|否，已终态| Ignore["不重复修改既有终态 Run"]
 ```
 
 **结论：**
@@ -1542,12 +1573,12 @@ sequenceDiagram
 ```text
 RuntimeEngine
 SessionRunCoordinator
-AgentPhase
-AgentState
+AgentRunState
 AgentAction
+StateTransition
+transition
 RunRequest
 RunResult
-RunStatus
 AgentRun
 ```
 
@@ -1570,14 +1601,9 @@ AgentRun
 | `TokenCounterPort` | 对当前可枚举输入组成进行确定性计数 | `TiktokenTokenCounter` |
 | `HistoryCompactorPort` | 完整 Conversation 滚动摘要 | `LLMContextCompactor` |
 
-### 6.3 `AgentPhase` 与 `RunStatus` 的区别
+### 6.3 `AgentRunState` 的控制语义
 
-| 类型 | 生命周期 | 用途 |
-|---|---|---|
-| `AgentPhase` | 单次执行控制状态 | 决定下一步流程是否合法 |
-| `RunStatus` | 持久化业务状态 | 表示对应用入口和 Session 占用的结果 |
-
-二者不是同一枚举，也不要求每个时刻完全一一对应。当前实现中部分持久化终态由 Engine 直接收口，而不是全部由 `AgentState` 转换产生。
+`AgentRunState` 是 AgentRun 的唯一持久化控制状态，由 `mode`（Created/Running/Suspended/Ended）组合 `RunStage`、`SuspendReason` 与 `RunOutcome` 构成。`is_ended()` 是判断运行是否终态、是否仍占用 Session 的唯一入口（取代旧模型中的持久化业务状态与可重试中断语义）。所有合法迁移由纯函数 `transition()` 计算，Engine 不再按独立阶段枚举分支；`RunResult.state`（`AgentRunState`）即对外暴露的运行结果。
 
 ### 6.4 数据容器边界
 
@@ -1668,7 +1694,7 @@ data/sessions/
 | 修改历史压缩 | `history_compaction.py`、Compactor Adapter | Context、Session 投影 | 只压缩完整旧 Conversation |
 | 修改审批恢复 | `ApprovalService`、`resolve_approval()` | Checkpoint、Tool Adapter、Coordinator | 恢复前置条件与消费边界一致，继续原 run_id |
 | 修改取消 | `CancellationService`、`Engine.cancel` | LLM/Tool/Delegation Adapter | 终态由 Engine 持久化 |
-| 修改中断重试 | `retry_interrupted()` | Checkpoint、ContextVersion | 只从明确安全点重试 |
+| 修改中断重试 | `resume_run`（恢复边界） | Checkpoint、ContextVersion | 只从明确安全点重放 |
 | 修改成功提交 | `RunRepositoryAdapter.commit_success` | Projector、Fault tests | COMPLETED 最后写入 |
 | 更换存储 | 实现 Repository Ports | Bootstrap、迁移工具 | 保持事实和投影分离 |
 | 修改多 Agent 委派 | `RuntimeDelegationAdapter` | Dispatcher、Session、Coordinator | 子 Run 仍经同一 Runtime |
@@ -1688,7 +1714,7 @@ data/sessions/
 1. `ApplicationHost` 是唯一公开组合根；Runtime Application 只依赖 Port。
 2. Runtime 的隔离单位是 Run：共享 Engine 不保存当前 Session 或当前 Agent。
 3. 同一 Session 的普通执行串行，不同 Session 可以并行。
-4. `AgentState` 提供纯领域转换，副作用、持久化和终态收口由 Engine 执行。
+4. `AgentRunState` + `transition()` 提供纯领域转换，副作用、持久化和终态收口由 Engine 执行。
 5. Session Conversation 只保存成功语义；完整执行事实分布在 AgentRun、RunMessage、RunEvent、ContextVersion 和 Checkpoint。
 6. 审批与中断只从明确安全边界恢复，不盲目重放有副作用 Tool。
 7. 历史压缩候选先暂存 Run，只有成功提交后才更新 Session。
@@ -1724,7 +1750,7 @@ data/sessions/
 
 **收益：**Domain 可纯测试，Checkpoint 可以保存最小控制状态。
 
-**代价与边界：**当前 Engine 仍主要根据 `AgentPhase` 分支，状态机尚未成为唯一执行计划来源。
+**代价与边界：**`transition()` 已是合法迁移的唯一事实来源；Engine 主循环 `_drive()` 直接消费 `transition()` 返回的 `AgentAction` 选择执行器，不再维护独立的阶段枚举。
 
 #### 8.2.4 运行事实与成功 Conversation 分离
 
@@ -1782,9 +1808,9 @@ data/sessions/
 
 `engine.py` 同时处理新建、恢复、ReAct、Tool、Delegation、ContextVersion、预算、压缩、审计和各类终态。仍应保持单执行中心，但内部用例边界过密。
 
-#### R2. 状态机与 Engine 双重控制
+#### R2. 委派状态已接入主路径
 
-`AgentState` 返回 `AgentAction`，但 `_drive()` 主要按 `AgentPhase` 分支；最终回答转换到 `FINALIZING` 后直接提交，没有再经状态机进入 `COMPLETED`。`WAITING_DELEGATION` 已定义，但当前 `delegate` Tool Call 以 `manage_state=False` 执行；`HANDOFF_TARGET` 没有主路径。
+`transition()` 已是唯一迁移事实来源，`_drive()` 直接按 `AgentAction` 分支选择执行器。其中 `DelegationRequested` 返回 `HANDOFF_TARGET` 且状态保持 `Running(EXECUTING_TOOLS)`，委派提交后 `DelegationSubmitted` 进入 `Suspended(DELEGATION)`；旧模型中独立的等待委派阶段已统一为 `Suspended(DELEGATION)` 与 `control_id` 校验。
 
 #### R3. 循环、超时和部分状态字段未贯通
 
@@ -1796,7 +1822,7 @@ data/sessions/
 
 #### R5. 审批消费与恢复不是原子边界
 
-当前流程会先消费 ApprovalRecord，再读取并校验 Checkpoint、RunStatus 和待执行 Tool Call。后续恢复校验失败时，审批已经无法再次提交。文件型 consume 也缺少跨进程 CAS。
+当前流程会先消费 ApprovalRecord，再读取并校验 Checkpoint、`AgentRunState` 和待执行 Tool Call。后续恢复校验失败时，审批已经无法再次提交。文件型 consume 也缺少跨进程 CAS。
 
 等待审批 Run 的取消可绕过 Session 锁，而审批恢复会获取 Session 锁；二者之间没有事务型竞争协调。
 
@@ -1893,7 +1919,7 @@ src/dotclaw/runtime/
 | `domain/facts.py` | 运行事实 | AgentRun、RunMessage、Checkpoint、Policy、Status、Error |
 | `domain/context.py` | 上下文事实 | ContextVersion、Slot Snapshot、Staged Compression、Success Intent |
 | `domain/events.py` | 事件 | DomainEvent、RunEvent、事件类型和 Tool 审计状态 |
-| `domain/state.py` | 状态规则 | AgentState、AgentPhase、StateTransition |
+| `domain/state.py` | 状态规则 | AgentRunState、RunStage、SuspendReason、RunOutcome、StateTransition、transition |
 | `domain/control.py` | 控制动作 | AgentAction |
 
 ### 9.3 Application 文件

@@ -1402,7 +1402,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     Start["初始 Run"] --> Snapshot["AgentPolicySnapshot 持久化"]
-    Snapshot --> Wait["WAITING_APPROVAL / INTERRUPTED"]
+    Snapshot --> Wait["Suspended(APPROVAL) / 非终态"]
     Wait --> Resume["恢复"]
     Resume --> Load["从 AgentRun 加载 policy"]
     Load --> Execution["RunExecution(policy=原 Snapshot)"]

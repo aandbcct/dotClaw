@@ -204,19 +204,19 @@ flowchart TD
     Event --> Finalize["Run 保存 COMPLETED"]
     Finalize --> Cleanup["删除 checkpoint / intent"]
 
-    Status -->|WAITING_APPROVAL| Approval["保留 Run + Checkpoint + Approval"]
-    Status -->|INTERRUPTED| Interrupted["保留 Run + Checkpoint"]
-    Status -->|FAILED| Failed["终态 Run，不投影"]
-    Status -->|CANCELLED| Cancelled["终态 Run，不投影"]
-    Status -->|ABANDONED| Abandoned["终态 Run，不投影"]
+    Status -->|Suspended(APPROVAL)| Approval["保留 Run + Checkpoint + Approval"]
+    Status -->|非终态 Created/Running/Suspended(DELEGATION)| NonEnded["保留 Run + Checkpoint，占用 Session"]
+    Status -->|Ended(FAILED)| Failed["终态 Run，不投影"]
+    Status -->|Ended(CANCELLED)| Cancelled["终态 Run，不投影"]
+    Status -->|Ended(ABANDONED)| Abandoned["终态 Run，不投影"]
 ```
 
 **结论：**
 
-- 只有 COMPLETED 进入正式 Conversation。
+- 只有 Ended(COMPLETED) 进入正式 Conversation。
 - 成功提交以可恢复意图协调 Session、事件、Run 和 Checkpoint。
-- WAITING_APPROVAL 与 INTERRUPTED 保留继续执行所需事实。
-- FAILED、CANCELLED 和 ABANDONED 保留审计 Run，但不污染正式对话历史。
+- 非终态 `AgentRunState`（含 `Suspended(APPROVAL)`）保留继续执行所需事实，并占用 Session。
+- Ended(FAILED)、Ended(CANCELLED) 和 Ended(ABANDONED) 保留审计 Run，但不污染正式对话历史。
 - Session 的 Conversation 数量不能用来推断运行次数。
 
 ### 2.4 存储布局
@@ -851,15 +851,14 @@ compressed_history
 
 ```text
 recover_session()
-→ 将遗留 RUNNING 标为 INTERRUPTED
+→ 扫描遗留非终态 Run，交由恢复边界按 Checkpoint 重放（不再改写状态）
 → active_run()
 ```
 
 结果：
 
-- 无活动 Run：允许；
-- INTERRUPTED：自动 abandon，再允许；
-- WAITING_APPROVAL 或其他非终态：返回 SESSION_BUSY。
+- 无活动 Run（`AgentRunState.is_ended()` 为真）：允许；
+- 非终态（Created/Running/Suspended）：返回 `SESSION_BUSY`，不再自动放弃。
 
 **控制操作**
 
@@ -924,8 +923,8 @@ return create_run_request(session, identity.agent_id, user_message)
 ```text
 resolve_approval
 cancel
-retry_interrupted
-abandon_interrupted
+resume_run（恢复边界按 Checkpoint 重放）
+abandon（经 transition 进入 Ended(ABANDONED)）
 ```
 
 控制状态属于 Runtime，不写入 Session 实体。
@@ -1191,21 +1190,18 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     New["新普通请求"] --> Recover["recover_session(session_id)"]
-    Recover --> Running["遗留 RUNNING → INTERRUPTED"]
-    Running --> Active["active_run(session_id)"]
-    Active --> None{"存在未终态 Run?"}
+    Recover --> Scan["扫描遗留非终态 Run，交由恢复边界重放"]
+    Scan --> Active["active_run(session_id)"]
+    Active --> None{"存在非终态 AgentRunState?"}
     None -->|否| Allow["允许创建新 Run"]
-    None -->|是，INTERRUPTED| Abandon["自动 ABANDONED"]
-    Abandon --> Allow
-    None -->|WAITING_APPROVAL/其他| Busy["SESSION_BUSY"]
+    None -->|是| Busy["SESSION_BUSY，不自动放弃"]
 ```
 
 **结论：**
 
-- 新进程第一次访问 Session 时会把遗留 RUNNING 标为 INTERRUPTED。
-- 普通新消息自动放弃旧 INTERRUPTED Run。
-- WAITING_APPROVAL 不会被新消息自动放弃。
-- 同一 Session 最多一个未终态 Run 是持久化不变量；检测到多个时 Engine 抛错。
+- 新进程第一次访问 Session 时会扫描遗留非终态 Run 并交由恢复边界重放，不再改写为特殊状态。
+- 普通新消息遇到非终态 Run 返回 `SESSION_BUSY`，不再自动放弃旧 Run。
+- 同一 Session 最多一个非终态 Run 是持久化不变量；检测到多个时 Engine 抛错。
 - 门禁是“读取后判断”，不是文件系统原子租约。
 
 ### 5.5 RunRequest 历史冻结
@@ -1319,8 +1315,8 @@ sequenceDiagram
 
     Engine->>RunRepo: 保存 RunMessage + Checkpoint
     Engine->>Approval: 创建 PENDING Approval
-    Engine->>RunRepo: Run → WAITING_APPROVAL
-    Engine-->>Entry: RunResult(WAITING_APPROVAL)
+    Engine->>RunRepo: AgentRunState → Suspended(APPROVAL, approval_id, EXECUTING_TOOLS)
+    Engine-->>Entry: RunResult(Suspended(APPROVAL), approval_id)
 
     Entry->>Coord: resolve_approval(approval_id)
     Coord->>Engine: get_approval_session_id()
@@ -1332,7 +1328,7 @@ sequenceDiagram
 
 **结论：**
 
-- WAITING_APPROVAL 是 Session 活动占用，不形成 Conversation。
+- `Suspended(APPROVAL)` 是 Session 活动占用，不形成 Conversation。
 - 审批恢复使用原 run_id、PolicySnapshot 和 ContextVersion。
 - 审批恢复与普通提交使用同一 Session 锁。
 - Approval 文件位于共享目录，删除 Session 时必须单独清理。
@@ -1342,23 +1338,23 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Failure["可恢复 LLM/压缩不可用"] --> Interrupted["Run → INTERRUPTED<br/>保留 Checkpoint"]
-    Interrupted --> Choice{"用户操作"}
-    Choice -->|/retry| Retry["Session 锁内重试原 Run"]
-    Choice -->|/abandon| Abandon["Run → ABANDONED<br/>删除 Checkpoint"]
-    Choice -->|发送新消息| Auto["Coordinator 自动 abandon"]
-    Retry --> Outcome["成功/再次中断/失败"]
+    Failure["可恢复 LLM/压缩不可用"] --> Keep["AgentRunState 保持非终态<br/>保留 Checkpoint"]
+    Keep --> Choice{"用户操作"}
+    Choice -->|resume| Retry["Session 锁内从 Checkpoint.action 重放原 Run"]
+    Choice -->|abandon| Abandon["Run → Ended(ABANDONED)<br/>删除 Checkpoint"]
+    Choice -->|发送新消息| Busy["SESSION_BUSY，不自动放弃"]
+    Retry --> Outcome["成功/再次失败"]
     Abandon --> New["允许新 Run"]
-    Auto --> New
+    Busy --> New
 ```
 
 **结论：**
 
-- INTERRUPTED 不是终态占用，仍会阻止直接并发 Run。
-- 显式重试复用原 Policy、ContextVersion 和 run_id。
-- 普通新消息选择放弃旧中断而不是自动重试。
-- ABANDONED 不进入 Conversation。
-- 自动放弃发生在新请求门禁内。
+- 非终态 `AgentRunState` 仍占用 Session，会阻止直接并发 Run。
+- 显式 resume 复用原 Policy、ContextVersion 和 run_id，从 Checkpoint.action 重放。
+- 普通新消息返回 `SESSION_BUSY`，不再自动放弃旧 Run。
+- Ended(ABANDONED) 不进入 Conversation。
+- 放弃发生在用户显式操作或取消，不再隐含于新请求门禁。
 
 ### 5.11 取消
 
@@ -1372,14 +1368,14 @@ flowchart TD
 
     Token --> Active{"活动执行?"}
     Active -->|是| SafePoint["Run 在安全点收口 CANCELLED"]
-    Active -->|否，WAITING_APPROVAL| Immediate["直接持久化 CANCELLED"]
+    Active -->|否，Suspended(APPROVAL)| Immediate["直接持久化 CANCELLED"]
 ```
 
 **结论：**
 
 - 取消故意绕过同 Session Lock，避免等待正在持锁的 Run。
 - 取消是尽力语义，具体 LLM/Tool 可能没有真实句柄。
-- WAITING_APPROVAL 可立即取消并释放占用。
+- `Suspended(APPROVAL)` 可立即取消并释放占用。
 - CANCELLED 不投影 Conversation。
 - 取消与删除仍需由调用方按结果顺序协调。
 
@@ -1594,18 +1590,18 @@ CANCELLED
 ABANDONED
 ```
 
-未终态占用：
+未终态占用（`AgentRunState` 非 `Ended`）：
 
 ```text
-RUNNING
-WAITING_APPROVAL
-INTERRUPTED
+Created
+Running（CALLING_LLM / EXECUTING_TOOLS）
+Suspended（APPROVAL / DELEGATION）
 ```
 
 新普通请求：
 
-- INTERRUPTED 自动 abandon；
-- 其他未终态返回 SESSION_BUSY。
+- 任何非终态占用都返回 SESSION_BUSY；
+- 不再自动放弃遗留 Run。
 
 ### 6.10 成功投影契约
 
@@ -1688,7 +1684,7 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 1. Session 是长期会话容器，`session.json` 不保存单次 Runtime 可变执行状态。
 2. Session 创建和反序列化都要求非空 `agent_id`，已有绑定不会由应用入口静默回退默认 Identity。
 3. Conversation 只由 COMPLETED Run 中已保存的用户输入和最终 assistant 消息投影。
-4. FAILED、CANCELLED、ABANDONED、INTERRUPTED 和 WAITING_APPROVAL 不进入正式 Conversation。
+4. Ended(FAILED)、Ended(CANCELLED) 和 Ended(ABANDONED) 不进入正式 Conversation；所有非终态 AgentRunState 也不进入。
 5. Conversation ID 在新建或旧数据迁移后保持稳定，并作为 HistoryCompression 覆盖边界。
 6. `add_conversation()` 每次追加都会使 `conversation_version` 增加 1。
 7. 正常追加 HistoryCompression 时要求新版本等于 `active + 1`，且覆盖边界属于当前 Conversation。
@@ -1696,7 +1692,7 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 9. 活动压缩存在时，Request Factory 只复制覆盖边界之后的 Conversation 原文。
 10. 单进程内，同一 Session 的普通提交、审批恢复、中断重试和放弃使用同一 `asyncio.Lock`。
 11. 取消不等待活动 Run 当前持有的 Session Lock。
-12. 新普通请求不会绕过 RUNNING 或 WAITING_APPROVAL 占用；INTERRUPTED 会先重试、显式放弃或自动放弃。
+12. 新普通请求不会绕过非终态 AgentRunState 占用；非终态占用返回 SESSION_BUSY，不再自动放弃遗留 Run。
 13. 成功提交通过可恢复 intent 协调 Session 投影、完成事件、终态 Run 和 Checkpoint。
 14. 重复恢复同一 success_commit 不会生成重复 Conversation。
 15. 应用级删除流程会在删除前检查活动 Run，并依次处理 Approval、Session 目录和 SESSION/RUN Context Scope。
@@ -1735,8 +1731,8 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 | 修复陈旧 Session | `SessionInteractionService.submit` | Coordinator、CLI | 锁内重新加载并冻结 |
 | 修改普通提交串行 | `SessionRunCoordinator` | Engine active_run、cancel | 同 Session 不得并行 Run |
 | 实现跨进程租约 | Coordinator + RunRepository | lease_id、run creation | 检查与占用创建必须原子 |
-| 修改活动 Run 规则 | `_prepare_new_request` | RunStatus、恢复 | WAITING_APPROVAL 不得被覆盖 |
-| 修改自动 abandon | `_prepare_new_request` | CLI 体验、审计 | 不得删除原 Run 事实 |
+| 修改活动 Run 规则 | `_prepare_new_request` | AgentRunState、恢复 | 非终态占用不得被覆盖 |
+| 修改占用拒绝 | `_prepare_new_request` | CLI 体验、审计 | 非终态返回 SESSION_BUSY，不得删除原 Run 事实 |
 | 修改取消流程 | Coordinator.cancel | Engine、LLM/Tool/Delegation | 不等待活动 Run 的同一锁 |
 | 修改 RunRequest 历史 | `request_factory.py` | ConversationSnapshot、Context | 只复制未压缩覆盖历史 |
 | 修改压缩边界 | Session + Request Factory | Runtime compaction | 边界必须属于当前 Session |
@@ -1758,7 +1754,7 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 | 统一时间格式 | Session/Conversation timestamps | Runtime UTC | 持久化时间带时区 |
 | 修改子 Session 策略 | RuntimeDelegationAdapter | Orchestration、清理 | 子 Session 独立且可识别 |
 | 排查对话历史不连续 | CLI current_session → submit → Request Factory | Projector、Coordinator | 确认锁内 load 最新 Session |
-| 排查 SESSION_BUSY | Coordinator → active_run | run.json、恢复 | 检查 WAITING_APPROVAL/INTERRUPTED |
+| 排查 SESSION_BUSY | Coordinator → active_run | run.json、恢复 | 检查非终态 AgentRunState |
 | 排查成功回答未进历史 | success_commit → Projector | session.json、intent | 检查未决成功提交 |
 | 排查 Session 列表缺项 | list_all → from_dict | JSON、agent_id | 区分损坏和不存在 |
 | 排查压缩摘要未生效 | active_compression_version → boundary | ContextVersion、Projector | 只在成功提交后激活 |
@@ -1781,8 +1777,8 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 5. HistoryCompression 以版本链保存，活动版本通过引用选择。
 6. RunRequest 创建时复制 ConversationSnapshot。
 7. 单进程内同 Session 普通提交串行，不同 Session 可并行。
-8. WAITING_APPROVAL 会保持 Session 占用。
-9. INTERRUPTED 可重试、放弃，或在新消息前自动放弃。
+8. 非终态 AgentRunState（含 Suspended(APPROVAL)）会保持 Session 占用。
+9. 非终态 Run 可经恢复边界 resume 或显式放弃；新消息遇到非终态占用返回 SESSION_BUSY，不再自动放弃。
 10. 只有 COMPLETED Run 进入 success_commit 和 Conversation 投影。
 11. 成功提交支持进程重启补偿。
 12. 删除 Session 是 Approval、目录和 Context 的应用级流程。
@@ -1852,13 +1848,13 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 
 **代价与边界：**取消与终态持久化依赖 Engine 安全点，无法形成普通串行调用的简单模型。
 
-#### 8.2.7 新消息自动放弃 INTERRUPTED
+#### 8.2.7 新消息遇到非终态 Run 返回 SESSION_BUSY
 
-**问题与选择：**用户发送新问题通常表示不再重试旧外部中断。当前门禁会先将旧 Run 标记 ABANDONED。
+**问题与选择：**用户发送新问题遇到仍在进行（非终态）的 Run 时，当前门禁直接返回 `SESSION_BUSY`，不再自动放弃旧 Run。
 
-**未选择：**所有中断都必须手工 `/abandon`；自动重试旧 Run。
+**未选择：**自动把旧非终态 Run 标为 ABANDONED；自动重试旧 Run。
 
-**收益：**会话不会长期被可恢复中断阻塞。
+**收益：**会话不会被旧 Run 静默改写，占用状态对用户显式可见。
 
 **代价与边界：**新消息具有隐式控制副作用；入口需要清晰提示。
 
@@ -2172,11 +2168,11 @@ Session/Conversation 使用无时区本地时间，Runtime 使用 UTC 风格工�
 
 虽然单文件读取使用 aiofiles，但目录遍历和逐个读取是串行的。Session 数量大时启动和 `/list` 延迟线性增长。
 
-#### S31. 自动 abandon 是隐式用户操作
+#### S31. 非终态占用的 SESSION_BUSY 是显式反馈
 
-发送新消息会自动放弃旧 INTERRUPTED Run，但入口结果主要返回新请求结果。
+发送新消息遇到非终态 Run 时返回 `SESSION_BUSY`，不自动放弃旧 Run，入口结果主要返回新请求结果。
 
-旧 Run 状态变化缺少单独确认或用户策略开关。
+占用状态缺少单独确认或用户策略开关，但不再隐式改写旧 Run 终态。
 
 #### S32. 委托 Session 没有临时生命周期标记
 
