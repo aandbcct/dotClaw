@@ -1,9 +1,9 @@
 # Orchestration 与 Delegation 模块总体说明
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
-> 扫描基准：2026-07-26，包含 Task Domain、TaskMessageBroker、AgentDispatcher、RuntimeDelegationAdapter、Runtime DelegationPort、`delegate` ToolCall 特殊路径、父子 Run 关系、结果回填和取消传播  
-> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
-> 文档定位：自顶向下解释 dotClaw 当前同进程多 Agent 委托如何建立 Task 投影、创建目标 Session 和子 Run、同步等待结果并回填父 Run，以及 Task 状态与 Runtime 状态之间的真实边界。  
+> 扫描基准：2026-07-28，包含 Task Domain、TaskMessageBroker、AgentDispatcher、RuntimeDelegationAdapter、Runtime DelegationPort、`delegate` ToolCall 特殊路径、父子 Run 关系、异步提交、恢复、结果回填和取消传播
+> 扫描提交：`31f30ae75d22f2b384e04a643894eaf9c0607323`
+> 文档定位：自顶向下解释 dotClaw 当前同进程多 Agent 委托如何建立 Task 投影、创建目标 Session 和异步子 Run、挂起父 Run 并通过 `resume_delegation()` 回填结果，以及 Task 状态与 Runtime 状态之间的真实边界。
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
 
@@ -27,8 +27,9 @@ AvailableAgents Context
 → DelegationRequest
 → RuntimeDelegationAdapter
 → 创建目标 Session + Task
-→ SessionRunCoordinator 提交子 Run
-→ 父 Run 同步等待 DelegationResult
+→ 异步提交 child Run
+→ 父 Run Suspended(DELEGATION)
+→ 外部检查 child Run 并调用 resume_delegation(child_run_id)
 → DELEGATION_RESULT Tool Message
 → 父模型继续生成最终回答
 ```
@@ -41,7 +42,7 @@ Orchestration / Delegation 模块是 dotClaw 的**同进程多 Agent 委托协�
 
 它不是另一套 Runtime，也不是远程 A2A 平台。当前实现的本质是：
 
-> 父 Run 通过一个特殊 `delegate` ToolCall 指定目标 Agent，Orchestration 创建目标 Session 和子 Run，维护一份内存 Task/Message 投影，并将子 Run 终态转换为父 Run 可消费的 Tool 结果。
+> 父 Run 通过一个特殊 `delegate` ToolCall 指定目标 Agent；Orchestration 创建目标 Session 并异步提交子 Run，父状态机转入 `Suspended(DELEGATION)`。外部随后以 `resume_delegation(child_run_id)` 查询并回填子结果，父 Run 才继续模型调用。
 
 ### 1.1 核心职责
 
@@ -51,7 +52,7 @@ Orchestration / Delegation 模块是 dotClaw 的**同进程多 Agent 委托协�
 2. **消息与状态投影**：在 TaskMessageBroker 中维护有序消息、端点游标和 Task 状态。
 3. **委托门面**：由 AgentDispatcher 创建、完成和取消 Task，但不执行子 Run。
 4. **Runtime 适配**：把 DelegationRequest 转成目标 Session、RunRequest 和异步子 Run。
-5. **结果桥接**：把子 RunResult 标准化为 DelegationResult，并作为 Tool 消息回填父 Run。
+5. **结果桥接**：在 `resume_delegation()` 时把子 RunResult 标准化为 DelegationResult，并作为 Tool 消息回填父 Run。
 6. **取消传播**：父 Run 取消时，向当前等待的子 Run 和 Task 状态同时传播。
 
 ### 1.2 主要使用者
@@ -277,7 +278,7 @@ flowchart LR
 - Broker 不读取 Session、Identity 或 RunRepository。
 - Bootstrap 负责解决 Adapter 与 Coordinator 的双向装配。
 
-### 2.5 当前同步等待模型
+### 2.5 当前异步提交与显式恢复模型
 
 ```mermaid
 sequenceDiagram
@@ -287,12 +288,15 @@ sequenceDiagram
     participant Child as Child RuntimeEngine
     participant Broker as TaskMessageBroker
 
+    participant Control as 外部控制入口
     Parent->>Adapter: submit(DelegationRequest)
     Adapter->>Broker: create Task + RUNNING_TARGET
     Adapter->>Coordinator: asyncio.create_task(submit Child)
     Adapter-->>Parent: child_run_id/task_id
+    Parent->>Parent: DelegationSubmitted → Suspended(DELEGATION)
+    Control->>Parent: resume_delegation(child_run_id)
     Parent->>Adapter: result(child_run_id)
-    Adapter->>Child: await asyncio.Task
+    Adapter->>Child: 查询或等待 asyncio.Task
     Child-->>Adapter: RunResult
     Adapter->>Broker: RESULT / FAILED
     Adapter-->>Parent: DelegationResult
@@ -300,10 +304,10 @@ sequenceDiagram
 
 **结论：**
 
-- 子 Run 使用 asyncio Task 异步启动。
-- 父 Run 随后立即调用 `result()` 并等待子 Run 结束。
-- 从父 Agent 视角，这是同步阻塞式委托，不是后台并行工作。
-- 父 Run 持有自己的 Session 锁，子 Run 使用独立目标 Session 锁。
+- 子 Run 使用 asyncio Task 异步启动，`submit()` 立即返回稳定的 `child_run_id`。
+- 父 Run 不在 `delegate` ToolCall 内等待结果，而是持久化 Checkpoint 后进入 `Suspended(DELEGATION)`。
+- 外部控制入口负责检查子 Run 并调用 `resume_delegation(child_run_id)`；该入口尚未到达终态时不改写父状态。
+- 恢复时 Adapter 可等待已提交的 asyncio Task；父 Run 的 Session 锁只在恢复调用期间占用，子 Run 使用独立目标 Session 锁。
 - 当前没有一个父 Run 同时等待多个子 Run 的 fan-out/join。
 
 ---
@@ -1155,7 +1159,7 @@ Broker、Dispatcher 和 Adapter 不暴露为 ApplicationHost 公共能力。
 
 ## 5. 组件依赖和使用流程
 
-本节说明组件装配、目标发现、ToolCall 转换、子 Run 提交、父 Run 等待、成功/失败回填、取消、嵌套委托和进程重启边界。
+本节说明组件装配、目标发现、ToolCall 转换、异步子 Run 提交、父 Run 挂起、显式恢复、结果回填、取消、嵌套委托和进程重启边界。
 
 ### 5.1 Bootstrap 装配
 
@@ -1279,7 +1283,7 @@ flowchart LR
 - Tool Scope 使用目标 agent_id。
 - 父子共享基础设施，但不共享 RunExecution。
 
-### 5.6 父 Run 同步等待
+### 5.6 父 Run 挂起与 delegation 恢复
 
 ```mermaid
 sequenceDiagram
@@ -1289,21 +1293,25 @@ sequenceDiagram
     participant Child as asyncio Child Task
 
     Engine->>Cancel: register_delegated_run(parent, child)
-    Engine->>Engine: 写 DELEGATION_SUBMITTED
+    Engine->>Engine: DelegationSubmitted → Suspended(DELEGATION)
+    Note over Engine: 保存父 Run 状态与 Checkpoint
+    participant Control as 外部控制入口
+    Control->>Engine: resume_delegation(child_run_id)
     Engine->>Adapter: result(child_run_id)
-    Adapter->>Child: await execution
+    Adapter->>Child: 查询或等待 execution
     Child-->>Adapter: RunResult
     Adapter-->>Engine: DelegationResult
+    Engine->>Engine: DelegationCompleted → Running(CALLING_LLM)
     Engine->>Cancel: clear_delegated_run(parent, child)
 ```
 
 **结论：**
 
-- 父 Run 在等待期间不继续调用 LLM。
-- 父 Run 的 Session Lock 保持占用。
+- 父 Run 在挂起期间不继续调用 LLM，且不持续占用其 Session Lock。
+- `resume_delegation()` 是唯一将 `Suspended(DELEGATION)` 迁回 `Running(CALLING_LLM)` 的入口，并校验 child_run_id。
 - 子 Run使用不同 Session Lock。
 - 取消服务只保存当前一个 child_run_id。
-- 这不是后台任务或异步通知模型。
+- 子 Run 是后台异步任务；当前没有自动完成通知或 fan-out/join，恢复由外部控制触发。
 
 ### 5.7 子 Run 成功回填
 
@@ -1318,6 +1326,7 @@ sequenceDiagram
     Child-->>Adapter: RunResult(COMPLETED, final_message)
     Adapter->>Dispatcher: finish_v2_delegation(RESULT)
     Dispatcher-->>Adapter: Task COMPLETED
+    Parent->>Adapter: resume_delegation(child_run_id) / result()
     Adapter-->>Parent: DelegationResult(COMPLETED, output)
     Parent->>Repo: 保存 DELEGATION_RESULT Tool Message
     Parent->>Repo: 写 DELEGATION_COMPLETED
@@ -1332,26 +1341,23 @@ sequenceDiagram
 - 父 Conversation 最终只保存父 Run 的用户输入与最终回答。
 - Child Run/Session 保留独立成功 Conversation。
 
-### 5.8 子 Run 非成功结果
+### 5.8 子 Run 非成功结果与恢复
 
 ```mermaid
 flowchart TD
     ChildResult["Child RunResult"] --> Status{"outcome == COMPLETED?"}
     Status -->|是| Result["Task RESULT<br/>Parent 继续"]
     Status -->|否| TaskFailed["Task FAILED"]
-    TaskFailed --> ParentMessage["仍保存 DELEGATION_RESULT"]
-    ParentMessage --> ParentFailed["Parent Run FAILED"]
-    Status -->|Suspended(APPROVAL)| OrphanApproval["Child 仍占用 Target Session"]
-    Status -->|非终态 Running/Suspended(DELEGATION)| RetryableChild["Child 仍由 transition() 驱动"]
+    TaskFailed --> ParentMessage["DELEGATION_RESULT（错误摘要）"]
+    ParentMessage --> ParentResume["父 Run → Running(CALLING_LLM)"]
+    ChildResult -->|尚未完成| KeepSuspended["父 Run 保持 Suspended(DELEGATION)"]
 ```
 
 **结论：**
 
-- Adapter 只区分 COMPLETED 与“其他”。
-- 处于 `Suspended(APPROVAL)` 的子 Run 不会向父入口传播 approval_id。
-- 非终态子 Run 不会让父 Run 进入可恢复等待。
-- 父模型没有机会读取错误并选择替代方案。
-- 子 Run 可能仍是非终态，而 Task 和父 Run 已失败。
+- 尚未完成的 child Run 不生成 DelegationResult；`resume_delegation()` 保持父 Run 挂起。
+- 已完成但非成功的 child Run 仍生成带错误摘要的 DELEGATION_RESULT，状态机回到 `Running(CALLING_LLM)`，由父模型决定后续处理。
+- 子 Run 的审批控制仍归子 Run；当前不把 approval_id 提升为父 Run 的审批。
 
 ### 5.9 父取消向下传播
 
@@ -1406,7 +1412,7 @@ sequenceDiagram
 - Broker 已定义中途问答的内存状态机。
 - 旧 `wait_task`、`task_send_message`、`task_status` 和 `cancel_task` Tool Definitions 被当前 Policy Resolver 排除。
 - RuntimeDelegationAdapter 不调用 wait_for_messages 或 send_message 的问答类型。
-- 生产父 Run只是等待 child RunResult。
+- 生产父 Run在子 Run 执行时处于 `Suspended(DELEGATION)`，不接入 Broker 的中途问答。
 - 因此当前 Agent 执行过程中不存在真正双向通信。
 
 ### 5.11 Message 游标与等待
@@ -1713,7 +1719,7 @@ Task CANCELLED
 7. 每次委托创建独立 Target Session 和 Child RunRequest。
 8. 子 Run根据 target_agent_id冻结自己的 AgentPolicySnapshot。
 9. Child Run持久化 parent_run_id 和 root_run_id。
-10. 父 Run等待子 Run期间登记唯一 child_run_id，允许取消向下传播。
+10. 父 Run 在 `Suspended(DELEGATION)` 期间登记唯一 child_run_id，允许取消向下传播。
 11. 成功子结果以 TOOL 角色 DELEGATION_RESULT 写入父 Run。
 12. 父 Run的 Delegation Result 保留原 source_tool_call_id。
 13. Adapter 只把 COMPLETED 映射为 Task COMPLETED。
@@ -1770,7 +1776,7 @@ Task CANCELLED
 | 修改结果缓存 | Adapter.result | 审计、清理 | 幂等查询且有淘汰 |
 | 修改 child 非终态 | `_to_delegation_result` / Engine | Approval、retry | 不得误写 Task FAILED |
 | 支持子审批 | DelegationResult + Channel | ApprovalRepository、Parent Run | approval_id 必须可路由 |
-| 支持子中断重试 | DelegationPort | Coordinator、Checkpoint | 保持原 child_run_id |
+| 支持子 Run Checkpoint 恢复 | DelegationPort | Coordinator、Checkpoint | 保持原 child_run_id |
 | 修改 delegate 参数 | `_delegation_request` + 实际 Tool Definition 注册点 | Provider、文档 | 先确认注册来源，再保持 Schema 单一 |
 | 修改 delegate 安全 | Engine ToolCall 分派 | Tool Policy、Capability | 不绕过安全层 |
 | 修改父结果消息 | RuntimeEngine._delegate | Context、Tool 协议 | role/tool_call_id 必须匹配 |
@@ -1810,14 +1816,14 @@ Task CANCELLED
 4. AgentDispatcher 不执行子 Run。
 5. RuntimeDelegationAdapter 创建 Target Session 和 Child Run；RuntimeEngine 支持 `delegate` ToolCall，但默认 Tool Definition 注册来源尚未在已扫描文件中确认。
 6. RuntimeEngine 只依赖 DelegationPort。
-7. Parent Run同步等待 Child Run终态。
+7. Parent Run 在 child Run 异步执行时进入 `Suspended(DELEGATION)`，由 `resume_delegation(child_run_id)` 恢复。
 8. Child Run使用独立 Session 和目标 Agent Policy。
 9. Child Result 以 Tool 消息回填 Parent Run。
 10. Parent Cancel 可向当前 Child Run传播。
 11. Broker 定义中途问答，但生产 Runtime 主链未使用。
 12. Task、消息、Adapter 映射和结果缓存不持久化。
 13. 当前一个 Parent Run不会并行等待多个 Child Run。
-14. 处于 Suspended(APPROVAL) 等非终态的 Child 不会形成可恢复父等待。
+14. 只有 child Run 已完成时才会生成 DelegationResult；子 Run 的审批仍需在其目标 Session 中处理。
 15. 没有深度、环路、目标允许列表或委托并发治理。
 
 ### 8.2 核心设计取舍
@@ -1852,15 +1858,15 @@ Task CANCELLED
 
 **代价与边界：**委托 Session 持续积累；目标没有先前对话历史。
 
-#### 8.2.4 Parent 同步等待 Child
+#### 8.2.4 Parent 挂起并显式恢复 Child 结果
 
-**问题与选择：**MVP 需要简单的 request/response 委托语义。当前父 Run await Child Result。
+**问题与选择：**MVP 需要简单的 request/response 委托语义。当前父 Run 异步提交 Child 后进入 `Suspended(DELEGATION)`，外部再调用 `resume_delegation(child_run_id)` 回填结果。
 
-**未选择：**后台 Task、并行 DAG、事件通知或稍后回收结果。
+**未选择：**自动完成通知、并行 DAG 或 fan-out/join。
 
 **收益：**结果可直接作为 Tool Message 进入下一轮模型。
 
-**代价与边界：**父 Session 长时间占用；无法并行委托；子审批无法回到原交互入口。
+**代价与边界：**当前没有自动完成通知或并行委托；子审批仍在目标 Session 的控制入口处理。
 
 #### 8.2.5 `delegate` 作为特殊 ToolCall
 
@@ -1988,7 +1994,7 @@ Adapter 以 SOURCE Binding 发送 CANCELLED，但传入的 `sender_run_id` 是 c
 
 #### O8. Child 非终态无法映射为父级可恢复控制状态
 
-处于 Suspended(APPROVAL) 等非 COMPLETED 结果统一被写成 Task FAILED；approval_id 不进入 `DelegationResult`，父 Run直接失败，无法代理审批、保持父等待、重试原 Child 或让父模型选择降级方案。
+子 Run 尚未完成时，`resume_delegation()` 保持父 Run 的 `Suspended(DELEGATION)` 状态；子审批仍不会提升 approval_id 到父入口。子 Run 已完成但非成功时会生成错误摘要，父 Run 回到 `Running(CALLING_LLM)` 让模型决定后续处理。
 
 #### O9. `delegate` 安全路径和 Tool Definition 来源未统一
 
@@ -2008,16 +2014,16 @@ QUESTION、REPLY、CONTEXT_UPDATE 和 PROGRESS 只存在于 Broker 与测试；�
 
 ```mermaid
 flowchart TD
-    Running["父 Run 等待子 Run"] --> Crash["进程退出"]
+    Running["父 Run Suspended(DELEGATION)"] --> Crash["进程退出"]
     Crash --> Lost["Broker / Task / asyncio Task / results 映射丢失"]
     Crash --> Persisted["Parent/Child run.json 与 Session 保留"]
     Persisted --> Recover["下次访问 recover_session"]
     Recover --> NonEnded["扫描非终态 Run 并由恢复边界重放"]
-    Interrupted --> Retry["手动 retry"]
-    Retry --> Duplicate{"可能重新执行 LLM / delegate"}
+    Persisted --> Resume["按 Checkpoint.action 恢复"]
+    Resume --> Duplicate{"可能重新执行 LLM / delegate"}
 ```
 
-**结论：**TaskMessage 与 RunEvent 存在重复投影，却没有共同事务；Parent 没有持久化 task_id/child_run_id 等委托 Checkpoint，重启后无法重连 Child，重试可能重复创建子任务。
+**结论：**TaskMessage 与 RunEvent 存在重复投影，却没有共同事务；Parent 没有持久化 task_id/child_run_id 等委托 Checkpoint，重启后无法重连 Child，恢复可能重复创建子任务。
 
 #### O13. 委托治理缺少深度、环路、目标权限和资源预算
 
@@ -2195,4 +2201,3 @@ Broker lost wakeup
 委托深度与环路
 delegate 安全策略
 ```
-

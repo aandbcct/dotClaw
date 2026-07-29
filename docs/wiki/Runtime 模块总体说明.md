@@ -1,7 +1,7 @@
 # Runtime 模块总体说明
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
-> 扫描基准：2026-07-24，包含 ApplicationHost 收口、ContextVersion、确定性 Token 预算、staged 历史压缩与 reasoning/response 双通道输出  
+> 扫描基准：2026-07-28，包含 ApplicationHost 收口、ContextVersion、确定性 Token 预算、staged 历史压缩、reasoning/response 双通道输出与 AgentRun 状态机分层重构（`master@31f30ae75d22f2b384e04a643894eaf9c0607323`）
 > 文档定位：自顶向下解释 Runtime 在系统中的位置、逻辑组件、核心类、运行事实、依赖与恢复流程，并记录当前设计取舍、真实痛点和演进方向。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -42,7 +42,7 @@ Session / Identity
 
 ## 1. 模块定位与边界
 
-Runtime 是 dotClaw 的**执行内核**。它接收已经确定 Session、Agent Identity、用户输入和历史快照的 `RunRequest`，为本次请求创建独立的 `AgentRun` 与 `RunExecution`，驱动 Context、LLM、Tool 和 Delegation，直到运行成功、失败、取消、等待审批、中断或放弃。
+Runtime 是 dotClaw 的**执行内核**。它接收已经确定 Session、Agent Identity、用户输入和历史快照的 `RunRequest`，为本次请求创建独立的 `AgentRun` 与 `RunExecution`，驱动 Context、LLM、Tool 和 Delegation，直到运行成功、失败、取消、外部挂起或放弃。
 
 Runtime 解决的核心问题不是“如何调用一次大模型”，而是：
 
@@ -56,7 +56,7 @@ Runtime 的稳定职责可归纳为七组：
 2. **Session 级顺序**：同一 Session 的普通执行串行，不同 Session 可以并行。
 3. **状态与外部能力驱动**：使用 `AgentRunState` 状态机约束流程，由 Engine 调用 Context、LLM、Tool 和 Delegation Ports。
 4. **运行事实管理**：保存 AgentRun、RunMessage、RunEvent、ContextVersion 和最小 Checkpoint。
-5. **暂停、恢复与取消**：处理审批、中断重试、放弃、进程重启遗留 Run 和尽力取消。
+5. **暂停、恢复与取消**：处理审批恢复、delegation 恢复、按 Checkpoint operation node 恢复未结束 Run、放弃与尽力取消。
 6. **上下文预算保护**：使用显式 tokenizer 对 Runtime 当前可计数的输入组成进行确定性统计，必要时暂存历史压缩候选。
 7. **成功语义提交**：通过 SuccessCommitIntent 幂等补齐 Conversation、完成事件和 Run 终态。
 
@@ -209,7 +209,7 @@ flowchart LR
 
 - 发起者是 Channel，应用入口是 `SessionInteractionService`，执行协调者是 `RuntimeEngine`。
 - `SessionRunCoordinator` 在获取 Session 锁后才冻结 `RunRequest`，避免并发请求基于同一历史版本运行。
-- 普通用户消息总是创建新 Run；只有审批恢复、重试、放弃和取消会定位已有 Run。
+- 普通用户消息总是创建新 Run；只有审批恢复、delegation 恢复、`resume_run()`、`abandon_run()` 和 `cancel()` 会定位已有 Run。
 - Tool、LLM、Context 和 Delegation 不能直接修改 AgentRun 或 Session Conversation。
 - response 成功后才能投影 Conversation；reasoning 只沿输出端口返回。
 
@@ -293,7 +293,7 @@ flowchart TB
     subgraph Control["D. 运行控制与恢复"]
         Approval["ApprovalService"]
         Cancellation["CancellationService"]
-        Recovery["Checkpoint / retry / abandon"]
+        Recovery["Checkpoint / resume / abandon"]
     end
 
     subgraph Facts["E. 事实持久化与成功提交"]
@@ -364,7 +364,7 @@ flowchart TB
 | 上下文控制 | 历史压缩 | 生成、暂存并成功后提交摘要 | `HistoryCompactorPort` |
 | 运行控制 | 审批 | approval_id 与原 Run 的一次性关联 | `ApprovalService` |
 | 运行控制 | 取消 | 活动 Run 令牌和父子取消映射 | `CancellationService` |
-| 运行控制 | 中断恢复 | 安全边界重试或放弃 | `resume_run`（恢复边界） |
+| 运行控制 | 未结束 Run 恢复 | 按 Checkpoint.action 恢复 operation node 或放弃 | `resume_run`（恢复边界） |
 | 事实持久化 | 运行事实 | Run 摘要、消息、事件、Checkpoint | Domain facts + Repository |
 | 事实持久化 | 成功提交 | 文件系统上的可恢复多事实提交 | `SuccessCommitIntent` |
 | 外部接入 | 运行策略 | 冻结 Identity、模型、工具和预算 | `AgentPolicyResolver` |
@@ -392,7 +392,7 @@ flowchart TB
 - 以 `session.agent_id` 为权威，在 `AgentRegistry` 中验证 Identity；
 - 创建 Session 时显式写入 Identity；
 - 将普通消息包装为延迟执行的 `RunRequest` Factory；
-- 将审批、取消、重试和放弃交给 Coordinator；
+- 将 `resolve_approval()`、`resume_delegation()`、`resume_run()`、`abandon_run()` 和 `cancel()` 交给 Coordinator；
 - 协调 Session 物理删除、审批清理和 Context 缓存释放；
 - 返回 `RunResult`，不自行渲染。
 
@@ -528,7 +528,7 @@ Engine 不应：
 | `run_id` | 当前运行标识 |
 | `request` | 冻结输入；历史压缩时可替换为重建请求 |
 | `policy` | 本 Run 的不可变策略 |
-| `state` | 当前 `AgentState` |
+| `state` | 当前 `AgentRunState` |
 | `budget` | 运行预算控制对象 |
 | `message_cursor` | 已保存消息游标 |
 | `cancellation` | 当前 Run 的取消令牌 |
@@ -700,7 +700,7 @@ reasoning 文本不写入 `RunMessage.content`。只有 response 正文和 Tool 
 - Tool 开始与完成；
 - 审批等待与恢复；
 - 委派提交与完成；
-- 中断、放弃和取消。
+- 外部挂起、放弃和取消。
 
 工具审计采用成对事件：
 
@@ -944,7 +944,7 @@ active_context_version 存在
 
 它通过 `agent_run_ids` 判断该 Run 是否已经投影，保证补偿重试不会生成重复 Conversation。
 
-失败、取消、中断、审批等待和放弃 Run 都不会调用该投影。
+Created、Running、Suspended 等非终态 Run，以及 Ended(FAILED / CANCELLED / ABANDONED) 都不会调用该投影。
 
 #### 4.6.4 `SuccessCommitIntent`
 
@@ -1653,7 +1653,7 @@ data/sessions/
 1. 普通消息创建新 Run；审批恢复必须继续原 run_id。
 2. 同一 Session 的普通执行不得并发，不同 Session 可以并行。
 3. `RuntimeEngine` 不保存任何 Run 级共享当前状态。
-4. `AgentState` 不依赖外部系统。
+4. `AgentRunState`、`AgentRunEvent`、`transition()` 和 `AgentAction` 不依赖外部系统。
 5. Application 只依赖 Port，不直接 import 具体 Provider、Tool 或 SessionManager。
 6. Run 创建时冻结 Identity、模型、提示词、模型可见工具和 Context 预算策略。
 7. Engine 调用 LLM 前必须有活动 ContextVersion 和最小 Checkpoint。
@@ -1694,7 +1694,7 @@ data/sessions/
 | 修改历史压缩 | `history_compaction.py`、Compactor Adapter | Context、Session 投影 | 只压缩完整旧 Conversation |
 | 修改审批恢复 | `ApprovalService`、`resolve_approval()` | Checkpoint、Tool Adapter、Coordinator | 恢复前置条件与消费边界一致，继续原 run_id |
 | 修改取消 | `CancellationService`、`Engine.cancel` | LLM/Tool/Delegation Adapter | 终态由 Engine 持久化 |
-| 修改中断重试 | `resume_run`（恢复边界） | Checkpoint、ContextVersion | 只从明确安全点重放 |
+| 修改未结束 Run 恢复 | `resume_run`（恢复边界） | Checkpoint、ContextVersion | 按 `Checkpoint.action` 从明确 operation node 重放 |
 | 修改成功提交 | `RunRepositoryAdapter.commit_success` | Projector、Fault tests | COMPLETED 最后写入 |
 | 更换存储 | 实现 Repository Ports | Bootstrap、迁移工具 | 保持事实和投影分离 |
 | 修改多 Agent 委派 | `RuntimeDelegationAdapter` | Dispatcher、Session、Coordinator | 子 Run 仍经同一 Runtime |
@@ -1744,7 +1744,7 @@ data/sessions/
 
 #### 8.2.3 纯状态规则与副作用 Engine 分离
 
-**问题与选择：**状态判断、外部调用和文件写入若混在同一对象中，非法转换和恢复难以验证。`AgentState.transition(event)` 只返回新状态和 `AgentAction`，Engine 执行 I/O。
+**问题与选择：**状态判断、外部调用和文件写入若混在同一对象中，非法转换和恢复难以验证。纯函数 `transition(state, event)` 只返回新的 `AgentRunState` 和 `AgentAction`，Engine 执行 I/O。
 
 **未选择：**状态对象直接调用 Port、Repository 自动触发流程、散落字符串状态、重量级工作流引擎。
 

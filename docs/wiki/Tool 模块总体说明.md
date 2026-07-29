@@ -2,7 +2,7 @@
 
 > 适用代码：`aandbcct/dotClaw` 默认分支 `master`  
 > 文档定位：自顶向下解释 Tool 在系统中的位置、完整组成、核心类、依赖与使用流程，并记录设计取舍、痛点和演进方向。  
-> 扫描基准：2026-07-27，以 `master@3d343abea03c58e68fdcdf5fc8271352bafc988c` 为事实基线。  
+> 扫描基准：2026-07-28，以 `master@31f30ae75d22f2b384e04a643894eaf9c0607323` 为事实基线。
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》。  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
 

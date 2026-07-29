@@ -1,8 +1,8 @@
 # Context 模块总体说明
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
-> 扫描基准：2026-07-25，包含多 Owner Context Plan、结构化 Slot、ContextVersion、精确 Owner 生命周期释放与定向刷新信号  
-> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
+> 扫描基准：2026-07-28，包含多 Owner Context Plan、结构化 Slot、ContextVersion、精确 Owner 生命周期释放、定向刷新信号与 AgentRun 状态机分层重构
+> 扫描提交：`31f30ae75d22f2b384e04a643894eaf9c0607323`
 > 文档定位：自顶向下解释 Context 在系统中的位置、完整组件、核心类、数据来源、注入与版本边界，并记录当前设计取舍、真实痛点和演进方向。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -52,7 +52,7 @@ Context 当前承担七组职责：
 4. **Slot 生命周期管理**：创建、缓存、刷新和释放 Slot 私有实例。
 5. **输入物化**：将结构化贡献转换为有序 LLM messages、实际 Tool Definitions 和 Context metadata。
 6. **快照与事实引用分离**：将稳定内容交给 Runtime 形成 `ContextVersion`，将动态 RunMessage 仅作为事实引用重放。
-7. **恢复支持**：审批或中断恢复时，以活动 ContextVersion 加当前 RunMessage 重新构造输入，不重新查询可变外部来源。
+7. **恢复支持**：审批、delegation 或 Checkpoint 恢复时，以活动 ContextVersion 加当前 RunMessage 重新构造输入，不重新查询可变外部来源。
 
 ### 1.2 主要使用者
 
@@ -1351,7 +1351,7 @@ Checkpoint
 
 #### 4.8.4 `_bundle_from_active_version`
 
-**职责与用途：**审批恢复或中断重试时，Provider 不重新读取 Agent、Memory、Skills、AgentRegistry 等可变来源，而是以活动 ContextVersion 的 Snapshot Slot 重建贡献，再追加当前 RunMessage 引用。
+**职责与用途：**审批、delegation 或 Checkpoint 恢复时，Provider 不重新读取 Agent、Memory、Skills、AgentRegistry 等可变来源，而是以活动 ContextVersion 的 Snapshot Slot 重建贡献，再追加当前 RunMessage 引用。
 
 流程：
 
@@ -1651,11 +1651,11 @@ sequenceDiagram
 - Tools Slot 有独立 hash，便于审计模型可见工具变化。
 - ContextVersion 在 LLM 调用前成为恢复安全点的一部分。
 
-### 5.7 审批与中断恢复
+### 5.7 审批、delegation 与 Checkpoint 恢复
 
 ```mermaid
 flowchart TD
-    Resume["审批恢复 / 中断重试"] --> View["RunExecutionView.replay_active_context = true"]
+    Resume["审批 / delegation / Checkpoint 恢复"] --> View["RunExecutionView.replay_active_context = true"]
     View --> Provider["ContextProvider.build"]
     Provider --> Active["读取 active ContextVersion.slots"]
     Active --> Contributions["重建 Snapshot Contributions"]
@@ -2403,4 +2403,3 @@ src/dotclaw/
 | `bootstrap/runtime_factory.py` | ContextDependencies 生产装配 |
 | `bootstrap/application_host.py` | Host 关闭时 release_all |
 | `bootstrap/session_interaction.py` | Session 删除时释放 SESSION/RUN Scope |
-

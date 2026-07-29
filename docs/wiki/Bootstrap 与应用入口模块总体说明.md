@@ -1,7 +1,7 @@
 # Bootstrap 与应用入口模块总体说明
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
-> 扫描基准：2026-07-26，包含 ApplicationHost 唯一组合根、Runtime/Context/Tool 装配、MCP 首次发现、SessionInteractionService 和 reasoning/response 运行级输出  
+> 扫描基准：2026-07-28，包含 ApplicationHost 唯一组合根、Runtime/Context/Tool 装配、MCP 首次发现、SessionInteractionService、reasoning/response 运行级输出与 AgentRun 状态机分层重构（`master@31f30ae75d22f2b384e04a643894eaf9c0607323`）
 > 文档定位：自顶向下解释 dotClaw 如何从配置和基础设施组装为可交互应用，说明启动、降级、恢复、Session 路由、CLI 接入和关闭边界，并记录当前设计取舍、真实痛点和演进方向。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -58,7 +58,7 @@ Bootstrap 与应用入口模块是 dotClaw 的**对象图组装、启动就绪�
 2. **基础设施装配**：创建 LLM、Session、Skills、Tool、HTTP、Memory 和 MCP，并区分关键依赖与可降级依赖。
 3. **Identity 启动**：扫描 Agent 配置，建立 AgentRegistry，并确定新 Session 使用的默认 Identity。
 4. **Runtime 对象图**：创建 Context、Repository、Adapter、RuntimeEngine、Coordinator 和 Delegation。
-5. **应用入口**：提供 Session 创建、普通提交、审批、取消、重试、放弃和完整删除用例。
+5. **应用入口**：提供 Session 创建、普通提交、审批恢复、delegation 恢复、`resume_run()`、`abandon_run()`、`cancel()` 和完整删除用例。
 6. **恢复与生命周期**：等待 MCP 首次发现，补偿未决成功提交，并在失败或退出时关闭当前明确管理的资源。
 
 ### 1.2 主要使用者

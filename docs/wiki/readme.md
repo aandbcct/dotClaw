@@ -3,7 +3,7 @@
 > 本 Wiki 面向参与 dotClaw 开发、扩展和排障的开发者。  
 > 阅读顺序遵循“项目地图 → 核心链路 → 模块 → 逻辑组件 → 核心类 → 修改入口”，不要求读者先理解源码目录。
 
-> 审计基准：`master@3d343abea03c58e68fdcdf5fc8271352bafc988c`（2026-07-27）  
+> 审计基准：`master@31f30ae75d22f2b384e04a643894eaf9c0607323`（2026-07-28）
 > 当前已完成 12 篇核心模块 Wiki；Channel 待补充，Journal 需先完成与 RunEvent 的边界审计，Scheduler 当前代码与配置存在但未进入 ApplicationHost。
 
 ## 1. 项目代码地图
@@ -25,7 +25,7 @@ flowchart TB
         Coordinator["SessionRunCoordinator<br/>同 Session 串行"]
         Engine["RuntimeEngine<br/>一次 Run 的执行协调"]
         Execution["RunExecution<br/>单 Run 内存上下文"]
-        State["AgentState<br/>纯领域状态机"]
+        State["AgentRunState<br/>transition() / AgentRunEvent / AgentAction"]
         RunFacts["Run Repository<br/>消息、事件、快照与恢复事实"]
     end
 
@@ -89,7 +89,7 @@ flowchart TB
 从这张图应当先建立四个判断：
 
 1. `RuntimeEngine` 是一次运行的执行协调器，不是整个应用的组合根。
-2. `SessionRunCoordinator` 处理多个 Run 之间的 Session 占用，`AgentState` 处理单个 Run 内部的状态转换。
+2. `SessionRunCoordinator` 处理多个 Run 之间的 Session 占用；`AgentRunState` 是单 Run 唯一的持久化控制状态，`transition()` 根据 `AgentRunEvent` 产出下一状态和 `AgentAction`。
 3. Memory、Skills 和 Agent Directory 主要通过 Context 进入模型输入；MCP 主要通过 Tool 进入工具注册表。
 4. Bootstrap 与 Config 是装配和配置支撑；Journal、Scheduler 当前没有进入 ApplicationHost 主链。
 
@@ -143,7 +143,7 @@ sequenceDiagram
 
 ### 2.2 审批、取消和委派分支
 
-普通消息总是创建新的 Run。只有审批、取消、重试和放弃等结构化控制事件会定位已有 Run。
+普通消息总是创建新的 Run。已有 Run 的结构化控制包括审批恢复、delegation 恢复、`resume_run()`、`abandon_run()` 和 `cancel()`；CLI 的 `/retry` 只是 `resume_run()` 的命令名。
 
 ```mermaid
 flowchart LR
@@ -160,7 +160,10 @@ flowchart LR
     Execute --> DelegationCheck{"是否为委派"}
     DelegationCheck -->|否| NextLLM["结果进入下一轮 LLM"]
     DelegationCheck -->|是| Child["创建目标 Session 与子 Run"]
-    Child --> ChildResult["等待 DelegationResult"]
+    Child --> Suspend["父 Run 进入 Suspended(DELEGATION)"]
+    Suspend --> Inspect["外部检查子 Run"]
+    Inspect --> ResumeDelegation["resume_delegation(child_run_id)"]
+    ResumeDelegation --> ChildResult["写入 DELEGATION_RESULT"]
     ChildResult --> NextLLM
 ```
 
@@ -200,7 +203,7 @@ flowchart LR
 
 | 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
 |---|---|---|---|---|
-| Runtime | 驱动 AgentRun 状态、外部能力调用、恢复和可靠提交 | `SessionRunCoordinator`、`RuntimeEngine`、`RunExecution`、`AgentState` | 主链已装配 | [Runtime](./Runtime%20模块总体说明.md) |
+| Runtime | 驱动 AgentRun 状态、外部能力调用、恢复和可靠提交 | `SessionRunCoordinator`、`RuntimeEngine`、`RunExecution`、`AgentRunState`、`transition()` | 主链已装配 | [Runtime](./Runtime%20模块总体说明.md) |
 
 ### 3.4 Agent 能力系统
 
@@ -383,10 +386,10 @@ flowchart TB
 
 ```text
 Runtime：Run / Session 边界
-→ AgentState 状态机
+→ AgentRunState / transition() 状态机
 → RunExecution 与 RuntimeEngine
 → RunRepository / Checkpoint
-→ 审批、取消、中断与成功提交
+→ 审批、恢复、取消与成功提交
 ```
 
 ### 6.3 理解工具安全
@@ -506,4 +509,4 @@ AgentIdentity / AgentRegistry
 模块 Wiki 标明扫描提交
 ```
 
-当前审计基线：`3d343abea03c58e68fdcdf5fc8271352bafc988c`。
+当前审计基线：`31f30ae75d22f2b384e04a643894eaf9c0607323`（2026-07-28）。

@@ -941,7 +941,7 @@ allowed_skills:
 
 **职责与用途：**首次 Context 构建后，Skills 内容进入 ContextVersion Snapshot。
 
-审批恢复或中断重试复用活动 Snapshot，不重新读取 Registry。新的 Run 会重新格式化当前 Registry，但 Registry 本身仍是启动时版本。
+审批、delegation 或 Checkpoint 恢复复用活动 Snapshot，不重新读取 Registry。新的 Run 会重新格式化当前 Registry，但 Registry 本身仍是启动时版本。
 
 ---
 

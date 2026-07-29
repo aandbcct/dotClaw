@@ -1,6 +1,6 @@
 # dotClaw 模块与组件清单
 
-> 扫描范围：`aandbcct/dotClaw` 当前默认分支 `master`  
+> 扫描范围：`aandbcct/dotClaw` 当前默认分支 `master`；状态机事实基线为 `master@31f30ae75d22f2b384e04a643894eaf9c0607323`（2026-07-28）
 > 目标：为 Wiki 首页和各模块 Wiki 重写建立代码事实底稿。  
 > 性质：这是架构级模块与组件盘点，不是穷举所有私有函数、异常和枚举的 API 索引。各模块进入正式重写时，再补齐完整源码索引。
 
@@ -35,7 +35,7 @@
 flowchart TB
     Channel["交互接入\nChannel / CLI"] --> Interaction["应用入口\nSessionInteractionService"]
     Interaction --> Coordinator["运行协调\nSessionRunCoordinator"]
-    Coordinator --> Runtime["执行内核\nRuntimeEngine / RunExecution / AgentState"]
+    Coordinator --> Runtime["执行内核\nRuntimeEngine / RunExecution / AgentRunState"]
 
     Runtime --> Context["Context"]
     Runtime --> LLM["LLM"]
@@ -102,7 +102,7 @@ flowchart TB
 | 组合根与生命周期 | `bootstrap/application_host.py` | `ApplicationHost` | 读取配置、创建关键和可降级资源、执行启动恢复、按依赖逆序关闭 |
 | 基础设施构建 | `bootstrap/_host_components.py` | `_build_llm`、`_build_tools`、`_build_memory`、`_build_mcp`、`_build_skills` | 将配置翻译为具体模块对象；定义 critical/degrade 初始化策略 |
 | Runtime 装配 | `bootstrap/runtime_factory.py` | `RuntimeServices`、`build_runtime_services` | 创建 Runtime adapters、ContextProvider、DelegationAdapter、Engine 和 Coordinator |
-| Session 应用服务 | `bootstrap/session_interaction.py` | `SessionInteractionService` | 按 `session.agent_id` 路由 Identity；提交消息、审批、取消、重试和放弃；协调 Session 删除 |
+| Session 应用服务 | `bootstrap/session_interaction.py` | `SessionInteractionService` | 按 `session.agent_id` 路由 Identity；提交消息、审批恢复、delegation 恢复、`resume_run()`、`abandon_run()`、`cancel()`；协调 Session 删除 |
 | CLI 展示支持 | `cli/banner.py` | `build_banner` | 生成 Rich 启动面板；属于展示支撑，不应成为独立架构模块 |
 
 ### 主要依赖
@@ -188,7 +188,7 @@ Session 是长期对话边界，保存成功的用户—Agent 语义历史、历
 
 ### 模块定位
 
-Runtime 是共享、业务无状态的执行内核。每个请求创建独立 `RunExecution`，由 `RuntimeEngine` 驱动纯 `AgentState` 状态机，通过 Ports 调用外部能力，并将运行事实可靠持久化。
+Runtime 是共享、业务无状态的执行内核。每个请求创建独立 `RunExecution`，由 `RuntimeEngine` 消费纯 `AgentRunState`、`AgentRunEvent`、`transition()` 与 `AgentAction`，通过 Ports 调用外部能力，并将运行事实可靠持久化。
 
 ### 逻辑组件
 
@@ -199,7 +199,7 @@ Runtime 是共享、业务无状态的执行内核。每个请求创建独立 `R
 | 状态机 | `runtime/domain/state.py`、`control.py` | `AgentRunState`、`AgentAction`、`transition` | 将领域事件转换为新状态和下一动作 |
 | 单 Run 执行上下文 | `runtime/application/execution.py` | `RunExecution`、`RunExecutionView`、`RunBudget` | 保存本次 Run 的可变控制数据、消息游标和取消令牌 |
 | 执行引擎 | `runtime/application/engine.py` | `RuntimeEngine` | 创建/恢复 Run；驱动 Context、LLM、Tool、Delegation 循环；收口终态和提交 |
-| Session 运行协调 | `runtime/application/session_run_coordinator.py` | `SessionRunCoordinator` | 同 Session 串行、跨 Session 并行；审批恢复和中断重试串行化 |
+| Session 运行协调 | `runtime/application/session_run_coordinator.py` | `SessionRunCoordinator` | 同 Session 串行、跨 Session 并行；审批、delegation 与 Checkpoint 恢复串行化 |
 | 控制服务 | `approval_service.py`、`cancellation_service.py` | `ApprovalService`、`CancellationService` | 审批记录关联、活动取消令牌和父子取消映射 |
 | Context 预算与历史压缩 | `context_budget.py`、`history_compaction.py` | `ContextBudgetPlanner`、压缩选择和批处理函数 | 精确计数、超限判断和成功后提交的 staged 压缩 |
 | 应用契约 | `dto.py`、`ports.py`、`request_factory.py` | `RunRequest`、`RunResult`、各类 Port | 定义 Runtime 与外部世界的稳定边界 |
@@ -212,7 +212,7 @@ Runtime 是共享、业务无状态的执行内核。每个请求创建独立 `R
 ```text
 SessionRunCoordinator
 → RuntimeEngine
-→ RunExecution / AgentState
+→ RunExecution / AgentRunState / transition()
 → ContextPort / LLMPort / ToolPort / DelegationPort
 → RunRepository / CheckpointRepository / ApprovalService
 → RunResult

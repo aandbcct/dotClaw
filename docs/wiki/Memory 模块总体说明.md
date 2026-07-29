@@ -1,8 +1,8 @@
 # Memory 模块总体说明
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
-> 扫描基准：2026-07-26，包含 SQLite/FTS5 存储、文本分块、Embedding、混合检索、MemoryManager、日记忆 Flush、DeepDream、Context 接入、Bootstrap、Config 与 Builtin Memory Tool 边界  
-> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
+> 扫描基准：2026-07-28，包含 SQLite/FTS5 存储、文本分块、Embedding、混合检索、MemoryManager、日记忆 Flush、DeepDream、Context 接入、Bootstrap、Config、Builtin Memory Tool 边界与 AgentRun 状态机分层重构
+> 扫描提交：`31f30ae75d22f2b384e04a643894eaf9c0607323`
 > 文档定位：自顶向下解释 dotClaw 当前 Memory 如何同步工作区知识和长期记忆、执行混合检索并进入 Context，同时明确日记忆写入、长期蒸馏、定时任务、索引更新和隔离能力中哪些已经接入主链、哪些仅有组件实现。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -1295,7 +1295,7 @@ Memory 顺序为 80，Knowledge 为 90。
 
 **职责与用途：**MemorySlot 采用 RUN Owner、SNAPSHOT Persistence。
 
-首次实际 LLM 输入会将 Memory 内容写入 ContextVersion；审批恢复或中断重试复用活动 Version，不重新查询当前 Memory。
+首次实际 LLM 输入会将 Memory 内容写入 ContextVersion；审批、delegation 或 Checkpoint 恢复复用活动 Version，不重新查询当前 Memory。
 
 **Prompt 信任边界**
 
@@ -2091,7 +2091,7 @@ Host 不显式 close MemoryStorage
 1. Runtime 不直接依赖 MemoryManager，Memory 通过 Context Port 进入执行链。
 2. Memory 初始化失败不会阻止 ApplicationHost 启动。
 3. 首次 Context 构建的 Memory 结果会进入 ContextVersion Snapshot。
-4. 审批恢复和中断重试不会重新查询可变 Memory。
+4. 审批、delegation 和 Checkpoint 恢复不会重新查询可变 Memory。
 5. MemoryStorage 使用 SQLite WAL。
 6. 同一文件正常重新同步前会先删除旧 Chunk。
 7. 文件内容未变化且 `force=False` 时跳过重建。
@@ -2620,4 +2620,3 @@ Memory 查询异常降级
 Owner Scope 与 Forget
 Host shutdown 关闭 SQLite
 ```
-

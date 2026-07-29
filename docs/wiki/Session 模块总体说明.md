@@ -1,8 +1,8 @@
 # Session 模块总体说明
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
-> 扫描基准：2026-07-26，包含 Session/Conversation/HistoryCompression、SessionManager、SessionInteractionService、RunRequest Factory、SessionRunCoordinator、成功 Conversation 投影、成功提交恢复和完整删除流程  
-> 扫描提交：`3d343abea03c58e68fdcdf5fc8271352bafc988c`  
+> 扫描基准：2026-07-28，包含 Session/Conversation/HistoryCompression、SessionManager、SessionInteractionService、RunRequest Factory、SessionRunCoordinator、成功 Conversation 投影、成功提交恢复、完整删除流程与 AgentRun 状态机分层重构
+> 扫描提交：`31f30ae75d22f2b384e04a643894eaf9c0607323`
 > 文档定位：自顶向下解释 Session 作为长期对话容器的领域边界、持久化结构、并发语义、成功投影、历史压缩、恢复与删除协议，并记录当前实现中的真实限制。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -38,7 +38,7 @@ Session.agent_id + Session.conversations
 
 Session 模块是 dotClaw 的**长期对话元数据与成功结果投影层**。
 
-Session 不是运行中的 Agent，也不是 Runtime 状态机。它保存一个长期会话的稳定绑定和已经成功完成的对话结果；单次执行过程、Tool 消息、审批、Checkpoint、事件和中断状态属于 AgentRun 及其运行仓储。
+Session 不是运行中的 Agent，也不是 Runtime 状态机。它保存一个长期会话的稳定绑定和已经成功完成的对话结果；单次执行过程、Tool 消息、审批、Checkpoint、事件和 `AgentRunState` 属于 AgentRun 及其运行仓储。
 
 核心问题是：
 
@@ -61,7 +61,7 @@ Session 不是运行中的 Agent，也不是 Runtime 状态机。它保存一个
 |---|---|
 | `ApplicationHost` | 创建 SessionManager，并装配 Runtime 与应用入口 |
 | `SessionInteractionService` | 创建、加载、提交、控制和删除 Session |
-| `SessionRunCoordinator` | 按 session_id 串行普通提交、审批恢复和中断重试 |
+| `SessionRunCoordinator` | 按 session_id 串行普通提交、审批恢复、delegation 恢复与 Checkpoint 恢复 |
 | `create_run_request` | 复制 Session 历史形成不可变 RunRequest |
 | `SessionConversationProjector` | 将成功 Run 投影为 Conversation 和历史压缩 |
 | `RuntimeEngine` | 使用 session_id 保存 Run 事实并提交成功意图 |
@@ -178,7 +178,7 @@ erDiagram
     }
     AGENT_RUN {
         string run_id
-        string status
+        AgentRunState state
         string final_message_id
     }
 ```
@@ -190,7 +190,7 @@ erDiagram
 - 一个 Session 可以有多个 Run 和多个 Conversation。
 - 概念上，一条 Conversation 可以引用一个或多个相关 AgentRun；一个 AgentRun 最多投影到一条 Conversation。
 - 当前 `SessionConversationProjector` 实际只把当前根 `run_id` 写入 `agent_run_ids`，尚未汇总委托子 Run。
-- 等待审批、中断、失败、取消和放弃的 Run 不形成 Conversation。
+- Created / Running / Suspended 的非终态 Run 不形成 Conversation；Ended(FAILED / CANCELLED / ABANDONED) 也不形成 Conversation。
 - HistoryCompression 覆盖 Conversation 边界，不覆盖 RunMessage 序列。
 
 ### 2.3 成功与非成功路径
@@ -865,8 +865,8 @@ recover_session()
 **职责与用途：**
 
 - 审批恢复：在所属 Session 锁内；
-- 中断重试：在所属 Session 锁内；
-- 放弃中断：在所属 Session 锁内；
+- delegation 恢复：在所属 Session 锁内；
+- `resume_run()` / `abandon_run()`：在所属 Session 锁内；
 - 取消：直接发送，不等待 Session 锁。
 
 取消绕过锁是为了避免活动 Run 持锁时形成互等。
@@ -1334,7 +1334,7 @@ sequenceDiagram
 - Approval 文件位于共享目录，删除 Session 时必须单独清理。
 - Approval.consume 的本地文件读改写当前没有跨进程锁。
 
-### 5.10 中断、重试与新消息
+### 5.10 Checkpoint 恢复与新消息
 
 ```mermaid
 flowchart TD
@@ -1563,7 +1563,7 @@ RunRequest
 ```text
 同 session_id
 → 同一 asyncio.Lock
-→ 普通提交 / 审批恢复 / retry / abandon 串行
+→ 普通提交 / 审批恢复 / delegation 恢复 / resume_run / abandon_run 串行
 
 不同 session_id
 → 不同 Lock
@@ -1690,7 +1690,7 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 7. 正常追加 HistoryCompression 时要求新版本等于 `active + 1`，且覆盖边界属于当前 Conversation。
 8. RunRequest 复制 ConversationSnapshot，不把可变 Session 对象交给 RuntimeEngine。
 9. 活动压缩存在时，Request Factory 只复制覆盖边界之后的 Conversation 原文。
-10. 单进程内，同一 Session 的普通提交、审批恢复、中断重试和放弃使用同一 `asyncio.Lock`。
+10. 单进程内，同一 Session 的普通提交、审批恢复、delegation 恢复、`resume_run()` 和 `abandon_run()` 使用同一 `asyncio.Lock`。
 11. 取消不等待活动 Run 当前持有的 Session Lock。
 12. 新普通请求不会绕过非终态 AgentRunState 占用；非终态占用返回 SESSION_BUSY，不再自动放弃遗留 Run。
 13. 成功提交通过可恢复 intent 协调 Session 投影、完成事件、终态 Run 和 Checkpoint。
@@ -1800,7 +1800,7 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 
 #### 8.2.2 成功结果才形成 Conversation
 
-**问题与选择：**中断或失败回答不能作为正式历史。当前只投影 COMPLETED Run 的用户输入和最终 assistant 消息。
+**问题与选择：**外部挂起或失败回答不能作为正式历史。当前只投影 COMPLETED Run 的用户输入和最终 assistant 消息。
 
 **未选择：**每次提交立即追加用户消息、失败后留下半条 Conversation。
 
@@ -2346,4 +2346,3 @@ src/dotclaw/orchestration/runtime_delegation_adapter.py
 ```
 
 该文件为目标 Agent 创建独立 Session 和子 Run。Delegation Task、Dispatcher 和消息状态的完整说明主归属 Orchestration Wiki。
-

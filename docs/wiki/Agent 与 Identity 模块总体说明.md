@@ -1,7 +1,7 @@
 # Agent 与 Identity 模块总体说明
 
 > 适用代码：`aandbcct/dotClaw` 的 `master` 分支  
-> 扫描基准：2026-07-26，包含 AgentIdentity 声明、YAML 加载、AgentRegistry、默认 Identity、Session 绑定、Runtime Policy 冻结、Context Plan、Tool Agent Policy 和 Delegation 接入  
+> 扫描基准：2026-07-28，包含 AgentIdentity 声明、YAML 加载、AgentRegistry、默认 Identity、Session 绑定、Runtime Policy 冻结、Context Plan、Tool Agent Policy、Delegation 接入与 AgentRun 状态机分层重构（`master@31f30ae75d22f2b384e04a643894eaf9c0607323`）
 > 文档定位：自顶向下解释 dotClaw 如何用声明式 Identity 描述 Agent，如何将 Identity 绑定到 Session 并冻结为每次 Run 的执行策略，以及各字段在 Runtime、Context、Tool 和 Orchestration 中的真实消费边界。  
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
@@ -209,7 +209,7 @@ flowchart LR
 
 - YAML 修改不会自动改变已经加载的 AgentRegistry。
 - 新 Run 使用 Registry 当前对象冻结新 Policy Snapshot。
-- 已开始 Run、审批恢复和中断重试复用已持久化 Policy Snapshot。
+- 已开始 Run、审批恢复、delegation 恢复和 Checkpoint 恢复复用已持久化 Policy Snapshot。
 - ContextVersion 是某次模型输入事实，不等同于 Identity 版本。
 - Tool policy_rules 当前存在独立的懒加载缓存，不完全遵循该单一路径。
 
@@ -851,7 +851,7 @@ max_iterations
 policy_data: JSONMap
 ```
 
-它随 AgentRun 持久化。审批恢复和中断重试复用保存的 Snapshot，不重新读取 Registry 或 YAML。
+它随 AgentRun 持久化。审批恢复、delegation 恢复和 Checkpoint 恢复复用保存的 Snapshot，不重新读取 Registry 或 YAML。
 
 ---
 
@@ -1397,7 +1397,7 @@ sequenceDiagram
 - 解析失败当前回退全局规则，属于可用性优先。
 - Identity 文件在启动后修改，Registry 与 Tool Policy 可能看到不同版本。
 
-### 5.11 审批恢复和中断重试
+### 5.11 审批、delegation 与 Checkpoint 恢复
 
 ```mermaid
 flowchart LR
@@ -1776,7 +1776,7 @@ Tool policy_rules 实际版本保证
 3. Session 必须持久化非空 `agent_id`；已有 Session 的绑定不得静默回退默认 Identity。
 4. `RunRequest` 只携带 `agent_id`，不得携带可变 Identity 对象引用。
 5. Runtime 必须在创建 AgentRun 前冻结 `AgentPolicySnapshot`。
-6. 已开始 Run、审批恢复和中断重试必须复用原 Policy Snapshot，不得按当前配置重算覆盖。
+6. 已开始 Run、审批恢复、delegation 恢复和 Checkpoint 恢复必须复用原 Policy Snapshot，不得按当前配置重算覆盖。
 7. Identity 的 Prompt 和模型回退必须在策略冻结时完成。
 8. `allowed_tools` 只控制模型可见 Tool Schema，不得替代 Tool Capability、Policy 和审批。
 9. Agent 级 `policy_rules` 只能收窄全局 Tool Policy，不能放宽全局上限。
@@ -1850,7 +1850,7 @@ Tool policy_rules 实际版本保证
 3. AgentRegistry 是进程级 Identity 目录，逻辑主归属 Agent；当前物理实现位于 Orchestration 目录。
 4. Session 持久化 agent_id，并以此路由未来 Run。
 5. 每次 Run 在创建前冻结 AgentPolicySnapshot。
-6. 审批恢复和中断重试复用原 Policy Snapshot。
+6. 审批、delegation 与 Checkpoint 恢复复用原 Policy Snapshot。
 7. Prompt、模型和 Tool Definitions 在 Run 边界冻结。
 8. Context Slot 选择在 Bootstrap 阶段从 Registry 建立。
 9. Tool Agent Policy 按当前 Run agent_id构造独立 Scope。
@@ -2379,4 +2379,3 @@ tests/agent/test_identity.py
 - capabilities/input_modes/output_modes 默认值。
 
 当前仍需要补充严格 Loader、Registry、Policy Snapshot、Tool Scope、Context Plan 和 Delegation 的端到端测试。
-
