@@ -2,7 +2,7 @@
 
 ## 软件架构
 
-- [ ] 顶层组合根还是mian->agent->runtime的形式，agent和runtime应该都是一等公民，需要理清楚层级关系
+- [x] 顶层组合根还是mian->agent->runtime的形式，agent和runtime应该都是一等公民，需要理清楚层级关系
 
   ```
   Q：
@@ -13,6 +13,10 @@
   ```
 
 - [ ] 跨进程/多节点 Session，Runtime 从“单进程任务执行器”升级为“分布式任务调度系统”
+
+- [ ] runtime加OperationRecorder Port，用于记录事件内部再调用 `RunRepository.append_event()`。这样 `RuntimeEngine` 不需要散落大量事件拼装代码
+
+- [ ] 目前session租约还只能单进程串行，但还不能保证两个 dotClaw 进程不会同时执行同一个 Session；原进程崩溃后由其他进程安全接管；锁具有超时、续租和 fencing token。
 
 ## 状态机分层重构（已完成）
 
@@ -52,7 +56,7 @@
   A:应该有一个事实源和一个暂存区，当slot更新时只做失效标记，让slot去暂存区和事实源重建，run完暂存区->事实源，下次agentrun前先对照缓存版本号和事实源版本号，高于事实源版本号时refresh重建
   ```
 
-- [ ]
+- [ ] 
 
 ## 上下文压缩
 
@@ -67,7 +71,7 @@
   **重要节点完成后**：保存“已经发生什么”的事实与下一步状态。
   ```
 
-- [ ]
+- [ ] 当前resume时只能重放整批tool_call，需要加多工具批次逐项进度恢复，保证执行幂等
 
 ## llm proxy
 
@@ -112,6 +116,7 @@ Q：后续可能有大量工具，全量注入不现实，要怎么做工具路�
 
 - [ ] 多加一些内建工具，连接mcp服务器
 - [ ] 首版只注册builtin包内的工具，后续需要通过显式 allowlist 配置再开放自定义本地工具包
+- [ ] 工具副作用边界还不能保证exactly-once，eg一个发邮件tool，发完邮件在tool写completed时崩溃，resume时没法验证是否完成。
 
 ## journal
 
