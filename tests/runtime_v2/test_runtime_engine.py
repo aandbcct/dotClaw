@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
+from dotclaw.runtime.domain.events import RunEventType
 
 import asyncio
 import json
@@ -320,6 +321,60 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
     ]
     assert event_types.index("approval_resolved") < event_types.index("run_resumed")
     assert event_types.index("run_resumed") < event_types.index("run_completed")
+
+
+async def test_approval_events_carry_structured_fields(tmp_path: Path) -> None:
+    """等待审批与审批解决事件分别携带 approval_id/call_id 与 approved（7.4）。"""
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    engine = RuntimeEngine(
+        run_repository,
+        CheckpointRepositoryAdapter(tmp_path),
+        ContextFake(),
+        ApprovalLLM(),
+        ApprovalTool(),
+        PolicyPort(),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+        CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
+    )
+    waiting = await engine.execute(_request("session-fields"))
+    completed = await engine.resolve_approval("approval-1", approved=True)
+
+    assert waiting.state.is_waiting_approval()
+    assert completed.state.outcome().value == "completed"
+    events = await run_repository.load_events("session-fields", waiting.run_id)
+    waiting_event = next(event for event in events if event.event_type is RunEventType.WAITING_APPROVAL)
+    resolved_event = next(event for event in events if event.event_type is RunEventType.APPROVAL_RESOLVED)
+    assert waiting_event.data.get("approval_id") == "approval-1"
+    assert waiting_event.data.get("call_id") == "call-1"
+    assert resolved_event.data.get("approval_id") == "approval-1"
+    assert resolved_event.data.get("approved") is True
+
+
+async def test_rejected_approval_event_marks_approved_false(tmp_path: Path) -> None:
+    """审批拒绝时 APPROVAL_RESOLVED 事件携带 approved=false（7.4）。"""
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    engine = RuntimeEngine(
+        run_repository,
+        CheckpointRepositoryAdapter(tmp_path),
+        ContextFake(),
+        ApprovalLLM(),
+        ApprovalTool(),
+        PolicyPort(),
+        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+        CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(),
+    )
+    await engine.execute(_request("session-reject"))
+    result = await engine.resolve_approval("approval-1", approved=False)
+
+    assert result.state.outcome().value == "cancelled"
+    events = await run_repository.load_events("session-reject", result.run_id)
+    resolved_event = next(event for event in events if event.event_type is RunEventType.APPROVAL_RESOLVED)
+    assert resolved_event.data.get("approval_id") == "approval-1"
+    assert resolved_event.data.get("approved") is False
 
 
 class ReActLLM(LLMPort):

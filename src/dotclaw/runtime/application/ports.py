@@ -133,6 +133,9 @@ class RunRepository(Protocol):
     async def append_event(self, session_id: str, event: RunEvent) -> None:
         """追加已引用存在消息的运行事件。"""
 
+    async def load_events(self, session_id: str, run_id: str) -> tuple[RunEvent, ...]:
+        """读取按 sequence 连续排列的运行事件。"""
+
     async def commit_success(
         self,
         run: AgentRun,

@@ -132,6 +132,10 @@ class InMemoryRunRepository:
             raise ValueError("事件序号必须连续")
         self._events[key] = events + (event,)
 
+    async def load_events(self, session_id: str, run_id: str) -> tuple[RunEvent, ...]:
+        """读取已追加的事件；隔离容器仅供测试，不构成生产第二事实源。"""
+        return self._events.get((session_id, run_id), ())
+
     async def commit_success(
         self,
         run: AgentRun,
