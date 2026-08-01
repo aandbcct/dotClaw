@@ -18,6 +18,14 @@
 
 - [ ] 目前session租约还只能单进程串行，但还不能保证两个 dotClaw 进程不会同时执行同一个 Session；原进程崩溃后由其他进程安全接管；锁具有超时、续租和 fencing token。
 
+- [ ] llm/tool port的cancel()句柄还是为空的，没法取消正在执行的tool/llm
+
+  ```
+  A：若要真正做到及时中断，需要让 LLMProxyAdapter 和 ToolExecutorAdapter 保存每个 run_id 对应的活动 asyncio.Task、流对象或 HTTP 请求句柄，并在 cancel() 中执行 task.cancel()、关闭响应流或终止子进程。
+  ```
+
+- [ ] session快照的获取时间点可能有问题，在获取session锁之前就获取了session对象，所以可能存在session未更新的情况，导致_make_request的延迟构建失效，所以把session管理器的load放到make_request里面
+
 ## 状态机分层重构（已完成）
 
 设计见 `docs/Development/runtime/statemachine/状态机分层重构总体设计.md` 与 `状态机分层重构开发计划.md`。

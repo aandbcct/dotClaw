@@ -925,12 +925,14 @@ active_context_version 存在
 - 防止 run_id 覆盖和重复；
 - 原子替换 JSON 文件；
 - 追加并校验连续 ContextVersion；
-- 追加有序 RunEvent；
+- 追加有序 RunEvent，并按 sequence 连续与 run_id 归属严格读取完整 RunEvent 序列（`load_events`）；
 - 扫描 Session 的非终态 Run；
 - 执行和恢复 `SuccessCommitIntent`；
 - 在读取 Run、查找 Run 或读取 Conversation 前补偿未决提交。
 
-它既是当前本地实现，也是后续数据库 Adapter 需要遵循的行为契约参考。
+`load_events(session_id, run_id)` 是 PR1 补齐的读取闭环：它从 `events.jsonl` 逐行严格反序列化事件，独立校验 sequence 必须从 1 连续递增、run_id 必须与入参一致，任何空白行、损坏 JSON 或非法字段都抛出包含文件名与行号的 `ValueError`，错误信息明确，不静默忽略损坏记录。内存仓储仅用于测试隔离，不构成生产第二事实源。它既是当前本地实现，也是后续数据库 Adapter 需要遵循的行为契约参考。
+
+> **演进边界（PR1 之后）**：`RunRepository.load_events()` 只解决“事件能否可靠读取”，返回 `tuple[RunEvent, ...]`。把事件序列解释为可重算指标、Span 与 `RunTrace` 的 `TraceAssembler` 属于后续 PR2，当前**尚未实现**；PR1 不创建 `trace/` 顶层模块、`RunRecord`、`RunRecordReader`、`RunTrace`、`TraceSpan`、`TraceAssembler` 或 `TraceService`，也不修改统计模型与 Journal。
 
 #### 4.6.2 `CheckpointRepositoryAdapter`
 
@@ -1594,7 +1596,7 @@ AgentRun
 | `LLMOutputPort` | 接收 reasoning/response 增量 | Channel 运行级 Adapter |
 | `ToolPort` | 执行 Tool 或返回审批需求 | `ToolExecutorAdapter` |
 | `DelegationPort` | 提交、读取和取消子执行 | `RuntimeDelegationAdapter` |
-| `RunRepository` | 运行事实与成功提交 | `RunRepositoryAdapter` |
+| `RunRepository` | 运行事实与成功提交（含按 sequence 严格读取事件序列） | `RunRepositoryAdapter` |
 | `CheckpointRepository` | 最小恢复快照 | `CheckpointRepositoryAdapter` |
 | `ApprovalRepository` | 审批关联与一次消费 | `ApprovalRepositoryAdapter` |
 | `ConversationProjectionPort` | 成功语义投影 Session | `SessionConversationProjector` |
