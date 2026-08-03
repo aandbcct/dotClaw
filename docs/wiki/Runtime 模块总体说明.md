@@ -932,7 +932,7 @@ active_context_version 存在
 
 `load_events(session_id, run_id)` 是 PR1 补齐的读取闭环：它从 `events.jsonl` 逐行严格反序列化事件，独立校验 sequence 必须从 1 连续递增、run_id 必须与入参一致，任何空白行、损坏 JSON 或非法字段都抛出包含文件名与行号的 `ValueError`，错误信息明确，不静默忽略损坏记录。内存仓储仅用于测试隔离，不构成生产第二事实源。它既是当前本地实现，也是后续数据库 Adapter 需要遵循的行为契约参考。
 
-> **演进边界（PR1 之后）**：`RunRepository.load_events()` 只解决“事件能否可靠读取”，返回 `tuple[RunEvent, ...]`。把事件序列解释为可重算指标、Span 与 `RunTrace` 的 `TraceAssembler` 属于后续 PR2，当前**尚未实现**；PR1 不创建 `trace/` 顶层模块、`RunRecord`、`RunRecordReader`、`RunTrace`、`TraceSpan`、`TraceAssembler` 或 `TraceService`，也不修改统计模型与 Journal。
+> **演进边界（PR1 / PR2 之后）**：`RunRepository.load_events()` 只解决“事件能否可靠读取”，返回 `tuple[RunEvent, ...]`。PR2 已在 `src/dotclaw/trace/` 以**外部只读消费者**身份落地 `RunTrace` / `TraceService` / `JsonTraceExporter`：`assemble_trace()` 是纯函数，从 `AgentRun` / `RunEvent[]` / `RunMessage[]` / `ContextVersion[]` 重建 Span、Issue、Metrics 与 `record_hash`，语义不完整只生成 `TraceIssue` 与 `INCOMPLETE` 标记、绝不抛读取异常；`TraceService.get_trace(run_id)` 仅调用 `find_run` / `load_events` / `load_messages` / `load_context_versions` 四个读取方法，不写回 Runtime。Runtime 不依赖 Trace，`trace/` 不构成生产第二事实源、不修改统计模型与 Journal。
 
 #### 4.6.2 `CheckpointRepositoryAdapter`
 

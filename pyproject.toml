@@ -53,6 +53,7 @@ testpaths = [
     "tests/runtime_v2",
     "tests/session",
     "tests/tools",
+    "tests/trace",
 ]
 asyncio_mode = "auto"
 pythonpath = ["src"]
