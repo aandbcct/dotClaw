@@ -69,6 +69,7 @@
 ## 上下文压缩
 
 - [x] 考虑在单次agentrun中需要触发压缩的情况，每次llm_request前判断压缩
+- [ ] 设置软上限和硬上限，压缩历史conversation和runMessage
 
 ## checkpoint/resume
 

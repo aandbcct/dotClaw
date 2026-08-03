@@ -1,4 +1,4 @@
-"""Eval/stats.py — 统计工具函数，所有 case 共享。"""
+"""benchmarks/stats.py — 统计工具函数，所有 case 共享。"""
 
 import dataclasses
 import json
