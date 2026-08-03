@@ -61,7 +61,7 @@ FixtureContextPort
 FixtureApprovalRepository
 ```
 
-`environment.py` 只提供具体 `EvalEnvironment(case, mode, dependencies)` 组装，不抽象新的 Environment Port。它创建 InMemoryRunRepository、InMemoryCheckpointRepository、固定 TokenCounter、固定 HistoryCompactor 和 RuntimeEngine。
+`environment.py` 只提供具体 `EvalEnvironment(case, dependencies)` 组装，不抽象新的 Environment Port。匹配模式与回退策略完全由 `case.execution_mode` 推导（外部不再接受 `mode` 覆盖）：Playback 恒为 STRICT 且 **禁止注入任何真实依赖**，未匹配调用判定为配置失败；Re-execution 为 NORMAL 且允许 Fixture 缺失时回退到注入的真实端口。它创建 InMemoryRunRepository、InMemoryCheckpointRepository、固定 TokenCounter、固定 HistoryCompactor 和 RuntimeEngine。
 
 ## 3. 匹配与隔离规则
 

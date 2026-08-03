@@ -1,9 +1,16 @@
 """隔离 Runtime 执行环境组装。
 
 ``EvalEnvironment`` 把 ``EvalCase`` 的 Fixture 装配为一个默认拒绝真实依赖的
-``RuntimeEngine``：所有外部能力首先由 Fixture 提供，未匹配调用在配置了真实
-依赖端口时回退到该端口，否则直接判定为配置失败，绝不静默接触生产 LLM、
+``RuntimeEngine``：所有外部能力首先由 Fixture 提供，未匹配调用在 Re-execution
+模式下可回退到注入的真实端口，否则直接判定为配置失败，绝不静默接触生产 LLM、
 工具、Session、Memory 或网络。
+
+隔离边界由 ``case.execution_mode`` 唯一决定（不再接受外部 mode 覆盖）：
+
+* ``PLAYBACK`` 冻结回放：匹配模式恒为 ``STRICT``，且 **禁止注入任何真实依赖**；
+  未匹配的调用一律判定为配置失败，所有组合端口强制拒绝回退。
+* ``REEXECUTION`` 重新执行：匹配模式为 ``NORMAL``，允许在 Fixture 缺失时回退到
+  注入的真实端口（缺省仍由 Fixture 驱动，未配置真实端口则同样判定为配置失败）。
 
 本模块同时提供内存版的 Run / Checkpoint 仓储与固定的 TokenCounter /
 HistoryCompactor，确保两次独立环境不共享任何运行事实或 Fixture 消费游标。
@@ -103,8 +110,9 @@ class _FixedHistoryCompactor:
 class EvalDependencies:
     """Re-execution 模式下可注入的真实能力端口；缺省时由 Fixture 提供。
 
-    这些端口仅在对应 Fixture 无法匹配调用时被回退使用。Playback 场景下若
-    不提供，未匹配的调用会直接判定为配置失败，从而默认拒绝真实依赖。
+    这些端口仅在 Re-execution 模式下、且对应 Fixture 无法匹配调用时被回退使用。
+    Playback 模式禁止注入任何真实依赖——``EvalEnvironment`` 会在构造时直接拒绝，
+    从而所有未匹配的调用都判定为配置失败，绝不回退到真实实现。
     """
 
     llm_port: LLMPort | None = None
@@ -114,6 +122,20 @@ class EvalDependencies:
     delegation_port: DelegationPort | None = None
     approval_repository: ApprovalRepository | None = None
 
+    def any_real(self) -> bool:
+        """是否存在任意已注入的真实端口。"""
+        return any(
+            port is not None
+            for port in (
+                self.llm_port,
+                self.tool_port,
+                self.context_port,
+                self.policy_port,
+                self.delegation_port,
+                self.approval_repository,
+            )
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Fixture 优先的组合端口：先消费 Fixture，未匹配再回退真实端口
@@ -121,12 +143,13 @@ class EvalDependencies:
 
 
 class _LLMComposite:
-    """LLM 组合端口：优先脚本化 Fixture，缺失时回退真实端口。"""
+    """LLM 组合端口：优先脚本化 Fixture；允许回退时缺失再回退真实端口。"""
 
-    def __init__(self, fixture: ScriptedLLMPort | None, real: LLMPort | None) -> None:
-        """绑定 Fixture 与可选真实端口。"""
+    def __init__(self, fixture: ScriptedLLMPort | None, real: LLMPort | None, allow_fallback: bool) -> None:
+        """绑定 Fixture、可选真实端口与回退开关。"""
         self._fixture: ScriptedLLMPort | None = fixture
         self._real: LLMPort | None = real
+        self._allow_fallback: bool = allow_fallback
         self.fixture_served: int = 0
         self.real_served: int = 0
 
@@ -136,15 +159,17 @@ class _LLMComposite:
         execution: Any,
         output_port: Any = None,
     ) -> RunMessage:
-        """优先返回 Fixture 响应；Fixture 缺失时回退真实端口。"""
+        """优先返回 Fixture 响应；仅当允许回退且 Fixture 缺失时回退真实端口。"""
         if self._fixture is not None:
             try:
                 result: RunMessage = await self._fixture.complete(context, execution, output_port)
                 self.fixture_served += 1
                 return result
             except FixtureConfigurationError:
-                if self._real is None:
+                if not self._allow_fallback:
                     raise
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("未配置 LLM fixture，且 Playback 模式禁止回退到真实 LLM 端口")
         if self._real is None:
             raise FixtureConfigurationError("未配置 LLM fixture 或真实 LLM 端口")
         self.real_served += 1
@@ -157,25 +182,28 @@ class _LLMComposite:
 
 
 class _ToolComposite:
-    """工具组合端口：优先 Fixture 结果，缺失时回退真实端口。"""
+    """工具组合端口：优先 Fixture 结果；允许回退时缺失再回退真实端口。"""
 
-    def __init__(self, fixture: FixtureToolPort | None, real: ToolPort | None) -> None:
-        """绑定 Fixture 与可选真实端口。"""
+    def __init__(self, fixture: FixtureToolPort | None, real: ToolPort | None, allow_fallback: bool) -> None:
+        """绑定 Fixture、可选真实端口与回退开关。"""
         self._fixture: FixtureToolPort | None = fixture
         self._real: ToolPort | None = real
+        self._allow_fallback: bool = allow_fallback
         self.fixture_served: int = 0
         self.real_served: int = 0
 
     async def execute(self, invocation: Any, execution: Any) -> Any:
-        """优先返回 Fixture 结果；Fixture 缺失时回退真实端口。"""
+        """优先返回 Fixture 结果；仅当允许回退且 Fixture 缺失时回退真实端口。"""
         if self._fixture is not None:
             try:
                 result: Any = await self._fixture.execute(invocation, execution)
                 self.fixture_served += 1
                 return result
             except FixtureConfigurationError:
-                if self._real is None:
+                if not self._allow_fallback:
                     raise
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("未配置工具 fixture，且 Playback 模式禁止回退到真实工具端口")
         if self._real is None:
             raise FixtureConfigurationError("未配置工具 fixture 或真实工具端口")
         self.real_served += 1
@@ -188,25 +216,28 @@ class _ToolComposite:
 
 
 class _ContextComposite:
-    """上下文组合端口：优先冻结 Fixture，缺失时回退真实端口。"""
+    """上下文组合端口：优先冻结 Fixture；允许回退时缺失再回退真实端口。"""
 
-    def __init__(self, fixture: FixtureContextPort | None, real: ContextPort | None) -> None:
-        """绑定 Fixture 与可选真实端口。"""
+    def __init__(self, fixture: FixtureContextPort | None, real: ContextPort | None, allow_fallback: bool) -> None:
+        """绑定 Fixture、可选真实端口与回退开关。"""
         self._fixture: FixtureContextPort | None = fixture
         self._real: ContextPort | None = real
+        self._allow_fallback: bool = allow_fallback
         self.fixture_served: int = 0
         self.real_served: int = 0
 
     async def build(self, request: Any, execution: Any) -> Any:
-        """优先返回冻结上下文；Fixture 缺失时回退真实端口。"""
+        """优先返回冻结上下文；仅当允许回退且 Fixture 缺失时回退真实端口。"""
         if self._fixture is not None:
             try:
                 result: Any = await self._fixture.build(request, execution)
                 self.fixture_served += 1
                 return result
             except FixtureConfigurationError:
-                if self._real is None:
+                if not self._allow_fallback:
                     raise
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("未配置上下文 fixture，且 Playback 模式禁止回退到真实上下文端口")
         if self._real is None:
             raise FixtureConfigurationError("未配置上下文 fixture 或真实上下文端口")
         self.real_served += 1
@@ -234,25 +265,28 @@ class _ContextComposite:
 
 
 class _PolicyComposite:
-    """策略组合端口：优先冻结 Fixture，缺失时回退真实端口。"""
+    """策略组合端口：优先冻结 Fixture；允许回退时缺失再回退真实端口。"""
 
-    def __init__(self, fixture: FixtureRunPolicyPort | None, real: RunPolicyPort | None) -> None:
-        """绑定 Fixture 与可选真实端口。"""
+    def __init__(self, fixture: FixtureRunPolicyPort | None, real: RunPolicyPort | None, allow_fallback: bool) -> None:
+        """绑定 Fixture、可选真实端口与回退开关。"""
         self._fixture: FixtureRunPolicyPort | None = fixture
         self._real: RunPolicyPort | None = real
+        self._allow_fallback: bool = allow_fallback
         self.fixture_served: int = 0
         self.real_served: int = 0
 
     async def resolve(self, request: Any) -> Any:
-        """优先返回冻结策略；Fixture 缺失时回退真实端口。"""
+        """优先返回冻结策略；仅当允许回退且 Fixture 缺失时回退真实端口。"""
         if self._fixture is not None:
             try:
                 result: Any = await self._fixture.resolve(request)
                 self.fixture_served += 1
                 return result
             except FixtureConfigurationError:
-                if self._real is None:
+                if not self._allow_fallback:
                     raise
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("未配置策略 fixture，且 Playback 模式禁止回退到真实策略端口")
         if self._real is None:
             raise FixtureConfigurationError("未配置策略 fixture 或真实策略端口")
         self.real_served += 1
@@ -260,38 +294,43 @@ class _PolicyComposite:
 
 
 class _DelegationComposite:
-    """委派组合端口：优先 Fixture 受理，缺失时回退真实端口。"""
+    """委派组合端口：优先 Fixture 受理；允许回退时缺失再回退真实端口。"""
 
-    def __init__(self, fixture: FixtureDelegationPort | None, real: DelegationPort | None) -> None:
-        """绑定 Fixture 与可选真实端口。"""
+    def __init__(self, fixture: FixtureDelegationPort | None, real: DelegationPort | None, allow_fallback: bool) -> None:
+        """绑定 Fixture、可选真实端口与回退开关。"""
         self._fixture: FixtureDelegationPort | None = fixture
         self._real: DelegationPort | None = real
+        self._allow_fallback: bool = allow_fallback
         self.fixture_served: int = 0
         self.real_served: int = 0
 
     async def submit(self, request: Any) -> Any:
-        """优先受理 Fixture 子执行；Fixture 缺失时回退真实端口。"""
+        """优先受理 Fixture 子执行；仅当允许回退且 Fixture 缺失时回退真实端口。"""
         if self._fixture is not None:
             try:
                 result: Any = await self._fixture.submit(request)
                 self.fixture_served += 1
                 return result
             except FixtureConfigurationError:
-                if self._real is None:
+                if not self._allow_fallback:
                     raise
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("未配置委派 fixture，且 Playback 模式禁止回退到真实委派端口")
         if self._real is None:
             raise FixtureConfigurationError("未配置委派 fixture 或真实委派端口")
         self.real_served += 1
         return await self._real.submit(request)
 
     async def result(self, child_run_id: str) -> Any:
-        """优先查询 Fixture 子执行结果；Fixture 缺失时回退真实端口。"""
+        """优先查询 Fixture 子执行结果；仅当允许回退且 Fixture 缺失时回退真实端口。"""
         if self._fixture is not None:
             try:
                 return await self._fixture.result(child_run_id)
             except FixtureConfigurationError:
-                if self._real is None:
+                if not self._allow_fallback:
                     raise
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("未配置委派 fixture，且 Playback 模式禁止回退到真实委派端口")
         if self._real is None:
             raise FixtureConfigurationError("未配置委派 fixture 或真实委派端口")
         return await self._real.result(child_run_id)
@@ -303,42 +342,47 @@ class _DelegationComposite:
 
 
 class _ApprovalRepositoryComposite:
-    """审批仓储组合端口：优先 Fixture 记录，缺失时回退真实仓储。"""
+    """审批仓储组合端口：优先 Fixture 记录；允许回退时缺失再回退真实仓储。"""
 
-    def __init__(self, fixture: FixtureApprovalRepository | None, real: ApprovalRepository | None) -> None:
-        """绑定 Fixture 与可选真实仓储。"""
+    def __init__(self, fixture: FixtureApprovalRepository | None, real: ApprovalRepository | None, allow_fallback: bool) -> None:
+        """绑定 Fixture、可选真实仓储与回退开关。"""
         self._fixture: FixtureApprovalRepository | None = fixture
         self._real: ApprovalRepository | None = real
+        self._allow_fallback: bool = allow_fallback
         self.fixture_served: int = 0
         self.real_served: int = 0
 
     async def create(self, record: Any) -> None:
-        """优先写入 Fixture 记录；Fixture 缺失时回退真实仓储。"""
+        """优先写入 Fixture 记录；仅当允许回退且 Fixture 缺失时回退真实仓储。"""
         if self._fixture is not None:
             try:
                 await self._fixture.create(record)
                 self.fixture_served += 1
                 return
             except FixtureConfigurationError:
-                if self._real is None:
+                if not self._allow_fallback:
                     raise
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("未配置审批 fixture，且 Playback 模式禁止回退到真实审批仓储")
         if self._real is None:
             raise FixtureConfigurationError("未配置审批 fixture 或真实审批仓储")
         self.real_served += 1
         await self._real.create(record)
 
     async def load(self, approval_id: str) -> Any:
-        """优先读取 Fixture 记录；未命中且配置了真实仓储时回退。"""
+        """优先读取 Fixture 记录；未命中且允许回退时才查询真实仓储。"""
         if self._fixture is not None:
             record: Any = await self._fixture.load(approval_id)
             if record is not None:
                 return record
+        if not self._allow_fallback:
+            return None
         if self._real is None:
             return None
         return await self._real.load(approval_id)
 
     async def consume(self, approval_id: str) -> Any:
-        """优先消费 Fixture 记录；Fixture 缺失时回退真实仓储。"""
+        """优先消费 Fixture 记录；仅当允许回退且 Fixture 缺失时回退真实仓储。"""
         if self._fixture is not None:
             try:
                 record: Any = await self._fixture.consume(approval_id)
@@ -346,8 +390,10 @@ class _ApprovalRepositoryComposite:
                     self.fixture_served += 1
                 return record
             except FixtureConfigurationError:
-                if self._real is None:
+                if not self._allow_fallback:
                     raise
+        if not self._allow_fallback:
+            return None
         if self._real is None:
             return None
         self.real_served += 1
@@ -386,13 +432,28 @@ class EvalEnvironment:
     def __init__(
         self,
         case: EvalCase,
-        mode: FixtureMatchMode | None = None,
         dependencies: EvalDependencies | None = None,
     ) -> None:
-        """组装内存仓储、固定计数器、Fixture 端口与 RuntimeEngine。"""
+        """组装内存仓储、固定计数器、Fixture 端口与 RuntimeEngine。
+
+        匹配模式与回退策略完全由 ``case.execution_mode`` 决定，不接受外部覆盖：
+        Playback 恒为 STRICT 且禁止注入真实依赖；Re-execution 为 NORMAL 且允许
+        在 Fixture 缺失时回退到注入的真实端口。
+        """
         self.case: EvalCase = case
-        self.mode: FixtureMatchMode = mode or _match_mode(case.execution_mode)
+        self.mode: FixtureMatchMode = _match_mode(case.execution_mode)
         deps: EvalDependencies = dependencies or EvalDependencies()
+
+        # Playback 禁止注入任何真实依赖：未匹配的调用必须判定为配置失败，
+        # 而非静默回退到生产实现。
+        if case.execution_mode is ExecutionMode.PLAYBACK and deps.any_real():
+            raise FixtureConfigurationError(
+                "Playback 模式禁止注入真实依赖：所有调用必须由 Fixture 提供，"
+                "未匹配调用应判定为配置失败而非回退真实实现"
+            )
+
+        # 仅 Re-execution 允许回退；Playback 下所有组合端口强制拒绝回退。
+        allow_fallback: bool = self.mode is FixtureMatchMode.NORMAL
 
         # 每个环境独立持有内存仓储，互不共享运行事实或检查点。
         self.run_repository: RunRepository = InMemoryRunRepository()
@@ -410,16 +471,16 @@ class EvalEnvironment:
             FixtureDelegationPort(case.delegation_fixtures, self.mode) if case.delegation_fixtures else None
         )
 
-        # 组合端口：Fixture 优先，未匹配再回退真实依赖（缺省则拒绝）。
-        self.llm_port: _LLMComposite = _LLMComposite(self.scripted_llm, deps.llm_port)
-        self.tool_port: _ToolComposite = _ToolComposite(self.fixture_tool, deps.tool_port)
-        self.context_port: _ContextComposite = _ContextComposite(self.fixture_context, deps.context_port)
-        self.policy_port: _PolicyComposite = _PolicyComposite(self.policy_fixture, deps.policy_port)
+        # 组合端口：Fixture 优先，仅当允许回退且 Fixture 缺失时回退真实依赖。
+        self.llm_port: _LLMComposite = _LLMComposite(self.scripted_llm, deps.llm_port, allow_fallback)
+        self.tool_port: _ToolComposite = _ToolComposite(self.fixture_tool, deps.tool_port, allow_fallback)
+        self.context_port: _ContextComposite = _ContextComposite(self.fixture_context, deps.context_port, allow_fallback)
+        self.policy_port: _PolicyComposite = _PolicyComposite(self.policy_fixture, deps.policy_port, allow_fallback)
         self.approval_repository: _ApprovalRepositoryComposite = _ApprovalRepositoryComposite(
-            self.fixture_approval, deps.approval_repository
+            self.fixture_approval, deps.approval_repository, allow_fallback
         )
         self.delegation_port: _DelegationComposite | None = (
-            _DelegationComposite(self.fixture_delegation, deps.delegation_port)
+            _DelegationComposite(self.fixture_delegation, deps.delegation_port, allow_fallback)
             if (self.fixture_delegation is not None or deps.delegation_port is not None)
             else None
         )

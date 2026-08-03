@@ -7,8 +7,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from dotclaw.eval.environment import EvalDependencies, EvalEnvironment
 from dotclaw.eval.fixtures import FixtureConfigurationError
-from dotclaw.eval.models import FixtureMatchMode
-from dotclaw.runtime.application.dto import ToolResultStatus
+from dotclaw.eval.models import ExecutionMode, FixtureMatchMode
+from dotclaw.runtime.application.dto import ToolResult, ToolResultStatus
+from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind
 from dotclaw.runtime.domain.state import Ended, RunOutcome
 
 from helpers import (
@@ -103,6 +104,37 @@ class _FailApproval(_FailIfCalled):
         raise AssertionError("生产审批被调用")
 
 
+class _RecordLLM(_FailLLM):
+    """记录调用并返回合法最终响应的真实 LLM 替身（用于正向回退验证）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: int = 0
+
+    async def complete(self, context, execution, output_port=None):
+        self.calls += 1
+        return RunMessage(
+            message_id="real-llm",
+            sequence=1,
+            kind=RunMessageKind.FINAL_RESPONSE,
+            role=MessageRole.ASSISTANT,
+            content="real answer",
+            tool_calls=(),
+        )
+
+
+class _RecordTool(_FailTool):
+    """记录调用并返回合法结果的真实工具替身（用于正向回退验证）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: int = 0
+
+    async def execute(self, invocation, execution):
+        self.calls += 1
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="real tool result")
+
+
 # --------------------------------------------------------------------------- #
 # 验收 #4：固定 Policy / Context 驱动多轮 LLM
 # --------------------------------------------------------------------------- #
@@ -138,8 +170,12 @@ async def test_multi_round_llm_driven_by_fixtures() -> None:
 
 
 async def test_no_production_fallback() -> None:
-    """完整 Fixture 覆盖下，注入的“被调用即失败”替身不应被触及。"""
-    case = build_case(case_id="isolation")
+    """Re-execution 下完整 Fixture 覆盖时，注入的“被调用即失败”替身不应被触及。
+
+    注意：Playback 已禁止注入真实依赖（见 test_playback_rejects_real_dependencies），
+    因此该“fixture 全命中则不回退”的反向验证只在允许回退的 Re-execution 下进行。
+    """
+    case = build_case(case_id="isolation", execution_mode=ExecutionMode.REEXECUTION)
     deps = EvalDependencies(
         llm_port=_FailLLM(),
         tool_port=_FailTool(),
@@ -164,6 +200,85 @@ async def test_no_production_fallback() -> None:
     ]
     for stub in stubs:
         assert stub.core_calls == 0, f"真实端口被回退调用：{stub!r}"
+
+
+# --------------------------------------------------------------------------- #
+# 隔离边界反向测试：Playback 禁止回退真实依赖（用户指出的缺口）
+# --------------------------------------------------------------------------- #
+
+
+async def test_playback_rejects_real_dependencies() -> None:
+    """Playback 模式下即便注入了真实依赖，构造时也必须明确拒绝。"""
+    case = build_case(case_id="playback-forbid", execution_mode=ExecutionMode.PLAYBACK)
+    deps = EvalDependencies(llm_port=_FailLLM(), tool_port=_FailTool())
+    try:
+        EvalEnvironment(case, dependencies=deps)
+        raise AssertionError("Playback 不应接受真实依赖")
+    except FixtureConfigurationError:
+        pass
+
+
+async def test_playback_missing_fixture_fails_do_not_silent_succeed() -> None:
+    """Playback 下 Fixture 缺失/不匹配必须明确失败，而非静默成功。"""
+    case = build_case(
+        case_id="playback-missing-tool",
+        execution_mode=ExecutionMode.PLAYBACK,
+        llm_fixture=make_llm_fixture("llm-1", (
+            llm_response("llm-resp-1", content="", tool_calls=(tool_call("c1", "search", {"q": "x"}),)),
+        )),
+        tool_fixtures=(),  # 没有对应的工具 fixture
+    )
+    env = EvalEnvironment(case)
+    outcome = await env.run()
+    # 未匹配的工具调用必须导致失败，绝不能伪装成完成
+    assert isinstance(outcome.state.mode, Ended)
+    assert outcome.state.mode.outcome is RunOutcome.FAILED
+
+
+async def test_playback_composite_never_falls_back_to_real() -> None:
+    """即使组合端口装配了真实端口，Playback（禁止回退）也必须拒绝而非调用真实端口。"""
+    from dotclaw.eval.environment import _LLMComposite
+    from dotclaw.eval.fixtures import ScriptedLLMPort
+
+    real = _RecordLLM()
+    fixture = ScriptedLLMPort(
+        make_llm_fixture("llm-1", (llm_response("r1", content="a"),)),
+        FixtureMatchMode.STRICT,
+    )
+    composite = _LLMComposite(fixture, real, allow_fallback=False)
+    await composite.complete(None, None)  # 消费唯一 fixture
+    try:
+        await composite.complete(None, None)  # 耗尽后应拒绝
+        raise AssertionError("禁止回退的组合端口不应调用真实端口")
+    except FixtureConfigurationError:
+        pass
+    assert real.calls == 0, "真实 LLM 端口被错误回退调用"
+
+
+async def test_reexecution_falls_back_to_real_port() -> None:
+    """Re-execution 下 Fixture 缺失时允许回退到注入的真实端口（设计允许的行为）。"""
+    real_llm = _RecordLLM()
+    real_tool = _RecordTool()
+    case = build_case(
+        case_id="reexec-fallback",
+        execution_mode=ExecutionMode.REEXECUTION,
+        context_fixtures=(context_fixture("ctx-1"), context_fixture("ctx-2")),
+        llm_fixture=make_llm_fixture("llm-1", (
+            llm_response("llm-resp-1", content="", tool_calls=(tool_call("c1", "search", {"q": "x"}),)),
+        )),
+        tool_fixtures=(),
+    )
+    deps = EvalDependencies(llm_port=real_llm, tool_port=real_tool)
+    env = EvalEnvironment(case, dependencies=deps)
+    outcome = await env.run()
+
+    assert isinstance(outcome.state.mode, Ended)
+    assert outcome.state.mode.outcome is RunOutcome.COMPLETED
+    # 缺失的工具 fixture 回退到真实工具端口，LLM 第二轮也回退到真实 LLM 端口
+    assert env.tool_port.real_served == 1
+    assert env.llm_port.real_served == 1
+    assert env.tool_port.fixture_served == 0
+    env.verify_fixtures_consumed()
 
 
 # --------------------------------------------------------------------------- #
