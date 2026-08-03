@@ -10,7 +10,9 @@ from typing import Protocol
 import pytest
 
 from dotclaw.runtime.adapters import CheckpointRepositoryAdapter, InMemoryRunRepository, RunRepositoryAdapter
+from dotclaw.runtime.adapters.run_repository import _run_event_from_dict
 from dotclaw.runtime.application.ports import RunRepository
+from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.context import (
     ContextContributionKind,
     ContextOwner,
@@ -257,3 +259,337 @@ async def test_file_repository_uses_atomic_replacement_for_v4_payload(tmp_path: 
         (RunMessage("user-1", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "第二条"),),
     )
     assert not tuple(tmp_path.rglob("*.tmp"))
+
+
+# ---------------------------------------------------------------------------
+# PR1：事件反序列化契约（7.1）
+# ---------------------------------------------------------------------------
+
+def _valid_event_dict() -> JSONMap:
+    """构造一个字段齐全的合法事件字典。"""
+    return {
+        "run_id": "run-1",
+        "sequence": 2,
+        "event_type": RunEventType.LLM_COMPLETED.value,
+        "occurred_at": "2026-07-20T00:00:00+00:00",
+        "message_ids": ["m-1", "m-2"],
+        "summary": "模型完成",
+        "data": {"call_index": 1},
+    }
+
+
+def test_event_round_trips_through_to_dict() -> None:
+    """RunEvent.to_dict() 后可由 _run_event_from_dict() 正确恢复。"""
+    event: RunEvent = RunEvent(
+        run_id="run-1",
+        sequence=3,
+        event_type=RunEventType.TOOL_STARTED,
+        occurred_at="2026-07-20T00:00:00+00:00",
+        message_ids=("m-1",),
+        summary="工具开始",
+        data={"call_id": "c-1"},
+    )
+    assert _run_event_from_dict(event.to_dict()) == event
+
+
+def test_event_uses_defaults_when_optional_fields_absent() -> None:
+    """可选字段缺失时使用默认值。"""
+    data: JSONMap = {
+        "run_id": "run-1",
+        "sequence": 1,
+        "event_type": RunEventType.RUN_STARTED.value,
+        "occurred_at": "2026-07-20T00:00:00+00:00",
+    }
+    event: RunEvent = _run_event_from_dict(data)
+    assert event.message_ids == ()
+    assert event.summary == ""
+    assert event.data == {}
+
+
+def test_event_rejects_invalid_event_type() -> None:
+    """非法 event_type 必须失败。"""
+    data: JSONMap = _valid_event_dict()
+    data["event_type"] = "not_a_type"
+    with pytest.raises(ValueError):
+        _run_event_from_dict(data)
+
+
+def test_event_rejects_zero_sequence() -> None:
+    """sequence=0 必须失败。"""
+    data: JSONMap = _valid_event_dict()
+    data["sequence"] = 0
+    with pytest.raises(ValueError):
+        _run_event_from_dict(data)
+
+
+def test_event_rejects_bool_sequence() -> None:
+    """布尔值不视为整数，sequence 为 True 必须失败。"""
+    data: JSONMap = _valid_event_dict()
+    data["sequence"] = True
+    with pytest.raises(ValueError):
+        _run_event_from_dict(data)
+
+
+def test_event_rejects_empty_run_id() -> None:
+    """空 run_id 必须失败。"""
+    data: JSONMap = _valid_event_dict()
+    data["run_id"] = ""
+    with pytest.raises(ValueError):
+        _run_event_from_dict(data)
+
+
+def test_event_rejects_non_string_occurred_at() -> None:
+    """非字符串 occurred_at 必须失败。"""
+    data: JSONMap = _valid_event_dict()
+    data["occurred_at"] = 123
+    with pytest.raises(ValueError):
+        _run_event_from_dict(data)
+
+
+def test_event_rejects_empty_occurred_at() -> None:
+    """空字符串 occurred_at 必须失败。"""
+    data: JSONMap = _valid_event_dict()
+    data["occurred_at"] = ""
+    with pytest.raises(ValueError):
+        _run_event_from_dict(data)
+
+
+def test_event_rejects_non_string_message_ids_elements() -> None:
+    """message_ids 含非字符串元素必须失败。"""
+    data: JSONMap = _valid_event_dict()
+    data["message_ids"] = ["m-1", 5]
+    with pytest.raises(ValueError):
+        _run_event_from_dict(data)
+
+
+def test_event_rejects_non_object_data() -> None:
+    """data 不是对象必须失败。"""
+    data: JSONMap = _valid_event_dict()
+    data["data"] = "not-an-object"
+    with pytest.raises(ValueError):
+        _run_event_from_dict(data)
+
+
+def test_event_rejects_non_string_summary_when_present() -> None:
+    """summary 已出现但非字符串必须失败。"""
+    data: JSONMap = _valid_event_dict()
+    data["summary"] = 123
+    with pytest.raises(ValueError):
+        _run_event_from_dict(data)
+
+
+def test_historical_approval_event_without_data_is_readable() -> None:
+    """历史审批事件即使缺少 data 字段仍可读取（向后兼容）。"""
+    data: JSONMap = {
+        "run_id": "run-1",
+        "sequence": 1,
+        "event_type": RunEventType.APPROVAL_RESOLVED.value,
+        "occurred_at": "2026-07-20T00:00:00+00:00",
+    }
+    event: RunEvent = _run_event_from_dict(data)
+    assert event.event_type is RunEventType.APPROVAL_RESOLVED
+    assert event.data == {}
+
+
+# ---------------------------------------------------------------------------
+# PR1：文件仓储 load_events 契约（7.2）
+# ---------------------------------------------------------------------------
+
+def _write_events(path: Path, lines: list[str]) -> None:
+    """原子写入 events.jsonl 测试内容（末尾统一换行）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _event_line(run_id: str, sequence: int, event_type: RunEventType = RunEventType.RUN_STARTED) -> str:
+    """构造一条合法事件行。"""
+    return json.dumps(
+        {
+            "run_id": run_id,
+            "sequence": sequence,
+            "event_type": event_type.value,
+            "occurred_at": "2026-07-20T00:00:00+00:00",
+            "message_ids": [],
+            "summary": "",
+            "data": {},
+        },
+        ensure_ascii=False,
+    )
+
+
+def _events_path(tmp_path: Path, session_id: str = "session-1", run_id: str = "run-1") -> Path:
+    """返回 events.jsonl 的测试路径。"""
+    return tmp_path / session_id / "agent_runs" / run_id / "events.jsonl"
+
+
+async def test_file_load_events_missing_file_returns_empty(tmp_path: Path) -> None:
+    """events.jsonl 不存在时返回空元组。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    assert await repository.load_events("session-1", "run-1") == ()
+
+
+async def test_file_load_events_empty_file_returns_empty(tmp_path: Path) -> None:
+    """空文件返回空元组。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [])
+    assert await repository.load_events("session-1", "run-1") == ()
+
+
+async def test_file_load_events_single_event(tmp_path: Path) -> None:
+    """单个事件正常读取。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("run-1", 1)])
+    events = await repository.load_events("session-1", "run-1")
+    assert len(events) == 1
+    assert events[0].sequence == 1
+    assert events[0].run_id == "run-1"
+
+
+async def test_file_load_events_multiple_events_in_order(tmp_path: Path) -> None:
+    """多个事件按序读取。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [
+        _event_line("run-1", 1),
+        _event_line("run-1", 2),
+        _event_line("run-1", 3),
+    ])
+    events = await repository.load_events("session-1", "run-1")
+    assert [event.sequence for event in events] == [1, 2, 3]
+
+
+async def test_file_load_events_rejects_corrupted_json(tmp_path: Path) -> None:
+    """JSON 损坏时失败。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("run-1", 1), "{not json"])
+    with pytest.raises(ValueError, match="events.jsonl"):
+        await repository.load_events("session-1", "run-1")
+
+
+async def test_file_load_events_rejects_non_object_root(tmp_path: Path) -> None:
+    """根节点不是对象时失败。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), ["[1, 2, 3]"])
+    with pytest.raises(ValueError, match="events.jsonl"):
+        await repository.load_events("session-1", "run-1")
+
+
+async def test_file_load_events_rejects_sequence_not_starting_at_one(tmp_path: Path) -> None:
+    """sequence 不从 1 开始时失败。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("run-1", 2)])
+    with pytest.raises(ValueError, match="events.jsonl"):
+        await repository.load_events("session-1", "run-1")
+
+
+async def test_file_load_events_rejects_sequence_gap(tmp_path: Path) -> None:
+    """sequence 跳号时失败。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("run-1", 1), _event_line("run-1", 3)])
+    with pytest.raises(ValueError, match="events.jsonl"):
+        await repository.load_events("session-1", "run-1")
+
+
+async def test_file_load_events_rejects_duplicate_sequence(tmp_path: Path) -> None:
+    """sequence 重复时失败。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("run-1", 1), _event_line("run-1", 1)])
+    with pytest.raises(ValueError, match="events.jsonl"):
+        await repository.load_events("session-1", "run-1")
+
+
+async def test_file_load_events_rejects_mismatched_run_id(tmp_path: Path) -> None:
+    """event.run_id 不匹配时失败。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("other-run", 1)])
+    with pytest.raises(ValueError, match="events.jsonl"):
+        await repository.load_events("session-1", "run-1")
+
+
+async def test_file_load_events_rejects_blank_line_in_middle(tmp_path: Path) -> None:
+    """中间空白行视为文件损坏。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("run-1", 1), "", _event_line("run-1", 2)])
+    with pytest.raises(ValueError, match="events.jsonl"):
+        await repository.load_events("session-1", "run-1")
+
+
+async def test_file_load_events_error_message_includes_line_number(tmp_path: Path) -> None:
+    """错误信息包含事件行号。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("run-1", 1), _event_line("run-1", 5)])
+    with pytest.raises(ValueError, match="第 2 行"):
+        await repository.load_events("session-1", "run-1")
+
+
+async def test_file_load_events_rejects_corrupted_last_line(tmp_path: Path) -> None:
+    """最后一行 JSON 损坏时失败，不静默返回此前事件。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("run-1", 1), "broken"])
+    with pytest.raises(ValueError, match="events.jsonl"):
+        await repository.load_events("session-1", "run-1")
+
+
+async def test_file_load_events_running_read_returns_contiguous_prefix(tmp_path: Path) -> None:
+    """运行中读取返回已持久化且从 1 开始连续的事件前缀（不要求跨文件快照）。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    _write_events(_events_path(tmp_path), [_event_line("run-1", 1), _event_line("run-1", 2)])
+    events = await repository.load_events("session-1", "run-1")
+    assert [event.sequence for event in events] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# PR1：内存仓储 load_events 契约（7.3）
+# ---------------------------------------------------------------------------
+
+async def test_in_memory_load_events_empty_by_default() -> None:
+    """未写入事件时返回空元组。"""
+    repository: InMemoryRunRepository = InMemoryRunRepository()
+    assert await repository.load_events("session-1", "run-1") == ()
+
+
+async def test_in_memory_load_events_returns_appended_events() -> None:
+    """追加后可以读取。"""
+    repository: InMemoryRunRepository = InMemoryRunRepository()
+    run: AgentRun = _run()
+    message: RunMessage = RunMessage("m-1", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "你好")
+    await repository.create_run(run)
+    await repository.save_messages(run.session_id, run.run_id, (message,))
+    event_one: RunEvent = RunEvent(run.run_id, 1, RunEventType.RUN_STARTED, "2026-07-20T00:00:00+00:00", (message.message_id,))
+    event_two: RunEvent = RunEvent(run.run_id, 2, RunEventType.LLM_STARTED, "2026-07-20T00:00:00+00:00", ())
+    await repository.append_event(run.session_id, event_one)
+    await repository.append_event(run.session_id, event_two)
+    assert await repository.load_events(run.session_id, run.run_id) == (event_one, event_two)
+
+
+async def test_in_memory_load_events_preserves_append_order() -> None:
+    """多个事件保持追加顺序。"""
+    repository: InMemoryRunRepository = InMemoryRunRepository()
+    run: AgentRun = _run()
+    message: RunMessage = RunMessage("m-1", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "你好")
+    await repository.create_run(run)
+    await repository.save_messages(run.session_id, run.run_id, (message,))
+    events: list[RunEvent] = []
+    for index in range(1, 4):
+        event: RunEvent = RunEvent(run.run_id, index, RunEventType.LLM_STARTED, "2026-07-20T00:00:00+00:00", ())
+        events.append(event)
+        await repository.append_event(run.session_id, event)
+    assert await repository.load_events(run.session_id, run.run_id) == tuple(events)
+
+
+async def test_in_memory_load_events_isolates_runs() -> None:
+    """不同 Run 的事件隔离。"""
+    repository: InMemoryRunRepository = InMemoryRunRepository()
+    run_a: AgentRun = replace(_run(), run_id="run-a", session_id="session-a")
+    run_b: AgentRun = replace(_run(), run_id="run-b", session_id="session-b")
+    message_a: RunMessage = RunMessage("m-a", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "a")
+    message_b: RunMessage = RunMessage("m-b", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "b")
+    await repository.create_run(run_a)
+    await repository.create_run(run_b)
+    await repository.save_messages("session-a", "run-a", (message_a,))
+    await repository.save_messages("session-b", "run-b", (message_b,))
+    event_a: RunEvent = RunEvent("run-a", 1, RunEventType.RUN_STARTED, "2026-07-20T00:00:00+00:00", (message_a.message_id,))
+    event_b: RunEvent = RunEvent("run-b", 1, RunEventType.RUN_STARTED, "2026-07-20T00:00:00+00:00", (message_b.message_id,))
+    await repository.append_event("session-a", event_a)
+    await repository.append_event("session-b", event_b)
+    assert await repository.load_events("session-a", "run-a") == (event_a,)
+    assert await repository.load_events("session-b", "run-b") == (event_b,)

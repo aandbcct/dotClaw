@@ -265,6 +265,10 @@ class RuntimeEngine:
             RunEventType.APPROVAL_RESOLVED,
             (),
             "审批已通过" if approved else "审批已拒绝",
+            {
+                "approval_id": approval_id,
+                "approved": approved,
+            },
         )
         self._cancellation_service.register(run.run_id, execution.cancellation)
         try:
@@ -832,7 +836,17 @@ class RuntimeEngine:
             latest_checkpoint_id=checkpoint.checkpoint_id,
         )
         await self._run_repository.save_run(waiting_run)
-        event_number = await self._event(run, event_number, RunEventType.WAITING_APPROVAL, (messages[-1].message_id,))
+        event_number = await self._event(
+            run,
+            event_number,
+            RunEventType.WAITING_APPROVAL,
+            (messages[-1].message_id,),
+            "等待工具审批",
+            {
+                "approval_id": record.approval_id,
+                "call_id": tool_call.call_id,
+            },
+        )
         return RunResult(run.run_id, suspend_transition.state, approval_id=record.approval_id)
 
     async def _invoke_llm_action(

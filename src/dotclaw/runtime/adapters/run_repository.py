@@ -153,6 +153,52 @@ class RunRepositoryAdapter:
         """在消息已落盘后追加有序事件。"""
         await asyncio.to_thread(self._append_event_sync, session_id, event)
 
+    async def load_events(self, session_id: str, run_id: str) -> tuple[RunEvent, ...]:
+        """读取按 sequence 连续排列的运行事件。"""
+        return await asyncio.to_thread(self._load_events_sync, session_id, run_id)
+
+    def _load_events_sync(self, session_id: str, run_id: str) -> tuple[RunEvent, ...]:
+        """严格读取 events.jsonl，独立校验 run_id 与连续 sequence。
+
+        文件不存在或内容为空返回空元组；中间空白行或任何无法解析的行
+        （含最后一行）视为损坏并抛出 ``ValueError``，错误信息包含文件名与行号。
+        不保证与 run.json / messages.json / checkpoint.json 构成跨文件事务快照。
+        """
+        path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.EVENTS.value)
+        if not path.is_file():
+            return ()
+        raw_text: str = path.read_text(encoding="utf-8")
+        # 兼容拆分：末尾换行不产生空串，但保留中间空白行；
+        # 真正的空文件或仅含空白/换行的文件直接返回空元组。
+        raw_lines: list[str] = raw_text.splitlines()
+        if not raw_lines or all(line.strip() == "" for line in raw_lines):
+            return ()
+        events: list[RunEvent] = []
+        expected_sequence: int = 1
+        for line_index, raw_line in enumerate(raw_lines, start=1):
+            stripped_line: str = raw_line.strip()
+            if stripped_line == "":
+                raise ValueError(f"events.jsonl 第 {line_index} 行解析失败：存在空白行（文件损坏）")
+            try:
+                decoded_value: JSONValue = json.loads(stripped_line)
+            except json.JSONDecodeError as decode_error:
+                raise ValueError(f"events.jsonl 第 {line_index} 行解析失败：{decode_error}")
+            if not isinstance(decoded_value, dict):
+                raise ValueError(f"events.jsonl 第 {line_index} 行解析失败：根节点必须是对象")
+            event_data: JSONMap = decoded_value
+            event: RunEvent = _run_event_from_dict(event_data)
+            if event.run_id != run_id:
+                raise ValueError(
+                    f"events.jsonl 第 {line_index} 行解析失败：事件 run_id 必须为 {run_id}，实际为 {event.run_id}"
+                )
+            if event.sequence != expected_sequence:
+                raise ValueError(
+                    f"events.jsonl 第 {line_index} 行解析失败：事件序号必须为 {expected_sequence}，实际为 {event.sequence}"
+                )
+            events.append(event)
+            expected_sequence += 1
+        return tuple(events)
+
     async def commit_success(
         self,
         run: AgentRun,
@@ -733,19 +779,66 @@ def _success_commit_intent_from_dict(data: JSONMap) -> SuccessCommitIntent:
 
 
 def _run_event_from_dict(data: JSONMap) -> RunEvent:
-    """将 events.jsonl 或事务意图中的审计事件反序列化为领域事件。"""
+    """将 events.jsonl 或事务意图中的审计事件严格反序列化为领域事件。
+
+    必填字段缺失或非法、或可选字段已出现但类型错误时一律抛出 ``ValueError``，
+    不在本函数中静默降级或过滤，损坏记录必须显式失败。
+    """
+    raw_run_id: JSONValue | None = data.get("run_id")
+    if not isinstance(raw_run_id, str) or raw_run_id == "":
+        raise ValueError("事件 run_id 必须是非空字符串")
+
+    raw_sequence: JSONValue | None = data.get("sequence")
+    if not isinstance(raw_sequence, int) or isinstance(raw_sequence, bool) or raw_sequence <= 0:
+        raise ValueError("事件 sequence 必须是大于 0 的整数（布尔值不视为整数）")
+
+    raw_event_type: JSONValue | None = data.get("event_type")
+    if not isinstance(raw_event_type, str):
+        raise ValueError("事件 event_type 必须是字符串")
+    try:
+        event_type: RunEventType = RunEventType(raw_event_type)
+    except ValueError:
+        raise ValueError(f"事件 event_type 非法：{raw_event_type}")
+
+    raw_occurred_at: JSONValue | None = data.get("occurred_at")
+    if not isinstance(raw_occurred_at, str) or raw_occurred_at == "":
+        raise ValueError("事件 occurred_at 必须是非空字符串")
+
     raw_message_ids: JSONValue | None = data.get("message_ids")
-    message_ids: tuple[str, ...] = tuple(
-        value for value in raw_message_ids if isinstance(value, str)
-    ) if isinstance(raw_message_ids, list) else ()
+    if raw_message_ids is None:
+        message_ids: tuple[str, ...] = ()
+    elif not isinstance(raw_message_ids, list):
+        raise ValueError("事件 message_ids 必须是字符串数组")
+    else:
+        for element in raw_message_ids:
+            if not isinstance(element, str):
+                raise ValueError("事件 message_ids 的元素必须是字符串")
+        message_ids = tuple(raw_message_ids)
+
+    raw_summary: JSONValue | None = data.get("summary")
+    if raw_summary is None:
+        summary: str = ""
+    elif not isinstance(raw_summary, str):
+        raise ValueError("事件 summary 必须是字符串")
+    else:
+        summary = raw_summary
+
+    raw_event_data: JSONValue | None = data.get("data")
+    if raw_event_data is None:
+        event_data: JSONMap = {}
+    elif not isinstance(raw_event_data, dict):
+        raise ValueError("事件 data 必须是 JSON 对象")
+    else:
+        event_data = raw_event_data
+
     return RunEvent(
-        run_id=get_string(data, "run_id"),
-        sequence=get_integer(data, "sequence"),
-        event_type=RunEventType(get_string(data, "event_type")),
-        occurred_at=get_string(data, "occurred_at"),
+        run_id=raw_run_id,
+        sequence=raw_sequence,
+        event_type=event_type,
+        occurred_at=raw_occurred_at,
         message_ids=message_ids,
-        summary=get_string(data, "summary"),
-        data=_json_map_or_empty(data.get("data")),
+        summary=summary,
+        data=event_data,
     )
 
 
