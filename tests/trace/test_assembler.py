@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -191,6 +192,61 @@ def test_no_events_returns_partial_with_only_run_span():
     assert trace.source.is_partial is True
     assert [s.kind for s in trace.spans] == [SpanKind.RUN]
     assert trace.issues == ()
+    # 无事实可读时来源 sequence 应为 None 而非 0，避免与“读到第 0 条”混淆。
+    assert trace.source.source_event_sequence is None
+    assert trace.source.source_message_sequence is None
+    assert trace.source.source_context_version_count == 0
+
+
+def test_source_metadata_records_read_snapshot():
+    """来源元数据必须说明读取快照：状态、最大 sequence、上下文数量、组装时间。"""
+    run = make_run()
+    events = (
+        make_event("run-1", 1, RunEventType.RUN_STARTED, message_ids=("msg-input",)),
+        make_event("run-1", 2, RunEventType.LLM_STARTED, data={"call_index": 1, "model_id": "model-1", "context_version": 1}),
+        make_event("run-1", 3, RunEventType.LLM_COMPLETED, message_ids=("msg-llm",)),
+        make_event("run-1", 4, RunEventType.RUN_COMPLETED, message_ids=("msg-llm",)),
+    )
+    messages = (
+        make_message("msg-input", 1, RunMessageKind.USER_INPUT, role=MessageRole.USER),
+        make_message("msg-llm", 2, RunMessageKind.LLM_RESPONSE),
+    )
+    versions = (make_context_version(1), make_context_version(2))
+    trace = assemble_trace(run, events, messages, versions)
+    source = trace.source
+    assert source.run_id == "run-1"
+    assert source.session_id == "sess-1"
+    assert source.source_run_status == "ended:completed"
+    assert source.source_event_sequence == 4
+    assert source.source_message_sequence == 2
+    assert source.source_context_version_count == 2
+    # assembled_at 必须是可解析的 ISO 时间戳。
+    assert datetime.fromisoformat(source.assembled_at) is not None
+
+
+def test_source_run_status_tracks_non_terminal_run():
+    run = make_run(ended=False)
+    events = (make_event("run-1", 1, RunEventType.RUN_STARTED, message_ids=("msg-input",)),)
+    messages = (make_message("msg-input", 1, RunMessageKind.USER_INPUT, role=MessageRole.USER),)
+    trace = assemble_trace(run, events, messages, (make_context_version(1),))
+    assert trace.source.source_run_status == "running:calling_llm"
+    assert trace.source.source_event_sequence == 1
+    assert trace.source.is_partial is True
+
+
+def test_record_hash_excludes_assembled_at():
+    """同一份权威事实在不同时刻重建：assembled_at 可变，record_hash 必须不变。"""
+    run = make_run()
+    events = (
+        make_event("run-1", 1, RunEventType.RUN_STARTED, message_ids=("msg-input",)),
+        make_event("run-1", 2, RunEventType.RUN_COMPLETED, message_ids=("msg-input",)),
+    )
+    messages = (make_message("msg-input", 1, RunMessageKind.USER_INPUT, role=MessageRole.USER),)
+    versions = (make_context_version(1),)  # 同一份权威事实，避免 created_at 差异干扰
+    first = assemble_trace(run, events, messages, versions)
+    second = assemble_trace(run, events, messages, versions)
+    assert first.source.record_hash == second.source.record_hash
+    assert first.source.assembled_at not in first.source.record_hash
 
 
 def test_missing_message_emits_issue_not_exception():

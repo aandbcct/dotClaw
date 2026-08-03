@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Mapping
 
 from ..runtime.domain.context import ContextVersion
@@ -628,6 +628,11 @@ def assemble_trace(
         schema_version=SCHEMA_VERSION,
         is_partial=is_partial,
         record_hash=record_hash,
+        source_run_status=run.state.describe(),
+        source_event_sequence=max((event.sequence for event in events), default=None),
+        source_message_sequence=max((message.sequence for message in messages), default=None),
+        source_context_version_count=len(context_versions),
+        assembled_at=datetime.now(UTC).isoformat(),
     )
     return RunTrace(
         schema_version=SCHEMA_VERSION,

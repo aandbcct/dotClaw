@@ -10,12 +10,16 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Mapping
 
 from ..runtime.domain.context import ContextVersion
 from ..runtime.domain.facts import AgentRun, RunMessage
+
+CONTENT_REDACTED_MARKER = "[redacted]"
+"""默认导出中代替正文的固定标记；出现该标记即表示正文未被导出。"""
 
 
 class SpanKind(StrEnum):
@@ -129,22 +133,40 @@ class TraceMetrics:
 
 @dataclass(frozen=True)
 class RunTraceSource:
-    """追踪来源的不可变元数据；``record_hash`` 指向原始权威事实。"""
+    """追踪来源的不可变元数据；用于说明本次读取的快照边界。
+
+    ``source_run_status`` 记录读取瞬间的 Run 状态标签；``source_event_sequence`` 与
+    ``source_message_sequence`` 记录已读取到的最大序号，``source_context_version_count``
+    记录读取到的上下文版本数量；三者共同界定“这份追踪读到哪里为止”。
+
+    ``record_hash`` 只由权威事实计算，**不包含** ``assembled_at``：同一份权威记录在不同
+    时刻重建，``assembled_at`` 会变化而 ``record_hash`` 必须保持一致。
+    """
 
     run_id: str
     session_id: str
     schema_version: str
     is_partial: bool
     record_hash: str
+    source_run_status: str
+    source_event_sequence: int | None
+    source_message_sequence: int | None
+    source_context_version_count: int
+    assembled_at: str
 
     def to_dict(self) -> dict[str, object]:
-        """序列化为稳定字典（不含 assembled_at 等运行期时间戳）。"""
+        """序列化为稳定字典（``assembled_at`` 属组装时刻，不参与 ``record_hash``）。"""
         return {
             "run_id": self.run_id,
             "session_id": self.session_id,
             "schema_version": self.schema_version,
             "is_partial": self.is_partial,
             "record_hash": self.record_hash,
+            "source_run_status": self.source_run_status,
+            "source_event_sequence": self.source_event_sequence,
+            "source_message_sequence": self.source_message_sequence,
+            "source_context_version_count": self.source_context_version_count,
+            "assembled_at": self.assembled_at,
         }
 
 
@@ -183,10 +205,15 @@ class RunTrace:
 
 
 def _message_view(message: RunMessage, include_content: bool) -> dict[str, object]:
-    """按内容模式渲染消息；默认仅导出脱敏预览与引用，不导出正文。"""
+    """按内容模式渲染消息。
+
+    默认模式**不导出任何正文片段**：Prompt、模型回复与工具输出都可能含敏感信息，
+    截断预览仍是原文，因此改为导出不可逆的内容哈希加固定脱敏标记，只保留长度、
+    引用 ID 与角色等结构信息；``tool_calls``、``metadata`` 同样不导出。
+    只有显式 ``include_content=True`` 才导出完整内容。
+    """
     if include_content:
         return message.to_dict()
-    preview: str = message.content[:80]
     return {
         "id": message.message_id,
         "sequence": message.sequence,
@@ -195,8 +222,15 @@ def _message_view(message: RunMessage, include_content: bool) -> dict[str, objec
         "tool_call_id": message.tool_call_id,
         "name": message.name,
         "content_length": len(message.content),
-        "content_preview": preview,
+        "content_sha256": _content_digest(message.content),
+        "content_redacted": CONTENT_REDACTED_MARKER,
+        "tool_call_count": len(message.tool_calls),
     }
+
+
+def _content_digest(content: str) -> str:
+    """对消息正文做不可逆摘要，供比对与去重而不泄露原文。"""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _context_version_view(version: ContextVersion, include_content: bool) -> dict[str, object]:
