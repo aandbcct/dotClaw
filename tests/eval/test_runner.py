@@ -7,9 +7,11 @@ from dotclaw.eval.models import Expectation
 from dotclaw.eval.results import EvaluationFailureKind
 from dotclaw.eval.runner import EvalRunner
 from dotclaw.eval.scorers import ALL_SCORERS, ExpectationKind, SCORERS, Scorer
-from dotclaw.eval.scorers._helpers import tool_spans
-from .eval_testkit import approval_required_case, tool_case
-from .helpers import llm_response, make_llm_fixture, tool_call, tool_fixture
+from dotclaw.eval.scorers._helpers import approval_spans, tool_spans
+from dotclaw.runtime.domain.state import RunOutcome
+from dotclaw.trace.models import TraceSpanStatus
+from .eval_testkit import approval_required_case, approval_resolved_case, tool_case
+from .helpers import approval_fixture, llm_response, make_llm_fixture, tool_call, tool_fixture
 
 PASSING_EXPECTATIONS = (
     Expectation("run_status", "outcome", "completed"),
@@ -143,6 +145,109 @@ async def test_unconsumed_fixture_not_reported_for_partial_trace():
     result = await EvalRunner().run(approval_required_case())
     assert result.failure_kind is EvaluationFailureKind.TRACE_RECONSTRUCTION
     assert result.failure_kind is not EvaluationFailureKind.FIXTURE_CONFIGURATION
+
+
+# --------------------------------------------------------------------------- #
+# 审批 Fixture 驱动隔离 Run：自动批准 / 自动拒绝 / 按预期停在等待
+# --------------------------------------------------------------------------- #
+
+
+async def test_approval_fixture_auto_approves_isolated_run():
+    """声明 approved 决议时，隔离 Run 应被自动批准并继续跑到完成终态。"""
+    expectations = (
+        Expectation("run_status", "outcome", "completed"),
+        Expectation("approval", "apr-1", "approved"),
+        Expectation("output_assertion", "text", "sunny", {"mode": "contains"}),
+    )
+    result = await EvalRunner().run(approval_resolved_case(approved=True, expectations=expectations))
+    assert result.failure_kind is None
+    assert result.passed is True
+    assert result.trace is not None
+    # 自动决议后运行已真正结束，Trace 不再是部分重建
+    assert result.trace.source.is_partial is False
+    assert result.trace.run.state.outcome() is RunOutcome.COMPLETED
+
+    approval = approval_spans(result.trace)
+    assert len(approval) == 1
+    assert approval[0].attributes.get("approval_id") == "apr-1"
+    assert approval[0].status is TraceSpanStatus.COMPLETED
+    assert approval[0].attributes.get("approved") is True
+    # 审批通过后引擎重放同一工具调用：先有等待中的一次，再有真正执行完成的一次
+    assert [span.status for span in tool_spans(result.trace)] == [
+        TraceSpanStatus.WAITING,
+        TraceSpanStatus.COMPLETED,
+    ]
+
+
+async def test_approval_fixture_auto_rejects_isolated_run():
+    """声明 rejected 决议时，隔离 Run 应被自动拒绝并以取消终态收口。"""
+    expectations = (
+        Expectation("run_status", "outcome", "cancelled"),
+        Expectation("approval", "apr-1", "rejected"),
+    )
+    result = await EvalRunner().run(approval_resolved_case(approved=False, expectations=expectations))
+    assert result.failure_kind is None
+    assert result.passed is True
+    assert result.trace is not None
+    assert result.trace.source.is_partial is False
+    assert result.trace.run.state.outcome() is RunOutcome.CANCELLED
+
+    assert approval_spans(result.trace)[0].status is TraceSpanStatus.CANCELLED
+    # 被拒绝的工具不会执行：只留下等待审批的那一个 Span
+    assert [span.status for span in tool_spans(result.trace)] == [TraceSpanStatus.WAITING]
+
+
+async def test_approval_fixture_consumed_by_isolated_run():
+    """审批决议必须真的由隔离 Run 取用，而不是只在单测里直接调用 Fixture。"""
+    env = EvalEnvironment(approval_resolved_case(approved=True))
+    outcome = await env.run()
+    assert env.fixture_approval.remaining == ()  # 审批 Fixture 已被主链消费
+    assert outcome.result.state.is_ended()
+    assert outcome.result.approval_id is None  # 不再挂在等待审批上
+    outcome.assert_fully_consumed()  # 上下文 / LLM / 工具 / 审批 Fixture 均被用到
+
+
+async def test_run_without_approval_fixture_stops_at_waiting():
+    """未声明审批 Fixture 时按预期停在等待状态，并可在允许部分 Trace 下被断言。"""
+    case = approval_required_case()
+    object.__setattr__(case, "allow_partial_trace", True)
+    object.__setattr__(
+        case,
+        "expectations",
+        (
+            Expectation("run_status", "outcome", "suspended"),
+            Expectation("approval", "apr-1", "waiting"),
+        ),
+    )
+    result = await EvalRunner().run(case)
+    assert result.passed is True
+    assert result.failure_kind is None
+    assert result.trace.run.state.is_waiting_approval()
+
+
+async def test_unused_approval_fixture_is_configuration_error():
+    """声明了审批 Fixture 但 Run 从未请求审批：属多余 Fixture 配置错误。"""
+    case = tool_case(
+        case_id="extra-approval-fixture",
+        approval_fixtures=(approval_fixture("apr-fix-unused", approved=True),),
+        expectations=PASSING_EXPECTATIONS,
+    )
+    result = await EvalRunner().run(case)
+    assert result.passed is False
+    assert result.failure_kind is EvaluationFailureKind.FIXTURE_CONFIGURATION
+    assert "apr-fix-unused" in result.failure_detail
+
+
+async def test_approval_fixture_id_mismatch_is_configuration_error():
+    """审批 Fixture 指定的 approval_id 与实际请求不符：配置错误而非断言失败。"""
+    case = approval_resolved_case(
+        approved=True,
+        approval_fixtures=(approval_fixture("apr-fix-1", approved=True, approval_id="apr-other"),),
+    )
+    result = await EvalRunner().run(case)
+    assert result.passed is False
+    assert result.failure_kind is EvaluationFailureKind.FIXTURE_CONFIGURATION
+    assert "apr-other" in result.failure_detail
 
 
 async def test_runtime_error_classification(monkeypatch):

@@ -7,6 +7,7 @@
 
 from .helpers import (
     AGENT_ID,
+    approval_fixture,
     build_case,
     context_fixture,
     llm_response,
@@ -94,6 +95,47 @@ def approval_required_case() -> object:
         ),
         execution_mode=ExecutionMode.PLAYBACK,
     )
+
+
+def approval_resolved_case(approved: bool, **kwargs) -> object:
+    """构造工具需审批、且由审批 Fixture 给出决议的 Case；隔离 Run 会自动批准/拒绝。
+
+    两个分支的 Fixture 数量不同，且都必须被完整消费：
+
+    * 批准：审批通过后引擎以 ``approved=True`` 重放同一工具调用并继续下一轮 LLM，
+      因此需要两次上下文构建与两条模型响应；
+    * 拒绝：决议当场以取消收口，工具不再执行，只需一次上下文与一条模型响应。
+    """
+    first = llm_response(
+        "llm-resp-1",
+        content="",
+        tool_calls=(tool_call("call-1", "search", {"q": "weather"}),),
+    )
+    followups = (llm_response("llm-resp-2", content="The weather is sunny today"),) if approved else ()
+    contexts = (
+        (context_fixture("ctx-1", messages=(sys_message(),)), context_fixture("ctx-2"))
+        if approved
+        else (context_fixture("ctx-1", messages=(sys_message(),)),)
+    )
+    base = dict(
+        case_id=f"approval-{'approved' if approved else 'rejected'}-case",
+        context_fixtures=contexts,
+        llm_fixture=make_llm_fixture("llm-1", (first, *followups)),
+        tool_fixtures=(
+            tool_fixture(
+                "tool-1",
+                "search",
+                key_arguments={"q": "weather"},
+                status=ToolResultStatus.APPROVAL_REQUIRED,
+                approval_id="apr-1",
+                output="sunny",
+            ),
+        ),
+        approval_fixtures=(approval_fixture("apr-fix-1", approved=approved, approval_id="apr-1"),),
+        execution_mode=ExecutionMode.PLAYBACK,
+    )
+    base.update(kwargs)
+    return tool_case(**base)
 
 
 async def run_case_to_trace(case) -> object:

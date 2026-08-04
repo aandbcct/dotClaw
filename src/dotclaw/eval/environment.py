@@ -513,9 +513,23 @@ class EvalEnvironment:
             self.fixture_delegation.verify_fully_consumed()
 
     async def run(self, output_port: Any = None) -> EvalRunOutcome:
-        """按 Case 输入构造请求并执行，返回隔离运行结果。"""
+        """按 Case 输入构造请求并执行，返回隔离运行结果。
+
+        若 Case 声明了审批 Fixture（``approval_fixtures``），运行因工具需审批而挂起时，
+        按 Fixture 顺序/标识取决议并调用引擎恢复执行，直到终态或挂起于其它等待项；
+        未声明审批 Fixture 时保持挂起（等待外部输入），交由上层按部分 Trace 处理。
+        """
         request: RunRequest = self._build_request()
         result: RunResult = await self.engine.execute(request, output_port=output_port)
+        resolved: set[str] = set()
+        while self._is_approval_suspended(result) and self.case.approval_fixtures:
+            approval_id: str = result.approval_id  # type: ignore[assignment]
+            if approval_id in resolved:
+                # 同一审批被重复要求：可能引擎恢复后仍未消费该审批，避免死循环或重复消费 Fixture。
+                break
+            approved: bool = self.fixture_approval.next_decision(approval_id)
+            resolved.add(approval_id)
+            result = await self.engine.resolve_approval(approval_id, approved, output_port)
         run: AgentRun | None = await self.run_repository.load_run(request.session_id, result.run_id)
         messages: tuple[RunMessage, ...] = await self.run_repository.load_messages(
             request.session_id, result.run_id
@@ -535,6 +549,13 @@ class EvalEnvironment:
             context_versions=context_versions,
             environment=self,
         )
+
+    @staticmethod
+    def _is_approval_suspended(result: RunResult) -> bool:
+        """判断执行结果是否因工具审批而挂起（等待外部决议）。"""
+        if result.approval_id is None:
+            return False
+        return result.state.is_waiting_approval()
 
     def _build_request(self) -> RunRequest:
         """由 Case 的会话与输入消息构造执行请求。"""

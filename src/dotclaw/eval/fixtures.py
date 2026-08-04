@@ -66,6 +66,15 @@ def _matches_key_arguments(key_arguments: JSONMap, actual: JSONMap) -> bool:
     return True
 
 
+def _pending_approval(invocation: ToolInvocation, fixture: ToolFixture) -> bool:
+    """该 Fixture 声明需审批且本次调用尚未获批。
+
+    此时工具只产出「等待审批」结果、并未真正执行，故不消费 Fixture：引擎在审批
+    通过后会以 ``approved=True`` 重放同一工具调用，那一次才算这条 Fixture 被消费。
+    """
+    return fixture.status is ToolResultStatus.APPROVAL_REQUIRED and not invocation.approved
+
+
 class ScriptedLLMPort:
     """按记录顺序回放模型响应的隔离 LLM Port。"""
 
@@ -120,25 +129,34 @@ class ScriptedLLMPort:
 
 
 class FixtureToolPort:
-    """只返回 Case 声明结果的隔离工具 Port。"""
+    """只返回 Case 声明结果的隔离工具 Port。
+
+    区分两种消费状态：``_served`` 表示 Fixture 至少被一次真实调用命中（哪怕只产出
+    「等待审批」），用于「Case 声明是否都被用到」的校验；``_consumed`` 表示已产出终态
+    结果、不再参与后续匹配。需审批的 Fixture 在批准后会被同一工具调用二次命中，
+    因此第一次只置 ``_served``，第二次才置 ``_consumed``。
+    """
 
     def __init__(self, fixtures: tuple[ToolFixture, ...], mode: FixtureMatchMode) -> None:
         """绑定工具 Fixture 与匹配模式，并初始化独立消费状态。"""
         self._fixtures: tuple[ToolFixture, ...] = fixtures
         self._mode: FixtureMatchMode = mode
         self._cursor: int = 0
+        self._served: set[str] = set()
         self._consumed: set[str] = set()
         self.cancelled_runs: list[str] = []
 
     @property
     def remaining(self) -> tuple[ToolFixture, ...]:
-        """尚未消费的工具 Fixture。"""
-        if self._mode is FixtureMatchMode.STRICT:
-            return self._fixtures[self._cursor :]
-        return tuple(item for item in self._fixtures if item.fixture_id not in self._consumed)
+        """尚未被任何调用命中的工具 Fixture。"""
+        return tuple(item for item in self._fixtures if item.fixture_id not in self._served)
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
-        """按模式匹配 Fixture 并返回冻结结果；无法匹配即失败。"""
+        """按模式匹配 Fixture 并返回冻结结果；无法匹配即失败。
+
+        需审批的 Fixture 会被同一工具调用命中两次（挂起一次、批准后重放一次），
+        只有产出终态结果的那一次才推进消费游标。
+        """
         fixture: ToolFixture = (
             self._match_strict(invocation) if self._mode is FixtureMatchMode.STRICT else self._match_normal(invocation)
         )
@@ -161,6 +179,10 @@ class FixtureToolPort:
                 f"期望 {_describe_arguments(dict(fixture.key_arguments))}，"
                 f"实际 {_describe_arguments(dict(invocation.call.arguments))}"
             )
+        self._served.add(fixture.fixture_id)
+        if _pending_approval(invocation, fixture):
+            # 仅挂起审批，工具尚未执行：保持游标，等待审批通过后的重放调用命中同一条。
+            return fixture
         self._cursor += 1
         self._consumed.add(fixture.fixture_id)
         return fixture
@@ -176,7 +198,9 @@ class FixtureToolPort:
             raise FixtureConfigurationError(f"工具 {invocation.call.name} 没有可用 fixture")
         for fixture in named:
             if _matches_key_arguments(dict(fixture.key_arguments), dict(invocation.call.arguments)):
-                self._consumed.add(fixture.fixture_id)
+                self._served.add(fixture.fixture_id)
+                if not _pending_approval(invocation, fixture):
+                    self._consumed.add(fixture.fixture_id)
                 return fixture
         raise FixtureConfigurationError(
             f"工具 {invocation.call.name} 的关键参数不匹配："
@@ -186,6 +210,10 @@ class FixtureToolPort:
     def _to_result(self, invocation: ToolInvocation, fixture: ToolFixture) -> ToolResult:
         """把 Fixture 转换为 Runtime 标准工具结果。"""
         if fixture.status is ToolResultStatus.APPROVAL_REQUIRED:
+            # 审批已获批准（恢复执行场景）：按已批准处理，返回完成结果而非再次要求审批，
+            # 否则引擎恢复后会再次进入审批挂起形成死循环。
+            if invocation.approved:
+                return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output)
             return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id=fixture.approval_id)
         if fixture.status is ToolResultStatus.FAILED:
             return ToolResult(
