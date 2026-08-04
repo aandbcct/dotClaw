@@ -26,6 +26,8 @@ from ._host_components import (
 from .runtime_factory import RuntimeServices, build_runtime_services, _storage_root
 from .session_interaction import SessionInteractionService
 from ..eval.draft_service import EvalCaseDraftService
+from ..eval.playback import PlaybackRunner
+from ..eval.reexecution import ReexecutionRunner
 from ..orchestration.registry import AgentRegistry
 from ..session.session import SessionManager
 
@@ -232,6 +234,16 @@ class ApplicationHost:
         if self._eval_draft_service is None:
             raise RuntimeError("ApplicationHost 尚未初始化")
         return self._eval_draft_service
+
+    @property
+    def playback_runner(self) -> PlaybackRunner:
+        """返回 Playback 批量执行器（PR6）；无状态，按需构建。"""
+        return PlaybackRunner()
+
+    @property
+    def reexecution_runner(self) -> ReexecutionRunner:
+        """返回 Re-execution 批量执行器（PR6）；无状态，按需构建。"""
+        return ReexecutionRunner()
 
     # ── 关闭 ──
 

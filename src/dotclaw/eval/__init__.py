@@ -28,7 +28,11 @@ from .fixtures import (
 )
 from .draft import DRAFT_SCHEMA_VERSION, EvalCaseDraft, trace_to_eval_case_draft
 from .draft_service import EvalCaseDraftService
+from .gate import RegressionGate
+from .playback import PlaybackRunner
 from .redaction import REDACTED_MARKER, redact_draft
+from .reexecution import ReexecutionRunner
+from .regression import RegressionCaseResult, RegressionReport
 from .models import (
     EVAL_SCHEMA_VERSION,
     EvalCase,
@@ -88,4 +92,9 @@ __all__ = [
     "SCORERS",
     "ALL_SCORERS",
     "EVAL_SCHEMA_VERSION",
+    "PlaybackRunner",
+    "ReexecutionRunner",
+    "RegressionGate",
+    "RegressionReport",
+    "RegressionCaseResult",
 ]

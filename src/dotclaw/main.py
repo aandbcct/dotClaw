@@ -206,7 +206,7 @@ dotClaw 命令:
   /retry <run_id>   重试中断运行
   /abandon <run_id> 放弃中断运行
   /model           查看当前模型
-  /eval            评测草案：list/show/review/confirm <dataset> ...
+  /eval            评测草案：list/show/review/confirm/run <dataset> ...
   /help            显示帮助
   /quit            退出
 """)
@@ -346,6 +346,60 @@ def _refresh_banner(service: SessionInteractionService, current_session: Session
     ))
 
 
+async def _eval_run(
+    channel: CLIChannel,
+    datasets_root: Path,
+    parts: list[str],
+) -> None:
+    """运行 Dataset 的全部 Case 并产出 Gate 报告。
+
+    用法: /eval run <dataset> [--mode playback|reexecution]
+    默认 playback；reexecution 仅供观察不进 Gate。
+    """
+    from dotclaw.eval.playback import PlaybackRunner
+    from dotclaw.eval.reexecution import ReexecutionRunner
+
+    if len(parts) < 2:
+        channel.print_error("用法: /eval run <dataset> [--mode playback|reexecution]")
+        return
+    dataset_name = parts[1]
+    mode = "playback"
+    if len(parts) >= 4 and parts[2] == "--mode":
+        mode = parts[3].lower()
+        if mode not in ("playback", "reexecution"):
+            channel.print_error(f"不支持的模式: {mode}，可选 playback / reexecution")
+            return
+
+    if mode == "reexecution":
+        runner = ReexecutionRunner()
+        results = await runner.run_dataset(datasets_root, dataset_name)
+        passed_count = sum(1 for r in results if r.passed)
+        channel.print_info(
+            f"Re-execution 完成：{passed_count}/{len(results)} Case 通过"
+        )
+        for result in results:
+            status = "✓" if result.passed else "✗"
+            channel.print_info(
+                f"  {status} {result.case_id}"
+                + (f" — {result.failure_kind.value}" if result.failure_kind else "")
+            )
+    else:
+        runner = PlaybackRunner()
+        report = await runner.run_and_gate(datasets_root, dataset_name)
+        passed_count = sum(1 for c in report.case_results if c.passed)
+        channel.print_info(
+            f"Gate 判定: {report.overall_status}  ({passed_count}/{len(report.case_results)} Case 通过)"
+        )
+        for case_result in report.case_results:
+            status = "✓" if case_result.passed else "✗"
+            channel.print_info(
+                f"  {status} {case_result.case_id}"
+                + (f" — {case_result.failure_kind}" if case_result.failure_kind else "")
+            )
+        if report.error_detail:
+            channel.print_error(f"ERROR 详情: {report.error_detail}")
+
+
 async def _cmd_eval(
     channel: CLIChannel,
     service: "EvalCaseDraftService",  # 由 ApplicationHost 注入
@@ -354,7 +408,7 @@ async def _cmd_eval(
     """评测草案的 Channel 命令；仅经服务读写，不直接访问 Dataset 文件。"""
     parts = arg_str.split()
     if not parts:
-        channel.print_info("用法: /eval <list|show|review|confirm> <dataset> [<draft_id> [<case_id>]]")
+        channel.print_info("用法: /eval <list|show|review|confirm|run> <dataset> [<draft_id> [<case_id>]]")
         return
     sub = parts[0]
     try:
@@ -405,6 +459,8 @@ async def _cmd_eval(
                 return
             case = await service.confirm_draft(parts[1], parts[2], parts[3])
             channel.print_info(f"已确认 Case: {case.case_id}")
+        elif sub == "run":
+            await _eval_run(channel, service.datasets_root, parts)
         else:
             channel.print_error(f"未知 /eval 子命令: {sub}")
     except (FileNotFoundError, FileExistsError, ValueError) as error:
