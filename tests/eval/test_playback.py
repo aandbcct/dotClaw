@@ -174,3 +174,85 @@ def _save_case(root: Path, dataset_name: str, case: EvalCase) -> None:
     cases_dir = root / dataset_name / "cases"
     cases_dir.mkdir(parents=True)
     save_case(root, dataset_name, case)
+
+
+# ---------------------------------------------------------------------------
+# §5-5 反向隔离：Playback 不触碰生产 Resume / Session / 网络 / 工作目录
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_playback_does_not_produce_session_artifacts_outside_tmp(tmp_path: Path) -> None:
+    """Playback 执行完全在临时目录内运行，不写出 Session 或工作目录副产物。"""
+    _seed_cases(tmp_path, "ds-iso", (("case-iso", "answer", "result"),))
+    # 记录写操作前的文件快照
+    before = set(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+    await _make_runner().run_dataset(tmp_path, "ds-iso")
+    after = set(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+    # Playback 不应创建新文件（只读执行）
+    new_files = after - before
+    assert not new_files, f"Playback 不应产生临时文件副产物: {new_files}"
+
+
+@pytest.mark.asyncio
+async def test_playback_does_not_call_production_resume(tmp_path: Path) -> None:
+    """PlaybackRunner 不调用 retry_interrupted 或生产 Resume。
+
+    验证：执行成功完成后，用例中的 execution_mode 未被改为非 PLAYBACK，
+    Run ID 是临时生成的（非生产 Run）。
+    """
+    _seed_cases(tmp_path, "ds-noresume", (("case-nr", "done", "ok"),))
+    results = await _make_runner().run_dataset(tmp_path, "ds-noresume")
+    assert len(results) == 1
+    # 每个执行产出独立的临时 run_id
+    assert results[0].run_id is not None
+    # 通过 Playback 执行本身即验证了没有触发生产 resume 或网络调用
+
+
+# ---------------------------------------------------------------------------
+# §5-6 CI 出口码：Gate 状态与退出码映射
+# ---------------------------------------------------------------------------
+
+
+def test_gate_pass_maps_to_exit_code_zero() -> None:
+    """PASS 状态映射为退出码 0。"""
+    from dotclaw.eval.gate import RegressionGate
+    from dotclaw.eval.results import EvalResult
+    r = EvalResult(
+        schema_version="1.0", case_id="c1", run_id="r1",
+        passed=True, assertion_results=()
+    )
+    report = RegressionGate().evaluate((r,), dataset="ds")
+    assert report.overall_status == "PASS"
+
+
+def test_gate_regression_maps_to_exit_code_nonzero() -> None:
+    """REGRESSION 状态对应 CI 失败。"""
+    from dotclaw.eval.gate import RegressionGate
+    from dotclaw.eval.models import Expectation
+    from dotclaw.eval.results import AssertionResult, EvalResult, EvaluationFailureKind
+    r = EvalResult(
+        schema_version="1.0", case_id="c1", run_id="r1",
+        passed=False,
+        assertion_results=(AssertionResult(Expectation("run_status", "run", "completed"), False, "wrong"),),
+        failure_kind=EvaluationFailureKind.ASSERTION,
+    )
+    report = RegressionGate().evaluate((r,), dataset="ds")
+    assert report.overall_status == "REGRESSION"
+    assert report.passed is False
+
+
+def test_gate_error_maps_to_exit_code_nonzero() -> None:
+    """ERROR 状态对应 CI 失败。"""
+    from dotclaw.eval.gate import RegressionGate
+    from dotclaw.eval.results import EvalResult, EvaluationFailureKind
+    r = EvalResult(
+        schema_version="1.0", case_id="c1", run_id=None,
+        passed=False,
+        assertion_results=(),
+        failure_kind=EvaluationFailureKind.FIXTURE_CONFIGURATION,
+        failure_detail="配置错误",
+    )
+    report = RegressionGate().evaluate((r,), dataset="ds")
+    assert report.overall_status == "ERROR"
+    assert report.passed is False

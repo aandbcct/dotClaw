@@ -476,12 +476,47 @@ def _parse_show_reasoning(args: Sequence[str] | None = None) -> bool:
         dest="show_reasoning",
         help="隐藏模型的思考过程，仅展示最终回答",
     )
-    return bool(parser.parse_args(args).show_reasoning)
+    parser.add_argument(
+        "--eval-ci",
+        metavar="DATASET",
+        dest="eval_ci_dataset",
+        help="CI 模式：对指定 Dataset 运行 Playback 闸门并退出（PASS→0, REGRESSION/ERROR→1）",
+    )
+    parsed = parser.parse_args(args)
+    return bool(parsed.show_reasoning), parsed.eval_ci_dataset
+
+
+async def _eval_ci(dataset_name: str) -> int:
+    """CI 模式：创建最小 Host，运行 Playback Gate，退出码 0=PASS / 1=非 PASS。"""
+    from dotclaw.config import _find_project_root, get_config
+    from dotclaw.bootstrap import ApplicationHost
+
+    config = get_config()
+    project_root = _find_project_root()
+    host = ApplicationHost(config, project_root)
+    await host.initialize()
+
+    try:
+        root = host.eval_draft_service.datasets_root
+        report = await host.playback_runner.run_and_gate(root, dataset_name)
+        print(f"Gate: {report.overall_status}  ({sum(1 for c in report.case_results if c.passed)}/{len(report.case_results)} Case 通过)")
+        for c in report.case_results:
+            mark = "✓" if c.passed else "✗"
+            extra = f" — {c.failure_kind}" if c.failure_kind else ""
+            print(f"  {mark} {c.case_id}{extra}")
+        if report.error_detail:
+            print(f"ERROR: {report.error_detail}")
+        return 0 if report.overall_status == "PASS" else 1
+    finally:
+        await host.shutdown()
 
 
 def main() -> None:
     try:
-        asyncio.run(_run_cli(show_reasoning=_parse_show_reasoning()))
+        show_reasoning, ci_dataset = _parse_show_reasoning()
+        if ci_dataset:
+            sys.exit(asyncio.run(_eval_ci(ci_dataset)))
+        asyncio.run(_run_cli(show_reasoning=show_reasoning))
     except KeyboardInterrupt:
         pass
 
