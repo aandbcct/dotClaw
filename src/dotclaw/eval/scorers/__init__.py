@@ -12,12 +12,13 @@ from .iteration_budget import IterationBudgetScorer
 from .kinds import ExpectationKind
 from .output_assertion import OutputAssertionScorer
 from .policy import PolicyScorer
+from .protocol import Scorer
 from .run_status import RunStatusScorer
 from .token_budget import TokenBudgetScorer
 from .tool_arguments import ToolArgumentScorer
 from .tool_sequence import ToolSequenceScorer
 
-ALL_SCORERS: list[type] = [
+ALL_SCORERS: list[type[Scorer]] = [
     RunStatusScorer,
     ToolSequenceScorer,
     ToolArgumentScorer,
@@ -29,10 +30,11 @@ ALL_SCORERS: list[type] = [
     IterationBudgetScorer,
 ]
 
-SCORERS: dict[ExpectationKind, object] = {scorer.KIND: scorer() for scorer in ALL_SCORERS}
+SCORERS: dict[ExpectationKind, Scorer] = {scorer.KIND: scorer() for scorer in ALL_SCORERS}
 
 __all__ = [
     "ExpectationKind",
+    "Scorer",
     "ALL_SCORERS",
     "SCORERS",
     "RunStatusScorer",

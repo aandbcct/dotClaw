@@ -44,6 +44,7 @@ from .scorers import (
     ALL_SCORERS,
     ExpectationKind,
     SCORERS,
+    Scorer,
 )
 
 __all__ = [
@@ -74,6 +75,7 @@ __all__ = [
     "EvaluationFailureKind",
     "EvalRunner",
     "ExpectationKind",
+    "Scorer",
     "SCORERS",
     "ALL_SCORERS",
     "EVAL_SCHEMA_VERSION",

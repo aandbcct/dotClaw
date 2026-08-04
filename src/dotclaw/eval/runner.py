@@ -9,8 +9,12 @@
    （同样归为 ``FIXTURE_CONFIGURATION``），其它异常归为 ``RUNTIME``；
 4. 用 PR2 ``assemble_trace`` 重建 Eval Run Trace；重建异常或部分 Trace 未声明允许
    时归为 ``TRACE_RECONSTRUCTION``；
-5. 按固定 ``ExpectationKind`` 顺序分派 Scorer，汇总 ``AssertionResult``；
-6. 返回 ``EvalResult``，仅当全部期望通过才 ``passed``，否则失败分类为 ``ASSERTION``。
+5. 校验 Fixture 被完整消费：Run 完整结束却仍有未被调用的 Fixture，说明 Case 声明与
+   实际执行不一致，结果不可信，归为 ``FIXTURE_CONFIGURATION``（与「缺失 Fixture」
+   同类）。仅对非部分 Trace 生效——中途挂起本就会剩余 Fixture，那属于
+   ``TRACE_RECONSTRUCTION`` 或 Case 显式允许的部分评分，两者互斥不重叠；
+6. 按固定 ``ExpectationKind`` 顺序分派 Scorer，汇总 ``AssertionResult``；
+7. 返回 ``EvalResult``，仅当全部期望通过才 ``passed``，否则失败分类为 ``ASSERTION``。
 """
 
 from __future__ import annotations
@@ -21,8 +25,9 @@ from .environment import EvalEnvironment
 from .fixtures import FixtureConfigurationError
 from .models import EvalCase, SCHEMA_VERSION
 from .results import AssertionResult, EvalResult, EvaluationFailureKind
-from .scorers import SCORERS, ExpectationKind
+from .scorers import SCORERS, ExpectationKind, Scorer
 from ..trace.assembler import assemble_trace
+from ..trace.models import RunTrace
 
 
 class EvalRunner:
@@ -30,7 +35,7 @@ class EvalRunner:
 
     def __init__(self) -> None:
         """绑定九个确定性 Scorer 实例。"""
-        self._scorers: dict[ExpectationKind, object] = SCORERS
+        self._scorers: dict[ExpectationKind, Scorer] = SCORERS
 
     async def run(self, case: EvalCase) -> EvalResult:
         """执行评测用例并返回分类后的结果。"""
@@ -66,6 +71,21 @@ class EvalRunner:
                 failure_detail="运行未完整结束，Trace 部分重建且 Case 未声明允许部分评分",
                 trace=trace,
             )
+
+        # Run 完整结束后，Case 声明的每个 Fixture 都应当被真正调用过；有剩余说明
+        # Case 与实际执行不一致（多余 Fixture），与「缺失 Fixture」同属配置错误。
+        # 部分 Trace 不做此校验：中途挂起必然留下未消费 Fixture，属另一类失败。
+        if not trace.is_partial:
+            try:
+                outcome.assert_fully_consumed()
+            except FixtureConfigurationError as exc:
+                return self._fail(
+                    case.case_id,
+                    outcome.run_id,
+                    EvaluationFailureKind.FIXTURE_CONFIGURATION,
+                    str(exc),
+                    trace=trace,
+                )
 
         results: list[AssertionResult] = []
         for expectation in case.expectations:
@@ -168,8 +188,9 @@ class EvalRunner:
         run_id: str | None,
         kind: EvaluationFailureKind,
         detail: str,
+        trace: RunTrace | None = None,
     ) -> EvalResult:
-        """构造一个无断言明细的失败结果。"""
+        """构造一个无断言明细的失败结果；已重建出 Trace 时一并保留以便回溯。"""
         return EvalResult(
             schema_version=SCHEMA_VERSION,
             case_id=case_id,
@@ -178,7 +199,7 @@ class EvalRunner:
             assertion_results=(),
             failure_kind=kind,
             failure_detail=detail,
-            trace=None,
+            trace=trace,
         )
 
     @staticmethod

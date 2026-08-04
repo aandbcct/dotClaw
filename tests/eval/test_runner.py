@@ -6,9 +6,10 @@ from dotclaw.eval.fixtures import FixtureConfigurationError
 from dotclaw.eval.models import Expectation
 from dotclaw.eval.results import EvaluationFailureKind
 from dotclaw.eval.runner import EvalRunner
-from dotclaw.eval.scorers import ALL_SCORERS, ExpectationKind, SCORERS
+from dotclaw.eval.scorers import ALL_SCORERS, ExpectationKind, SCORERS, Scorer
 from dotclaw.eval.scorers._helpers import tool_spans
 from .eval_testkit import approval_required_case, tool_case
+from .helpers import llm_response, make_llm_fixture, tool_call, tool_fixture
 
 PASSING_EXPECTATIONS = (
     Expectation("run_status", "outcome", "completed"),
@@ -96,6 +97,54 @@ async def test_fixture_configuration_on_env_run_error(monkeypatch):
     assert result.trace is None
 
 
+async def test_fixture_configuration_unconsumed_llm_fixture():
+    """Run 完整结束却剩下没被调用的 LLM Fixture：Case 声明与执行不一致，结果不可信。"""
+    case = tool_case(
+        case_id="extra-llm-fixture",
+        llm_fixture=make_llm_fixture(
+            "llm-1",
+            (
+                llm_response("llm-resp-1", content="", tool_calls=(tool_call("call-1", "search", {"q": "weather"}),)),
+                llm_response("llm-resp-2", content="The weather is sunny today"),
+                llm_response("llm-resp-3-unused", content="本次执行不会用到"),
+            ),
+        ),
+        expectations=PASSING_EXPECTATIONS,
+    )
+    result = await EvalRunner().run(case)
+    assert result.passed is False
+    assert result.failure_kind is EvaluationFailureKind.FIXTURE_CONFIGURATION
+    assert "llm-resp-3-unused" in result.failure_detail
+    # 未消费属配置错误而非断言失败：不产出任何断言明细
+    assert result.assertion_results == ()
+    # 已执行过，证据仍可回溯到本次运行
+    assert result.run_id is not None
+    assert result.trace is not None
+
+
+async def test_fixture_configuration_unconsumed_tool_fixture():
+    """多余的工具 Fixture 同样归为配置错误，与缺失 Fixture 同类。"""
+    case = tool_case(
+        case_id="extra-tool-fixture",
+        tool_fixtures=(
+            tool_fixture("tool-1", "search", key_arguments={"q": "weather"}, output="sunny"),
+            tool_fixture("tool-2-unused", "translate", key_arguments={"q": "hello"}, output="你好"),
+        ),
+        expectations=PASSING_EXPECTATIONS,
+    )
+    result = await EvalRunner().run(case)
+    assert result.passed is False
+    assert result.failure_kind is EvaluationFailureKind.FIXTURE_CONFIGURATION
+    assert "tool-2-unused" in result.failure_detail
+
+
+async def test_unconsumed_fixture_not_reported_for_partial_trace():
+    """挂起产生的部分 Trace 必然剩余 Fixture，应归 TRACE_RECONSTRUCTION 而非配置错误。"""
+    result = await EvalRunner().run(approval_required_case())
+    assert result.failure_kind is EvaluationFailureKind.TRACE_RECONSTRUCTION
+    assert result.failure_kind is not EvaluationFailureKind.FIXTURE_CONFIGURATION
+
+
 async def test_runtime_error_classification(monkeypatch):
     async def _boom(self, *args, **kwargs):
         raise RuntimeError("boom")
@@ -159,3 +208,10 @@ def test_scorer_registry_covers_all_kinds():
     for scorer in SCORERS.values():
         assert hasattr(scorer, "KIND")
         assert scorer.KIND in ExpectationKind
+
+
+def test_all_scorers_satisfy_scorer_protocol():
+    """九个 Scorer 均需结构化满足 Scorer 协议（KIND + score）。"""
+    for kind, scorer in SCORERS.items():
+        assert isinstance(scorer, Scorer)
+        assert scorer.KIND is kind  # 注册表键与自身 KIND 一致
