@@ -168,6 +168,8 @@ async def _run_cli(show_reasoning: bool = True) -> None:
                     elif cmd == "/model":
                         identity = service.get_identity(current_session)
                         channel.print_info(f"当前模型: {identity.resolve_model(config.llm.default_model)}")
+                    elif cmd == "/eval":
+                        await _cmd_eval(channel, host.eval_draft_service, args)
                     else:
                         channel.print_error(f"未知命令: {cmd}")
                     continue
@@ -204,6 +206,7 @@ dotClaw 命令:
   /retry <run_id>   重试中断运行
   /abandon <run_id> 放弃中断运行
   /model           查看当前模型
+  /eval            评测草案：list/show/review/confirm/run <dataset> ...
   /help            显示帮助
   /quit            退出
 """)
@@ -343,6 +346,127 @@ def _refresh_banner(service: SessionInteractionService, current_session: Session
     ))
 
 
+async def _eval_run(
+    channel: CLIChannel,
+    datasets_root: Path,
+    parts: list[str],
+) -> None:
+    """运行 Dataset 的全部 Case 并产出 Gate 报告。
+
+    用法: /eval run <dataset> [--mode playback|reexecution]
+    默认 playback；reexecution 仅供观察不进 Gate。
+    """
+    from dotclaw.eval.playback import PlaybackRunner
+    from dotclaw.eval.reexecution import ReexecutionRunner
+
+    if len(parts) < 2:
+        channel.print_error("用法: /eval run <dataset> [--mode playback|reexecution]")
+        return
+    dataset_name = parts[1]
+    mode = "playback"
+    if len(parts) >= 4 and parts[2] == "--mode":
+        mode = parts[3].lower()
+        if mode not in ("playback", "reexecution"):
+            channel.print_error(f"不支持的模式: {mode}，可选 playback / reexecution")
+            return
+
+    if mode == "reexecution":
+        runner = ReexecutionRunner()
+        results = await runner.run_dataset(datasets_root, dataset_name)
+        passed_count = sum(1 for r in results if r.passed)
+        channel.print_info(
+            f"Re-execution 完成：{passed_count}/{len(results)} Case 通过"
+        )
+        for result in results:
+            status = "✓" if result.passed else "✗"
+            channel.print_info(
+                f"  {status} {result.case_id}"
+                + (f" — {result.failure_kind.value}" if result.failure_kind else "")
+            )
+    else:
+        runner = PlaybackRunner()
+        report = await runner.run_and_gate(datasets_root, dataset_name)
+        passed_count = sum(1 for c in report.case_results if c.passed)
+        channel.print_info(
+            f"Gate 判定: {report.overall_status}  ({passed_count}/{len(report.case_results)} Case 通过)"
+        )
+        for case_result in report.case_results:
+            status = "✓" if case_result.passed else "✗"
+            channel.print_info(
+                f"  {status} {case_result.case_id}"
+                + (f" — {case_result.failure_kind}" if case_result.failure_kind else "")
+            )
+        if report.error_detail:
+            channel.print_error(f"ERROR 详情: {report.error_detail}")
+
+
+async def _cmd_eval(
+    channel: CLIChannel,
+    service: "EvalCaseDraftService",  # 由 ApplicationHost 注入
+    arg_str: str,
+) -> None:
+    """评测草案的 Channel 命令；仅经服务读写，不直接访问 Dataset 文件。"""
+    parts = arg_str.split()
+    if not parts:
+        channel.print_info("用法: /eval <list|show|review|confirm|run> <dataset> [<draft_id> [<case_id>]]")
+        return
+    sub = parts[0]
+    try:
+        if sub == "list":
+            if len(parts) < 2:
+                channel.print_error("用法: /eval list <dataset>")
+                return
+            dataset_name = parts[1]
+            drafts = await service.list_drafts(dataset_name)
+            cases = await service.list_cases(dataset_name)
+            channel.print_info(f"数据集 {dataset_name}: {len(drafts)} 个草案, {len(cases)} 个 Case")
+            for draft_id in drafts:
+                channel.print_info(f"  [draft] {draft_id}")
+            for case in cases:
+                channel.print_info(f"  [case]  {case.case_id} ({case.agent_id})")
+        elif sub == "show":
+            if len(parts) < 3:
+                channel.print_error("用法: /eval show <dataset> <draft_id>")
+                return
+            draft = await service.load_draft(parts[1], parts[2])
+            channel.print_info(
+                f"草案 {draft.draft_id}（来源 run={draft.source_run_id}, "
+                f"hash={draft.source_record_hash[:8]}…）"
+            )
+            channel.print_info(
+                f"  requires_review={draft.requires_review}, "
+                f"confirmed_case_id={draft.confirmed_case_id}"
+            )
+            channel.print_info(
+                f"  case_id={draft.case.case_id}, agent_id={draft.case.agent_id}, "
+                f"fixtures: llm={len(draft.case.llm_fixture.responses)}, "
+                f"tools={len(draft.case.tool_fixtures)}, "
+                f"approvals={len(draft.case.approval_fixtures)}, "
+                f"delegations={len(draft.case.delegation_fixtures)}, "
+                f"contexts={len(draft.case.context_fixtures)}, "
+                f"expectations={len(draft.case.expectations)}"
+            )
+        elif sub == "review":
+            if len(parts) < 3:
+                channel.print_error("用法: /eval review <dataset> <draft_id>")
+                return
+            draft = await service.load_draft(parts[1], parts[2])
+            reviewed = await service.save_reviewed_draft(parts[1], parts[2], draft)
+            channel.print_info(f"已保存审阅（requires_review={reviewed.requires_review}）: {reviewed.draft_id}")
+        elif sub == "confirm":
+            if len(parts) < 4:
+                channel.print_error("用法: /eval confirm <dataset> <draft_id> <case_id>")
+                return
+            case = await service.confirm_draft(parts[1], parts[2], parts[3])
+            channel.print_info(f"已确认 Case: {case.case_id}")
+        elif sub == "run":
+            await _eval_run(channel, service.datasets_root, parts)
+        else:
+            channel.print_error(f"未知 /eval 子命令: {sub}")
+    except (FileNotFoundError, FileExistsError, ValueError) as error:
+        channel.print_error(f"eval 错误: {error}")
+
+
 def _parse_show_reasoning(args: Sequence[str] | None = None) -> bool:
     """解析 CLI 的思考展示开关，默认展示 reasoning 增量。"""
     parser = argparse.ArgumentParser(description="dotClaw 命令行客户端")
@@ -352,12 +476,47 @@ def _parse_show_reasoning(args: Sequence[str] | None = None) -> bool:
         dest="show_reasoning",
         help="隐藏模型的思考过程，仅展示最终回答",
     )
-    return bool(parser.parse_args(args).show_reasoning)
+    parser.add_argument(
+        "--eval-ci",
+        metavar="DATASET",
+        dest="eval_ci_dataset",
+        help="CI 模式：对指定 Dataset 运行 Playback 闸门并退出（PASS→0, REGRESSION/ERROR→1）",
+    )
+    parsed = parser.parse_args(args)
+    return bool(parsed.show_reasoning), parsed.eval_ci_dataset
+
+
+async def _eval_ci(dataset_name: str) -> int:
+    """CI 模式：创建最小 Host，运行 Playback Gate，退出码 0=PASS / 1=非 PASS。"""
+    from dotclaw.config import _find_project_root, get_config
+    from dotclaw.bootstrap import ApplicationHost
+
+    config = get_config()
+    project_root = _find_project_root()
+    host = ApplicationHost(config, project_root)
+    await host.initialize()
+
+    try:
+        root = host.eval_draft_service.datasets_root
+        report = await host.playback_runner.run_and_gate(root, dataset_name)
+        print(f"Gate: {report.overall_status}  ({sum(1 for c in report.case_results if c.passed)}/{len(report.case_results)} Case 通过)")
+        for c in report.case_results:
+            mark = "✓" if c.passed else "✗"
+            extra = f" — {c.failure_kind}" if c.failure_kind else ""
+            print(f"  {mark} {c.case_id}{extra}")
+        if report.error_detail:
+            print(f"ERROR: {report.error_detail}")
+        return 0 if report.overall_status == "PASS" else 1
+    finally:
+        await host.shutdown()
 
 
 def main() -> None:
     try:
-        asyncio.run(_run_cli(show_reasoning=_parse_show_reasoning()))
+        show_reasoning, ci_dataset = _parse_show_reasoning()
+        if ci_dataset:
+            sys.exit(asyncio.run(_eval_ci(ci_dataset)))
+        asyncio.run(_run_cli(show_reasoning=show_reasoning))
     except KeyboardInterrupt:
         pass
 

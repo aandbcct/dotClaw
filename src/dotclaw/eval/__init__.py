@@ -26,6 +26,13 @@ from .fixtures import (
     ScriptedLLMPort,
     ToolFixture,
 )
+from .draft import DRAFT_SCHEMA_VERSION, EvalCaseDraft, trace_to_eval_case_draft
+from .draft_service import EvalCaseDraftService
+from .gate import RegressionGate
+from .playback import PlaybackRunner
+from .redaction import REDACTED_MARKER, redact_draft
+from .reexecution import ReexecutionRunner
+from .regression import PlaybackBatch, RegressionCaseResult, RegressionReport
 from .models import (
     EVAL_SCHEMA_VERSION,
     EvalCase,
@@ -48,6 +55,12 @@ from .scorers import (
 )
 
 __all__ = [
+    "EvalCaseDraft",
+    "DRAFT_SCHEMA_VERSION",
+    "trace_to_eval_case_draft",
+    "redact_draft",
+    "REDACTED_MARKER",
+    "EvalCaseDraftService",
     "EvalCase",
     "EvalCaseValidationError",
     "ExecutionMode",
@@ -79,4 +92,10 @@ __all__ = [
     "SCORERS",
     "ALL_SCORERS",
     "EVAL_SCHEMA_VERSION",
+    "PlaybackRunner",
+    "PlaybackBatch",
+    "ReexecutionRunner",
+    "RegressionGate",
+    "RegressionReport",
+    "RegressionCaseResult",
 ]

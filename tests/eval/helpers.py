@@ -175,3 +175,120 @@ def build_case(
         tags=tuple(tags),
         source_trace=source_trace,
     )
+
+
+def make_terminal_trace(run_id: str = "run-1", *, ended: bool = True, statistics=None):
+    """构造含 Tool + Approval + Delegation 的 RunTrace，供 PR5 转换测试使用。
+
+    ``ended=False`` 时返回部分（语义不完整）Trace，用于验证转换拒绝；
+    ``statistics`` 用于注入非零 Token / 调用次数，验证基线提取。
+    """
+    import dataclasses
+
+    from dotclaw.runtime.domain.context import ContextVersion
+    from dotclaw.runtime.domain.events import RunEvent, RunEventType
+    from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
+    from dotclaw.trace.assembler import assemble_trace
+    from tests.trace.helpers import make_run, make_message, make_event
+
+    run = make_run(run_id=run_id, ended=ended)
+    if statistics is not None:
+        run = dataclasses.replace(run, statistics=statistics)
+    messages = (
+        make_message("msg-input", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "do it"),
+        make_message(
+            "msg-llm1", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+            tool_calls=(ToolCall(call_id="c1", name="t", arguments={"x": 1}),),
+        ),
+        make_message("msg-tool1", 3, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "ok", tool_call_id="c1"),
+        make_message(
+            "msg-llm2", 4, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+            tool_calls=(ToolCall(call_id="c2", name="danger", arguments={}),),
+        ),
+        make_message("msg-tool2", 5, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "allowed", tool_call_id="c2"),
+        make_message(
+            "msg-llm3", 6, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+            tool_calls=(ToolCall(call_id="c3", name="delegate", arguments={}),),
+        ),
+        make_message("msg-del1", 7, RunMessageKind.DELEGATION_RESULT, MessageRole.ASSISTANT, "delegated done"),
+        make_message("msg-llm4", 8, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, "final answer"),
+    )
+    events = (
+        make_event(run_id, 1, RunEventType.RUN_STARTED),
+        make_event(run_id, 2, RunEventType.LLM_STARTED, data={"call_index": 1, "model_id": "m", "context_version": 1}),
+        make_event(run_id, 3, RunEventType.LLM_COMPLETED, message_ids=("msg-llm1",)),
+        make_event(run_id, 4, RunEventType.TOOL_STARTED, data={"call_id": "c1", "tool_name": "t", "source_response_message_id": "msg-llm1"}),
+        make_event(run_id, 5, RunEventType.TOOL_COMPLETED, data={"call_id": "c1", "status": "completed", "result_message_id": "msg-tool1"}),
+        make_event(run_id, 6, RunEventType.LLM_STARTED, data={"call_index": 2, "model_id": "m", "context_version": 1}),
+        make_event(run_id, 7, RunEventType.LLM_COMPLETED, message_ids=("msg-llm2",)),
+        make_event(run_id, 8, RunEventType.TOOL_STARTED, data={"call_id": "c2", "tool_name": "danger", "source_response_message_id": "msg-llm2"}),
+        make_event(run_id, 9, RunEventType.WAITING_APPROVAL, data={"approval_id": "a1", "call_id": "c2"}),
+        make_event(run_id, 10, RunEventType.APPROVAL_RESOLVED, data={"approval_id": "a1", "approved": True}),
+        make_event(run_id, 11, RunEventType.TOOL_COMPLETED, data={"call_id": "c2", "status": "completed", "result_message_id": "msg-tool2"}),
+        make_event(run_id, 12, RunEventType.LLM_STARTED, data={"call_index": 3, "model_id": "m", "context_version": 1}),
+        make_event(run_id, 13, RunEventType.LLM_COMPLETED, message_ids=("msg-llm3",)),
+        make_event(run_id, 14, RunEventType.DELEGATION_REQUESTED, data={"tool_call_id": "c3", "target_agent_id": "agent-2"}),
+        make_event(run_id, 15, RunEventType.DELEGATION_SUBMITTED, data={"child_run_id": "child-1", "task_id": "task-1", "target_agent_id": "agent-2"}),
+        make_event(run_id, 16, RunEventType.DELEGATION_COMPLETED, data={"child_run_id": "child-1", "outcome": "completed"}, message_ids=("msg-del1",)),
+        make_event(run_id, 17, RunEventType.LLM_STARTED, data={"call_index": 4, "model_id": "m", "context_version": 1}),
+        make_event(run_id, 18, RunEventType.LLM_COMPLETED, message_ids=("msg-llm4",)),
+        make_event(run_id, 19, RunEventType.RUN_COMPLETED),
+    )
+    # 直接构造带固定 created_at 的上下文版本：new_context_version 使用当前时刻，
+    # 会让同一份权威事实在不同时刻算出不同 record_hash，破坏转换的可复现性断言。
+    context_version = ContextVersion(
+        version=1,
+        created_at="2026-07-31T00:00:00+00:00",
+        slots=(),
+        content_hash="chash-1",
+        tool_schema_hash="thash-1",
+    )
+    return assemble_trace(run, events, messages, (context_version,))
+
+
+def make_simple_trace(run_id: str = "run-simple", *, statistics=None):
+    """构造最小工具调用 Trace（无审批、无委派），供 Playback E2E 使用。
+
+    结构：用户输入 → 工具调用 → 工具结果 → 最终回复 → 完成。
+    ``statistics`` 用于注入非零统计基线。
+    """
+    import dataclasses
+
+    from dotclaw.runtime.domain.context import ContextVersion
+    from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall, RunStatistics
+    from dotclaw.runtime.domain.events import RunEvent, RunEventType
+    from dotclaw.trace.assembler import assemble_trace
+    from tests.trace.helpers import make_run, make_message, make_event, make_policy
+
+    stats = statistics or RunStatistics(
+        duration_ms=100, llm_call_count=2, tool_call_count=1, tokens_in=100, tokens_out=50
+    )
+    run = make_run(run_id=run_id, ended=True)
+    run = dataclasses.replace(run, statistics=stats, policy=make_policy())
+    messages = (
+        make_message("msg-input", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "weather please"),
+        make_message(
+            "msg-llm1", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+            tool_calls=(ToolCall(call_id="call-1", name="search", arguments={"q": "weather"}),),
+        ),
+        make_message("msg-tool1", 3, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "sunny", tool_call_id="call-1"),
+        make_message("msg-llm2", 4, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, "The weather is sunny today"),
+    )
+    events = (
+        make_event(run_id, 1, RunEventType.RUN_STARTED),
+        make_event(run_id, 2, RunEventType.LLM_STARTED, data={"call_index": 1, "model_id": "m", "context_version": 1}),
+        make_event(run_id, 3, RunEventType.LLM_COMPLETED, message_ids=("msg-llm1",)),
+        make_event(run_id, 4, RunEventType.TOOL_STARTED, data={"call_id": "call-1", "tool_name": "search", "source_response_message_id": "msg-llm1"}),
+        make_event(run_id, 5, RunEventType.TOOL_COMPLETED, data={"call_id": "call-1", "status": "completed", "result_message_id": "msg-tool1"}),
+        make_event(run_id, 6, RunEventType.LLM_STARTED, data={"call_index": 2, "model_id": "m", "context_version": 1}),
+        make_event(run_id, 7, RunEventType.LLM_COMPLETED, message_ids=("msg-llm2",)),
+        make_event(run_id, 8, RunEventType.RUN_COMPLETED),
+    )
+    context_version = ContextVersion(
+        version=1,
+        created_at="2026-07-31T00:00:00+00:00",
+        slots=(),
+        content_hash="chash-1",
+        tool_schema_hash="thash-1",
+    )
+    return assemble_trace(run, events, messages, (context_version,))
