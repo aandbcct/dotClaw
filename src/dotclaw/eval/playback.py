@@ -7,12 +7,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 from .dataset import load_cases
 from .gate import RegressionGate
-from .models import EvalCaseValidationError
-from .regression import RegressionReport
+from .models import EvalCaseValidationError, ExecutionMode
+from .regression import PlaybackBatch, RegressionReport
 from .results import EvalResult, EvaluationFailureKind
 from .runner import EvalRunner
 
@@ -60,8 +61,11 @@ class PlaybackRunner:
             return (_error_result("", f"Dataset {dataset_name!r} 未包含任何 Case"),)
 
         for case in cases:
+            # 强制 PLAYBACK：无论 Case 文件声明何种模式，PlaybackRunner 必须
+            # 以 STRICT / 冻结回放执行——不信任外部模式的声明。
+            playback_case = dataclasses.replace(case, execution_mode=ExecutionMode.PLAYBACK)
             try:
-                result = await runner.run(case)
+                result = await runner.run(playback_case)
             except Exception as e:
                 result = _error_result(
                     case.case_id,
@@ -79,8 +83,10 @@ class PlaybackRunner:
         """执行数据集并产出 Gate 判定报告。
 
         等价于 ``run_dataset()`` 后接 ``RegressionGate().evaluate()``，
-        是 CI 场景的最常用入口。
+        是 CI 场景的最常用入口。结果以 ``PlaybackBatch`` 包装传入 Gate，
+        确保仅 Playback 来源的结果可被判定。
         """
         results = await self.run_dataset(root, dataset_name)
+        batch = PlaybackBatch(results=results, dataset=dataset_name)
         gate = RegressionGate()
-        return gate.evaluate(results, dataset=dataset_name)
+        return gate.evaluate(batch)

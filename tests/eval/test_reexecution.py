@@ -67,6 +67,39 @@ async def test_reexecution_preserves_case_conversation(tmp_path: Path) -> None:
     assert len(results) == 1
 
 
+@pytest.mark.asyncio
+async def test_reexecution_results_cannot_enter_gate() -> None:
+    """Re-execution 直接结果无法传入 Gate（PlaybackBatch 类型检查）。
+
+    ``RegressionGate.evaluate()`` 仅接受 ``PlaybackBatch``——
+    ReexecutionRunner 不产出该类型，外部无法将普通 tuple[EvalResult]
+    传入 Gate。
+    """
+    import tempfile
+
+    from dotclaw.eval.gate import RegressionGate
+    from dotclaw.eval.regression import PlaybackBatch
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _seed_cases(root, "ds-type", (("case-tt", "yes", "ok"),))
+        results = await _make_runner().run_dataset(root, "ds-type")
+        assert len(results) == 1
+
+    # Gate 不接受 tuple[EvalResult]，仅接受 PlaybackBatch
+    gate = RegressionGate()
+    try:
+        gate.evaluate(results)  # type: ignore[arg-type]
+        assert False, "Gate 不应接受 tuple[EvalResult]"
+    except (TypeError, AttributeError):
+        pass
+
+    # 但正确构造的 PlaybackBatch 应正常工作
+    batch = PlaybackBatch(results=results, dataset="ds-type")
+    report = gate.evaluate(batch)
+    assert report.overall_status in ("PASS", "REGRESSION", "ERROR")
+
+
 # ---------------------------------------------------------------------------
 # 辅助
 # ---------------------------------------------------------------------------

@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .dataset import load_cases
 from .models import EvalCaseValidationError, ExecutionMode
 from .results import EvalResult, EvaluationFailureKind
 from .runner import EvalRunner
+
+if TYPE_CHECKING:
+    from .environment import EvalDependencies
 
 
 def _error_result(case_id: str, detail: str) -> EvalResult:
@@ -35,7 +39,14 @@ class ReexecutionRunner:
     Case 的执行模式被覆写为 REEXECUTION，保留 Conversation 与隔离外部
     Fixture，允许 NORMAL 匹配与真实 LLM 回退。不调用 retry_interrupted，
     不写原 Run / Session / 工作目录，不使用生产凭证。
+
+    通过 ``dependencies`` 注入当前 Agent / Prompt / LLM 的真实端口；
+    未注入时仅消费 Fixture（等价于松弛匹配的 Playback）。
     """
+
+    def __init__(self, dependencies: "EvalDependencies | None" = None) -> None:
+        """绑定 Re-execution 所需的生产端口。"""
+        self._deps: EvalDependencies | None = dependencies
 
     async def run_dataset(self, root: Path, dataset_name: str) -> tuple[EvalResult, ...]:
         """加载并以 REEXECUTION 模式逐个执行 Dataset 全部 Case。
@@ -62,7 +73,7 @@ class ReexecutionRunner:
             # REEXECUTION 覆写：保留 Conversation 与隔离 Fixture，允许真实 LLM
             reexec_case = dataclasses.replace(case, execution_mode=ExecutionMode.REEXECUTION)
             try:
-                result = await runner.run(reexec_case)
+                result = await runner.run(reexec_case, dependencies=self._deps)
             except Exception as e:
                 result = _error_result(
                     case.case_id,

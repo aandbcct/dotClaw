@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .regression import (
     REPORT_SCHEMA_VERSION,
+    PlaybackBatch,
     RegressionCaseResult,
     RegressionReport,
     _is_trusted,
@@ -25,25 +26,24 @@ _TRUSTED_FAILURE_KINDS: frozenset[EvaluationFailureKind] = frozenset(
 
 
 class RegressionGate:
-    """Playback 回归闸门：对批量评测结果判定 PASS / REGRESSION / ERROR。
+    """Playback 回归闸门：仅接受 ``PlaybackBatch`` 并对结果判定三态。
 
-    Gate 不从结果中"重算"通过与否，直接复用 ``EvalResult.passed``；
+    ``evaluate()`` 的入参类型为 ``PlaybackBatch``——该类型仅由
+    ``PlaybackRunner`` 产出，Re-execution 结果无法绕过。Gate 不从
+    EvalResult 中"重算"通过与否，直接复用 ``EvalResult.passed``；
     只对不可信的运行基础设施错误定位并阻止 CI。
     """
 
-    def evaluate(
-        self,
-        results: tuple[EvalResult, ...],
-        *,
-        dataset: str = "",
-    ) -> RegressionReport:
-        """对批量 Playback 结果归因并产出报告。
+    def evaluate(self, batch: PlaybackBatch) -> RegressionReport:
+        """对 PlaybackBatch 归因并产出报告。
 
         判定规则：
         - 全部受信且 passed → PASS
         - 至少一条受信但断言失败 → REGRESSION
         - 任何一条不可信（RUNTIME / FIXTURE_CONFIGURATION / TRACE_RECONSTRUCTION）→ ERROR
         """
+        results = batch.results
+        dataset = batch.dataset
         if not results:
             return RegressionReport(
                 schema_version=REPORT_SCHEMA_VERSION,

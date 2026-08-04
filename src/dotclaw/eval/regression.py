@@ -21,6 +21,21 @@ _REPORT_STATUS_ERROR: str = "ERROR"
 
 
 @dataclass(frozen=True)
+class PlaybackBatch:
+    """由 PlaybackRunner 产出的可信回放结果批次。
+
+    该类型的唯一作用是作为 ``RegressionGate.evaluate()`` 的参数——
+    只有 PlaybackRunner 能产出 ``PlaybackBatch``，Re-execution 结果
+    无法以该类型包装，从而从类型层面阻止非 Playback 结果进入 Gate。
+    """
+
+    results: tuple[EvalResult, ...]
+    """Playback 执行的全部结果。"""
+    dataset: str = ""
+    """被评估的 Dataset 标识。"""
+
+
+@dataclass(frozen=True)
 class RegressionCaseResult:
     """单个 Case 的回归摘要——只保留不可变的语义信息。"""
 

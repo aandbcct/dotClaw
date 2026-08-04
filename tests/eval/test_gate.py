@@ -1,9 +1,14 @@
 """PR6 Gate 三态判定与 CI 准入。"""
 
 from dotclaw.eval.gate import RegressionGate
-from dotclaw.eval.regression import RegressionReport
+from dotclaw.eval.regression import PlaybackBatch, RegressionReport
 from dotclaw.eval.results import EvalResult, EvaluationFailureKind, AssertionResult
 from dotclaw.eval.models import Expectation
+
+
+def _batch(*results: EvalResult, dataset: str = "ds") -> PlaybackBatch:
+    """辅助构造 PlaybackBatch。"""
+    return PlaybackBatch(results=results, dataset=dataset)
 
 
 def _pass(case_id: str = "case-1") -> EvalResult:
@@ -70,52 +75,44 @@ def _trace_error(case_id: str = "case-5") -> EvalResult:
 
 
 def test_all_pass_is_pass() -> None:
-    """全部通过归为 PASS。"""
-    report = RegressionGate().evaluate((_pass(), _pass()), dataset="ds")
+    report = RegressionGate().evaluate(_batch(_pass(), _pass()))
     assert report.overall_status == "PASS"
     assert report.passed is True
     assert report.error_detail is None
 
 
 def test_single_assertion_failure_is_regression() -> None:
-    """任一 ASSERTION 失败归为 REGRESSION。"""
-    report = RegressionGate().evaluate((_pass(), _assertion_fail()), dataset="ds")
+    report = RegressionGate().evaluate(_batch(_pass(), _assertion_fail()))
     assert report.overall_status == "REGRESSION"
     assert report.passed is False
     assert report.error_detail is None
 
 
 def test_fixture_configuration_is_error() -> None:
-    """FIXTURE_CONFIGURATION 不可信，归为 ERROR。"""
-    report = RegressionGate().evaluate((_fixture_error(),), dataset="ds")
+    report = RegressionGate().evaluate(_batch(_fixture_error()))
     assert report.overall_status == "ERROR"
     assert report.error_detail is not None
     assert "case-3" in report.error_detail
 
 
 def test_runtime_error_is_error() -> None:
-    """RUNTIME 错误不可信，归为 ERROR。"""
-    report = RegressionGate().evaluate((_runtime_error(),), dataset="ds")
+    report = RegressionGate().evaluate(_batch(_runtime_error()))
     assert report.overall_status == "ERROR"
 
 
 def test_trace_reconstruction_is_error() -> None:
-    """TRACE_RECONSTRUCTION 不可信，归为 ERROR。"""
-    report = RegressionGate().evaluate((_trace_error(),), dataset="ds")
+    report = RegressionGate().evaluate(_batch(_trace_error()))
     assert report.overall_status == "ERROR"
 
 
 def test_mixed_trusted_and_untrusted_is_error() -> None:
-    """混合受信与不可信结果：整体归为 ERROR。"""
-    report = RegressionGate().evaluate((_pass(), _fixture_error()), dataset="ds")
+    report = RegressionGate().evaluate(_batch(_pass(), _fixture_error()))
     assert report.overall_status == "ERROR"
-    # 所有 Case 摘要都应在报告中（不丢失信息）
     assert len(report.case_results) == 2
 
 
 def test_empty_results_is_error() -> None:
-    """空结果集归为 ERROR。"""
-    report = RegressionGate().evaluate((), dataset="ds")
+    report = RegressionGate().evaluate(PlaybackBatch(results=()))
     assert report.overall_status == "ERROR"
     assert report.error_detail is not None
 
@@ -126,22 +123,18 @@ def test_empty_results_is_error() -> None:
 
 
 def test_report_contains_all_case_summaries() -> None:
-    """报告应包含全部 Case 的摘要，无论通过与否。"""
-    results = (_pass("c1"), _assertion_fail("c2"), _pass("c3"))
-    report = RegressionGate().evaluate(results, dataset="ds")
+    report = RegressionGate().evaluate(_batch(_pass("c1"), _assertion_fail("c2"), _pass("c3")))
     assert len(report.case_results) == 3
     case_ids = {c.case_id for c in report.case_results}
     assert case_ids == {"c1", "c2", "c3"}
 
 
 def test_report_dataset_field_is_preserved() -> None:
-    """evaluate 传入的 dataset 参数被写入 Report。"""
-    report = RegressionGate().evaluate((_pass(),), dataset="my-dataset")
+    report = RegressionGate().evaluate(_batch(_pass(), dataset="my-dataset"))
     assert report.dataset == "my-dataset"
 
 
 def test_error_report_has_diagnostic_detail() -> None:
-    """ERROR 报告必须携带诊断信息。"""
-    report = RegressionGate().evaluate((_fixture_error("c-broken"),), dataset="ds")
+    report = RegressionGate().evaluate(_batch(_fixture_error("c-broken")))
     assert report.error_detail is not None
     assert "c-broken" in report.error_detail

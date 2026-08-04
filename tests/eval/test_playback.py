@@ -69,16 +69,20 @@ async def test_playback_nonexistent_dataset_is_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_playback_forces_playback_mode(tmp_path: Path) -> None:
-    """即使 Case 声明 REEXECUTION，PlaybackRunner 也不覆盖，仅执行现有模式。
-    
-    实际上 Case 来自 confirm_draft 流程，均默认 PLAYBACK；
-    此测试验证 runner 不做额外的模式覆写。
-    """
-    _seed_cases(tmp_path, "ds-play", (("case-c", "hello", "world"),))
-    runner = _make_runner()
-    results = await runner.run_dataset(tmp_path, "ds-play")
-    assert all(r.passed for r in results)
+async def test_playback_forces_playback_mode_on_reexecution_case(tmp_path: Path) -> None:
+    """声明 REEXECUTION 的 Case 也强制以 PLAYBACK/STRICT 执行。"""
+    import dataclasses
+    from dotclaw.eval.models import ExecutionMode
+
+    case = _make_case("case-force", "hello", "world")
+    # 故意声明 REEXECUTION——PlaybackRunner 应忽略并强制 PLAYBACK
+    case = dataclasses.replace(case, execution_mode=ExecutionMode.REEXECUTION)
+    _save_case(tmp_path, "ds-force", case)
+
+    results = await _make_runner().run_dataset(tmp_path, "ds-force")
+    assert len(results) == 1
+    # 强制 Playback 应成功执行（若泄漏 REEXECUTION 去依赖真实端口则失败）
+    assert results[0].passed is True
 
 
 @pytest.mark.asyncio
@@ -217,12 +221,13 @@ async def test_playback_does_not_call_production_resume(tmp_path: Path) -> None:
 def test_gate_pass_maps_to_exit_code_zero() -> None:
     """PASS 状态映射为退出码 0。"""
     from dotclaw.eval.gate import RegressionGate
+    from dotclaw.eval.regression import PlaybackBatch
     from dotclaw.eval.results import EvalResult
     r = EvalResult(
         schema_version="1.0", case_id="c1", run_id="r1",
         passed=True, assertion_results=()
     )
-    report = RegressionGate().evaluate((r,), dataset="ds")
+    report = RegressionGate().evaluate(PlaybackBatch(results=(r,), dataset="ds"))
     assert report.overall_status == "PASS"
 
 
@@ -230,6 +235,7 @@ def test_gate_regression_maps_to_exit_code_nonzero() -> None:
     """REGRESSION 状态对应 CI 失败。"""
     from dotclaw.eval.gate import RegressionGate
     from dotclaw.eval.models import Expectation
+    from dotclaw.eval.regression import PlaybackBatch
     from dotclaw.eval.results import AssertionResult, EvalResult, EvaluationFailureKind
     r = EvalResult(
         schema_version="1.0", case_id="c1", run_id="r1",
@@ -237,7 +243,7 @@ def test_gate_regression_maps_to_exit_code_nonzero() -> None:
         assertion_results=(AssertionResult(Expectation("run_status", "run", "completed"), False, "wrong"),),
         failure_kind=EvaluationFailureKind.ASSERTION,
     )
-    report = RegressionGate().evaluate((r,), dataset="ds")
+    report = RegressionGate().evaluate(PlaybackBatch(results=(r,), dataset="ds"))
     assert report.overall_status == "REGRESSION"
     assert report.passed is False
 
@@ -245,6 +251,7 @@ def test_gate_regression_maps_to_exit_code_nonzero() -> None:
 def test_gate_error_maps_to_exit_code_nonzero() -> None:
     """ERROR 状态对应 CI 失败。"""
     from dotclaw.eval.gate import RegressionGate
+    from dotclaw.eval.regression import PlaybackBatch
     from dotclaw.eval.results import EvalResult, EvaluationFailureKind
     r = EvalResult(
         schema_version="1.0", case_id="c1", run_id=None,
@@ -253,6 +260,6 @@ def test_gate_error_maps_to_exit_code_nonzero() -> None:
         failure_kind=EvaluationFailureKind.FIXTURE_CONFIGURATION,
         failure_detail="配置错误",
     )
-    report = RegressionGate().evaluate((r,), dataset="ds")
+    report = RegressionGate().evaluate(PlaybackBatch(results=(r,), dataset="ds"))
     assert report.overall_status == "ERROR"
     assert report.passed is False

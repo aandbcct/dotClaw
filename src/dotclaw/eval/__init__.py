@@ -32,7 +32,7 @@ from .gate import RegressionGate
 from .playback import PlaybackRunner
 from .redaction import REDACTED_MARKER, redact_draft
 from .reexecution import ReexecutionRunner
-from .regression import RegressionCaseResult, RegressionReport
+from .regression import PlaybackBatch, RegressionCaseResult, RegressionReport
 from .models import (
     EVAL_SCHEMA_VERSION,
     EvalCase,
@@ -93,6 +93,7 @@ __all__ = [
     "ALL_SCORERS",
     "EVAL_SCHEMA_VERSION",
     "PlaybackRunner",
+    "PlaybackBatch",
     "ReexecutionRunner",
     "RegressionGate",
     "RegressionReport",

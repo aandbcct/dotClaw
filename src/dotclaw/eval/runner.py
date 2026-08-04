@@ -37,14 +37,19 @@ class EvalRunner:
         """绑定九个确定性 Scorer 实例。"""
         self._scorers: dict[ExpectationKind, Scorer] = SCORERS
 
-    async def run(self, case: EvalCase) -> EvalResult:
-        """执行评测用例并返回分类后的结果。"""
+    async def run(self, case: EvalCase, dependencies: "EvalDependencies | None" = None) -> EvalResult:
+        """执行评测用例并返回分类后的结果。
+
+        参数：
+            case: 要执行的评测用例。
+            dependencies: Re-execution 模式所需的生产端口；Playback 下须为 None。
+        """
         config_errors = self._validate_expectations(case)
         if config_errors:
             return self._config_error(case, config_errors)
 
         try:
-            env = EvalEnvironment(case)
+            env = EvalEnvironment(case, dependencies=dependencies)
         except (FixtureConfigurationError, ValueError) as exc:
             return self._fail(case.case_id, None, EvaluationFailureKind.FIXTURE_CONFIGURATION, str(exc))
 
