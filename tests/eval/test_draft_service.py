@@ -346,3 +346,29 @@ def test_host_exposes_service_only_after_initialize() -> None:
     host._eval_draft_service = None
     with pytest.raises(RuntimeError):
         _ = host.eval_draft_service
+
+
+# ---------------------------------------------------------------------------
+# E2E：Trace → Draft → confirm → EvalRunner（PR5 核心闭环）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_simple_trace_to_case_through_runner_passes(tmp_path: Path) -> None:
+    """从最简工具调用 Trace 到 Runner 执行全链路通过。
+
+    链路：make_simple_trace → create_draft_from_trace → confirm_draft →
+    EvalRunner.run() → passed=True。
+    验证 Draft 生成的 Expectation 与 PR4 scorer 契约一致。
+    """
+    from dotclaw.eval.runner import EvalRunner
+    from .helpers import make_simple_trace
+
+    trace = make_simple_trace("run-e2e")
+    svc = service_at(tmp_path)
+    draft = await svc.create_draft_from_trace(DATASET, trace)
+    case = await svc.confirm_draft(DATASET, draft.draft_id, "case-e2e")
+
+    result = await EvalRunner().run(case)
+    assert result.passed is True, f"E2E 全链路应通过，实际失败：{result.failure_detail}"
+    assert result.failure_kind is None

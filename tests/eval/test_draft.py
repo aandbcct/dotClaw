@@ -128,38 +128,46 @@ def test_llm_fixture_preserves_response_order() -> None:
 
 
 def test_context_and_policy_are_frozen() -> None:
-    """上下文版本被冻结为空载体，Policy 直接取自 Run 快照。"""
+    """上下文版本按 LLM Span 数冻结，Policy 直接取自 Run 快照，工具定义从 Span 提取。"""
     trace = make_terminal_trace()
     draft = trace_to_eval_case_draft(trace)
-    assert [item.fixture_id for item in draft.case.context_fixtures] == ["ctx-1"]
+    assert [item.fixture_id for item in draft.case.context_fixtures] == [
+        "ctx-1", "ctx-2", "ctx-3", "ctx-4",
+    ]
+    # 工具定义从 Trace 的工具 Span 中按名称去重派生
+    tool_names = [tool.name for tool in draft.case.context_fixtures[0].tools]
+    assert tool_names == ["t", "danger"]
     assert draft.case.policy_fixture == trace.run.policy
     assert draft.case.policy_fixture.max_iterations == 10
     assert draft.case.conversation_fixture.session_id == trace.run.session_id
 
 
 def test_token_and_call_count_baseline_is_extracted() -> None:
-    """Token 与调用次数基线来自运行统计，逐字段提取。"""
+    """Token 与调用次数基线作为独立 Expectation，对齐 scorer 契约。"""
     statistics = RunStatistics(
         duration_ms=1234, llm_call_count=4, tool_call_count=2, tokens_in=111, tokens_out=222
     )
     draft = trace_to_eval_case_draft(make_terminal_trace(statistics=statistics))
-    budget = [item for item in draft.case.expectations if item.kind == "token_budget"]
-    assert len(budget) == 1
-    assert budget[0].expected == {
-        "tokens_in": 111,
-        "tokens_out": 222,
-        "tool_call_count": 2,
-        "llm_call_count": 4,
+    by_kind_target = {
+        (item.kind, item.target): item.expected
+        for item in draft.case.expectations
     }
+    assert by_kind_target[("token_budget", "tokens_in")] == 111
+    assert by_kind_target[("token_budget", "tokens_out")] == 222
+    assert by_kind_target[("iteration_budget", "llm_calls")] == 4
+    assert by_kind_target[("iteration_budget", "tool_calls")] == 2
 
 
 def test_base_expectations_cover_status_iteration_and_tool_sequence() -> None:
-    """基础断言包含运行状态、迭代预算与工具序列。"""
+    """基础断言包含运行状态、独立迭代预算与工具序列，对齐 scorer 契约。"""
     draft = trace_to_eval_case_draft(make_terminal_trace())
-    by_kind = {item.kind: item for item in draft.case.expectations}
-    assert by_kind["run_status"].expected == RunOutcome.COMPLETED.value
-    assert by_kind["iteration_budget"].expected == 10
-    assert by_kind["tool_sequence"].expected == ["t", "danger"]
+    by_kind_target = {(item.kind, item.target): item.expected for item in draft.case.expectations}
+    assert by_kind_target[("run_status", "run")] == RunOutcome.COMPLETED.value
+    assert by_kind_target[("iteration_budget", "llm_calls")] == 0
+    assert by_kind_target[("iteration_budget", "tool_calls")] == 0
+    assert by_kind_target[("token_budget", "tokens_in")] == 0
+    assert by_kind_target[("token_budget", "tokens_out")] == 0
+    assert by_kind_target[("tool_sequence", "run")] == ["t", "danger"]
 
 
 def test_source_trace_is_recorded_without_content() -> None:
@@ -220,3 +228,15 @@ def test_draft_rejects_empty_identifiers(field_name: str) -> None:
     values[field_name] = ""
     with pytest.raises(EvalCaseValidationError):
         EvalCaseDraft(case=build_case(), **values)
+
+
+def test_draft_rejects_non_bool_requires_review() -> None:
+    """from_dict 拒绝非布尔 requires_review，防止字符串 "false" 被静默判 True。"""
+    payload = trace_to_eval_case_draft(make_terminal_trace()).to_dict()
+    payload["requires_review"] = "false"
+    with pytest.raises(EvalCaseValidationError, match="requires_review.*必须是布尔值"):
+        EvalCaseDraft.from_dict(payload)
+
+    payload["requires_review"] = 1
+    with pytest.raises(EvalCaseValidationError, match="requires_review.*必须是布尔值"):
+        EvalCaseDraft.from_dict(payload)

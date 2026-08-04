@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import Mapping
 
-from ..runtime.application.dto import ConversationMessage, ToolResultStatus
+from ..runtime.application.dto import ConversationMessage, ToolDefinition, ToolResultStatus
 from ..runtime.domain.facts import JSONMap, MessageRole, RunMessage, RunMessageKind
 from ..runtime.domain.state import RunOutcome
 from ..trace.models import RunTrace, SpanKind, TraceSpanStatus
@@ -100,6 +100,15 @@ class EvalCaseDraft:
             _require_map(data.get("case"), f"{label}.case")
         )
         confirmed: str | None = _optional_str(data, "confirmed_case_id", label)
+        raw_review = data.get("requires_review")
+        if raw_review is None:
+            requires_review: bool = False
+        elif isinstance(raw_review, bool):
+            requires_review = raw_review
+        else:
+            raise EvalCaseValidationError(
+                f"draft.requires_review 必须是布尔值，实际为 {type(raw_review).__name__}: {raw_review!r}"
+            )
         return cls(
             draft_id=_require_str(data, "draft_id", label, allow_empty=False),
             schema_version=schema_version,
@@ -109,7 +118,7 @@ class EvalCaseDraft:
                 data, "source_trace_schema_version", label, allow_empty=False
             ),
             case=case,
-            requires_review=bool(data.get("requires_review", False)),
+            requires_review=requires_review,
             confirmed_case_id=confirmed,
         )
 
@@ -298,10 +307,32 @@ def _build_delegation_fixtures(trace: RunTrace) -> tuple[DelegationFixture, ...]
 
 
 def _build_context_fixtures(trace: RunTrace) -> tuple[ContextFixture, ...]:
-    """按上下文版本提取冻结上下文载体；明文不可复现，固定为空载体 + 版本标识。"""
+    """按 LLM Span 数生成上下文 Fixture —— 一次 LLM 调用消耗一次上下文构建。
+
+    工具定义从 Trace 的工具 Span 中按名称去重派生 —— 仅保留名称，
+    描述与参数 Schema 留空（运行期不可复现）。每个上下文版本携带相同
+    的最小工具定义集，确保 Playback 模式下 Runtime 每次上下文构建都能
+    找到匹配的 Fixture。
+    """
+    tool_spans = list(ordered_spans(trace, SpanKind.TOOL))
+    tool_names: tuple[str, ...] = tuple(dict.fromkeys(
+        span.attributes.get("tool_name")
+        for span in tool_spans
+        if span.attributes.get("tool_name")
+    ))
+    minimal_tools: tuple[ToolDefinition, ...] = tuple(
+        ToolDefinition(name=name, description="", parameters={})
+        for name in tool_names
+    )
+    llm_count = len(list(ordered_spans(trace, SpanKind.LLM)))
     return tuple(
-        ContextFixture(fixture_id=f"ctx-{version.version}", messages=(), tools=(), estimated_tokens=1)
-        for version in trace.context_versions
+        ContextFixture(
+            fixture_id=f"ctx-{i + 1}",
+            messages=(),
+            tools=minimal_tools,
+            estimated_tokens=1,
+        )
+        for i in range(llm_count)
     )
 
 
@@ -323,26 +354,33 @@ def _stable_source_view(trace: RunTrace) -> str:
 def _build_base_expectations(
     trace: RunTrace, tool_fixtures: tuple[ToolFixture, ...]
 ) -> tuple[Expectation, ...]:
-    """派生基础断言与 Token / 调用次数基线。"""
+    """派生基础断言与 Token / 调用次数基线。
+
+    每个预算指标生成**独立** Expectation，字段与 PR4 scorer 契约严格一致：
+    - ``TOKEN_BUDGET``: target 仅接受 ``tokens_in`` / ``tokens_out`` / ``total``，
+      expected 必须是整数。
+    - ``ITERATION_BUDGET``: target 仅接受 ``llm_calls`` / ``tool_calls`` / ``loops``，
+      expected 必须是整数。
+
+    本函数从运行统计中提取 **tokens_in 与 tokens_out** 作为两条独立 token
+    预算，以及 **llm_calls 与 tool_calls** 作为两条独立迭代预算。
+    """
     expectations: list[Expectation] = []
     outcome = run_outcome(trace)
     if outcome is not None:
         expectations.append(Expectation(kind="run_status", target="run", expected=outcome.value))
     statistics = trace.run.statistics
     expectations.append(
-        Expectation(
-            kind="token_budget",
-            target="run",
-            expected={
-                "tokens_in": statistics.tokens_in,
-                "tokens_out": statistics.tokens_out,
-                "tool_call_count": statistics.tool_call_count,
-                "llm_call_count": statistics.llm_call_count,
-            },
-        )
+        Expectation(kind="token_budget", target="tokens_in", expected=statistics.tokens_in)
     )
     expectations.append(
-        Expectation(kind="iteration_budget", target="policy", expected=trace.run.policy.max_iterations)
+        Expectation(kind="token_budget", target="tokens_out", expected=statistics.tokens_out)
+    )
+    expectations.append(
+        Expectation(kind="iteration_budget", target="llm_calls", expected=statistics.llm_call_count)
+    )
+    expectations.append(
+        Expectation(kind="iteration_budget", target="tool_calls", expected=statistics.tool_call_count)
     )
     tool_names = [fixture.tool_name for fixture in tool_fixtures]
     if tool_names:

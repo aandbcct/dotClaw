@@ -244,3 +244,51 @@ def make_terminal_trace(run_id: str = "run-1", *, ended: bool = True, statistics
         tool_schema_hash="thash-1",
     )
     return assemble_trace(run, events, messages, (context_version,))
+
+
+def make_simple_trace(run_id: str = "run-simple", *, statistics=None):
+    """构造最小工具调用 Trace（无审批、无委派），供 Playback E2E 使用。
+
+    结构：用户输入 → 工具调用 → 工具结果 → 最终回复 → 完成。
+    ``statistics`` 用于注入非零统计基线。
+    """
+    import dataclasses
+
+    from dotclaw.runtime.domain.context import ContextVersion
+    from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall, RunStatistics
+    from dotclaw.runtime.domain.events import RunEvent, RunEventType
+    from dotclaw.trace.assembler import assemble_trace
+    from tests.trace.helpers import make_run, make_message, make_event, make_policy
+
+    stats = statistics or RunStatistics(
+        duration_ms=100, llm_call_count=2, tool_call_count=1, tokens_in=100, tokens_out=50
+    )
+    run = make_run(run_id=run_id, ended=True)
+    run = dataclasses.replace(run, statistics=stats, policy=make_policy())
+    messages = (
+        make_message("msg-input", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "weather please"),
+        make_message(
+            "msg-llm1", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+            tool_calls=(ToolCall(call_id="call-1", name="search", arguments={"q": "weather"}),),
+        ),
+        make_message("msg-tool1", 3, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "sunny", tool_call_id="call-1"),
+        make_message("msg-llm2", 4, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, "The weather is sunny today"),
+    )
+    events = (
+        make_event(run_id, 1, RunEventType.RUN_STARTED),
+        make_event(run_id, 2, RunEventType.LLM_STARTED, data={"call_index": 1, "model_id": "m", "context_version": 1}),
+        make_event(run_id, 3, RunEventType.LLM_COMPLETED, message_ids=("msg-llm1",)),
+        make_event(run_id, 4, RunEventType.TOOL_STARTED, data={"call_id": "call-1", "tool_name": "search", "source_response_message_id": "msg-llm1"}),
+        make_event(run_id, 5, RunEventType.TOOL_COMPLETED, data={"call_id": "call-1", "status": "completed", "result_message_id": "msg-tool1"}),
+        make_event(run_id, 6, RunEventType.LLM_STARTED, data={"call_index": 2, "model_id": "m", "context_version": 1}),
+        make_event(run_id, 7, RunEventType.LLM_COMPLETED, message_ids=("msg-llm2",)),
+        make_event(run_id, 8, RunEventType.RUN_COMPLETED),
+    )
+    context_version = ContextVersion(
+        version=1,
+        created_at="2026-07-31T00:00:00+00:00",
+        slots=(),
+        content_hash="chash-1",
+        tool_schema_hash="thash-1",
+    )
+    return assemble_trace(run, events, messages, (context_version,))

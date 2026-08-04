@@ -26,6 +26,7 @@ def make_policy(model_id: str = "model-1") -> AgentPolicySnapshot:
         identity_version="v1",
         model_id=model_id,
         max_iterations=10,
+        policy_data={"context_window": 100000, "tokenizer_encoding": "cl100k_base"},
     )
 
 
