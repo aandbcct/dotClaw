@@ -346,6 +346,14 @@ class SessionConfig:
 
 
 @dataclass
+class EvalConfig:
+    """评测 Dataset 存储配置（PR5：TraceToEvalCaseDraft 与目录 Dataset）。"""
+
+    dataset_directory: str = "./data/datasets"
+    """Dataset 根目录；经 _storage_root 解析为与 Session 相同的绝对根。"""
+
+
+@dataclass
 class SchedulerConfig:
     enabled: bool = True
 
@@ -376,6 +384,7 @@ class Config:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
     journal: JournalConfig = field(default_factory=JournalConfig)
@@ -769,6 +778,10 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
     session = SessionConfig(
         directory=raw.get("session", {}).get("directory", "./data/sessions"),
     )
+    eval_raw = raw.get("eval", {})
+    eval_cfg = EvalConfig(
+        dataset_directory=eval_raw.get("dataset_directory", "./data/datasets"),
+    )
     scheduler = SchedulerConfig(
         enabled=raw.get("scheduler", {}).get("enabled", True),
     )
@@ -794,6 +807,7 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         skills=skills,
         memory=memory,
         session=session,
+        eval=eval_cfg,
         scheduler=scheduler,
         debug=debug,
         journal=journal,

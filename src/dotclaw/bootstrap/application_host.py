@@ -23,8 +23,9 @@ from ._host_components import (
     _init_async,
     _init_sync,
 )
-from .runtime_factory import RuntimeServices, build_runtime_services
+from .runtime_factory import RuntimeServices, build_runtime_services, _storage_root
 from .session_interaction import SessionInteractionService
+from ..eval.draft_service import EvalCaseDraftService
 from ..orchestration.registry import AgentRegistry
 from ..session.session import SessionManager
 
@@ -63,6 +64,7 @@ class ApplicationHost:
         self._context_port: ContextPort | None = None
         self._runtime_services: RuntimeServices | None = None
         self._session_interaction: SessionInteractionService | None = None
+        self._eval_draft_service: EvalCaseDraftService | None = None
         self._http_client: "HttpClient | None" = None
 
     # ── 构建 ──
@@ -154,6 +156,15 @@ class ApplicationHost:
             approval_repository=self._runtime_services.approval_repository,
             context_port=self._context_port,
         )
+        # ── 评测 Draft 服务（PR5：TraceToEvalCaseDraft 与目录 Dataset）──
+        # 兼容测试以 SimpleNamespace 注入配置的场景：缺省回退到默认 Dataset 目录。
+        eval_cfg = getattr(config, "eval", None)
+        dataset_directory = (
+            eval_cfg.dataset_directory if eval_cfg is not None else "./data/datasets"
+        )
+        dataset_root = _storage_root(root, dataset_directory)
+        self._eval_draft_service = EvalCaseDraftService(dataset_root)
+
         logger.info("ApplicationHost 就绪：%d 个 Identity 已注册", len(self._agent_registry.list_all()))
 
     def _resolve_default_agent_id(self):
@@ -214,6 +225,13 @@ class ApplicationHost:
     def memory_dream(self) -> "DeepDream | None":
         """返回可选的记忆蒸馏服务（CLI /dream 使用）。"""
         return self._memory_dream
+
+    @property
+    def eval_draft_service(self) -> EvalCaseDraftService:
+        """返回 Channel 审阅 / 确认 Draft 的窄应用入口（PR5）。"""
+        if self._eval_draft_service is None:
+            raise RuntimeError("ApplicationHost 尚未初始化")
+        return self._eval_draft_service
 
     # ── 关闭 ──
 

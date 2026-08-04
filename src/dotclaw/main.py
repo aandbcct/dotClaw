@@ -168,6 +168,8 @@ async def _run_cli(show_reasoning: bool = True) -> None:
                     elif cmd == "/model":
                         identity = service.get_identity(current_session)
                         channel.print_info(f"当前模型: {identity.resolve_model(config.llm.default_model)}")
+                    elif cmd == "/eval":
+                        await _cmd_eval(channel, host.eval_draft_service, args)
                     else:
                         channel.print_error(f"未知命令: {cmd}")
                     continue
@@ -204,6 +206,7 @@ dotClaw 命令:
   /retry <run_id>   重试中断运行
   /abandon <run_id> 放弃中断运行
   /model           查看当前模型
+  /eval            评测草案：list/show/review/confirm <dataset> ...
   /help            显示帮助
   /quit            退出
 """)
@@ -341,6 +344,71 @@ def _refresh_banner(service: SessionInteractionService, current_session: Session
         session_title=current_session.title,
         workspace=str(_find_project_root()),
     ))
+
+
+async def _cmd_eval(
+    channel: CLIChannel,
+    service: "EvalCaseDraftService",  # 由 ApplicationHost 注入
+    arg_str: str,
+) -> None:
+    """评测草案的 Channel 命令；仅经服务读写，不直接访问 Dataset 文件。"""
+    parts = arg_str.split()
+    if not parts:
+        channel.print_info("用法: /eval <list|show|review|confirm> <dataset> [<draft_id> [<case_id>]]")
+        return
+    sub = parts[0]
+    try:
+        if sub == "list":
+            if len(parts) < 2:
+                channel.print_error("用法: /eval list <dataset>")
+                return
+            dataset_name = parts[1]
+            drafts = await service.list_drafts(dataset_name)
+            cases = await service.list_cases(dataset_name)
+            channel.print_info(f"数据集 {dataset_name}: {len(drafts)} 个草案, {len(cases)} 个 Case")
+            for draft_id in drafts:
+                channel.print_info(f"  [draft] {draft_id}")
+            for case in cases:
+                channel.print_info(f"  [case]  {case.case_id} ({case.agent_id})")
+        elif sub == "show":
+            if len(parts) < 3:
+                channel.print_error("用法: /eval show <dataset> <draft_id>")
+                return
+            draft = await service.load_draft(parts[1], parts[2])
+            channel.print_info(
+                f"草案 {draft.draft_id}（来源 run={draft.source_run_id}, "
+                f"hash={draft.source_record_hash[:8]}…）"
+            )
+            channel.print_info(
+                f"  requires_review={draft.requires_review}, "
+                f"confirmed_case_id={draft.confirmed_case_id}"
+            )
+            channel.print_info(
+                f"  case_id={draft.case.case_id}, agent_id={draft.case.agent_id}, "
+                f"fixtures: llm={len(draft.case.llm_fixture.responses)}, "
+                f"tools={len(draft.case.tool_fixtures)}, "
+                f"approvals={len(draft.case.approval_fixtures)}, "
+                f"delegations={len(draft.case.delegation_fixtures)}, "
+                f"contexts={len(draft.case.context_fixtures)}, "
+                f"expectations={len(draft.case.expectations)}"
+            )
+        elif sub == "review":
+            if len(parts) < 3:
+                channel.print_error("用法: /eval review <dataset> <draft_id>")
+                return
+            draft = await service.load_draft(parts[1], parts[2])
+            reviewed = await service.save_reviewed_draft(parts[1], parts[2], draft)
+            channel.print_info(f"已保存审阅（requires_review={reviewed.requires_review}）: {reviewed.draft_id}")
+        elif sub == "confirm":
+            if len(parts) < 4:
+                channel.print_error("用法: /eval confirm <dataset> <draft_id> <case_id>")
+                return
+            case = await service.confirm_draft(parts[1], parts[2], parts[3])
+            channel.print_info(f"已确认 Case: {case.case_id}")
+        else:
+            channel.print_error(f"未知 /eval 子命令: {sub}")
+    except (FileNotFoundError, FileExistsError, ValueError) as error:
+        channel.print_error(f"eval 错误: {error}")
 
 
 def _parse_show_reasoning(args: Sequence[str] | None = None) -> bool:

@@ -26,6 +26,9 @@ from .fixtures import (
     ScriptedLLMPort,
     ToolFixture,
 )
+from .draft import DRAFT_SCHEMA_VERSION, EvalCaseDraft, trace_to_eval_case_draft
+from .draft_service import EvalCaseDraftService
+from .redaction import REDACTED_MARKER, redact_draft
 from .models import (
     EVAL_SCHEMA_VERSION,
     EvalCase,
@@ -48,6 +51,12 @@ from .scorers import (
 )
 
 __all__ = [
+    "EvalCaseDraft",
+    "DRAFT_SCHEMA_VERSION",
+    "trace_to_eval_case_draft",
+    "redact_draft",
+    "REDACTED_MARKER",
+    "EvalCaseDraftService",
     "EvalCase",
     "EvalCaseValidationError",
     "ExecutionMode",
