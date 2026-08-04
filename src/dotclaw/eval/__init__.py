@@ -1,7 +1,8 @@
-"""EvalCase 与隔离 Fixture Environment。
+"""EvalCase、隔离 Fixture Environment 与确定性评测。
 
-本包定义版本化 ``EvalCase``、默认拒绝真实依赖的 Fixture 端口，以及把二者
-装配为隔离 ``RuntimeEngine`` 的 ``EvalEnvironment``。PR3 不评分。
+本包定义版本化 ``EvalCase``、默认拒绝真实依赖的 Fixture 端口、把二者装配为隔离
+``RuntimeEngine`` 的 ``EvalEnvironment``，以及执行用例并用九个确定性 Scorer 产出
+可追溯 ``EvalResult`` 的 ``EvalRunner``（PR4）。
 """
 
 from .environment import (
@@ -26,11 +27,23 @@ from .fixtures import (
     ToolFixture,
 )
 from .models import (
+    EVAL_SCHEMA_VERSION,
     EvalCase,
     EvalCaseValidationError,
     ExecutionMode,
     Expectation,
     FixtureMatchMode,
+)
+from .results import (
+    AssertionResult,
+    EvalResult,
+    EvaluationFailureKind,
+)
+from .runner import EvalRunner
+from .scorers import (
+    ALL_SCORERS,
+    ExpectationKind,
+    SCORERS,
 )
 
 __all__ = [
@@ -56,4 +69,12 @@ __all__ = [
     "EvalEnvironment",
     "EvalRunOutcome",
     "InMemoryCheckpointRepository",
+    "AssertionResult",
+    "EvalResult",
+    "EvaluationFailureKind",
+    "EvalRunner",
+    "ExpectationKind",
+    "SCORERS",
+    "ALL_SCORERS",
+    "EVAL_SCHEMA_VERSION",
 ]

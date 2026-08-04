@@ -414,6 +414,7 @@ class EvalRunOutcome:
     run: AgentRun | None
     messages: tuple[RunMessage, ...]
     events: tuple[RunEvent, ...]
+    context_versions: tuple[ContextVersion, ...]
     environment: EvalEnvironment
 
     @property
@@ -522,12 +523,16 @@ class EvalEnvironment:
         events: tuple[RunEvent, ...] = await self.run_repository.load_events(
             request.session_id, result.run_id
         )
+        context_versions: tuple[ContextVersion, ...] = await self.run_repository.load_context_versions(
+            request.session_id, result.run_id
+        )
         return EvalRunOutcome(
             run_id=result.run_id,
             result=result,
             run=run,
             messages=messages,
             events=events,
+            context_versions=context_versions,
             environment=self,
         )
 

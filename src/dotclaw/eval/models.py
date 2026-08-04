@@ -26,6 +26,9 @@ from ..runtime.domain.state import RunOutcome
 SCHEMA_VERSION: str = "1.0"
 """当前支持的唯一 Case schema 版本；读取到其他版本必须明确失败。"""
 
+EVAL_SCHEMA_VERSION: str = SCHEMA_VERSION
+"""评测结果使用的 schema 版本，与 Case schema 同源。"""
+
 
 class EvalCaseValidationError(ValueError):
     """Case 或 Fixture 的结构、版本或取值不合法。"""
@@ -548,6 +551,8 @@ class EvalCase:
     tags: tuple[str, ...] = ()
     source_trace: str | None = None
     execution_mode: ExecutionMode = ExecutionMode.PLAYBACK
+    allow_partial_trace: bool = False
+    """显式声明允许对部分 Trace（运行未完整结束）评分；未声明时部分 Trace 视为重建失败。"""
 
     def __post_init__(self) -> None:
         """校验 schema 版本、必填标识与全局 Fixture 标识唯一。"""
@@ -587,6 +592,7 @@ class EvalCase:
             "tags": list(self.tags),
             "source_trace": self.source_trace,
             "execution_mode": self.execution_mode.value,
+            "allow_partial_trace": self.allow_partial_trace,
         }
 
     @classmethod
@@ -644,4 +650,5 @@ class EvalCase:
             execution_mode=_enum_of(
                 ExecutionMode, _require_str(data, "execution_mode", label), f"{label}.execution_mode"
             ),
+            allow_partial_trace=bool(data.get("allow_partial_trace", False)),
         )

@@ -8,7 +8,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from helpers import make_context_version, make_event, make_message, make_run
+from .helpers import make_context_version, make_event, make_message, make_run
 
 from dotclaw.runtime.domain.events import RunEventType
 from dotclaw.runtime.domain.facts import MessageRole, RunMessageKind
