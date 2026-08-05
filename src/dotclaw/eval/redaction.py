@@ -22,7 +22,7 @@ from .models import EvalCase
 REDACTED_MARKER: str = "[redacted]"
 """脱敏后的固定替换标记。"""
 
-_SENSITIVE_FIELD_NAMES: frozenset[str] = frozenset(
+SENSITIVE_FIELD_NAMES: frozenset[str] = frozenset(
     {
         "token",
         "api_key",
@@ -34,7 +34,7 @@ _SENSITIVE_FIELD_NAMES: frozenset[str] = frozenset(
 )
 
 # 已知凭证模式：命中即视为需要人工复核（启发式，无法保证全覆盖）。
-_CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
     re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
@@ -49,7 +49,7 @@ def _redact_string(text: str) -> tuple[str, bool]:
     """对字符串逐模式脱敏，返回（脱敏后文本, 是否触发启发式）。"""
     result: str = text
     hit: bool = False
-    for pattern in _CREDENTIAL_PATTERNS:
+    for pattern in CREDENTIAL_PATTERNS:
         if pattern.search(result):
             result = pattern.sub(REDACTED_MARKER, result)
             hit = True
@@ -63,7 +63,7 @@ def _redact_node(node: Any) -> tuple[Any, bool, bool]:
     if isinstance(node, dict):
         new_dict: dict[str, Any] = {}
         for key, value in node.items():
-            if isinstance(key, str) and key.lower() in _SENSITIVE_FIELD_NAMES:
+            if isinstance(key, str) and key.lower() in SENSITIVE_FIELD_NAMES:
                 # 字段名命中：确定性替换整个值，安全不触发复核。
                 new_dict[key] = REDACTED_MARKER
                 redacted = True

@@ -287,24 +287,28 @@ def test_non_ended_trace_rejected() -> None:
 
 
 def test_span_parent_child_hierarchy() -> None:
-    """导出 Span 的 parent_span_id 引用实际存在的父 Span。"""
+    """导出 Span 的子 Span 的 parent_span_id 指向实际 RUN 根。"""
     trace = make_terminal_trace("r-hier-check")
     mem = _memory_exporter()
     OtlpTraceExporter(mem).export(trace)
 
     spans = _exported_spans(mem)
-    span_ids: set[str] = set()
-    for s in spans:
-        ctx = getattr(s, "context", None)
-        if ctx is not None:
-            parent = getattr(ctx, "span_id", None)
-            if parent is not None:
-                span_ids.add(format(parent, "x"))
-        span_ids.add(format(s.context.span_id if s.context else 0, "x"))
+    # 找到 RUN 根 Span
+    run_spans = [s for s in spans if "dotclaw.run." in s.name]
+    assert len(run_spans) == 1
+    run_root = run_spans[0]
+    root_span_id = format(run_root.get_span_context().span_id, "x")
 
-    # 所有非根 Span 应有父 Span 且父 ID 在集合中
-    all_span_ids = {format(s.get_span_context().span_id, "x") for s in spans if s.get_span_context().span_id != 0}
-    assert len(all_span_ids) >= 2  # 至少 RUN 根 + 一个子 Span
+    # 收集所有子 Span（非 root）
+    children = [s for s in spans if s is not run_root and s.parent is not None]
+    assert len(children) >= 4  # LLM + TOOL + APPROVAL + DELEGATION
+
+    for child in children:
+        parent_ctx = child.parent
+        parent_id = format(parent_ctx.span_id, "x")
+        assert parent_id == root_span_id, (
+            f"{child.name} 的 parent={parent_id} 不是 RUN 根 {root_span_id}"
+        )
 
 
 def test_spans_have_start_and_end_times() -> None:

@@ -11,16 +11,13 @@ from typing import Any
 
 from ..models import RunTrace, SpanKind, TraceSpan, TraceSpanStatus, CONTENT_REDACTED_MARKER
 
+# 脱敏规则复用 eval/redaction.py 的同一实现，避免规则漂移。
+from ...eval.redaction import SENSITIVE_FIELD_NAMES, CREDENTIAL_PATTERNS
+
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import StatusCode, SpanKind as OtelSpanKind
-
-# 字段名命中即脱敏（与 eval/redaction.py 同源）
-_SENSITIVE_FIELD_NAMES: frozenset[str] = frozenset(
-    {"token", "api_key", "password", "authorization", "cookie", "secret",
-     "key", "apikey", "passwd", "auth"}
-)
 
 _MAX_ATTR_VALUE_LEN: int = 10240
 
@@ -222,6 +219,7 @@ def _default_exporter() -> SpanExporter:
 
 
 def _add_content_attrs(trace: RunTrace, span: TraceSpan, attrs: dict[str, object]) -> None:
+    """include_content=True 时附加消息正文与工具输出（复用 redaction.py 脱敏规则）。"""
     from dotclaw.eval.scorers._helpers import message_by_id
 
     for mid in span.message_ids:
@@ -229,7 +227,7 @@ def _add_content_attrs(trace: RunTrace, span: TraceSpan, attrs: dict[str, object
         if msg is None:
             continue
 
-        safe_content = _redact_content(msg.content)
+        safe_content = _redact(msg.content)
         if safe_content:
             attrs[f"dotclaw.message.{mid}.content"] = safe_content[:_MAX_ATTR_VALUE_LEN]
 
@@ -239,11 +237,10 @@ def _add_content_attrs(trace: RunTrace, span: TraceSpan, attrs: dict[str, object
                 safe_args = {}
                 for k, v in tc.arguments.items():
                     v_str = str(v)
-                    # 先按字段名脱敏，再按凭证模式脱敏
-                    if _is_sensitive_field(k):
+                    if k.lower() in SENSITIVE_FIELD_NAMES:
                         v_str = CONTENT_REDACTED_MARKER
                     else:
-                        v_str = _redact_patterns(v_str)
+                        v_str = _redact(v_str)
                     safe_args[k] = v_str
                 safe_tools.append({
                     "name": tc.name,
@@ -256,29 +253,10 @@ def _add_content_attrs(trace: RunTrace, span: TraceSpan, attrs: dict[str, object
             )[:_MAX_ATTR_VALUE_LEN]
 
 
-def _is_sensitive_field(name: str) -> bool:
-    """检查字段名是否属于敏感字段。"""
-    return name.lower() in _SENSITIVE_FIELD_NAMES
-
-
-def _redact_content(text: str) -> str:
-    """先字段名无关凭证模式脱敏。"""
-    return _redact_patterns(text)
-
-
-def _redact_patterns(text: str) -> str:
-    import re
-    patterns = (
-        re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
-        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
-        re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
-        re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-        re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
-        re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b"),
-        re.compile(r"\bghp_[0-9A-Za-z]{36}\b"),
-    )
+def _redact(text: str) -> str:
+    """用 redaction.py 的同一凭证模式脱敏文本。"""
     result = text
-    for p in patterns:
+    for p in CREDENTIAL_PATTERNS:
         if p.search(result):
             result = p.sub(CONTENT_REDACTED_MARKER, result)
     return result
