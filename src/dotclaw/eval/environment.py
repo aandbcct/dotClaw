@@ -1,16 +1,18 @@
 """隔离 Runtime 执行环境组装。
 
 ``EvalEnvironment`` 把 ``EvalCase`` 的 Fixture 装配为一个默认拒绝真实依赖的
-``RuntimeEngine``：所有外部能力首先由 Fixture 提供，未匹配调用在 Re-execution
-模式下可回退到注入的真实端口，否则直接判定为配置失败，绝不静默接触生产 LLM、
-工具、Session、Memory 或网络。
+``RuntimeEngine``：所有外���能力首先由 Fixture 提供；Re-execution 模式仅允许
+LLM / Context / Policy 三种路径回退到注入的真实端口，Tool / Approval / Delegation
+必须始终由 Fixture 覆盖，否则判定为配置失败——绝不静默接触生产工具、审批、委派、
+Session、Memory 或网络。
 
 隔离边界由 ``case.execution_mode`` 唯一决定（不再接受外部 mode 覆盖）：
 
 * ``PLAYBACK`` 冻结回放：匹配模式恒为 ``STRICT``，且 **禁止注入任何真实依赖**；
   未匹配的调用一律判定为配置失败，所有组合端口强制拒绝回退。
-* ``REEXECUTION`` 重新执行：匹配模式为 ``NORMAL``，允许在 Fixture 缺失时回退到
-  注入的真实端口（缺省仍由 Fixture 驱动，未配置真实端口则同样判定为配置失败）。
+* ``REEXECUTION`` 重新执行：匹配模式为 ``NORMAL``，仅 LLM / Context / Policy 可在
+  Fixture 缺失时回退到注入的真实端口；Tool / Approval / Delegation 始终由 Fixture
+  驱动，注入即构造期拒绝（缺省仍由 Fixture 驱动，无 Fixture 则判定为配置失败）。
 
 本模块同时提供内存版的 Run / Checkpoint 仓储与固定的 TokenCounter /
 HistoryCompactor，确保两次独立环境不共享任何运行事实或 Fixture 消费游标。
@@ -110,7 +112,9 @@ class _FixedHistoryCompactor:
 class EvalDependencies:
     """Re-execution 模式下可注入的真实能力端口；缺省时由 Fixture 提供。
 
-    这些端口仅在 Re-execution 模式下、且对应 Fixture 无法匹配调用时被回退使用。
+    仅 LLM / Context / Policy 在 Re-execution 下允许注入真实端口并由 Fixture
+    缺失时回退使用；Tool / Approval / Delegation 必须始终由 Fixture 覆盖，
+    注入即被 ``EvalEnvironment`` 在构造期拒绝。
     Playback 模式禁止注入任何真实依赖——``EvalEnvironment`` 会在构造时直接拒绝，
     从而所有未匹配的调用都判定为配置失败，绝不回退到真实实现。
     """
@@ -438,8 +442,8 @@ class EvalEnvironment:
         """组装内存仓储、固定计数器、Fixture 端口与 RuntimeEngine。
 
         匹配模式与回退策略完全由 ``case.execution_mode`` 决定，不接受外部覆盖：
-        Playback 恒为 STRICT 且禁止注入真实依赖；Re-execution 为 NORMAL 且允许
-        在 Fixture 缺失时回退到注入的真实端口。
+        Playback 恒为 STRICT 且禁止注入真实依赖；Re-execution 仅允许 LLM / Context
+        / Policy 回退到真实端口，Tool / Approval / Delegation 必须在 Fixture 中覆盖。
         """
         self.case: EvalCase = case
         self.mode: FixtureMatchMode = _match_mode(case.execution_mode)
