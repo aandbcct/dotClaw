@@ -3,6 +3,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
 
 from dotclaw.eval.environment import EvalDependencies, EvalEnvironment
@@ -178,11 +180,8 @@ async def test_no_production_fallback() -> None:
     case = build_case(case_id="isolation", execution_mode=ExecutionMode.REEXECUTION)
     deps = EvalDependencies(
         llm_port=_FailLLM(),
-        tool_port=_FailTool(),
         context_port=_FailContext(),
         policy_port=_FailPolicy(),
-        delegation_port=_FailDelegation(),
-        approval_repository=_FailApproval(),
     )
     env = EvalEnvironment(case, dependencies=deps)
     outcome = await env.run()
@@ -192,13 +191,11 @@ async def test_no_production_fallback() -> None:
 
     stubs = [
         deps.llm_port,
-        deps.tool_port,
         deps.context_port,
         deps.policy_port,
-        deps.delegation_port,
-        deps.approval_repository,
     ]
     for stub in stubs:
+        assert stub is not None
         assert stub.core_calls == 0, f"真实端口被回退调用：{stub!r}"
 
 
@@ -256,11 +253,11 @@ async def test_playback_composite_never_falls_back_to_real() -> None:
 
 
 async def test_reexecution_falls_back_to_real_port() -> None:
-    """Re-execution 下 Fixture 缺失时允许回退到注入的真实端口（设计允许的行为）。"""
+    """Re-execution 拒绝 Tool 真实依赖：缺失 Fixture 判定为配置失败而非回退。"""
     real_llm = _RecordLLM()
     real_tool = _RecordTool()
     case = build_case(
-        case_id="reexec-fallback",
+        case_id="reexec-no-fallback",
         execution_mode=ExecutionMode.REEXECUTION,
         context_fixtures=(context_fixture("ctx-1"), context_fixture("ctx-2")),
         llm_fixture=make_llm_fixture("llm-1", (
@@ -269,16 +266,8 @@ async def test_reexecution_falls_back_to_real_port() -> None:
         tool_fixtures=(),
     )
     deps = EvalDependencies(llm_port=real_llm, tool_port=real_tool)
-    env = EvalEnvironment(case, dependencies=deps)
-    outcome = await env.run()
-
-    assert isinstance(outcome.state.mode, Ended)
-    assert outcome.state.mode.outcome is RunOutcome.COMPLETED
-    # 缺失的工具 fixture 回退到真实工具端口，LLM 第二轮也回退到真实 LLM 端口
-    assert env.tool_port.real_served == 1
-    assert env.llm_port.real_served == 1
-    assert env.tool_port.fixture_served == 0
-    env.verify_fixtures_consumed()
+    with pytest.raises(FixtureConfigurationError, match="Tool"):
+        EvalEnvironment(case, dependencies=deps)
 
 
 # --------------------------------------------------------------------------- #

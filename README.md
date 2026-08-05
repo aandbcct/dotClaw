@@ -4,7 +4,7 @@
 
 **面向本地 Agent 应用开发的轻量级 Agent Harness**
 
-声明式 Agent · 可恢复执行 · 模型路由 · 工具安全 · MCP · 上下文工程 · 记忆与技能 · 多 Agent 委派
+声明式 Agent · 可恢复执行 · 模型路由 · 工具安全 · Trace / Eval · MCP · 上下文工程 · 记忆与技能 · 多 Agent 委派
 
 [![Python](https://img.shields.io/badge/Python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-0.5.0-informational.svg)](pyproject.toml)
@@ -55,6 +55,8 @@ flowchart TB
     Runtime --> Tool["ToolPort"]
     Runtime --> Delegation["DelegationPort"]
     Runtime --> Facts["Run Repository<br/>State / Message / Event / ContextVersion / Checkpoint.action"]
+    Facts -.只读重建.-> Trace["Trace<br/>显式查询与导出"]
+    Trace --> Eval["Eval<br/>Case / Playback / Gate"]
 
     Context --> Memory["Memory"]
     Context --> Skills["Skills"]
@@ -73,6 +75,7 @@ flowchart TB
     Host -.装配.-> LLM
     Host -.装配.-> Tool
     Host -.装配.-> MCP
+    Host -.按需装配.-> Eval
 ```
 
 关键边界：
@@ -85,6 +88,7 @@ flowchart TB
 6. Runtime 只通过 Port 调用能力模块；
 7. MCP 是 Tool 来源，不在 Runtime 中建立独立调用分支；
 8. Journal 和 Scheduler 的代码与配置目前存在，但尚未进入 ApplicationHost 主链。
+9. Trace / Eval 是后置控制面：它们只读取既有运行事实或执行隔离 Run，不参与普通请求的执行和恢复。
 
 ---
 
@@ -395,6 +399,7 @@ resume_delegation(child_run_id)
 | Memory | 可选接入 | 检索进入 Context；Dream 当前通过 CLI 手动触发 |
 | Skills | 可选接入 | 当前示例目录默认被跳过，Registry 初始可为空 |
 | 多 Agent 委派 | 已接入主链 | 异步 child Run、`Suspended(DELEGATION)` 与结果回灌；Task 和等待映射当前主要在内存 |
+| Trace 与 Eval | 按需入口已装配 | 动态 Trace、人工确认 Dataset、9 类确定性评分、Playback Gate、失败归因与显式 OTLP 导出 |
 | Journal | 未接入主链 | 代码和配置存在，不作为 Runtime 恢复事实源 |
 | Scheduler | 未接入主链 | `ReminderManager` 存在，但 Host 当前不创建和管理 |
 
@@ -506,10 +511,19 @@ dotclaw --hide-thinking
 | `/retry <run_id>` | 按 `Checkpoint.action` 恢复未结束 Run |
 | `/abandon <run_id>` | 显式放弃未结束 Run |
 | `/model` | 查看当前模型 |
+| `/eval list\|show\|review\|confirm\|run ...` | 管理评测 Draft / Dataset，或运行 Playback、Re-execution |
 | `/help` | 查看帮助 |
 | `/quit` | 退出 |
 
 危险 Tool 需要审批时，CLI 会显示结构化确认并在原 Run 上继续或取消。
+
+在 CI 中运行冻结 Dataset 的回归闸门：
+
+```bash
+dotclaw --eval-ci <dataset>
+```
+
+该命令仅执行 Playback：全部通过返回 0；行为回退或评测基础设施错误返回非零。
 
 ---
 
@@ -524,6 +538,7 @@ Agent 默认值
 Tool / Network / MCP
 Skills / Memory
 Session
+Eval（Dataset 默认目录：`./data/datasets`）
 Debug
 ```
 
@@ -617,18 +632,22 @@ mcp.<server>.<tool>
 
 ## 数据与运行事实
 
-默认运行数据按 Session 和 Run 分层保存：
+默认运行与评测数据保存在本地 `data/` 下：
 
 ```text
-data/sessions/
-├── approvals/
-└── {session_id}/
-    ├── session.json
-    └── agent_runs/{run_id}/
-        ├── run.json
-        ├── messages.json
-        ├── events.jsonl
-        └── checkpoint.json
+data/
+├── sessions/
+│   ├── approvals/
+│   └── {session_id}/
+│       ├── session.json
+│       └── agent_runs/{run_id}/
+│           ├── run.json
+│           ├── messages.json
+│           ├── events.jsonl
+│           └── checkpoint.json
+└── datasets/<dataset-name>/
+    ├── drafts/<draft-id>.draft.json
+    └── cases/<case-id>.json
 ```
 
 其中：
@@ -638,6 +657,7 @@ data/sessions/
 - `messages.json` 保存 RunMessage 与 ContextVersion；
 - `events.jsonl` 保存追加式 RunEvent 审计事实；
 - `checkpoint.json` 保存当前 `AgentAction`、事件/消息游标、活动 ContextVersion，以及 Tool、审批或 Delegation 的 pending 恢复引用。
+- Dataset 中的 Draft 是待人工审核资产；只有确认后的 Case 会被 Playback / CI 加载。
 
 状态与 Checkpoint 的关系是：
 
@@ -666,6 +686,7 @@ dotClaw/
 │   ├── channel/         # CLI 和运行级输出适配
 │   ├── config/          # 配置模型、加载与兼容
 │   ├── context/         # Slot、Plan、缓存与物化
+│   ├── eval/            # Fixture 评测、Dataset、Playback、Gate 与失败归因
 │   ├── llm/             # Provider、Router、Proxy 与 Reasoning
 │   ├── mcp/             # MCP Client、Provider 和 Tool Adapter
 │   ├── memory/          # 记忆存储、检索与蒸馏
@@ -675,6 +696,7 @@ dotClaw/
 │   ├── session/         # Session 与 Conversation
 │   ├── skills/          # Skill 扫描与 Registry
 │   ├── tools/           # Tool 定义、Registry、安全与执行
+│   ├── trace/           # Runtime 事实的只读 Trace 重建与显式导出
 │   └── journal/         # 旧观测设施，当前未进入 Runtime 主链
 ├── .dotclaw/agentConfig/
 ├── docs/wiki/
@@ -704,6 +726,8 @@ python -m pytest tests/runtime_v2
 python -m pytest tests/tools
 python -m pytest tests/context
 python -m pytest tests/llm
+python -m pytest tests/trace
+python -m pytest tests/eval
 ```
 
 ---
@@ -722,6 +746,7 @@ dotClaw 当前明确定位为本地、单进程 Agent Harness：
 - Config、Agent Identity 和 Tool Registry 不支持运行时热重载；
 - Journal 和 Scheduler 尚未进入 ApplicationHost 主链；
 - MCP resources 和 prompts 尚未进入 Agent 能力主链。
+- Eval 不提供 LLM Judge、真实副作用回放或运行期间进度 UI；Re-execution 不进入 CI Gate，Tool、审批和委派仍必须由 Fixture 覆盖。
 
 这些边界是当前实现状态，不代表已经完成的分布式或生产级能力。
 
@@ -731,12 +756,13 @@ dotClaw 当前明确定位为本地、单进程 Agent Harness：
 
 完整源码地图、模块边界、调用流程、设计取舍和修改入口见：
 
-- [dotClaw 开发者 Wiki](docs/wiki/README.md)
+- [dotClaw 开发者 Wiki](docs/wiki/readme.md)
 - [Runtime 模块](docs/wiki/Runtime%20模块总体说明.md)
 - [Bootstrap 与应用入口](docs/wiki/Bootstrap%20与应用入口模块总体说明.md)
 - [Context 模块](docs/wiki/Context%20模块总体说明.md)
 - [Tool 模块](docs/wiki/Tool%20模块总体说明.md)
 - [Config 模块](docs/wiki/Config%20模块总体说明.md)
+- [Eval 模块](docs/wiki/Eval%20模块总体说明.md)
 
 其余模块由 Wiki 首页统一导航。
 
