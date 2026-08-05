@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from .assembler import assemble_trace
-from .exporters import JsonTraceExporter
+from .exporters import JsonTraceExporter, OtlpTraceExporter, OtlpExportResult
 from .models import (
     CONTENT_REDACTED_MARKER,
     RunTrace,
@@ -26,6 +26,8 @@ __all__ = [
     "assemble_trace",
     "TraceService",
     "JsonTraceExporter",
+    "OtlpTraceExporter",
+    "OtlpExportResult",
     "CONTENT_REDACTED_MARKER",
     "RunTrace",
     "RunTraceSource",
