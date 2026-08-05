@@ -212,21 +212,20 @@ def test_incomplete_span_trace_rejected() -> None:
 
 
 def test_export_failure_does_not_affect_trace() -> None:
-    """OTel 导出器故障不抛异常、原 Trace 不变。"""
+    """Exporter 返回 FAILURE 时报告 success=False，原 Trace 不变。"""
     trace = make_terminal_trace("r-safe")
     original = trace.to_dict()
 
-    # OTel SDK 的 force_flush/shutdown 会吞掉 exporter 异常
-    # 因此导出结果 success 可能仍为 True；关键是原 Trace 未被改动
-    class _SafeBad:
+    class _FailExporter:
         def export(self, spans):
             return __import__("opentelemetry.sdk.trace.export", fromlist=["SpanExportResult"]).SpanExportResult.FAILURE
         def shutdown(self):
             pass
-        def force_flush(self, timeout_millis=None):
-            return True
 
-    OtlpTraceExporter(_SafeBad()).export(trace)
+    result = OtlpTraceExporter(_FailExporter()).export(trace)
+    assert result.success is False
+    assert result.error is not None
+    assert "FAILURE" in result.error
     assert trace.to_dict() == original
 
 
