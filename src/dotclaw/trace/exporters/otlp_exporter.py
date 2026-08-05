@@ -10,9 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..models import RunTrace, SpanKind, TraceSpan, TraceSpanStatus, CONTENT_REDACTED_MARKER
-
-# 脱敏规则复用 eval/redaction.py 的同一实现，避免规则漂移。
-from ...eval.redaction import SENSITIVE_FIELD_NAMES, CREDENTIAL_PATTERNS
+from ..redaction import SENSITIVE_FIELD_NAMES, CREDENTIAL_PATTERNS
 
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -220,10 +218,9 @@ def _default_exporter() -> SpanExporter:
 
 def _add_content_attrs(trace: RunTrace, span: TraceSpan, attrs: dict[str, object]) -> None:
     """include_content=True 时附加消息正文与工具输出（复用 redaction.py 脱敏规则）。"""
-    from dotclaw.eval.scorers._helpers import message_by_id
 
     for mid in span.message_ids:
-        msg = message_by_id(trace, mid)
+        msg = _find_message(trace, mid)
         if msg is None:
             continue
 
@@ -260,3 +257,11 @@ def _redact(text: str) -> str:
         if p.search(result):
             result = p.sub(CONTENT_REDACTED_MARKER, result)
     return result
+
+
+def _find_message(trace: RunTrace, message_id: str):
+    """内联按消息 ID 查找，避免跨包导入 eval。"""
+    for message in trace.messages:
+        if message.message_id == message_id:
+            return message
+    return None
