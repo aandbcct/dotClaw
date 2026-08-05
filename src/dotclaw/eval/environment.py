@@ -453,6 +453,15 @@ class EvalEnvironment:
                 "未匹配调用应判定为配置失败而非回退真实实现"
             )
 
+        # Re-execution 仅允许 LLM / Context / Policy 路径真实回退；
+        # Tool、审批、委派等外部副作用必须由 Fixture 覆盖，不允许真实执行。
+        if case.execution_mode is ExecutionMode.REEXECUTION:
+            if deps.tool_port is not None or deps.approval_repository is not None or deps.delegation_port is not None:
+                raise FixtureConfigurationError(
+                    "Re-execution 模式下禁止注入 Tool / Approval / Delegation 真实依赖："
+                    "外部副作用必须由 Fixture 覆盖，未匹配调用判定为配置失败"
+                )
+
         # 仅 Re-execution 允许回退；Playback 下所有组合端口强制拒绝回退。
         allow_fallback: bool = self.mode is FixtureMatchMode.NORMAL
 

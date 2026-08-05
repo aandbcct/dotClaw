@@ -101,6 +101,44 @@ async def test_reexecution_results_cannot_enter_gate() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Re-execution 隔离：仅 LLM/Context/Policy 可真实回退
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reexecution_rejects_real_tool_port(tmp_path: Path) -> None:
+    """注入真实 ToolPort 时 Re-execution 环境直接拒绝（FIXTURE_CONFIGURATION）。"""
+    from dotclaw.eval.environment import EvalDependencies
+    from dotclaw.eval.reexecution import ReexecutionRunner
+
+    _seed_cases(tmp_path, "ds-reject-tool", (("case-rt", "final", "out"),))
+    # 注入一个假的 ToolPort
+    deps = EvalDependencies(tool_port=object())  # type: ignore[arg-type]
+    runner = ReexecutionRunner(dependencies=deps)
+    results = await runner.run_dataset(tmp_path, "ds-reject-tool")
+    assert len(results) == 1
+    assert results[0].passed is False
+    assert results[0].failure_kind is not None
+    assert results[0].failure_kind.value == "fixture_configuration"
+
+
+@pytest.mark.asyncio
+async def test_reexecution_accepts_llm_deps_only(tmp_path: Path) -> None:
+    """仅注入 LLM/Context/Policy 的 Re-execution 正常工作（通过 Fixture）。"""
+    from dotclaw.eval.environment import EvalDependencies
+    from dotclaw.eval.reexecution import ReexecutionRunner
+
+    _seed_cases(tmp_path, "ds-allow-llm", (("case-al", "answer", "ok"),))
+    # 只给 LLM（Fixture 未覆盖时会回退，但 Fixture 已覆盖所以不用回退）
+    deps = EvalDependencies(llm_port=object())  # type: ignore[arg-type]
+    runner = ReexecutionRunner(dependencies=deps)
+    results = await runner.run_dataset(tmp_path, "ds-allow-llm")
+    assert len(results) == 1
+    # Fixture 存在时 LLM port 不影响结果
+    assert results[0].passed is True
+
+
+# ---------------------------------------------------------------------------
 # 辅助
 # ---------------------------------------------------------------------------
 
