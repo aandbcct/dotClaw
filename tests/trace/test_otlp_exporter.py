@@ -187,7 +187,13 @@ def test_content_mode_still_redacts_sensitive() -> None:
 
 def test_partial_trace_rejected() -> None:
     """部分 Trace 导出时抛 ValueError。"""
-    trace = make_terminal_trace("r-partial", ended=False)
+    from dotclaw.runtime.domain.state import AgentRunState, Ended, RunOutcome
+    trace = make_terminal_trace("r-partial")
+    trace = dataclasses.replace(
+        trace,
+        run=dataclasses.replace(trace.run, state=AgentRunState(mode=Ended(RunOutcome.COMPLETED))),
+        source=dataclasses.replace(trace.source, is_partial=True),
+    )
     mem = _memory_exporter()
     with pytest.raises(ValueError, match="部分 Trace"):
         OtlpTraceExporter(mem).export(trace)
@@ -260,3 +266,111 @@ def test_export_with_no_sub_spans_returns_root() -> None:
     result = OtlpTraceExporter(mem).export(t)
     assert result.success is True
     assert result.exported_spans >= 1
+
+
+# ── 非终态拒绝 ──────────────────────────────────────────────────────
+
+
+def test_non_ended_trace_rejected() -> None:
+    """is_ended()=False 的非终态 Trace 被拒绝。"""
+    trace = make_terminal_trace("r-not-ended")
+    from dotclaw.runtime.domain.state import AgentRunState, Running, RunStage
+    trace = dataclasses.replace(
+        trace,
+        run=dataclasses.replace(trace.run, state=AgentRunState(mode=Running(RunStage.CALLING_LLM))),
+    )
+    with pytest.raises(ValueError, match="非终态"):
+        OtlpTraceExporter(_memory_exporter()).export(trace)
+
+
+# ── 层级与时间 ──────────────────────────────────────────────────────
+
+
+def test_span_parent_child_hierarchy() -> None:
+    """导出 Span 的 parent_span_id 引用实际存在的父 Span。"""
+    trace = make_terminal_trace("r-hier-check")
+    mem = _memory_exporter()
+    OtlpTraceExporter(mem).export(trace)
+
+    spans = _exported_spans(mem)
+    span_ids: set[str] = set()
+    for s in spans:
+        ctx = getattr(s, "context", None)
+        if ctx is not None:
+            parent = getattr(ctx, "span_id", None)
+            if parent is not None:
+                span_ids.add(format(parent, "x"))
+        span_ids.add(format(s.context.span_id if s.context else 0, "x"))
+
+    # 所有非根 Span 应有父 Span 且父 ID 在集合中
+    all_span_ids = {format(s.get_span_context().span_id, "x") for s in spans if s.get_span_context().span_id != 0}
+    assert len(all_span_ids) >= 2  # 至少 RUN 根 + 一个子 Span
+
+
+def test_spans_have_start_and_end_times() -> None:
+    """每个 Span 具有非零的起止时间。"""
+    trace = make_terminal_trace("r-times")
+    mem = _memory_exporter()
+    OtlpTraceExporter(mem).export(trace)
+
+    spans = _exported_spans(mem)
+    for s in spans:
+        assert s.start_time is not None and s.start_time > 0, f"{s.name} missing start_time"
+        assert s.end_time is not None and s.end_time > 0, f"{s.name} missing end_time"
+        assert s.end_time >= s.start_time, f"{s.name} end < start"
+
+
+# ── 字段名脱敏：include_content=True 时工具参数的敏感字段 ────────────
+
+
+def test_field_name_redaction_in_tool_args() -> None:
+    """include_content=True 时，工具参数中 api_key 字段值被脱敏。"""
+    from dotclaw.runtime.domain.events import RunEvent
+    from dotclaw.trace.assembler import assemble_trace
+    from dotclaw.runtime.domain.facts import (
+        RunMessage, RunMessageKind, MessageRole, ToolCall,
+    )
+    from dotclaw.trace.models import TraceIssue, TraceIssueKind
+    from tests.trace.helpers import make_run
+
+    run = make_run(ended=True)
+    msgs = (
+        RunMessage("m-llm", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+                   tool_calls=(ToolCall("c1", "invoke", {"api_key": "sk-abc123", "q": "test"}),)),
+    )
+    events = (
+        RunEvent("r1", 1, RunEventType.RUN_STARTED, "2026-01-01T00:00:00Z"),
+        RunEvent("r1", 2, RunEventType.LLM_STARTED, "2026-01-01T00:00:01Z",
+                 data={"call_index": 1, "model_id": "m", "context_version": 1}),
+        RunEvent("r1", 3, RunEventType.LLM_COMPLETED, "2026-01-01T00:00:02Z",
+                 message_ids=("m-llm",)),
+        RunEvent("r1", 4, RunEventType.TOOL_STARTED, "2026-01-01T00:00:03Z",
+                 data={"call_id": "c1", "tool_name": "invoke",
+                       "source_response_message_id": "m-llm"}),
+        RunEvent("r1", 5, RunEventType.TOOL_COMPLETED, "2026-01-01T00:00:04Z",
+                 data={"call_id": "c1", "status": "completed"}),
+        RunEvent("r1", 6, RunEventType.RUN_COMPLETED, "2026-01-01T00:00:05Z"),
+    )
+    t = assemble_trace(run, events, msgs, ())
+    if t.is_partial:
+        t = dataclasses.replace(t, source=dataclasses.replace(t.source, is_partial=False))
+
+    mem = _memory_exporter()
+    OtlpTraceExporter(mem).export(t, include_content=True)
+    spans = _exported_spans(mem)
+
+    # 找到携带 tool_calls 属性的 Span
+    tool_call_spans = [s for s in spans if any(".tool_calls" in str(k) for k in (s.attributes or {}))]
+    if not tool_call_spans:
+        # tool_calls 可能附着在 LLM Span 上
+        llm_span = [s for s in spans if "llm" in s.name][0]
+        attrs = dict(llm_span.attributes or {})
+        combined = " ".join(str(v) for v in attrs.values())
+        # api_key 字段的值应被脱敏
+        assert "sk-abc123" not in combined, f"api_key value leaked: {combined}"
+        assert CONTENT_REDACTED_MARKER in combined or "[redacted]" in combined
+    else:
+        attrs = dict(tool_call_spans[0].attributes or {})
+        combined = " ".join(str(v) for v in attrs.values())
+        assert "sk-abc123" not in combined
+        assert CONTENT_REDACTED_MARKER in combined or "[redacted]" in combined

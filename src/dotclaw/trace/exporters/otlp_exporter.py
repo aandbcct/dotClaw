@@ -65,6 +65,9 @@ class OtlpTraceExporter:
         self._exporter: SpanExporter | None = exporter
 
     def export(self, trace: RunTrace, *, include_content: bool = False) -> OtlpExportResult:
+        if not trace.run.state.is_ended():
+            raise ValueError("非终态 Trace 不能导出为 OTLP；请等待运行完成")
+
         if trace.is_partial:
             raise ValueError("部分 Trace 不能导出为 OTLP")
 
