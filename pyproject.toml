@@ -28,6 +28,10 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+trace = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+]
 
 [project.scripts]
 dotclaw = "dotclaw.main:main"

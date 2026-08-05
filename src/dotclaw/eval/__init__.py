@@ -2,9 +2,12 @@
 
 本包定义版本化 ``EvalCase``、默认拒绝真实依赖的 Fixture 端口、把二者装配为隔离
 ``RuntimeEngine`` 的 ``EvalEnvironment``，以及执行用例并用九个确定性 Scorer 产出
-可追溯 ``EvalResult`` 的 ``EvalRunner``（PR4）。
+可追溯 ``EvalResult`` 的 ``EvalRunner``（PR4）。PR7 增加基于 Trace 的固定规则
+失败归因（``FailureAttributor``）。
 """
 
+from .attribution import ATTRIBUTION_SCHEMA_VERSION, AttributionResult, FailureAttributor
+from .attribution_rules import AttributionCategory
 from .environment import (
     EvalDependencies,
     EvalEnvironment,
@@ -98,4 +101,8 @@ __all__ = [
     "RegressionGate",
     "RegressionReport",
     "RegressionCaseResult",
+    "FailureAttributor",
+    "AttributionResult",
+    "AttributionCategory",
+    "ATTRIBUTION_SCHEMA_VERSION",
 ]
