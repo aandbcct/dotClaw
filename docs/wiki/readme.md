@@ -3,8 +3,8 @@
 > 本 Wiki 面向参与 dotClaw 开发、扩展和排障的开发者。  
 > 阅读顺序遵循“项目地图 → 核心链路 → 模块 → 逻辑组件 → 核心类 → 修改入口”，不要求读者先理解源码目录。
 
-> 审计基准：`master@31f30ae75d22f2b384e04a643894eaf9c0607323`（2026-07-28）
-> 当前已完成 12 篇核心模块 Wiki；Channel 待补充，Journal 需先完成与 RunEvent 的边界审计，Scheduler 当前代码与配置存在但未进入 ApplicationHost。
+> 审计基准：`2426220`（2026-08-05）
+> 当前已完成 13 篇核心模块 Wiki；Channel 待补充，Journal 需先完成与 RunEvent 的边界审计，Scheduler 当前代码与配置存在但未进入 ApplicationHost。
 
 ## 1. 项目代码地图
 
@@ -27,6 +27,11 @@ flowchart TB
         Execution["RunExecution<br/>单 Run 内存上下文"]
         State["AgentRunState<br/>transition() / AgentRunEvent / AgentAction"]
         RunFacts["Run Repository<br/>消息、事件、快照与恢复事实"]
+    end
+
+    subgraph Evaluation["追踪与评测控制面"]
+        Trace["Trace<br/>Run 事实的只读重建与显式导出"]
+        Eval["Eval<br/>Fixture、评分、Dataset 与回归 Gate"]
     end
 
     subgraph Capabilities["Agent 能力"]
@@ -59,6 +64,8 @@ flowchart TB
     Engine --> Execution
     Execution <--> State
     Engine --> RunFacts
+    RunFacts -.只读事实.-> Trace
+    Trace --> Eval
 
     Engine --> Context
     Engine --> LLM
@@ -82,6 +89,7 @@ flowchart TB
     Bootstrap -.装配.-> LLM
     Bootstrap -.装配.-> Tool
     Bootstrap -.装配.-> MCP
+    Bootstrap -.装配按需入口.-> Eval
 
     Config -.提供配置.-> Bootstrap
 ```
@@ -92,6 +100,7 @@ flowchart TB
 2. `SessionRunCoordinator` 处理多个 Run 之间的 Session 占用；`AgentRunState` 是单 Run 唯一的持久化控制状态，`transition()` 根据 `AgentRunEvent` 产出下一状态和 `AgentAction`。
 3. Memory、Skills 和 Agent Directory 主要通过 Context 进入模型输入；MCP 主要通过 Tool 进入工具注册表。
 4. Bootstrap 与 Config 是装配和配置支撑；Journal、Scheduler 当前没有进入 ApplicationHost 主链。
+5. Trace / Eval 是后置控制面：Trace 不回写 Runtime，Eval 不进入普通请求主链；它们由 Channel、CLI 或 CI 显式触发。
 
 ---
 
@@ -180,6 +189,7 @@ flowchart LR
 | 状态 | 含义 |
 |---|---|
 | 主链已装配 | ApplicationHost 创建，并被正常请求链消费 |
+| 按需入口已装配 | Host 或 CLI 提供显式入口，但不属于普通请求主链 |
 | 可选已装配 | 满足配置或资源条件时由 Host 创建 |
 | 默认空能力 | 主链支持，但当前仓库默认没有可用资源 |
 | 代码存在、未装配 | 类型或配置存在，但 Host 当前不创建 |
@@ -205,7 +215,13 @@ flowchart LR
 |---|---|---|---|---|
 | Runtime | 驱动 AgentRun 状态、外部能力调用、恢复和可靠提交 | `SessionRunCoordinator`、`RuntimeEngine`、`RunExecution`、`AgentRunState`、`transition()` | 主链已装配 | [Runtime](./Runtime%20模块总体说明.md) |
 
-### 3.4 Agent 能力系统
+### 3.4 追踪、评测与回归
+
+| 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
+|---|---|---|---|---|
+| Eval | 从 Runtime 事实构建只读 Trace，生成 / 审核 Case，以冻结 Playback 执行确定性评分与 CI Gate | `TraceService`、`EvalCaseDraftService`、`EvalRunner`、`PlaybackRunner` | 按需入口已装配；不进入普通请求主链 | [Eval](./Eval%20模块总体说明.md) |
+
+### 3.5 Agent 能力系统
 
 | 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
 |---|---|---|---|---|
@@ -216,13 +232,13 @@ flowchart LR
 | Memory | 文件同步、混合检索、日记忆写入和长期蒸馏 | `MemoryManager`、`MemoryStorage`、`DeepDream` | 可选已装配；Dream 仅手动入口 | [Memory](./Memory%20模块总体说明.md) |
 | Skills | SKILL.md 扫描、元数据注册和 Context 暴露 | `SkillScanner`、`SkillRegistry` | 可选已装配；默认 Registry 为空 | [Skills](./Skills%20模块总体说明.md) |
 
-### 3.5 多 Agent 编排
+### 3.6 多 Agent 编排
 
 | 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
 |---|---|---|---|---|
 | Orchestration 与 Delegation | 保存委派 Task 事实、传递消息并将委派映射为目标子 Run | `RuntimeDelegationAdapter`、`AgentDispatcher`、`TaskMessageBroker` | 主链已装配 | [Orchestration 与 Delegation](./Orchestration%20与%20Delegation%20模块总体说明.md) |
 
-### 3.6 支撑设施
+### 3.7 支撑设施
 
 | 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
 |---|---|---|---|---|
@@ -255,6 +271,10 @@ flowchart LR
     Runtime --> Tool["Tool"]
     Runtime --> Delegation["Delegation"]
 
+    Runtime -.持久化事实.-> Trace["Trace"]
+    Trace --> Eval["Eval / Regression"]
+    Channel -.显式 /eval.-> Eval
+
     Context --> Session
     Context --> Agent
     Context --> Memory["Memory"]
@@ -275,6 +295,7 @@ flowchart LR
 - Context 是 Memory、Skills、Agent Directory 与模型输入之间的主要汇聚点。
 - MCP 是工具来源，不应在 Runtime 中建立独立调用分支。
 - Orchestration 管理 Task 事实，但子 Run 仍由同一个 Runtime/Coordinator 执行。
+- Trace / Eval 使用已保存的运行事实，不插入 Runtime 的普通请求执行链；CI Gate 只消费冻结 Playback 结果。
 
 ### 4.2 源码依赖与 Port 边界
 
@@ -291,6 +312,7 @@ flowchart TB
 
     Bootstrap["Bootstrap<br/>唯一组合根"] --> Application
     Bootstrap --> Adapters
+    Bootstrap --> Eval["Eval Draft / Playback 入口"]
 
     Context["ContextProvider"] --> Application
     Orchestration["RuntimeDelegationAdapter"] --> Application
@@ -308,6 +330,10 @@ flowchart TB
     MCP["MCP"] --> Tool
     Memory --> LLM
 
+    Trace["Trace"] --> Domain
+    Eval --> Trace
+    Eval --> Application
+
     Config["Config"] -.配置输入.-> Bootstrap
     Config -.配置模型.-> LLM
     Config -.配置模型.-> Tool
@@ -323,6 +349,7 @@ flowchart TB
 3. ContextProvider 和 RuntimeDelegationAdapter 实现 Runtime 定义的能力边界，因此它们可以依赖 Runtime 契约；Runtime 内核不反向依赖它们的具体类。
 4. Bootstrap 可以依赖各具体模块，因为组合根的职责就是创建对象并连接依赖。
 5. Config 向装配和各模块提供数据，但不应反向调用业务模块。
+6. Trace 只读取 Runtime Domain Facts；Eval 可以依赖 Trace 与 Runtime Application 契约，Runtime 不反向依赖它们。
 
 ### 4.3 模块主归属规则
 
@@ -362,6 +389,8 @@ flowchart TB
 | 修改子 Agent 委派 | [Orchestration 与 Delegation](./Orchestration%20与%20Delegation%20模块总体说明.md) | `runtime_delegation_adapter.py`、`dispatcher.py` | Runtime DelegationPort、Session、取消传播 |
 | 修改配置结构 | [Config](./Config%20模块总体说明.md) | `config/settings.py` | ApplicationHost Builder、目标模块 |
 | 排查 Run 执行事实 | [Runtime](./Runtime%20模块总体说明.md) | Session 下 `agent_runs/{run_id}/` | RunMessage、RunEvent、Checkpoint |
+| 新增确定性评测或修改 Fixture | [Eval](./Eval%20模块总体说明.md) | `eval/models.py`、`fixtures.py`、`scorers/` | Playback STRICT、隔离边界与 Trace 证据 |
+| 修改回归 Dataset 或 CI Gate | [Eval](./Eval%20模块总体说明.md) | `draft_service.py`、`playback.py`、`gate.py` | Draft 审核、仅 Playback 可入 Gate、三态报告 |
 | 排查观测输出 | [Runtime](./Runtime%20模块总体说明.md) + [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块总体说明.md) | `runtime` RunEvent、`journal/` | Journal 当前未进入 Runtime 主链 |
 | 评估提醒能力 | [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块总体说明.md) + [Config](./Config%20模块总体说明.md) | `scheduler/reminder.py` | 当前 Host 未装配、无持久化和关闭管理 |
 
@@ -425,7 +454,20 @@ AgentIdentity / AgentRegistry
 → 结果和取消传播
 ```
 
-### 6.6 开发新能力
+### 6.6 理解追踪、评测与回归
+
+```text
+Runtime：Run / Event / Message 权威事实
+→ Eval：Trace 重建
+→ EvalCase 与 Fixture
+→ EvalRunner 与九类确定性 Scorer
+→ Draft 审核与 Dataset
+→ Playback / RegressionGate
+```
+
+这条路径区分“运行事实”“评测资产”和“CI 回归结论”：Trace 不是第二事实源，Re-execution 也不进入 Gate。
+
+### 6.7 开发新能力
 
 ```text
 常见修改入口
@@ -454,7 +496,8 @@ AgentIdentity / AgentRegistry
 - Memory 主链接入存在；DeepDream 当前只由手动入口触发，不是普通 Run 自动阶段。
 - `AgentRegistry` 的物理目录与逻辑归属不完全一致；Wiki 将其完整说明归入 Agent 与 Identity。
 - Runtime Adapter 的完整说明主归属 Runtime，能力模块只保留接入摘要。
-- 12 篇核心模块 Wiki 已完成；Channel 待补充，Journal 需先完成 Observability 边界审计，Scheduler 暂不建立独立 Wiki。
+- Trace / Eval 是显式控制面，不提供运行期间进度 UI、自动 Trace 持久化、LLM Judge 或真实副作用回放；Re-execution 结果仅供人工观察。
+- 13 篇核心模块 Wiki 已完成；Channel 待补充，Journal 需先完成 Observability 边界审计，Scheduler 暂不建立独立 Wiki。
 
 ---
 
@@ -509,4 +552,4 @@ AgentIdentity / AgentRegistry
 模块 Wiki 标明扫描提交
 ```
 
-当前审计基线：`31f30ae75d22f2b384e04a643894eaf9c0607323`（2026-07-28）。
+当前审计基线：`2426220`（2026-08-05）。
