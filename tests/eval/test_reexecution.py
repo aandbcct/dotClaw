@@ -138,6 +138,48 @@ async def test_reexecution_accepts_llm_deps_only(tmp_path: Path) -> None:
     assert results[0].passed is True
 
 
+@pytest.mark.asyncio
+async def test_reexecution_run_case_matches_batch(tmp_path: Path) -> None:
+    """run_case() 与 run_dataset() 在相同 Case 下产出等价的 EvalResult。
+
+    单条入口只覆写 REEXECUTION 并调用 EvalRunner，批量入口复用同一逻辑；
+    两者逐条结果的语义指纹（通过状态、失败分类、断言明细）必须一致。
+    """
+    _seed_cases(tmp_path, "ds-eq", (
+        ("case-a", "answer A", "out-a"),
+        ("case-b", "answer B", "out-b"),
+    ))
+    runner = _make_runner()
+
+    # 逐个调用 run_case()（加载顺序即稳定顺序）
+    from dotclaw.eval.dataset import load_cases
+    from dotclaw.eval.results import EvalResult
+
+    cases = load_cases(tmp_path, "ds-eq")
+    single_results: list[EvalResult] = []
+    for case in cases:
+        single_results.append(await runner.run_case(case))
+    single = tuple(single_results)
+
+    # 批量入口
+    batch = await runner.run_dataset(tmp_path, "ds-eq")
+
+    def _fingerprint(result) -> tuple:
+        return (
+            result.case_id,
+            result.passed,
+            result.failure_kind.value if result.failure_kind else None,
+            tuple(
+                (a.expectation.kind, a.expectation.target, a.passed, a.evidence)
+                for a in result.assertion_results
+            ),
+        )
+
+    assert len(single) == len(batch) == 2
+    assert [_fingerprint(item) for item in single] == [_fingerprint(item) for item in batch]
+    assert all(item.passed for item in single)
+
+
 # ---------------------------------------------------------------------------
 # 辅助
 # ---------------------------------------------------------------------------

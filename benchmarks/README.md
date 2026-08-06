@@ -6,27 +6,98 @@
 
 与 `tests/`（功能正确性）互补——tests 回答"对不对"，benchmarks 回答"快不快"。
 
+## Eval 基线快照（PR1）
+
+基于 Git 跟踪的 Eval Dataset，重复执行当前隔离 Runtime，输出逐次 JSONL 原始记录、
+JSON 基线快照与 Markdown 汇总报告。它回答"当前提交对固定 Eval 任务是否稳定完成、
+耗时构成如何"，并作为后续版本对照的当前基线。
+
+```text
+benchmarks/datasets/runtime_core_v1/cases/*.json
+    → ReexecutionRunner
+    → EvalResult + RunTrace
+    → BenchmarkSample（单次采样记录）JSONL
+    → BenchmarkSnapshot（当前基线快照）JSON + Markdown 报告
+```
+
+### 入口命令
+
+```bash
+# 开发期快速验证（warmup=1, repeat=10 即可）
+python -m benchmarks.eval_baseline --dataset runtime_core_v1 --warmup 1 --repeat 10
+
+# 正式基线（warmup=5, repeat=30），可选 --save-baseline 提交基线目录
+python -m benchmarks.eval_baseline \
+  --dataset-root benchmarks/datasets \
+  --dataset runtime_core_v1 \
+  --warmup 5 --repeat 30 \
+  --output benchmarks/reports/<run-id> \
+  --save-baseline benchmarks/baselines/runtime_core_v1
+```
+
+参数：`--dataset-root`（默认 `benchmarks/datasets`）、`--dataset`（默认 `runtime_core_v1`）、
+`--warmup`（默认 5，预热不进入正式统计）、`--repeat`（默认 30，必须 > 0）、
+`--output`（非提交运行工件目录）、`--save-baseline`（可选提交基线目录）。
+
+### 产物与布局
+
+- 非提交运行输出写入 `--output`（默认 `benchmarks/reports/<snapshot-id>/`）：
+  JSONL 原始记录、JSON 快照、Markdown 报告；
+- 提交基线写入 `benchmarks/baselines/<dataset>/`：
+  `<snapshot-id>.json` 与 `samples/<snapshot-id>.jsonl`；
+- `<snapshot-id>` 固定为 `YYYYMMDDTHHMMSSZ_<short-git-commit>`（UTC），目标文件已
+  存在时拒绝覆盖，新运行总是创建新快照。
+
+### 口径与边界
+
+- 通过率是隔离 Fixture 下的 Eval 语义通过率（`runtime_core_v1` 四个 Case），
+  不等同于真实模型线上成功率；断言失败但 Trace 完整仍是有效样本；
+- `wall_duration_ms` 是跨提交性能比较的端到端口径，Trace 关键路径用于解释内部
+  耗时构成，两者分开报告且不可互相替代；
+- P50/P95/P99 只在同机、同 Python、同 Dataset、同配置、同 repeat 下可比；
+- Fixture 未产生的 token / 时延以 `null` 记录，不得猜测为 0；
+- 快照不是 `EvalResult` / `RegressionReport` / Runtime 事实的替代品，不进入 CI Gate；
+- 历史 worktree 对比、并发 / 故障注入由后续 PR 提供，PR1 不做。
+
+### 当前基线（20260806T033707Z_7b1b093，commit `7b1b093`）
+
+- 环境：Python 3.13.5 / Windows-11 / config 哈希 `b9bea591d3252a9a`；
+- 采样：warmup=5, repeat=30，共 120 个正式样本，**120/120 通过（100%）**；
+- 全局耗时：Wall P50 **0.83 ms**、P95 **1.64 ms**、P99 **2.08 ms**、Max **2.19 ms**；
+- 调用统计：LLM 210 次、Tool 150 次，Trace 完整 120/120；
+- 各 Case（30 样本）：`approval_rejected` P50 0.68 ms、`approval_resume` P50 1.06 ms、
+  `context_retention` P50 0.80 ms、`tool_success` P50 0.82 ms，成功率均为 100%；
+- 原始证据：`benchmarks/baselines/runtime_core_v1/` 下快照 JSON 与 140 行 JSONL
+  （含 warmup 诊断记录）。
+
 ## 目录结构
 
 ```
 benchmarks/
-├── runner.py          # 评测入口（CLI）
-├── stats.py           # 公共工具（p50/p95/snapshot 转换）
-├── cases/             # 6 个评测用例
+├── runner.py          # 旧 Agent/Journal 微基准评测入口（CLI）
+├── stats.py           # 旧微基准公共工具（p50/p95/snapshot 转换）
+├── eval_baseline.py   # PR1 Eval 基线 CLI 与编排（ReexecutionRunner + 计时采样）
+├── eval_baseline_models.py   # PR1 BenchmarkSample / BenchmarkSnapshot 数据模型
+├── eval_baseline_stats.py    # PR1 统计纯函数（分位数、成功率、聚合）
+├── datasets/runtime_core_v1/cases/   # PR1 Git 跟踪的四个 Eval Case JSON
+├── cases/             # 6 个旧微基准评测用例
 │   ├── init_perf.py       # 初始化性能
 │   ├── tool_dispatch.py   # 工具调度延迟
 │   ├── llm_stream.py      # LLM 流式延迟
 │   ├── memory_perf.py     # 记忆检索性能
 │   ├── skill_load.py      # Skill 加载性能
 │   └── stress.py          # 压力测试
-├── dataset/           # 测试数据集（自动生成）
+├── dataset/           # 旧微基准测试数据集（自动生成）
 │   ├── sample_skills/         # 100 个测试 Skill
 │   ├── memory_corpus/         # 100 / 1000 / 10000 行语料
 │   └── stress_prompts.json    # 压力测试用 prompts
 ├── reports/           # 报告输出（gitignore）
 │   ├── benchmark_report_*.md
-│   └── snapshots/
+│   ├── snapshots/
+│   └── <snapshot-id>/         # PR1 非提交运行工件（JSONL / JSON / MD）
 └── baselines/         # 基线快照（git tracked，用于回归对比）
+    ├── v1.0/                  # 旧微基准基线
+    └── runtime_core_v1/       # PR1 Eval 基线（<snapshot-id>.json + samples/）
 ```
 
 ## 快速开始

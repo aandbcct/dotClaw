@@ -1,0 +1,129 @@
+{
+  "case_id": "approval_resume",
+  "schema_version": "1.0",
+  "name": "审批通过：等待审批后以 approved 决议重放工具并继续完成",
+  "agent_id": "agent-eval",
+  "input": {
+    "id": "u1",
+    "role": "user",
+    "content": "请查询今天的天气",
+    "created_at": "2026-01-01T00:00:00Z"
+  },
+  "conversation_fixture": {
+    "session_id": "sess-eval",
+    "messages": [],
+    "version": 0
+  },
+  "policy_fixture": {
+    "agent_id": "agent-eval",
+    "identity_version": "v1",
+    "model_id": "mock-model",
+    "max_iterations": 10,
+    "policy_data": {
+      "context_window": 100000,
+      "tokenizer_encoding": "cl100k_base"
+    }
+  },
+  "context_fixtures": [
+    {
+      "fixture_id": "ctx-1",
+      "messages": [
+        {
+          "id": "sys-1",
+          "sequence": 1,
+          "kind": "llm_response",
+          "role": "system",
+          "content": "SECRET_SYSTEM_TEXT protected",
+          "tool_call_id": null,
+          "name": null,
+          "tool_calls": [],
+          "metadata": {}
+        }
+      ],
+      "tools": [],
+      "estimated_tokens": 1
+    },
+    {
+      "fixture_id": "ctx-2",
+      "messages": [],
+      "tools": [],
+      "estimated_tokens": 1
+    }
+  ],
+  "llm_fixture": {
+    "fixture_id": "llm-1",
+    "responses": [
+      {
+        "message_id": "llm-resp-1",
+        "content": "",
+        "tool_calls": [
+          {
+            "call_id": "call-1",
+            "name": "search",
+            "arguments": {
+              "q": "weather"
+            }
+          }
+        ]
+      },
+      {
+        "message_id": "llm-resp-2",
+        "content": "The weather is sunny today",
+        "tool_calls": []
+      }
+    ]
+  },
+  "tool_fixtures": [
+    {
+      "fixture_id": "tool-1",
+      "tool_name": "search",
+      "key_arguments": {
+        "q": "weather"
+      },
+      "status": "approval_required",
+      "output": "sunny",
+      "approval_id": "apr-1",
+      "error_message": ""
+    }
+  ],
+  "approval_fixtures": [
+    {
+      "fixture_id": "apr-fix-1",
+      "approved": true,
+      "approval_id": "apr-1"
+    }
+  ],
+  "delegation_fixtures": [],
+  "expectations": [
+    {
+      "kind": "run_status",
+      "target": "outcome",
+      "expected": "completed",
+      "options": {}
+    },
+    {
+      "kind": "approval",
+      "target": "apr-1",
+      "expected": "approved",
+      "options": {}
+    },
+    {
+      "kind": "tool_sequence",
+      "target": "tool_name",
+      "expected": ["search", "search"],
+      "options": {}
+    },
+    {
+      "kind": "output_assertion",
+      "target": "text",
+      "expected": "sunny",
+      "options": {
+        "mode": "contains"
+      }
+    }
+  ],
+  "tags": ["approval", "runtime-core"],
+  "source_trace": null,
+  "execution_mode": "playback",
+  "allow_partial_trace": false
+}
