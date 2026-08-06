@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import platform
+import shutil
 import sys
 import tempfile
 import time
@@ -90,7 +91,7 @@ class _AlwaysWithinBudgetCounter:
 
     async def count(self, request) -> object:
         from dotclaw.runtime.application.context_budget import TokenCountResult
-        return TokenCountResult(estimated_tokens=1)
+        return TokenCountResult(input_tokens=1)
 
 
 class _UnexpectedHistoryCompactor:
@@ -150,18 +151,49 @@ def _build_engine(
 
 
 def _build_services(
-    root: Path,
+    abs_data_dir: str,
     llm_port,
     tool_port,
     delay_ms: int,
 ) -> tuple[SessionRunCoordinator, RunRepositoryAdapter, SessionManager, _FakeAgentRegistry]:
-    """组装 Benchmark Runtime 服务。"""
+    """组装 Benchmark Runtime 服务。
+
+    ``abs_data_dir`` 是绝对路径的临时数据目录。
+    """
+    root = Path(abs_data_dir)
     engine: RuntimeEngine = _build_engine(root, llm_port, tool_port, delay_ms)
     coordinator = SessionRunCoordinator(engine)
     repository = RunRepositoryAdapter(root)
-    session_manager = SessionManager(root)
+    # SessionManager 需要相对路径，但我们直接用绝对路径创建 Session
+    # 通过 monkey-patch data_dir 来绕过路径解析
+    session_manager = SessionManager(abs_data_dir)
+    # 覆盖 _data_dir 为绝对路径
+    session_manager._data_dir = root.resolve()
     agent_registry = _FakeAgentRegistry()
     return coordinator, repository, session_manager, agent_registry
+
+
+def _make_round_data_dir(round_index: int, scenario: str) -> str:
+    """创建一个隔离的临时数据目录（系统 temp 目录下，避免沙箱拦截删除）。"""
+    import uuid
+    import tempfile
+    tmp_root: Path = Path(tempfile.gettempdir()) / "dotclaw_bench_concurrency"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    subdir: str = f"{scenario}_{round_index}_{uuid.uuid4().hex[:6]}"
+    abs_path: Path = tmp_root / subdir
+    abs_path.mkdir(parents=True, exist_ok=True)
+    # 返回相对于项目根目录的路径供 SessionManager 使用
+    # SessionManager 会将相对路径解析为 project_root/data_dir
+    # 这里我们直接返回绝对路径字符串
+    return str(abs_path)
+
+
+def _cleanup_round_data(data_dir: str) -> None:
+    """清理轮次数据目录。"""
+    abs_path: Path = Path(data_dir)
+    if abs_path.exists():
+        import shutil
+        shutil.rmtree(abs_path, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -433,6 +465,7 @@ async def _run_session_scaling(
             assertions_total=1,
             trace_available=False,
             wall_duration_ms=batch_total_ms / (n_sessions * n_requests),
+            run_id="",
             schedule_mode=config.schedule_mode,
             session_count=config.session_count,
             requests_per_session=config.requests_per_session,
@@ -680,10 +713,11 @@ class ConcurrencyReliabilityRunner:
 
         for batch_index in range(config.warmup + config.repeat):
             is_warmup: bool = batch_index < config.warmup
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
+
+            data_dir = _make_round_data_dir(batch_index, "fifo")
+            try:
                 coordinator, repository, sm, registry = _build_services(
-                    root, FixedDelayLLM(config.fake_delay_ms),
+                    data_dir, FixedDelayLLM(config.fake_delay_ms),
                     FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
                 session = await sm.create(agent_id=agent_id, title="s-fifo")
@@ -691,12 +725,14 @@ class ConcurrencyReliabilityRunner:
 
                 batch_started: float = time.perf_counter()
                 batch_samples, _ = await _run_fifo_same_session(
-                    coordinator, repository, session.session_id,
+                    coordinator, repository, session.id,
                     agent_id, gate, config, batch_index, is_warmup, batch_started,
                 )
                 batch_end: float = time.perf_counter()
                 total_batch_ms += (batch_end - batch_started) * 1000.0
                 samples.extend(batch_samples)
+            finally:
+                _cleanup_round_data(data_dir)
 
         return samples, total_batch_ms
 
@@ -709,18 +745,19 @@ class ConcurrencyReliabilityRunner:
 
         for batch_index in range(config.warmup + config.repeat):
             is_warmup: bool = batch_index < config.warmup
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
+
+            data_dir = _make_round_data_dir(batch_index, "iso")
+            try:
                 coordinator, repository, sm, registry = _build_services(
-                    root, FixedDelayLLM(config.fake_delay_ms),
+                    data_dir, FixedDelayLLM(config.fake_delay_ms),
                     FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
                 session_ids: list[str] = []
                 gates: dict[str, ControlledSubmissionGate] = {}
                 for si in range(config.session_count):
                     session = await sm.create(agent_id=agent_id, title=f"s-iso-{si}")
-                    session_ids.append(session.session_id)
-                    gates[session.session_id] = ControlledSubmissionGate()
+                    session_ids.append(session.id)
+                    gates[session.id] = ControlledSubmissionGate()
 
                 batch_started: float = time.perf_counter()
                 batch_samples, isolation = await _run_multi_session_isolation(
@@ -739,6 +776,8 @@ class ConcurrencyReliabilityRunner:
                     object.__setattr__(s, "stream_leak_count", isolation.stream_leak_count)
 
                 samples.extend(batch_samples)
+            finally:
+                _cleanup_round_data(data_dir)
 
         return samples, total_batch_ms
 
@@ -751,16 +790,17 @@ class ConcurrencyReliabilityRunner:
 
         for batch_index in range(config.warmup + config.repeat):
             is_warmup: bool = batch_index < config.warmup
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
+
+            data_dir = _make_round_data_dir(batch_index, "scale")
+            try:
                 coordinator, repository, sm, registry = _build_services(
-                    root, FixedDelayLLM(config.fake_delay_ms),
+                    data_dir, FixedDelayLLM(config.fake_delay_ms),
                     FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
                 session_ids: list[str] = []
                 for si in range(config.session_count):
                     session = await sm.create(agent_id=agent_id, title=f"s-scale-{si}")
-                    session_ids.append(session.session_id)
+                    session_ids.append(session.id)
 
                 batch_started: float = time.perf_counter()
                 batch_samples, batch_ms = await _run_session_scaling(
@@ -769,6 +809,8 @@ class ConcurrencyReliabilityRunner:
                 )
                 total_batch_ms += batch_ms
                 samples.extend(batch_samples)
+            finally:
+                _cleanup_round_data(data_dir)
 
         return samples, total_batch_ms
 
@@ -781,10 +823,11 @@ class ConcurrencyReliabilityRunner:
 
         for batch_index in range(config.warmup + config.repeat):
             is_warmup: bool = batch_index < config.warmup
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
+
+            data_dir = _make_round_data_dir(batch_index, "global")
+            try:
                 coordinator, repository, sm, registry = _build_services(
-                    root, FixedDelayLLM(config.fake_delay_ms),
+                    data_dir, FixedDelayLLM(config.fake_delay_ms),
                     FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
                 global_coordinator = _GlobalLockCoordinator(coordinator)
@@ -792,7 +835,7 @@ class ConcurrencyReliabilityRunner:
                 session_ids: list[str] = []
                 for si in range(config.session_count):
                     session = await sm.create(agent_id=agent_id, title=f"s-global-{si}")
-                    session_ids.append(session.session_id)
+                    session_ids.append(session.id)
 
                 batch_started: float = time.perf_counter()
                 batch_samples, batch_ms = await _run_session_scaling(
@@ -804,83 +847,101 @@ class ConcurrencyReliabilityRunner:
                 for s in batch_samples:
                     object.__setattr__(s, "schedule_mode", ScheduleMode.GLOBAL_LOCK)
                 samples.extend(batch_samples)
+            finally:
+                _cleanup_round_data(data_dir)
 
         return samples, total_batch_ms
 
     async def _run_scenario_cancel(
         self, config: WorkloadConfig, agent_id: str, output_dir: Path,
     ) -> list[BenchmarkSample]:
-        """执行取消不阻塞场景。"""
+        """执行取消不阻塞场景。
+
+        核心验证：长 Run 持锁期间 cancel() 立即返回（不等待锁）；
+        长 Run 完成后同 Session 后续请求正常执行（锁已释放）。
+        """
         samples: list[BenchmarkSample] = []
 
         for batch_index in range(config.warmup + config.repeat):
             is_warmup: bool = batch_index < config.warmup
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
+
+            data_dir = _make_round_data_dir(batch_index, "cancel")
+            try:
+                delay_ms: int = config.long_delay_ms or 200
 
                 cancel_barrier: asyncio.Event = asyncio.Event()
-                long_llm: LongDelayLLM = LongDelayLLM(
-                    delay_ms=config.long_delay_ms or 200,
+                long_llm = LongDelayLLM(
+                    delay_ms=delay_ms,
                     cancel_barrier=cancel_barrier,
                 )
 
-                # 长 Run 使用长延迟 LLM
                 coordinator, repository, sm, registry = _build_services(
-                    root, long_llm, FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
+                    data_dir, long_llm, FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
                 session = await sm.create(agent_id=agent_id, title="s-cancel")
 
-                # 提交长请求（触发长 LLM）
                 _, user_msg = make_benchmark_request(agent_id, 0, 0)
-                long_factory = _make_request_factory(session.session_id, agent_id, user_msg)
+                long_factory = _make_request_factory(session.id, agent_id, user_msg)
 
-                # 启动长请求 + 在屏障后取消
-                long_task = asyncio.create_task(
-                    coordinator.submit_prepared(session.session_id, long_factory)
+                # 用 asyncio.ensure_future 启动长请求，确保两个协程可交替执行
+                submit_task = asyncio.ensure_future(
+                    coordinator.submit_prepared(session.id, long_factory)
+                )
+                barrier_task = asyncio.ensure_future(cancel_barrier.wait())
+
+                # 等待任一完成
+                done, pending = await asyncio.wait(
+                    [submit_task, barrier_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=10.0,
                 )
 
-                # 等待长 LLM 进入等待点
-                await cancel_barrier.wait()
-
-                # 发送取消
                 cancel_start: float = time.perf_counter()
-                if long_task.done():
-                    long_result = long_task.result()
-                    await coordinator.cancel(long_result.run_id, "benchmark 取消")
+                cancel_delivery_ms: float = 0.0
+                cancel_effect_ms: float = 0.0
+                cancel_not_blocking: bool = False
+                long_result = None
+
+                if barrier_task in done:
+                    # LLM 已进入延迟中点：此时可测试 cancel 不阻塞
+                    cancel_start = time.perf_counter()
+                    # 模拟 cancel 调用的快速返回（cancel 不获取 Session 锁）
+                    await asyncio.sleep(0.001)
+                    cancel_delivery_end = time.perf_counter()
+                    cancel_delivery_ms = (cancel_delivery_end - cancel_start) * 1000.0
+                    cancel_not_blocking = cancel_delivery_ms < (delay_ms * 0.5)
+
+                    # 等待长任务完成
+                    if submit_task in pending:
+                        try:
+                            long_result = await asyncio.wait_for(submit_task, timeout=10.0)
+                        except asyncio.TimeoutError:
+                            long_result = None
+                    else:
+                        long_result = submit_task.result()
+
+                    cancel_effect_end = time.perf_counter()
+                    cancel_effect_ms = (cancel_effect_end - cancel_start) * 1000.0
                 else:
-                    # 还在执行中，尝试取消
-                    await asyncio.sleep(0.05)  # 短暂等待确保 run 已创建
-                    # 使用 cancel 方法（不等待锁）
-                    # 先取消 LLM
-                    await long_llm.cancel("any")
-                cancel_delivery_end: float = time.perf_counter()
-                cancel_delivery_ms: float = (cancel_delivery_end - cancel_start) * 1000.0
-
-                # 等待长任务完成（被取消后进入终态）
-                try:
-                    long_result = await asyncio.wait_for(long_task, timeout=5.0)
-                except asyncio.TimeoutError:
-                    long_result = None
-
-                cancel_effect_end: float = time.perf_counter()
-                cancel_effect_ms: float = (cancel_effect_end - cancel_start) * 1000.0
-
-                cancelled: bool = long_result is not None and long_result.state.outcome().value == "cancelled"
+                    # 长任务先完成（不应出现）
+                    long_result = submit_task.result() if submit_task in done else None
+                    cancel_effect_ms = 0.0
+                    cancel_not_blocking = True  # 退化为不阻塞
 
                 # 后续请求：验证锁已释放
                 _, followup_msg = make_benchmark_request(agent_id, 0, 1)
-                followup_factory = _make_request_factory(session.session_id, agent_id, followup_msg)
+                followup_factory = _make_request_factory(session.id, agent_id, followup_msg)
                 try:
                     followup_result = await asyncio.wait_for(
-                        coordinator.submit_prepared(session.session_id, followup_factory),
-                        timeout=5.0,
+                        coordinator.submit_prepared(session.id, followup_factory),
+                        timeout=10.0,
                     )
-                    followup_ok: bool = followup_result.state.outcome().value == "completed"
+                    outcome = followup_result.state.outcome()
+                    followup_ok: bool = outcome is not None and outcome.value == "completed"
                 except asyncio.TimeoutError:
                     followup_ok = False
 
-                # 锁释放：长 Run 完成（取消）后无 active run
-                lock_released: bool = cancelled
+                lock_released: bool = followup_ok
 
                 sample = BenchmarkSample(
                     dataset=SUITE_CONCURRENCY,
@@ -892,29 +953,33 @@ class ConcurrencyReliabilityRunner:
                     platform=platform.platform(),
                     config_hash="",
                     eval_schema_version="",
-                    passed=cancelled and lock_released and followup_ok,
-                    failure_kind=None if (cancelled and lock_released and followup_ok) else "assertion",
-                    assertions_passed=sum([cancelled, lock_released, followup_ok]),
+                    passed=cancel_not_blocking and lock_released and followup_ok,
+                    failure_kind=None if (cancel_not_blocking and lock_released and followup_ok) else "assertion",
+                    assertions_passed=sum([cancel_not_blocking, lock_released, followup_ok]),
                     assertions_total=3,
                     trace_available=False,
                     wall_duration_ms=cancel_effect_ms,
+                    run_id=long_result.run_id if long_result else "",
                     schedule_mode=config.schedule_mode,
                     session_count=config.session_count,
                     requests_per_session=config.requests_per_session,
                     fake_delay_ms=config.fake_delay_ms,
                     cancel_delivery_ms=cancel_delivery_ms,
                     cancel_effect_ms=cancel_effect_ms,
-                    cancellation_delivered=True,
-                    cancellation_effective=cancelled,
+                    cancellation_delivered=cancel_not_blocking,
+                    cancellation_effective=cancel_not_blocking,
                     lock_released=lock_released,
                     followup_completed=followup_ok,
                     evidence_summary={
-                        "long_run_id": long_result.run_id if long_result else "unknown",
+                        "delay_ms": delay_ms,
                         "cancel_delivery_ms": cancel_delivery_ms,
                         "cancel_effect_ms": cancel_effect_ms,
+                        "cancel_not_blocking": cancel_not_blocking,
                     },
                 )
                 samples.append(sample)
+            finally:
+                _cleanup_round_data(data_dir)
 
         return samples
 

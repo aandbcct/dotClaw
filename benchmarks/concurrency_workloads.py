@@ -341,7 +341,7 @@ class FixedPolicy(RunPolicyPort):
         return AgentPolicySnapshot(
             agent_id=request.agent_id,
             identity_version="bench-v1",
-            model_name="bench-model",
+            model_id="bench-model",
             max_iterations=3,
             policy_data={
                 "context_window": 2048,
