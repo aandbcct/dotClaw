@@ -274,6 +274,40 @@ class LongDelayLLM(FixedDelayLLM):
         self.was_cancelled = True
 
 
+class SessionSelectiveDelayLLM(FixedDelayLLM):
+    """按请求所属 Session 注入长短固定延迟的 LLM 替身。"""
+
+    def __init__(self, short_delay_ms: int, long_delay_ms: int, long_session_index: int) -> None:
+        """保存短延迟、长延迟与唯一长请求所属 Session。"""
+        super().__init__(short_delay_ms)
+        self._short_delay_ms: int = short_delay_ms
+        self._long_delay_ms: int = long_delay_ms
+        self._long_session_index: int = long_session_index
+
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port=None) -> RunMessage:
+        """根据用户标识选择固定延迟，并回显该标识。"""
+        user_content: str = ""
+        for message in context.messages:
+            if message.content:
+                user_content = message.content
+                break
+        delay_ms: int = (
+            self._long_delay_ms
+            if IdentifierCodec.session_prefix(self._long_session_index) in user_content
+            else self._short_delay_ms
+        )
+        self._call_count += 1
+        await asyncio.sleep(delay_ms / 1000.0)
+        self._message_seq += 1
+        return RunMessage(
+            message_id=f"llm-mixed-{self._call_count}",
+            sequence=self._message_seq,
+            kind=RunMessageKind.FINAL_RESPONSE,
+            role=MessageRole.ASSISTANT,
+            content=f"回答来自: {user_content}",
+        )
+
+
 class FixedDelayTool(ToolPort):
     """固定延迟工具替身：回显唯一标识 + 固定延迟后返回完成。
 

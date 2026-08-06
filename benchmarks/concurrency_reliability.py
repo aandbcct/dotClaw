@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -67,6 +68,7 @@ from .concurrency_workloads import (
     IdentifierCodec,
     LongDelayLLM,
     RunFacts,
+    SessionSelectiveDelayLLM,
     WorkloadConfig,
     make_benchmark_request,
     read_run_facts,
@@ -122,6 +124,22 @@ class _FakeAgentRegistry:
                 display_name="Benchmark Agent",
             )
         return None
+
+    def get(self, agent_id: str):
+        """按 SessionInteractionService 所需接口读取固定 Identity。"""
+        if agent_id != self._agent_id:
+            return None
+        from dotclaw.agent.identity import AgentIdentity
+        return AgentIdentity(
+            agent_id=agent_id,
+            version="bench-v1",
+            display_name="Benchmark Agent",
+        )
+
+    def list_all(self) -> list[object]:
+        """返回唯一可用 Identity，满足默认解析协议。"""
+        identity = self.get(self._agent_id)
+        return [identity] if identity is not None else []
 
 
 # --------------------------------------------------------------------------- #
@@ -501,6 +519,15 @@ class _GlobalLockCoordinator:
             )
 
 
+def _with_batch_metrics(stats: ScenarioStats, batch_total_ms: float) -> ScenarioStats:
+    """为正式采样统计补充总批次耗时与吞吐量。"""
+    return replace(
+        stats,
+        throughput_per_sec=compute_throughput(stats.total_requests, batch_total_ms),
+        batch_total_ms=batch_total_ms,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 主编排器
 # --------------------------------------------------------------------------- #
@@ -576,12 +603,12 @@ class ConcurrencyReliabilityRunner:
         # === 场景 3：Session 数扩展 ===
         print("=== 场景 3：Session 数扩展 ===")
         for n_sessions in (1, 2, 4, 8):
-            scale_config = WorkloadConfig(
+            session_config = WorkloadConfig(
                 session_count=n_sessions, requests_per_session=4, fake_delay_ms=fake_delay_ms,
                 schedule_mode=ScheduleMode.SESSION_LOCK, warmup=warmup, repeat=repeat,
             )
             scale_samples, batch_total = await self._run_scenario_scaling(
-                scale_config, agent_id, output_dir,
+                session_config, agent_id, output_dir,
             )
             all_samples.extend(scale_samples)
             scale_stats = aggregate_scenario_stats(
@@ -590,36 +617,32 @@ class ConcurrencyReliabilityRunner:
                 scale_samples,
                 repeat,
             )
-            # 计算吞吐
-            total_requests = n_sessions * 4 * (repeat if batch_total <= 0 else 1)
-            if len([s for s in scale_samples if not s.is_warmup]) > 0:
-                pass
-            scale_stats = ScenarioStats(
-                scenario_id=scale_stats.scenario_id,
-                schedule_mode=scale_stats.schedule_mode,
-                total_requests=scale_stats.total_requests,
-                total_batches=scale_stats.total_batches,
-                queue_wait_ms=scale_stats.queue_wait_ms,
-                wall_duration_ms=scale_stats.wall_duration_ms,
-                cancel_delivery_ms=scale_stats.cancel_delivery_ms,
-                cancel_effect_ms=scale_stats.cancel_effect_ms,
-                fifo_passed_count=scale_stats.fifo_passed_count,
-                fifo_total_count=scale_stats.fifo_total_count,
-                isolation_passed_count=scale_stats.isolation_passed_count,
-                isolation_total_count=scale_stats.isolation_total_count,
-                cancel_passed_count=scale_stats.cancel_passed_count,
-                cancel_total_count=scale_stats.cancel_total_count,
-                message_leak_total=scale_stats.message_leak_total,
-                event_leak_total=scale_stats.event_leak_total,
-                context_leak_total=scale_stats.context_leak_total,
-                tool_leak_total=scale_stats.tool_leak_total,
-                stream_leak_total=scale_stats.stream_leak_total,
-                throughput_per_sec=compute_throughput(total_requests, batch_total),
-                batch_total_ms=batch_total,
-            )
+            scale_stats = _with_batch_metrics(scale_stats, batch_total)
             all_scenarios.append(scale_stats)
-            all_configs.append(scale_config.to_dict())
-            print(f"  Session {n_sessions}: 吞吐 {scale_stats.throughput_per_sec:.1f} req/s")
+            all_configs.append(session_config.to_dict())
+
+            global_config = WorkloadConfig(
+                session_count=n_sessions, requests_per_session=4, fake_delay_ms=fake_delay_ms,
+                schedule_mode=ScheduleMode.GLOBAL_LOCK, warmup=warmup, repeat=repeat,
+            )
+            global_samples, global_batch = await self._run_scenario_scaling_global(
+                global_config, agent_id, output_dir,
+            )
+            all_samples.extend(global_samples)
+            global_stats = aggregate_scenario_stats(
+                f"{ConcurrencyScenario.SESSION_SCALING.value}_{n_sessions}s",
+                ScheduleMode.GLOBAL_LOCK.value,
+                global_samples,
+                repeat,
+            )
+            global_stats = _with_batch_metrics(global_stats, global_batch)
+            all_scenarios.append(global_stats)
+            all_configs.append(global_config.to_dict())
+            comparison = compare_schedule_modes(scale_stats, global_stats)
+            print(
+                f"  Session {n_sessions}: 相对全局串行吞吐变化 "
+                f"{comparison.get('throughput_change_rate', 'N/A')}"
+            )
 
         # === 场景 4：固定并发对照（Session 锁 vs 全局锁） ===
         print("=== 场景 4：固定并发对照 ===")
@@ -655,6 +678,8 @@ class ConcurrencyReliabilityRunner:
             global_samples,
             repeat,
         )
+        session_stats = _with_batch_metrics(session_stats, session_batch)
+        global_stats = _with_batch_metrics(global_stats, global_batch)
 
         # 对照
         comparison = compare_schedule_modes(session_stats, global_stats)
@@ -664,8 +689,50 @@ class ConcurrencyReliabilityRunner:
         all_configs.append(global_config.to_dict())
         print(f"  对照: {comparison.get('throughput_change_rate', 'N/A')}")
 
-        # === 场景 5：取消不阻塞 ===
-        print("=== 场景 5：取消不阻塞 ===")
+        # === 场景 5：长短混合（Session 锁 vs 全局锁） ===
+        print("=== 场景 5：长短混合 ===")
+        mixed_session_config = WorkloadConfig(
+            session_count=8, requests_per_session=1, fake_delay_ms=fake_delay_ms,
+            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=warmup, repeat=repeat,
+            long_delay_ms=200, long_request_session_index=0,
+        )
+        mixed_session_samples, mixed_session_batch = await self._run_scenario_mixed(
+            mixed_session_config, agent_id, global_lock=False,
+        )
+        mixed_global_config = WorkloadConfig(
+            session_count=8, requests_per_session=1, fake_delay_ms=fake_delay_ms,
+            schedule_mode=ScheduleMode.GLOBAL_LOCK, warmup=warmup, repeat=repeat,
+            long_delay_ms=200, long_request_session_index=0,
+        )
+        mixed_global_samples, mixed_global_batch = await self._run_scenario_mixed(
+            mixed_global_config, agent_id, global_lock=True,
+        )
+        all_samples.extend(mixed_session_samples)
+        all_samples.extend(mixed_global_samples)
+        mixed_session_stats = _with_batch_metrics(
+            aggregate_scenario_stats(
+                ConcurrencyScenario.MIXED_LONG_SHORT.value,
+                ScheduleMode.SESSION_LOCK.value,
+                mixed_session_samples,
+                repeat,
+            ),
+            mixed_session_batch,
+        )
+        mixed_global_stats = _with_batch_metrics(
+            aggregate_scenario_stats(
+                ConcurrencyScenario.MIXED_LONG_SHORT.value,
+                ScheduleMode.GLOBAL_LOCK.value,
+                mixed_global_samples,
+                repeat,
+            ),
+            mixed_global_batch,
+        )
+        all_scenarios.extend((mixed_session_stats, mixed_global_stats))
+        all_configs.extend((mixed_session_config.to_dict(), mixed_global_config.to_dict()))
+        print(f"  长短混合对照: {compare_schedule_modes(mixed_session_stats, mixed_global_stats).get('throughput_change_rate', 'N/A')}")
+
+        # === 场景 6：取消不阻塞 ===
+        print("=== 场景 6：取消不阻塞 ===")
         cancel_config = WorkloadConfig(
             session_count=1, requests_per_session=2, fake_delay_ms=fake_delay_ms,
             schedule_mode=ScheduleMode.SESSION_LOCK, warmup=warmup, repeat=repeat,
@@ -807,7 +874,8 @@ class ConcurrencyReliabilityRunner:
                     coordinator, repository, session_ids, agent_id,
                     config, batch_index, is_warmup, batch_started,
                 )
-                total_batch_ms += batch_ms
+                if not is_warmup:
+                    total_batch_ms += batch_ms
                 samples.extend(batch_samples)
             finally:
                 _cleanup_round_data(data_dir)
@@ -842,7 +910,8 @@ class ConcurrencyReliabilityRunner:
                     global_coordinator, repository, session_ids, agent_id,
                     config, batch_index, is_warmup, batch_started,
                 )
-                total_batch_ms += batch_ms
+                if not is_warmup:
+                    total_batch_ms += batch_ms
                 # 覆盖调度模式
                 for s in batch_samples:
                     object.__setattr__(s, "schedule_mode", ScheduleMode.GLOBAL_LOCK)
@@ -850,6 +919,50 @@ class ConcurrencyReliabilityRunner:
             finally:
                 _cleanup_round_data(data_dir)
 
+        return samples, total_batch_ms
+
+    async def _run_scenario_mixed(
+        self,
+        config: WorkloadConfig,
+        agent_id: str,
+        *,
+        global_lock: bool,
+    ) -> tuple[list[BenchmarkSample], float]:
+        """执行一个长请求与七个独立短请求的调度对照。"""
+        samples: list[BenchmarkSample] = []
+        total_batch_ms: float = 0.0
+        long_delay_ms: int = config.long_delay_ms or 200
+        for batch_index in range(config.warmup + config.repeat):
+            is_warmup: bool = batch_index < config.warmup
+            data_dir = _make_round_data_dir(batch_index, "mixed-global" if global_lock else "mixed-session")
+            try:
+                coordinator, repository, sm, registry = _build_services(
+                    data_dir,
+                    SessionSelectiveDelayLLM(
+                        config.fake_delay_ms,
+                        long_delay_ms,
+                        config.long_request_session_index,
+                    ),
+                    FixedDelayTool(config.fake_delay_ms),
+                    config.fake_delay_ms,
+                )
+                submitter = _GlobalLockCoordinator(coordinator) if global_lock else coordinator
+                session_ids: list[str] = []
+                for session_index in range(config.session_count):
+                    session = await sm.create(agent_id=agent_id, title=f"s-mixed-{session_index}")
+                    session_ids.append(session.id)
+                batch_started: float = time.perf_counter()
+                batch_samples, batch_ms = await _run_session_scaling(
+                    submitter, repository, session_ids, agent_id,
+                    config, batch_index, is_warmup, batch_started,
+                )
+                for sample in batch_samples:
+                    object.__setattr__(sample, "schedule_mode", config.schedule_mode)
+                if not is_warmup:
+                    total_batch_ms += batch_ms
+                samples.extend(batch_samples)
+            finally:
+                _cleanup_round_data(data_dir)
         return samples, total_batch_ms
 
     async def _run_scenario_cancel(
@@ -879,6 +992,7 @@ class ConcurrencyReliabilityRunner:
                     data_dir, long_llm, FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
                 session = await sm.create(agent_id=agent_id, title="s-cancel")
+                interaction = SessionInteractionService(sm, registry, coordinator)
 
                 _, user_msg = make_benchmark_request(agent_id, 0, 0)
                 long_factory = _make_request_factory(session.id, agent_id, user_msg)
@@ -905,8 +1019,10 @@ class ConcurrencyReliabilityRunner:
                 if barrier_task in done:
                     # LLM 已进入延迟中点：此时可测试 cancel 不阻塞
                     cancel_start = time.perf_counter()
-                    # 模拟 cancel 调用的快速返回（cancel 不获取 Session 锁）
-                    await asyncio.sleep(0.001)
+                    active_runs = await repository.list_active_runs(session.id)
+                    if not active_runs:
+                        raise AssertionError("取消屏障打开后未找到活动 Run")
+                    await interaction.cancel(active_runs[0].run_id, "PR3 benchmark cancellation")
                     cancel_delivery_end = time.perf_counter()
                     cancel_delivery_ms = (cancel_delivery_end - cancel_start) * 1000.0
                     cancel_not_blocking = cancel_delivery_ms < (delay_ms * 0.5)
@@ -942,6 +1058,11 @@ class ConcurrencyReliabilityRunner:
                     followup_ok = False
 
                 lock_released: bool = followup_ok
+                cancellation_effective: bool = (
+                    long_result is not None
+                    and long_result.state.outcome() is not None
+                    and long_result.state.outcome().value == "cancelled"
+                )
 
                 sample = BenchmarkSample(
                     dataset=SUITE_CONCURRENCY,
@@ -953,10 +1074,10 @@ class ConcurrencyReliabilityRunner:
                     platform=platform.platform(),
                     config_hash="",
                     eval_schema_version="",
-                    passed=cancel_not_blocking and lock_released and followup_ok,
-                    failure_kind=None if (cancel_not_blocking and lock_released and followup_ok) else "assertion",
-                    assertions_passed=sum([cancel_not_blocking, lock_released, followup_ok]),
-                    assertions_total=3,
+                    passed=cancel_not_blocking and cancellation_effective and lock_released and followup_ok,
+                    failure_kind=None if (cancel_not_blocking and cancellation_effective and lock_released and followup_ok) else "assertion",
+                    assertions_passed=sum([cancel_not_blocking, cancellation_effective, lock_released, followup_ok]),
+                    assertions_total=4,
                     trace_available=False,
                     wall_duration_ms=cancel_effect_ms,
                     run_id=long_result.run_id if long_result else "",
@@ -967,7 +1088,7 @@ class ConcurrencyReliabilityRunner:
                     cancel_delivery_ms=cancel_delivery_ms,
                     cancel_effect_ms=cancel_effect_ms,
                     cancellation_delivered=cancel_not_blocking,
-                    cancellation_effective=cancel_not_blocking,
+                    cancellation_effective=cancellation_effective,
                     lock_released=lock_released,
                     followup_completed=followup_ok,
                     evidence_summary={
@@ -1016,6 +1137,14 @@ class ConcurrencyReliabilityRunner:
         report_path: Path = out / f"{snapshot_id}.md"
         report_path.write_text(
             _build_concurrency_report(snapshot, snapshot_id, samples_path),
+            encoding="utf-8",
+        )
+        (out / "correctness.md").write_text(
+            _build_correctness_report(snapshot, snapshot_id, samples_path),
+            encoding="utf-8",
+        )
+        (out / "scheduling-comparison.md").write_text(
+            _build_scheduling_report(snapshot, snapshot_id, samples_path),
             encoding="utf-8",
         )
 
@@ -1127,6 +1256,79 @@ def _build_concurrency_report(
         f"- 工作负载配置：`workload-config.json`",
     ])
 
+    return "\n".join(lines)
+
+
+def _build_correctness_report(
+    snapshot: ConcurrencySnapshot,
+    snapshot_id: str,
+    samples_path: Path,
+) -> str:
+    """生成可独立审阅的正确性报告。"""
+    lines: list[str] = [
+        "# PR3 正确性报告",
+        "",
+        f"- 快照：`{snapshot_id}`",
+        f"- 原始样本：`samples/{samples_path.name}`",
+        f"- Warmup / Repeat：{snapshot.warmup} / {snapshot.repeat}",
+        "",
+        "| 场景 | 请求数 | FIFO | 消息 | 事件 | 上下文 | 工具 | 输出串流 | 取消 |",
+        "|---|---:|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for sc in snapshot.scenarios:
+        lines.append(
+            f"| `{sc.scenario_id}` | {sc.total_requests} | "
+            f"{sc.fifo_passed_count}/{sc.fifo_total_count} | "
+            f"{sc.message_leak_total} | {sc.event_leak_total} | "
+            f"{sc.context_leak_total} | {sc.tool_leak_total} | "
+            f"{sc.stream_leak_total} | {sc.cancel_passed_count}/{sc.cancel_total_count} |"
+        )
+    lines.extend([
+        "",
+        "FIFO 仅覆盖受控、单进程、单 SessionRunCoordinator 实例；隔离与取消均以该快照的原始 JSONL 为证据。",
+    ])
+    return "\n".join(lines)
+
+
+def _build_scheduling_report(
+    snapshot: ConcurrencySnapshot,
+    snapshot_id: str,
+    samples_path: Path,
+) -> str:
+    """生成仅针对 Benchmark 全局串行对照的调度报告。"""
+    sessions: dict[str, ScenarioStats] = {}
+    globals_: dict[str, ScenarioStats] = {}
+    for sc in snapshot.scenarios:
+        key: str = sc.scenario_id.removesuffix("_session").removesuffix("_global")
+        if sc.schedule_mode == ScheduleMode.SESSION_LOCK.value:
+            sessions[key] = sc
+        elif sc.schedule_mode == ScheduleMode.GLOBAL_LOCK.value:
+            globals_[key] = sc
+
+    lines: list[str] = [
+        "# PR3 调度对照报告",
+        "",
+        f"- 快照：`{snapshot_id}`",
+        f"- 原始样本：`samples/{samples_path.name}`",
+        "- 对照对象：当前 Session 锁与 Benchmark 进程内全局串行锁；不代表真实 Provider/API 加速。",
+        "",
+        "| 负载 | Session 锁吞吐 | 全局锁吞吐 | 吞吐变化 | Session 锁 Wall P95 | 全局锁 Wall P95 | Wall P95 变化 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for key in sorted(set(sessions) & set(globals_)):
+        comparison = compare_schedule_modes(sessions[key], globals_[key])
+        session = sessions[key]
+        global_ = globals_[key]
+        def render(value: object) -> str:
+            return "—" if value is None else f"{float(value):+.2%}"
+        lines.append(
+            f"| `{key}` | {session.throughput_per_sec:.1f} | {global_.throughput_per_sec:.1f} | "
+            f"{render(comparison.get('throughput_change_rate'))} | "
+            f"{session.wall_duration_ms.p95_ms:.1f} | {global_.wall_duration_ms.p95_ms:.1f} | "
+            f"{render(comparison.get('wall_p95_change_rate'))} |"
+        )
+    if not (set(sessions) & set(globals_)):
+        lines.append("| 无可比的完整对照负载 | — | — | — | — | — | — |")
     return "\n".join(lines)
 
 

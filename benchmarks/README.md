@@ -100,7 +100,16 @@ python -m benchmarks.concurrency_reliability \
 | 多 Session 隔离 | 8 Session × 4 请求，验证跨 Session 消息/事件/上下文/工具/输出零串扰 | 串扰 = 0/N |
 | Session 数扩展 | 1/2/4/8 Session × 4 请求，绘制吞吐随 Session 数变化 | 吞吐(req/s) |
 | 固定并发对照 | 8×4 请求，Session 锁 vs 全局锁主对照 | 吞吐变化率 |
+| 长短混合 | 1 个长请求 + 7 个独立短请求，双调度模式对照 | 吞吐变化率、Wall P95 |
 | 取消不阻塞 | 1 长 Run + 后续请求，验证取消送达/生效/锁释放 | 送达/生效 P50/P95 |
+
+### PR3 正式基线（20260806T110244Z_8d3afda，commit `8d3afda`）
+
+- 配置：Python 3.13.5 / Windows 11，固定短延迟 20ms、长延迟 200ms，warmup=5、repeat=100；
+- 正确性：同 Session FIFO **2,000/2,000**；8×4 多 Session 隔离的消息、事件、上下文、工具和输出串流计数均为 **0**；
+- 取消：**100/100** 送达、生效、锁释放及同 Session 后续请求可用；送达 P50 **1.3ms**、生效 P50 **118.2ms**；
+- 调度：8×4 固定并发相对 Benchmark 全局串行，吞吐 **+325.91%**，Wall P95 **-68.97%**；8 Session 扩展负载相对全局串行吞吐 **+391.14%**；
+- 可追溯工件：`benchmarks/baselines/reliability_concurrency_v1/20260806T110244Z_8d3afda.json`、同名 JSONL，以及 `benchmarks/reports/concurrency/20260806-pr3-formal/`。
 
 ### 口径与边界
 

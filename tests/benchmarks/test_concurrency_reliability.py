@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from benchmarks.concurrency_reliability import (
     ConcurrencyReliabilityRunner,
     _GlobalLockCoordinator,
+    _build_scheduling_report,
+)
+from benchmarks.concurrency_stats import (
+    ConcurrencyLatencyStats,
+    ConcurrencySnapshot,
+    ScenarioStats,
 )
 from benchmarks.concurrency_workloads import WorkloadConfig
 from benchmarks.eval_baseline_models import ScheduleMode
@@ -102,3 +110,68 @@ class TestWorkloadConfigValidation:
         d = config.to_dict()
         assert d["session_count"] == 8
         assert d["long_delay_ms"] == 200
+
+
+def _scenario(scenario_id: str, schedule_mode: str, throughput: float) -> ScenarioStats:
+    """构造报告协议测试需要的最小场景统计。"""
+    latency = ConcurrencyLatencyStats.from_values([10.0])
+    return ScenarioStats(
+        scenario_id=scenario_id,
+        schedule_mode=schedule_mode,
+        total_requests=32,
+        total_batches=1,
+        queue_wait_ms=latency,
+        wall_duration_ms=latency,
+        cancel_delivery_ms=ConcurrencyLatencyStats.from_values([]),
+        cancel_effect_ms=ConcurrencyLatencyStats.from_values([]),
+        fifo_passed_count=0,
+        fifo_total_count=0,
+        isolation_passed_count=32,
+        isolation_total_count=32,
+        cancel_passed_count=0,
+        cancel_total_count=0,
+        message_leak_total=0,
+        event_leak_total=0,
+        context_leak_total=0,
+        tool_leak_total=0,
+        stream_leak_total=0,
+        throughput_per_sec=throughput,
+        batch_total_ms=100.0,
+    )
+
+
+def test_write_artifacts_writes_required_pr3_reports(tmp_path):
+    """正式工件必须包含正确性和调度对照两份独立报告。"""
+    snapshot = ConcurrencySnapshot(
+        suite="reliability_concurrency_v1",
+        generated_at="2026-08-06T00:00:00+00:00",
+        git_commit="test",
+        warmup=5,
+        repeat=100,
+        fake_delay_ms=20,
+        scenarios=(
+            _scenario("fixed_concurrency_session", "session_lock", 100.0),
+            _scenario("fixed_concurrency_global", "global_lock", 25.0),
+        ),
+    )
+    ConcurrencyReliabilityRunner()._write_artifacts(snapshot, [], tmp_path, None)
+    assert (tmp_path / "correctness.md").is_file()
+    assert (tmp_path / "scheduling-comparison.md").is_file()
+
+
+def test_scheduling_report_contains_comparable_change_rate():
+    """同负载双调度模式必须呈现可复核的变化率。"""
+    snapshot = ConcurrencySnapshot(
+        suite="reliability_concurrency_v1",
+        generated_at="2026-08-06T00:00:00+00:00",
+        git_commit="test",
+        warmup=5,
+        repeat=100,
+        fake_delay_ms=20,
+        scenarios=(
+            _scenario("fixed_concurrency_session", "session_lock", 100.0),
+            _scenario("fixed_concurrency_global", "global_lock", 25.0),
+        ),
+    )
+    report = _build_scheduling_report(snapshot, "snapshot", Path("samples.jsonl"))
+    assert "300.00%" in report
