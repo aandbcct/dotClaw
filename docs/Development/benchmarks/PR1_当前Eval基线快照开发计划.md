@@ -139,6 +139,8 @@ python -m benchmarks.eval_baseline \
 
 CLI 默认只使用隔离 Fixture；若未来加入真实依赖，必须使用单独命令和 `[EXT]` 标识，不扩展 PR1 参数。
 
+初版 `runtime_core_v1` 的四个 Case 先各执行 30 次，结论只覆盖这四类业务路径；在将业务场景通过率作为简历主结论前，Dataset 应扩展并审核至至少 10–20 个代表性 Case，仍保持每 Case 30 次和相同证据要求。
+
 ## 5. 数据模型设计
 
 ### 5.1 BenchmarkSample（单次采样记录）

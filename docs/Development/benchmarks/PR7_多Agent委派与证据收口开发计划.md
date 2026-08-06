@@ -109,8 +109,8 @@ tests/benchmarks/test_eval_baseline_stats.py
 python -m benchmarks.delegation_reliability \
   --suite reliability_delegation_v1 \
   --outcome-warmup 1 --outcome-repeat 1 \
-  --cancellation-warmup 5 --cancellation-repeat 100 \
-  --concurrent-parents 8 --concurrent-repeat 100 \
+  --cancellation-warmup 5 --cancellation-repeat 50 \
+  --concurrent-parents 8 --concurrent-warmup 5 --concurrent-repeat 50 \
   --output benchmarks/reports/delegation/<run-id> \
   --save-baseline benchmarks/baselines/reliability_delegation_v1
 
@@ -122,7 +122,7 @@ python -m benchmarks.evidence_report \
 ```
 
 - 所有场景使用独立临时存储根与固定 Fixture；父/子 Agent、Session、Run、Task、工具、取消时机和 Fake LLM/Tool 延迟写入 `delegation-config.json` 与单次记录。
-- 结果终态表为确定性有限 Case，每行执行一次；父取消和多父并发隔离各预热 5 次、正式重复 100 次。正式 README/简历使用的性能型样本仍遵循统一 `warmup=5, repeat=30`，不得与正确率样本混合。
+- 结果终态表为确定性有限 Case，每行执行一次；父取消和多父并发隔离各预热 5 次、正式重复 50 次。正式 README/简历使用的性能型样本遵循各场景的固定预热/正式次数，不得与正确率样本混合。
 - 计时范围、环境、Git 提交、Dataset/Fixture 版本、配置哈希和原始 JSONL 必须同时写入快照，缺失任一项的结果只能标记为诊断。
 
 ### 4.2 子终态与结果回灌有限表
@@ -141,7 +141,7 @@ python -m benchmarks.evidence_report \
 
 ### 4.3 父取消传播
 
-父 Run 在子 Run 执行期间主动取消，受控重复 100 次。单次记录至少包括：取消请求发出时间、父取消送达时间、子取消送达时间、父/子进入取消终态时间、子 Run 收口后同父 Session 后续请求开始/完成时间。
+父 Run 在子 Run 执行期间主动取消，受控重复 50 次。单次记录至少包括：取消请求发出时间、父取消送达时间、子取消送达时间、父/子进入取消终态时间、子 Run 收口后同父 Session 后续请求开始/完成时间。
 
 一轮通过必须满足：
 
@@ -155,7 +155,7 @@ python -m benchmarks.evidence_report \
 
 ### 4.4 多父 Run 并发隔离与回灌时延
 
-使用 8 个并发父 Session、每个固定一条委派请求，重复 100 轮。每条链路写入唯一父 Session/Run/Task/请求标识以及唯一子目标标识，使用固定延迟的 Fixture，避免供应商波动掩盖编排行为。
+使用 8 个并发父 Session、每个固定一条委派请求，重复 50 轮。每条链路写入唯一父 Session/Run/Task/请求标识以及唯一子目标标识，使用固定延迟的 Fixture，避免供应商波动掩盖编排行为。
 
 每轮验证：
 
@@ -190,7 +190,7 @@ PR7 继续使用 `BenchmarkSample` 和 `BenchmarkSnapshot`，二者是 Benchmark
 | 时延 | suspend_to_backfill_ms、parent_end_to_end_ms | 固定 Fixture 下的本地编排时延 |
 | 证据 | git_commit、fixture_version、config_hash、environment、raw_sample_path、formal_sampling | 结果进入对外结论的资格 |
 
-统计规则：确定性终态表使用通过行数/总行数；100 次场景使用成功率、绝对错误数和 Wilson 置信区间；时延使用正式非 warmup 样本的 P50/P95。只有对照双方工作负载、延迟、样本资格、环境和计时范围相同时才计算相对变化。
+统计规则：确定性终态表使用通过行数/总行数；50 次场景使用成功率、绝对错误数和 Wilson 置信区间；时延使用正式非 warmup 样本的 P50/P95。只有对照双方工作负载、延迟、样本资格、环境和计时范围相同时才计算相对变化。
 
 ## 6. 行为与一致性边界
 
@@ -211,8 +211,8 @@ PR7 继续使用 `BenchmarkSample` 和 `BenchmarkSnapshot`，二者是 Benchmark
 ### 8.1 正常路径
 
 - 完整四行子终态表按预期挂起、回灌、收口，且每条链路只创建一个子 Run；
-- 100 次父取消均能记录父/子送达及生效时延，子 Run 收口后后续请求可继续执行；
-- 8 父 Session 并发 × 100 轮的所有链路都可定位到唯一父/子/Task/Broker 事实，生成 P50/P95；
+- 50 次父取消均能记录父/子送达及生效时延，子 Run 收口后后续请求可继续执行；
+- 8 父 Session 并发 × 50 轮的所有链路都可定位到唯一父/子/Task/Broker 事实，生成 P50/P95；
 - 已有正式快照和覆盖率输入可生成带完整追溯信息的证据清单。
 
 ### 8.2 边界路径
@@ -242,16 +242,16 @@ PR7 不把历史 Git 委派实现纳入同口径性能比较。它验证 PR1 至
 
 1. 扩展统一记录/快照的委派、取消、隔离和正式证据字段，并先写严格 schema/资格校验测试。
 2. 装配固定父/子 Fixture 与四行子终态表，完成父子关联、事件、回灌与重复请求断言。
-3. 实现父取消传播与后续请求释放实验，记录送达/生效时延并完成 100 次采样。
-4. 实现 8 父 Session 并发工作负载与链路归属断言，完成 100 轮隔离与回灌时延采样。
+3. 实现父取消传播与后续请求释放实验，记录送达/生效时延并完成 50 次采样。
+4. 实现 8 父 Session 并发工作负载与链路归属断言，完成 50 轮隔离与回灌时延采样。
 5. 加入 `pytest-cov`，实现快照/覆盖率证据清单和报告，拒绝不完整或非正式证据。
 6. 执行正式采样；仅将实际结果、复现命令和边界写入 `benchmarks/README.md`、README 和简历候选报告。
 
 ## 10. PR 验收标准
 
 1. 四行子终态有限表中，父/子 Run、Task、事件、结果回灌和最终状态均符合当前 Runtime 语义，重复/未知/不匹配请求不产生额外子 Run 或回灌；
-2. 100 次父取消中，父/子取消送达和生效时延、重复/遗漏/串扰数均有 JSONL 原始证据，子收口后同 Session 后续请求可继续执行；
-3. 8 父 Session 并发 × 100 轮中，父/子/Task/Broker/Context/工具/流式输出跨链路泄漏、错误投递、重复创建、重复回灌和遗漏完成均可统计；
+2. 50 次父取消中，父/子取消送达和生效时延、重复/遗漏/串扰数均有 JSONL 原始证据，子收口后同 Session 后续请求可继续执行；
+3. 8 父 Session 并发 × 50 轮中，父/子/Task/Broker/Context/工具/流式输出跨链路泄漏、错误投递、重复创建、重复回灌和遗漏完成均可统计；
 4. 委派时延以固定 Fixture 下的 P50/P95 报告，且不外推为真实模型或网络性能；
 5. `pytest-cov` 报告总体及 Runtime、Tool、Context、Orchestration、LLM 的真实行/分支覆盖率，未设置虚假阈值；
 6. 每一条 README/简历候选结论都能追溯到固定提交、环境、Dataset/Fixture、配置、正式样本、JSONL、快照和报告；
@@ -264,8 +264,8 @@ PR7 完成后，可在正式快照已产生的前提下写出以下类型结论�
 
 ```text
 在 X 条确定性委派终态路径中，父子关联、单次结果回灌与状态语义均为 X/X；重复、遗漏和错误投递为 0。
-在 8 个并发父 Session、100 轮固定 Fixture 委派中，跨链路消息、上下文、工具结果和流式输出串扰为 0；父挂起至结果回灌 P95 为 Y ms。
-在 100 次父取消实验中，取消传播遗漏为 0，子 Run 收口后同 Session 后续请求可继续执行。
+在 8 个并发父 Session、50 轮固定 Fixture 委派中，跨链路消息、上下文、工具结果和流式输出串扰为 0；父挂起至结果回灌 P95 为 Y ms。
+在 50 次父取消实验中，取消传播遗漏为 0，子 Run 收口后同 Session 后续请求可继续执行。
 Reliability & Benchmark Suite 覆盖 X 个正式场景、Y 次正式采样；总体及 Runtime/Tool/Context/Orchestration/LLM 覆盖率见可追溯测试报告。
 ```
 

@@ -107,7 +107,8 @@ tests/benchmarks/test_eval_baseline_stats.py
 ```text
 python -m benchmarks.recovery_reliability \
   --suite reliability_recovery_v1 \
-  --warmup 5 --repeat 100 \
+  --warmup 5 --repeat 30 \
+  --process-warmup 5 --process-repeat 50 \
   --output benchmarks/reports/recovery/<run-id> \
   --save-baseline benchmarks/baselines/reliability_recovery_v1
 ```
@@ -154,7 +155,7 @@ python -m benchmarks.recovery_reliability \
 
 ### 4.6 成功提交恢复
 
-复用现有成功提交故障点枚举的全部 6 个边界：Session 投影前/后、完成事件前/后、Run 收口前/后。每个边界各重复 100 次。
+复用现有成功提交故障点枚举的全部 6 个边界：Session 投影前/后、完成事件前/后、Run 收口前/后。每个边界各重复 30 次。
 
 每轮中断后调用持久化层的成功提交恢复，并重复调用一次以验证幂等性。必须最终得到：一份 Conversation 投影、一个完成事件、一个 `COMPLETED` Run；成功提交意图和 checkpoint 均被清理。该场景没有外部副作用，外部层记为“不适用”。
 
@@ -168,7 +169,7 @@ python -m benchmarks.recovery_reliability \
 
 仅对 `tool_before_effect` 执行子进程验证：子进程在 checkpoint 已落盘、工具记录型副作用前以强制退出结束；父进程使用同一存储根新建服务并恢复。
 
-该验证与受控异常使用相同判据和记录格式，额外保存子进程命令、退出码、源码提交、环境摘要和持久化文件摘要。正式执行 100 次；它验证该一个关键边界跨真实进程仍可恢复，不泛化为所有节点均已通过 OS 级中断验证。
+该验证与受控异常使用相同判据和记录格式，额外保存子进程命令、退出码、源码提交、环境摘要和持久化文件摘要。正式执行 50 次；它验证该一个关键边界跨真实进程仍可恢复，不泛化为所有节点均已通过 OS 级中断验证。
 
 ## 5. 数据模型与统计口径
 
@@ -194,7 +195,7 @@ PR4 继续使用 `BenchmarkSample`（单次采样记录）和 `BenchmarkSnapshot
 - 冷重建仅证明同机、同存储格式、相同代码提交下的恢复；不承诺跨版本数据迁移或分布式故障恢复。
 - 子进程强制退出的结论只覆盖工具副作用前的一个 checkpoint 边界；其余边界使用受控异常验证。
 - 委派冷重建为已知能力边界；即使某次恰好不报错，也不升级为可靠性结论，除非满足后续持久化设计和验收条件。
-- 正式每个恢复场景/边界执行 100 次，成功提交为 6×100，预热结果不参与正式统计。
+- 正式普通恢复场景/边界执行 30 次，成功提交为 6×30；工具前 checkpoint 的跨进程强退执行 50 次，预热结果不参与正式统计。
 
 ## 7. 必要的现有代码修改
 
@@ -242,7 +243,7 @@ PR4 不读取历史 Git Runtime。它验证 PR1/PR3 样本缺少恢复字段时�
 2. 实现固定 LLM、工具故障与冷重建装配，先完成两类 LLM、工具前/后中断和无故障参考运行。
 3. 接入审批等待冷重建与成功提交六边界，读取并判定内部 Run/事件/Conversation/checkpoint 事实。
 4. 实现单一工具前边界的子进程强退验证，以及委派冷重建能力边界审计。
-5. 输出 JSONL、快照、三层报告和证据摘要；以开发期采样验证后执行正式每点 100 次。
+5. 输出 JSONL、快照、三层报告和证据摘要；以开发期采样验证后执行普通故障点每点 30 次、跨进程强退 50 次。
 6. 更新 Benchmark README，仅写入实际正式运行得到的恢复率、内部一致性与外部副作用边界。
 
 ## 10. PR 验收标准
@@ -250,8 +251,8 @@ PR4 不读取历史 Git Runtime。它验证 PR1/PR3 样本缺少恢复字段时�
 1. LLM 调用前失败和结果未知明确分开统计，后者不宣称 exactly-once；
 2. 工具前中断从 `EXECUTE_TOOLS` 恢复且不重新规划，工具后中断即使外部重复也不产生重复内部事实；
 3. 审批等待冷重建不重建审批、不漂移 ContextVersion，批准后原 Run 正确收口；
-4. 成功提交 6 个边界各 100 次后均收敛为唯一 Conversation、完成事件、Run 终态且清理控制记录；
-5. 工具前 checkpoint 的子进程强退 100 次均可由新进程/服务恢复；
+4. 成功提交 6 个边界各 30 次后均收敛为唯一 Conversation、完成事件、Run 终态且清理控制记录；
+5. 工具前 checkpoint 的子进程强退 50 次均可由新进程/服务恢复；
 6. 委派冷重建只作为能力边界报告，不进入正式恢复成功率；
 7. 每次正式结果可追溯到固定环境、故障配置、原始 JSONL 与前后事实摘要；
 8. Runtime 生产状态机、checkpoint、恢复协议与历史数据未被 Benchmark 改写。

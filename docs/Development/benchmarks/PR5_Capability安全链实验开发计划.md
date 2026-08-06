@@ -106,13 +106,13 @@ tests/benchmarks/test_eval_baseline_stats.py
 python -m benchmarks.capability_reliability \
   --suite reliability_capability_v1 \
   --matrix benchmarks/datasets/reliability_capability_v1/matrix.json \
-  --performance-warmup 5 --performance-repeat 30 \
+  --performance-warmup 5 --performance-repeat 50 \
   --output benchmarks/reports/capability/<run-id> \
   --save-baseline benchmarks/baselines/reliability_capability_v1
 ```
 
 - 正确性矩阵逐行执行一次；它是经过审核的完整有限决策表，不以重复次数替代覆盖。
-- 性能仅执行无副作用 allow Case，使用 `warmup=5, repeat=30`；预热不进入正式统计。
+- 性能仅执行无副作用 allow Case，使用 `warmup=5, repeat=50`；预热不进入正式统计。
 - 每次运行使用临时 workspace、固定策略作用域、固定审批响应和记录型 Handler；配置、Python、平台、提交和矩阵内容摘要写入记录。
 
 ### 4.2 完整有限安全决策表

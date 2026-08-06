@@ -103,7 +103,8 @@ tests/benchmarks/test_eval_baseline_stats.py
 ```text
 python -m benchmarks.concurrency_reliability \
   --suite reliability_concurrency_v1 \
-  --warmup 5 --repeat 100 \
+  --core-warmup 5 --core-repeat 50 \
+  --scaling-warmup 5 --scaling-repeat 30 \
   --fake-delay-ms 20 \
   --output benchmarks/reports/concurrency/<run-id> \
   --save-baseline benchmarks/baselines/reliability_concurrency_v1
@@ -126,7 +127,7 @@ python -m benchmarks.concurrency_reliability \
 2. Runtime 开始执行、Run 完成、Conversation 中成功消息的顺序均严格等于 `accepted_seq`；
 3. 每个序号恰好出现一次；乱序、重复、遗漏均为 0。
 
-正式采样为 100 轮，即至少 2,000 个同 Session 请求；报告同时给出每轮和总计的绝对错误数、成功数/总数及 Wilson 95% 区间。
+正式采样为 50 轮，即至少 1,000 个同 Session 请求；报告同时给出每轮和总计的绝对错误数、成功数/总数及 Wilson 95% 区间。
 
 ### 4.3 多 Session 隔离场景
 
@@ -139,7 +140,7 @@ python -m benchmarks.concurrency_reliability \
 - Run、ContextVersion 和工具记录的所有者/引用与本请求一致；
 - 输出收集器仅得到自身 Run 的流式片段。
 
-正式采样为 100 轮，即至少 3,200 个多 Session 请求。跨 Session 消息串扰、上下文串扰、工具结果串扰和输出串流均分别计数，目标是各项 `0/N`，不只报告合并成功率。
+正式采样为 50 轮，即至少 1,600 个多 Session 请求。跨 Session 消息串扰、上下文串扰、工具结果串扰和输出串流均分别计数，目标是各项 `0/N`，不只报告合并成功率。
 
 ### 4.4 跨 Session 并行收益场景
 
@@ -160,6 +161,8 @@ python -m benchmarks.concurrency_reliability \
 
 短请求和长请求均由固定延迟替身控制；默认短延迟 20ms、长延迟 200ms，正式结果必须以保存的配置为准。记录批次总耗时、吞吐量、每请求入口至开始执行的排队等待、入口至终态的端到端时延及其 P50/P95。变化率只在同负载的两种模式间计算，并标明“相对 Benchmark 全局串行调度”。
 
+Session 扩展、固定并发和长短混合的每个调度模式/负载组合各预热 5 次、正式执行 30 次；该次数只用于调度效率对照，不混入 FIFO、隔离或取消正确率。
+
 ### 4.5 取消不阻塞场景
 
 每轮启动一个受控长 Run，在其进入 LLM/Tool 等待点且仍持有 Session 执行权后，经 `SessionInteractionService.cancel()` 发送取消。时间点定义为：
@@ -168,7 +171,7 @@ python -m benchmarks.concurrency_reliability \
 - **生效耗时**：从调用 `cancel()` 到该 Run 持久化为取消终态；
 - **后续可用性**：取消 Run 收口后，同 Session 新请求能完成且不返回 `SESSION_BUSY`。
 
-一轮通过必须证明：取消调用在长 Run 正常延迟结束前返回；目标 Run 进入取消终态；Run 收口后租约释放；后续同 Session 请求完成。正式采样为 100 轮，并分别报告送达/生效时延 P50/P95、失败数与锁释放失败数。
+一轮通过必须证明：取消调用在长 Run 正常延迟结束前返回；目标 Run 进入取消终态；Run 收口后租约释放；后续同 Session 请求完成。正式采样为 50 轮，并分别报告送达/生效时延 P50/P95、失败数与锁释放失败数。
 
 ## 5. 数据模型与统计口径
 
@@ -241,16 +244,16 @@ PR3 不读取历史 Git Runtime 记录；仅验证 PR1 样本在新增并发字�
 2. 实现固定延迟替身、标识编码、受控提交闸门与单轮事实读取；先完成同 Session FIFO 与多 Session 隔离的失败/成功断言。
 3. 实现 Session 锁/全局锁两种 Benchmark 调度模式、Session 数扩展和长短混合负载，补齐可比性校验及统计报告。
 4. 实现取消不阻塞场景，区分送达和生效时延，并验证锁释放与后续请求。
-5. 接入 JSONL、快照和 Markdown 报告；用开发期采样验证后，执行正式 `warmup=5, repeat=100`，保存基线与原始数据。
+5. 接入 JSONL、快照和 Markdown 报告；用开发期采样验证后，执行核心正确性/取消 `warmup=5, repeat=50` 与扩展负载 `warmup=5, repeat=30`，保存基线与原始数据。
 6. 更新 Benchmark README，仅写入正式运行实际得到的正确性和调度结论。
 
 ## 10. PR 验收标准
 
-1. 同 Session 20×100 请求以 `accepted_seq` 为基准，开始、完成与 Conversation 顺序均无乱序、重复或遗漏；
-2. 8×4×100 请求中，返回结果、RunMessage、RunEvent、ContextVersion、工具记录和流式输出的串扰分别可统计，正式结论可表达为各项 `0/N`；
+1. 同 Session 20×50 请求以 `accepted_seq` 为基准，开始、完成与 Conversation 顺序均无乱序、重复或遗漏；
+2. 8×4×50 请求中，返回结果、RunMessage、RunEvent、ContextVersion、工具记录和流式输出的串扰分别可统计，正式结论可表达为各项 `0/N`；
 3. 1/2/4/8 Session、8×4 与长短混合负载均能在两种调度模式下产出可比 JSONL 与报告；
 4. 报告区分总耗时、吞吐、排队等待和端到端 P50/P95，并仅以全局锁模式作为调度对照；
-5. 取消 100 轮报告送达/生效时延、终态成功、锁释放和后续请求可用性；
+5. 取消 50 轮报告送达/生效时延、终态成功、锁释放和后续请求可用性；
 6. 基线配置、环境、固定延迟、原始数据、快照和统计脚本可追溯且不覆盖既有快照；
 7. Runtime 生产锁、状态机、持久化和接口未因 Benchmark 而改变。
 

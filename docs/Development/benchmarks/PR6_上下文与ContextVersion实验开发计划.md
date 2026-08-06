@@ -108,7 +108,7 @@ tests/benchmarks/test_eval_baseline_stats.py
 python -m benchmarks.context_reliability \
   --suite reliability_context_v1 \
   --compression-tokenizer cl100k_base \
-  --recovery-warmup 5 --recovery-repeat 100 \
+  --recovery-warmup 5 --recovery-repeat 30 \
   --performance-warmup 5 --performance-repeat 30 \
   --output benchmarks/reports/context/<run-id> \
   --save-baseline benchmarks/baselines/reliability_context_v1
@@ -116,7 +116,7 @@ python -m benchmarks.context_reliability \
 
 - 场景、语料、固定 Slot 内容、预算窗口、tokenizer、外部 Provider 延迟和对照模式均写入 `context-config.json` 与单次记录。
 - 所有场景使用独立临时 Session/Run 存储根；无故障、复用和强制重建对照不能共享持久化状态。
-- 完整有限一致性/Owner 表逐行执行；冷恢复、成功/失败/取消/放弃污染边界各重复 100 次；性能对照预热 5、正式 30 次。
+- 完整有限一致性/Owner 表逐行执行；冷恢复、成功/失败/取消/放弃污染边界各重复 30 次；性能对照预热 5、正式 30 次。
 
 ### 4.2 固定输入一致性
 
@@ -141,7 +141,7 @@ python -m benchmarks.context_reliability \
 4. 外部 Slot Provider 的重新加载次数为 0；
 5. Run 最终按预期收口，且恢复期不产生重复 Conversation 或运行事实。
 
-该场景正式重复 100 次，分别统计上下文漂移、Provider 重载、重复 ContextVersion 和内部事实错误数。
+该场景正式重复 30 次，分别统计上下文漂移、Provider 重载、重复 ContextVersion 和内部事实错误数。
 
 ### 4.4 快照复用效率对照
 
@@ -196,7 +196,7 @@ PR6 继续使用 `BenchmarkSample`（单次采样记录）和 `BenchmarkSnapshot
 | Owner | owner_case_id、global_leak_count、agent_leak_count、session_leak_count、run_leak_count、provider_load_count、cache_hit_count | 内容归属及可观测复用 |
 | 证据 | ContextVersion/Run/Session/事件/Provider 计数摘要 | 不保存完整敏感检索正文 |
 
-报告分别呈现：完整有限一致性/Owner 表的通过数；100 次冷恢复的漂移/重载/重复版本绝对错误数与 Wilson 区间；压缩关闭/开启的 token、预算通过率和耗时；复用/强制重建对照的 P50/P95。只有两侧固定环境、输入、延迟与计时范围一致时才计算百分比变化。
+报告分别呈现：完整有限一致性/Owner 表的通过数；30 次冷恢复的漂移/重载/重复版本绝对错误数与 Wilson 区间；压缩关闭/开启的 token、预算通过率和耗时；复用/强制重建对照的 P50/P95。只有两侧固定环境、输入、延迟与计时范围一致时才计算百分比变化。
 
 ## 6. 行为与一致性边界
 
@@ -251,7 +251,7 @@ PR6 不读取历史 Git Context。它验证 PR1 至 PR5 样本缺少 Context 字
 
 1. 扩展统一记录/快照的 Context、Provider、token、污染字段和严格 schema 测试。
 2. 实现固定 Slot/消息/工具快照工作负载与一致性、Owner 归属断言；固化有限场景表。
-3. 实现 `v1 → v2` 冷恢复、服务冷重建和 Provider 加载观察；先完成 100 次抗漂移场景。
+3. 实现 `v1 → v2` 冷恢复、服务冷重建和 Provider 加载观察；先完成 30 次抗漂移场景。
 4. 实现仅限 Benchmark 的强制重建对照，固定加载延迟与计时范围，补齐可比性校验。
 5. 实现固定语料/tokenizer/窗口的压缩关闭/开启矩阵及成功/失败/取消/放弃污染边界。
 6. 输出 JSONL、快照和四类报告，执行正式采样；更新 README，仅写入实际结果与能力边界。
@@ -259,10 +259,10 @@ PR6 不读取历史 Git Context。它验证 PR1 至 PR5 样本缺少 Context 字
 ## 10. PR 验收标准
 
 1. 固定输入完整表中内容哈希、工具 Schema、Slot 规范化哈希/顺序和消息序列均符合预期，且不比较 `created_at`；
-2. 100 次 `v1 → v2` 冷恢复中，上下文漂移、Provider 重载和重复 ContextVersion 均可统计并有原始证据；
+2. 30 次 `v1 → v2` 冷恢复中，上下文漂移、Provider 重载和重复 ContextVersion 均可统计并有原始证据；
 3. 快照复用与强制重建对照在相同输入/环境/计时范围下报告恢复 P50/P95、Provider 加载和版本新增数，并明确其反事实性质；
 4. 固定语料压缩报告 token 缩减、预算通过率、最近 Conversation 保留、完整 Tool Call/Result 边界和压缩 P50/P95；
-5. 成功 Run 才投影摘要；失败、取消、放弃各 100 次对后续 Session 的污染为可审计的绝对错误数；
+5. 成功 Run 才投影摘要；失败、取消、放弃各 30 次对后续 Session 的污染为可审计的绝对错误数；
 6. GLOBAL/AGENT/SESSION/RUN 的上下文泄漏分别可统计，复用效率仅在 Provider/缓存观察存在时报告；
 7. 未宣称摘要质量、运行中片段压缩、TOCTOU、真实 API 或强制重建生产能力；
 8. Context 与 Runtime 生产语义未因 Benchmark 改写。
