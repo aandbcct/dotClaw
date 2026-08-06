@@ -19,7 +19,7 @@ def make_sample(
 ) -> BenchmarkSample:
     """构造一条合法的 BenchmarkSample；可覆盖任意字段。"""
     base = dict(
-        schema_version="1.0",
+        schema_version="2.0",
         suite=SUITE_NAME,
         dataset="runtime_core_v1",
         case_id=case_id,

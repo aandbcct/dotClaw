@@ -17,7 +17,7 @@ from benchmarks.eval_baseline import (
     git_short_commit,
     make_snapshot_id,
 )
-from benchmarks.eval_baseline_models import BenchmarkSample, BenchmarkSnapshot
+from benchmarks.eval_baseline_models import BENCHMARK_SCHEMA_VERSION, BenchmarkSample, BenchmarkSnapshot
 from dotclaw.eval.reexecution import ReexecutionRunner
 from dotclaw.eval.results import EvaluationFailureKind
 
@@ -85,7 +85,7 @@ async def test_run_dataset_end_to_end(tmp_path: Path) -> None:
     assert len(lines) == 8
     for line in lines:
         sample = BenchmarkSample.from_dict(json.loads(line))
-        assert sample.schema_version == "1.0"
+        assert sample.schema_version == BENCHMARK_SCHEMA_VERSION
         assert sample.is_warmup is False
         assert sample.trace_available is True
 

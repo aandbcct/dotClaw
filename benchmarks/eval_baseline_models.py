@@ -1,15 +1,16 @@
-"""PR1 Eval 基线数据模型：BenchmarkSample（单次采样记录）与 BenchmarkSnapshot（汇总快照）。
+"""Eval 基线数据模型：BenchmarkSample（单次采样记录）与 BenchmarkSnapshot（汇总快照）。
 
 本模块只定义可序列化的派生测试记录，不承担执行、统计或写盘逻辑。两类模型都复用
 Runtime / Eval 既有事实的只读视图，不新增持久化容器，也不内联正文或敏感内容：
 
-- ``BenchmarkSample`` 是 ``ReexecutionRunner.run_case()`` 单次结果的派生记录，
-  按 JSONL 逐条追加，warmup 与正式采样均写出并以 ``is_warmup`` 区分；
-- ``BenchmarkSnapshot`` 是由同一次 Dataset、提交、环境和采样配置下的非 warmup
+- ``BenchmarkSample`` 是单次实验结果的派生记录，按 JSONL 逐条追加，warmup 与
+  正式采样均写出并以 ``is_warmup`` 区分；
+- ``BenchmarkSnapshot`` 是由同一次实验、提交、环境和采样配置下的非 warmup
   样本聚合而成的对照工件，聚合逻辑见 ``eval_baseline_stats``。
 
 序列化采用严格模式：未知 schema 版本或字段类型错误必须明确失败，禁止把缺失
-事实静默当作 0 或成功。
+事实静默当作 0 或成功。并发 / 取消观察字段在 PR1（schema 1.0）样本中缺失时
+按 None 处理，不猜测为 0。
 """
 
 from __future__ import annotations
@@ -20,14 +21,53 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Mapping, Sequence
 
-BENCHMARK_SCHEMA_VERSION: str = "1.0"
+BENCHMARK_SCHEMA_VERSION: str = "2.0"
 """Benchmark 记录与快照的 schema 版本；读取到其他版本必须明确失败。"""
+
+# PR1 兼容：旧版本 schema 用于反序列化兼容。
+_BENCHMARK_SCHEMA_VERSION_V1: str = "1.0"
+_SUPPORTED_SCHEMA_VERSIONS: frozenset[str] = frozenset({_BENCHMARK_SCHEMA_VERSION_V1, BENCHMARK_SCHEMA_VERSION})
 
 SUITE_NAME: str = "runtime_core"
 """PR1 实验族标识：Runtime 核心语义的 Eval 业务回归套件。"""
 
+SUITE_CONCURRENCY: str = "reliability_concurrency"
+"""PR3 实验族标识：并发隔离与调度收益套件。"""
+
 SCENARIO_TOOL_SUCCESS: str = "tool_success"
 """PR2 统一业务场景标识：单工具成功（工具调用 → 固定输出 → 最终回答）。"""
+
+
+class ScheduleMode(StrEnum):
+    """PR3 并发 Benchmark 的调度模式。"""
+
+    SESSION_LOCK = "session_lock"
+    """当前生产路径：每 Session 异步锁串行化，不同 Session 可并行。"""
+
+    GLOBAL_LOCK = "global_lock"
+    """Benchmark 进程内全局锁对照：所有提交串行，仅用于证明调度结构容量影响。"""
+
+
+class ConcurrencyScenario(StrEnum):
+    """PR3 并发场景标识。"""
+
+    FIFO_SAME_SESSION = "fifo_same_session"
+    """同 Session FIFO：20 请求并发提交，验证开始/完成/Conversation 顺序。"""
+
+    MULTI_SESSION_ISOLATION = "multi_session_isolation"
+    """多 Session 隔离：8×4 请求，验证跨 Session 零串扰。"""
+
+    SESSION_SCALING = "session_scaling"
+    """Session 数扩展：1/2/4/8 Session，绘制吞吐随 Session 数变化曲线。"""
+
+    FIXED_CONCURRENCY = "fixed_concurrency"
+    """固定并发对照：8×4 请求，Session 锁 vs 全局锁主对照。"""
+
+    MIXED_LONG_SHORT = "mixed_long_short"
+    """长短混合：1 长请求 + 7 Session 短请求，证明长任务不阻塞其他 Session。"""
+
+    CANCEL_NON_BLOCKING = "cancel_non_blocking"
+    """取消不阻塞：长 Run 持锁期间取消，验证送达/生效时延与锁释放。"""
 
 
 def compute_fixture_fingerprint(case) -> str:
@@ -167,6 +207,39 @@ def _optional_json_map(value: object, label: str) -> Mapping[str, object] | None
     return _require_json_map(value, label)
 
 
+def _optional_int(value: object, label: str) -> int | None:
+    """读取可选整数字段；缺失时为 None，存在时校验类型（布尔不算整数）。"""
+    if value is None:
+        return None
+    return _require_int(value, label)
+
+
+def _optional_float(value: object, label: str) -> float | None:
+    """读取可选数值字段；缺失时为 None，存在时校验类型。"""
+    if value is None:
+        return None
+    return _require_float(value, label)
+
+
+def _optional_bool(value: object, label: str) -> bool | None:
+    """读取可选布尔字段；缺失时为 None，存在时校验类型。"""
+    if value is None:
+        return None
+    return _require_bool(value, label)
+
+
+def _optional_schedule_mode(value: object, label: str) -> ScheduleMode | None:
+    """读取可选调度模式枚举；缺失或为 None 时返回 None，存在时校验取值。"""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise BenchmarkSchemaError(f"{label} 必须是字符串，实际为 {type(value).__name__}")
+    try:
+        return ScheduleMode(value)
+    except ValueError as error:
+        raise BenchmarkSchemaError(f"{label} 取值 {value!r} 不受支持") from error
+
+
 # --------------------------------------------------------------------------- #
 # BenchmarkSample：单次采样记录
 # --------------------------------------------------------------------------- #
@@ -209,9 +282,65 @@ class BenchmarkSample:
     run_statistics: Mapping[str, object] = field(default_factory=dict)
     trace_source: Mapping[str, object] | None = None
 
+    # ---- PR3 并发 / 取消观察字段（PR1 样本中为 None，不猜测为 0） ----
+
+    # 工作负载
+    schedule_mode: ScheduleMode | None = None
+    """调度模式；PR1 Eval 样本为 None。"""
+    session_count: int | None = None
+    """该轮实验的 Session 数。"""
+    requests_per_session: int | None = None
+    """每个 Session 的请求数。"""
+    fake_delay_ms: int | None = None
+    """固定延迟替身的延迟毫秒数。"""
+
+    # 顺序（同 Session FIFO 观察证据）
+    accepted_seq: int | None = None
+    """Benchmark 入口分配的请求接受序号（1-based）。"""
+    execution_started_seq: int | None = None
+    """Runtime 真正开始执行的次序。"""
+    completed_seq: int | None = None
+    """Run 完成的次序。"""
+    conversation_commit_seq: int | None = None
+    """Conversation 持久化次序。"""
+
+    # 时延
+    queue_wait_ms: float | None = None
+    """从入口提交到 Runtime 开始执行的排队等待耗时；缺失时为 None，不当作 0。"""
+    cancel_delivery_ms: float | None = None
+    """取消送达耗时：从调用 cancel() 到取消调用返回。"""
+    cancel_effect_ms: float | None = None
+    """取消生效耗时：从调用 cancel() 到该 Run 持久化为取消终态。"""
+
+    # 隔离（跨 Session 串扰计数）
+    message_leak_count: int | None = None
+    """跨 Session 消息串扰数。"""
+    event_leak_count: int | None = None
+    """跨 Session 事件串扰数。"""
+    context_leak_count: int | None = None
+    """跨 Session 上下文串��数。"""
+    tool_leak_count: int | None = None
+    """跨 Session 工具结果串扰数。"""
+    stream_leak_count: int | None = None
+    """跨 Session 输出串流数。"""
+
+    # 取消路径
+    cancellation_delivered: bool | None = None
+    """取消信号是否已送达。"""
+    cancellation_effective: bool | None = None
+    """取消是否已生效（Run 进入取消终态）。"""
+    lock_released: bool | None = None
+    """取消后 Session 锁是否已释放。"""
+    followup_completed: bool | None = None
+    """取消后同 Session 后续请求是否完成。"""
+
+    # 证据摘要
+    evidence_summary: Mapping[str, object] | None = None
+    """运行事实引用与内容摘要（不保存 Prompt、密钥或完整输出正文）。"""
+
     def to_dict(self) -> dict[str, object]:
-        """序列化为 JSON 兼容字典。"""
-        return {
+        """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
+        result: dict[str, object] = {
             "schema_version": self.schema_version,
             "suite": self.suite,
             "dataset": self.dataset,
@@ -238,16 +367,42 @@ class BenchmarkSample:
             "evidence_kind": self.evidence_kind.value,
             "fixture_fingerprint": self.fixture_fingerprint,
             "trace_source": None if self.trace_source is None else dict(self.trace_source),
+            # PR3 并发 / 取消观察字段
+            "schedule_mode": None if self.schedule_mode is None else self.schedule_mode.value,
+            "session_count": self.session_count,
+            "requests_per_session": self.requests_per_session,
+            "fake_delay_ms": self.fake_delay_ms,
+            "accepted_seq": self.accepted_seq,
+            "execution_started_seq": self.execution_started_seq,
+            "completed_seq": self.completed_seq,
+            "conversation_commit_seq": self.conversation_commit_seq,
+            "queue_wait_ms": self.queue_wait_ms,
+            "cancel_delivery_ms": self.cancel_delivery_ms,
+            "cancel_effect_ms": self.cancel_effect_ms,
+            "message_leak_count": self.message_leak_count,
+            "event_leak_count": self.event_leak_count,
+            "context_leak_count": self.context_leak_count,
+            "tool_leak_count": self.tool_leak_count,
+            "stream_leak_count": self.stream_leak_count,
+            "cancellation_delivered": self.cancellation_delivered,
+            "cancellation_effective": self.cancellation_effective,
+            "lock_released": self.lock_released,
+            "followup_completed": self.followup_completed,
+            "evidence_summary": None if self.evidence_summary is None else dict(self.evidence_summary),
         }
+        return result
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> BenchmarkSample:
-        """从 JSON 字典严格反序列化；未知版本或非法字段类型立即失败。"""
+        """从 JSON 字典严格反序列化；未知版本或非法字段类型立即失败。
+
+        PR1（schema 1.0）样本缺少并发字段时按 None 处理，不猜测为 0。
+        """
         label: str = "benchmark_sample"
         schema_version: str = _require_str(data.get("schema_version"), f"{label}.schema_version")
-        if schema_version != BENCHMARK_SCHEMA_VERSION:
+        if schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
             raise BenchmarkSchemaError(
-                f"不支持的 sample schema 版本 {schema_version!r}，当前仅支持 {BENCHMARK_SCHEMA_VERSION!r}"
+                f"不支持的 sample schema 版本 {schema_version!r}，当前支持 {sorted(_SUPPORTED_SCHEMA_VERSIONS)}"
             )
         return cls(
             schema_version=schema_version,
@@ -282,6 +437,28 @@ class BenchmarkSample:
                 data.get("fixture_fingerprint") or "", f"{label}.fixture_fingerprint"
             ),
             trace_source=_optional_json_map(data.get("trace_source"), f"{label}.trace_source"),
+            # PR3 并发字段：v1.0 样本缺失时读为 None；v2.0 存在时校验类型
+            schedule_mode=_optional_schedule_mode(data.get("schedule_mode"), f"{label}.schedule_mode"),
+            session_count=_optional_int(data.get("session_count"), f"{label}.session_count"),
+            requests_per_session=_optional_int(data.get("requests_per_session"), f"{label}.requests_per_session"),
+            fake_delay_ms=_optional_int(data.get("fake_delay_ms"), f"{label}.fake_delay_ms"),
+            accepted_seq=_optional_int(data.get("accepted_seq"), f"{label}.accepted_seq"),
+            execution_started_seq=_optional_int(data.get("execution_started_seq"), f"{label}.execution_started_seq"),
+            completed_seq=_optional_int(data.get("completed_seq"), f"{label}.completed_seq"),
+            conversation_commit_seq=_optional_int(data.get("conversation_commit_seq"), f"{label}.conversation_commit_seq"),
+            queue_wait_ms=_optional_float(data.get("queue_wait_ms"), f"{label}.queue_wait_ms"),
+            cancel_delivery_ms=_optional_float(data.get("cancel_delivery_ms"), f"{label}.cancel_delivery_ms"),
+            cancel_effect_ms=_optional_float(data.get("cancel_effect_ms"), f"{label}.cancel_effect_ms"),
+            message_leak_count=_optional_int(data.get("message_leak_count"), f"{label}.message_leak_count"),
+            event_leak_count=_optional_int(data.get("event_leak_count"), f"{label}.event_leak_count"),
+            context_leak_count=_optional_int(data.get("context_leak_count"), f"{label}.context_leak_count"),
+            tool_leak_count=_optional_int(data.get("tool_leak_count"), f"{label}.tool_leak_count"),
+            stream_leak_count=_optional_int(data.get("stream_leak_count"), f"{label}.stream_leak_count"),
+            cancellation_delivered=_optional_bool(data.get("cancellation_delivered"), f"{label}.cancellation_delivered"),
+            cancellation_effective=_optional_bool(data.get("cancellation_effective"), f"{label}.cancellation_effective"),
+            lock_released=_optional_bool(data.get("lock_released"), f"{label}.lock_released"),
+            followup_completed=_optional_bool(data.get("followup_completed"), f"{label}.followup_completed"),
+            evidence_summary=_optional_json_map(data.get("evidence_summary"), f"{label}.evidence_summary"),
         )
 
 
@@ -492,9 +669,9 @@ class BenchmarkSnapshot:
         """从 JSON 字典严格反序列化。"""
         label: str = "benchmark_snapshot"
         schema_version: str = _require_str(data.get("schema_version"), f"{label}.schema_version")
-        if schema_version != BENCHMARK_SCHEMA_VERSION:
+        if schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
             raise BenchmarkSchemaError(
-                f"不支持的 snapshot schema 版本 {schema_version!r}，当前仅支持 {BENCHMARK_SCHEMA_VERSION!r}"
+                f"不支持的 snapshot schema 版本 {schema_version!r}，当前支持 {sorted(_SUPPORTED_SCHEMA_VERSIONS)}"
             )
         return cls(
             schema_version=schema_version,

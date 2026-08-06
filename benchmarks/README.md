@@ -59,6 +59,58 @@ python -m benchmarks.eval_baseline \
 - 快照不是 `EvalResult` / `RegressionReport` / Runtime 事实的替代品，不进入 CI Gate；
 - 历史 worktree 对比、并发 / 故障注入由后续 PR 提供，PR1 不做。
 
+## 并发隔离与调度收益（PR3）
+
+以固定的并发工作负载量化当前 Session 级串行、跨 Session 并行、状态隔离与取消
+不阻塞行为，并在相同 Runtime 下对照 Benchmark 内部全局串行调度的成本。
+
+```text
+固定并发场景 + 固定延迟 Fake LLM / Fake Tool
+    → SessionInteractionService
+    → SessionRunCoordinator → RuntimeEngine
+    → 持久化事实读取 → BenchmarkSample（JSONL）
+    → ConcurrencySnapshot（JSON + Markdown 报告）
+```
+
+### 入口命令
+
+```bash
+# 开发期快速验证（warmup=2, repeat=10）
+python -m benchmarks.concurrency_reliability --warmup 2 --repeat 10 --fake-delay-ms 20
+
+# 正式实验（warmup=5, repeat=100）
+python -m benchmarks.concurrency_reliability \
+  --suite reliability_concurrency_v1 \
+  --warmup 5 --repeat 100 \
+  --fake-delay-ms 20 \
+  --output benchmarks/reports/concurrency/<run-id> \
+  --save-baseline benchmarks/baselines/reliability_concurrency_v1
+```
+
+参数：`--suite`（实验族，默认 `reliability_concurrency_v1`）、
+`--warmup`（默认 5）、`--repeat`（默认 100）、
+`--fake-delay-ms`（固定延迟毫秒，默认 20）、
+`--output`（工件输出目录）、`--save-baseline`（可选基线目录）。
+
+### 覆盖场景
+
+| 场景 | 说明 | 核心指标 |
+|------|------|---------|
+| 同 Session FIFO | 1 Session × 20 请求，验证开始/完成/Conversation 顺序 | 乱序/重复/遗漏 = 0/N |
+| 多 Session 隔离 | 8 Session × 4 请求，验证跨 Session 消息/事件/上下文/工具/输出零串扰 | 串扰 = 0/N |
+| Session 数扩展 | 1/2/4/8 Session × 4 请求，绘制吞吐随 Session 数变化 | 吞吐(req/s) |
+| 固定并发对照 | 8×4 请求，Session 锁 vs 全局锁主对照 | 吞吐变化率 |
+| 取消不阻塞 | 1 长 Run + 后续请求，验证取消送达/生效/锁释放 | 送达/生效 P50/P95 |
+
+### 口径与边界
+
+- FIFO 结论只针对同进程、单 `SessionRunCoordinator` 实例内的同 Session 提交；
+- 隔离判据以持久化运行事实中的标识回显为准，Fake LLM/Tool 只消除外部不确定性；
+- 全局锁对照仅证明调度结构容量影响，不等同于真实 API 端到端加速；
+- 取消结论仅证明 Runtime 内取消信号、终态收口与租约释放；不涉及外部副作用停止；
+- 不修改 `SessionRunCoordinator`、`RuntimeEngine`、`SessionInteractionService`
+  的锁、排队或取消生产语义。
+
 ### 当前基线（20260806T065437Z_cd5a1cc，commit `cd5a1cc`）
 
 - 环境：Python 3.13.5 / Windows-11 / config 哈希 `b9bea591d3252a9a`；
@@ -154,6 +206,10 @@ benchmarks/
 ├── eval_baseline.py   # PR1 Eval 基线 CLI 与编排（ReexecutionRunner + 计时采样）
 ├── eval_baseline_models.py   # PR1 BenchmarkSample / BenchmarkSnapshot 数据模型
 ├── eval_baseline_stats.py    # PR1 统计纯函数（分位数、成功率、聚合）
+├── concurrency_reliability.py    # PR3 并发 CLI 与编排
+├── concurrency_workloads.py      # PR3 固定工作负载与受控延迟替身
+├── concurrency_assertions.py     # PR3 顺序/归属/隔离/取消断言
+├── concurrency_stats.py          # PR3 吞吐/排队/端到端时延与对照聚合
 ├── historical_baseline.py    # PR2 历史审计 / 运行 / 对照 CLI
 ├── historical_audit.py       # PR2 六道审计门与审计报告
 ├── historical_legacy_agent_v1.py   # PR2 旧 Agent v1（AgentLoop）单场景适配
@@ -177,7 +233,8 @@ benchmarks/
 │   └── historical-audits/     # PR2 审计输出（audit.json / environment / worktrees）
 └── baselines/         # 基线快照（git tracked，用于回归对比）
     ├── v1.0/                  # 旧微基准基线
-    └── runtime_core_v1/       # PR1/PR2 Eval 基线（当前 + 历史快照 + samples/）
+    ├── runtime_core_v1/       # PR1/PR2 Eval 基线（当前 + 历史快照 + samples/）
+    └── reliability_concurrency_v1/  # PR3 并发基线（JSON + samples/）
 ```
 
 ## 快速开始

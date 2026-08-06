@@ -202,7 +202,7 @@ def test_snapshot_json_round_trip() -> None:
 def test_snapshot_unknown_schema_version_rejected() -> None:
     """快照未知 schema 版本必须明确失败。"""
     payload = _snapshot().to_dict()
-    payload["schema_version"] = "2.0"
+    payload["schema_version"] = "99.0"
     with pytest.raises(BenchmarkSchemaError):
         BenchmarkSnapshot.from_dict(payload)
 

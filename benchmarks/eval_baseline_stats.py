@@ -1,4 +1,4 @@
-"""PR1 Eval 基线统计纯函数：分位数、成功率与按 Case / 全局聚合。
+"""Eval 基线统计纯函数：分位数、成功率与按 Case / 全局聚合。
 
 本模块只做无副作用的计算，输入为 ``BenchmarkSample`` 或已聚合的数值序列，输出
 ``CaseSummary`` / ``GlobalSummary`` / ``BenchmarkSnapshot``。调用方（
@@ -12,6 +12,8 @@
 - P50 / P95 / P99 只在同机、同 Python、同 Dataset、同配置、同 repeat 下才能
   用于后续提交的趋势比较；
 - 成功率分子 / 分母与失败归因计数一起报告，失败或缺失数据不得静默当作成功或 0。
+- PR3 并发样本可通过 ``filter_by_schedule_mode`` / ``filter_by_scenario``
+  在选择特定调度模式或场景后复用已有聚合函数。
 """
 
 from __future__ import annotations
@@ -25,9 +27,11 @@ from .eval_baseline_models import (
     BenchmarkSample,
     BenchmarkSnapshot,
     CaseSummary,
+    ConcurrencyScenario,
     ExecutionSource,
     GlobalSummary,
     LatencyStats,
+    ScheduleMode,
 )
 
 # Trace 时延类指标键：与 ``TraceMetrics`` 序列化键一致，用于按 Case 汇总耗时构成。
@@ -249,3 +253,32 @@ def build_snapshot(
         cases=case_summaries,
         samples_content_summary=dict(samples_content_summary),
     )
+
+
+# --------------------------------------------------------------------------- #
+# PR3 并发样本过滤辅助
+# --------------------------------------------------------------------------- #
+
+
+def filter_by_schedule_mode(
+    samples: Sequence[BenchmarkSample],
+    schedule_mode: ScheduleMode,
+) -> list[BenchmarkSample]:
+    """过滤出指定调度模式的样本（不含 None 的样本）。"""
+    return [s for s in samples if s.schedule_mode == schedule_mode]
+
+
+def filter_by_scenario(
+    samples: Sequence[BenchmarkSample],
+    scenario: ConcurrencyScenario,
+) -> list[BenchmarkSample]:
+    """过滤出指定场景的样本。"""
+    return [s for s in samples if s.case_id == scenario.value]
+
+
+def filter_by_scenario_prefix(
+    samples: Sequence[BenchmarkSample],
+    scenario_prefix: str,
+) -> list[BenchmarkSample]:
+    """过滤出 case_id 以指定前缀开头���样本（用于 Session 数扩展子场景）。"""
+    return [s for s in samples if s.case_id.startswith(scenario_prefix)]
