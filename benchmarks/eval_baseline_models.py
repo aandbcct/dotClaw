@@ -15,6 +15,7 @@ Runtime / Eval 既有事实的只读视图，不新增持久化容器，也不�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Mapping, Sequence
 
 BENCHMARK_SCHEMA_VERSION: str = "1.0"
@@ -22,6 +23,35 @@ BENCHMARK_SCHEMA_VERSION: str = "1.0"
 
 SUITE_NAME: str = "runtime_core"
 """PR1 实验族标识：Runtime 核心语义的 Eval 业务回归套件。"""
+
+SCENARIO_TOOL_SUCCESS: str = "tool_success"
+"""PR2 统一业务场景标识：单工具成功（工具调用 → 固定输出 → 最终回答）。"""
+
+
+class ExecutionSource(StrEnum):
+    """采样数据由哪条执行链路产生。"""
+
+    CURRENT_EVAL = "current_eval"
+    """当前仓库的 Eval 隔离执行（``ReexecutionRunner``）。"""
+
+    HISTORICAL_ADAPTER = "historical_adapter"
+    """历史提交中经外围适配器启动的旧执行链路。"""
+
+
+class EvidenceKind(StrEnum):
+    """语义 / 统计事实取自哪类证据。"""
+
+    RUN_TRACE = "run_trace"
+    """当前 Eval 重建出的 RunTrace。"""
+
+    JOURNAL = "journal"
+    """历史 Journal 指标。"""
+
+    FINAL_RESULT = "final_result"
+    """历史最终结果对象（如 AgentRun 的终态与统计）。"""
+
+    RECORDED_FIXTURE_LOG = "recorded_fixture_log"
+    """记录型替身工具 / Fixture 的调用日志。"""
 
 
 class BenchmarkSchemaError(ValueError):
@@ -61,6 +91,18 @@ def _require_bool(value: object, label: str) -> bool:
     if not isinstance(value, bool):
         raise BenchmarkSchemaError(f"{label} 必须是布尔值，实际为 {type(value).__name__}")
     return value
+
+
+def _optional_enum[EnumT: StrEnum](enum_type: type[EnumT], value: object, label: str, default: EnumT) -> EnumT:
+    """读取可缺省的枚举字段：缺失时返回默认值，存在但取值非法时明确失败。"""
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise BenchmarkSchemaError(f"{label} 必须是字符串，实际为 {type(value).__name__}")
+    try:
+        return enum_type(value)
+    except ValueError as error:
+        raise BenchmarkSchemaError(f"{label} 取值 {value!r} 不受支持") from error
 
 
 def _require_float(value: object, label: str) -> float:
@@ -135,6 +177,10 @@ class BenchmarkSample:
     run_id: str | None
     schema_version: str = BENCHMARK_SCHEMA_VERSION
     suite: str = SUITE_NAME
+    execution_source: ExecutionSource = ExecutionSource.CURRENT_EVAL
+    source_commit: str = ""
+    scenario_id: str = ""
+    evidence_kind: EvidenceKind = EvidenceKind.RUN_TRACE
     trace_metrics: Mapping[str, object] = field(default_factory=dict)
     run_statistics: Mapping[str, object] = field(default_factory=dict)
     trace_source: Mapping[str, object] | None = None
@@ -162,6 +208,10 @@ class BenchmarkSample:
             "trace_metrics": dict(self.trace_metrics),
             "run_statistics": dict(self.run_statistics),
             "run_id": self.run_id,
+            "execution_source": self.execution_source.value,
+            "source_commit": self.source_commit,
+            "scenario_id": self.scenario_id,
+            "evidence_kind": self.evidence_kind.value,
             "trace_source": None if self.trace_source is None else dict(self.trace_source),
         }
 
@@ -195,6 +245,14 @@ class BenchmarkSample:
             trace_metrics=_require_json_map(data.get("trace_metrics"), f"{label}.trace_metrics"),
             run_statistics=_require_json_map(data.get("run_statistics"), f"{label}.run_statistics"),
             run_id=_optional_str(data.get("run_id"), f"{label}.run_id"),
+            execution_source=_optional_enum(
+                ExecutionSource, data.get("execution_source"), f"{label}.execution_source", ExecutionSource.CURRENT_EVAL
+            ),
+            source_commit=_require_str(data.get("source_commit") or "", f"{label}.source_commit"),
+            scenario_id=_require_str(data.get("scenario_id") or "", f"{label}.scenario_id"),
+            evidence_kind=_optional_enum(
+                EvidenceKind, data.get("evidence_kind"), f"{label}.evidence_kind", EvidenceKind.RUN_TRACE
+            ),
             trace_source=_optional_json_map(data.get("trace_source"), f"{label}.trace_source"),
         )
 
@@ -374,6 +432,8 @@ class BenchmarkSnapshot:
     global_summary: GlobalSummary
     samples_path: str
     schema_version: str = BENCHMARK_SCHEMA_VERSION
+    execution_source: ExecutionSource = ExecutionSource.CURRENT_EVAL
+    scenario_id: str = ""
     environment: Mapping[str, str] = field(default_factory=dict)
     cases: Sequence[CaseSummary] = ()
     samples_content_summary: Mapping[str, object] = field(default_factory=dict)
@@ -392,6 +452,8 @@ class BenchmarkSnapshot:
             "cases": [case.to_dict() for case in self.cases],
             "global_summary": self.global_summary.to_dict(),
             "samples_path": self.samples_path,
+            "execution_source": self.execution_source.value,
+            "scenario_id": self.scenario_id,
             "samples_content_summary": dict(self.samples_content_summary),
         }
 
@@ -421,6 +483,10 @@ class BenchmarkSnapshot:
                 _require_json_map(data.get("global_summary"), f"{label}.global_summary")
             ),
             samples_path=_require_str(data.get("samples_path"), f"{label}.samples_path"),
+            execution_source=_optional_enum(
+                ExecutionSource, data.get("execution_source"), f"{label}.execution_source", ExecutionSource.CURRENT_EVAL
+            ),
+            scenario_id=_require_str(data.get("scenario_id") or "", f"{label}.scenario_id"),
             samples_content_summary=_require_json_map(
                 data.get("samples_content_summary"), f"{label}.samples_content_summary"
             ),

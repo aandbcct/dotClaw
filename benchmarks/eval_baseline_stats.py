@@ -25,6 +25,7 @@ from .eval_baseline_models import (
     BenchmarkSample,
     BenchmarkSnapshot,
     CaseSummary,
+    ExecutionSource,
     GlobalSummary,
     LatencyStats,
 )
@@ -191,12 +192,15 @@ def build_snapshot(
     repeat: int,
     samples: Sequence[BenchmarkSample],
     samples_path: str,
+    execution_source: ExecutionSource = ExecutionSource.CURRENT_EVAL,
+    scenario_id: str = "",
     samples_content_summary: Mapping[str, object],
 ) -> BenchmarkSnapshot:
     """从采样记录构建当前基线快照。
 
     仅选择 ``is_warmup=False`` 的记录；缺少正式采样时快照生成必须失败，
-    保证 JSONL 中正式采样缺失时不会产出可用基线。
+    保证 JSONL 中正式采样缺失时不会产出可用基线。``execution_source`` 与
+    ``scenario_id`` 记录快照覆盖的执行链路与业务场景集合，供跨来源对照。
     """
     formal = [sample for sample in samples if not sample.is_warmup]
     if not formal:
@@ -223,6 +227,8 @@ def build_snapshot(
         global_summary=aggregate_global_summary(formal),
         samples_path=samples_path,
         schema_version=BENCHMARK_SCHEMA_VERSION,
+        execution_source=execution_source,
+        scenario_id=scenario_id,
         environment=dict(environment),
         cases=case_summaries,
         samples_content_summary=dict(samples_content_summary),

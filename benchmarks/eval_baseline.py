@@ -31,7 +31,7 @@ from dotclaw.eval.reexecution import ReexecutionRunner
 from dotclaw.eval.results import EvalResult
 from dotclaw.runtime.domain.facts import RunStatistics
 
-from .eval_baseline_models import BenchmarkSample, BenchmarkSnapshot
+from .eval_baseline_models import BenchmarkSample, BenchmarkSnapshot, ExecutionSource
 from .eval_baseline_stats import build_snapshot
 
 # 可信结果的失败分类：None（全部通过）与 assertion（已可信执行但行为不符）。
@@ -49,6 +49,25 @@ def git_short_commit() -> str:
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if proc.returncode != 0:
+        return "unknown"
+    return proc.stdout.strip() or "unknown"
+
+
+def git_full_commit() -> str:
+    """返回当前 HEAD 的完整提交号；非 Git 仓库或读取失败时返回 ``unknown``。
+
+    ``source_commit`` 必须使用完整提交号，不以展示短哈希代替。
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -98,10 +117,12 @@ def _sample_from_result(
     *,
     dataset: str,
     case_id: str,
+    scenario_id: str,
     attempt: int,
     is_warmup: bool,
     wall_duration_ms: float,
     git_commit: str,
+    source_commit: str,
     python_version: str,
     platform_name: str,
     config_hash_value: str,
@@ -109,6 +130,8 @@ def _sample_from_result(
     """把一次 ``run_case()`` 结果转为一个 BenchmarkSample。
 
     只提取 EvalResult / RunTrace 的派生视图，不内联正文或敏感内容。
+    当前 Eval 链路的样本以 ``CURRENT_EVAL`` / ``RUN_TRACE`` 标记来源，
+    ``source_commit`` 记录实际执行的完整提交号。
     """
     trace = result.trace
     assertion_results = result.assertion_results
@@ -129,6 +152,8 @@ def _sample_from_result(
         trace_available=trace is not None,
         wall_duration_ms=wall_duration_ms,
         run_id=result.run_id,
+        scenario_id=scenario_id,
+        source_commit=source_commit,
         trace_metrics=dict(trace.metrics.to_dict()) if trace is not None else {},
         run_statistics=_run_statistics_view(trace.run.statistics) if trace is not None else {},
         trace_source=dict(trace.source.to_dict()) if trace is not None else None,
@@ -298,6 +323,7 @@ class EvalBaselineRunner:
             raise BaselineExperimentError(f"Dataset {dataset_name!r} 未包含任何 Case")
 
         git_commit: str = git_short_commit()
+        source_commit: str = git_full_commit()
         snapshot_id: str = make_snapshot_id()
         environment: Mapping[str, str] = {
             "python_version": sys.version.split()[0],
@@ -334,10 +360,12 @@ class EvalBaselineRunner:
                     result,
                     dataset=dataset_name,
                     case_id=case.case_id,
+                    scenario_id=case.case_id,
                     attempt=attempt,
                     is_warmup=is_warmup,
                     wall_duration_ms=wall_duration_ms,
                     git_commit=git_commit,
+                    source_commit=source_commit,
                     python_version=environment["python_version"],
                     platform_name=environment["platform"],
                     config_hash_value=environment["config_hash"],
@@ -369,6 +397,7 @@ class EvalBaselineRunner:
                 )
 
         samples_path: str = f"samples/{snapshot_id}.jsonl"
+        scenarios: str = ",".join(sorted(case.case_id for case in cases))
         snapshot = build_snapshot(
             snapshot_id=snapshot_id,
             generated_at=datetime.now(timezone.utc).isoformat(),
@@ -379,6 +408,8 @@ class EvalBaselineRunner:
             repeat=repeat,
             samples=all_samples,
             samples_path=samples_path,
+            execution_source=ExecutionSource.CURRENT_EVAL,
+            scenario_id=scenarios,
             samples_content_summary={},
         )
 
@@ -407,6 +438,8 @@ class EvalBaselineRunner:
             repeat=repeat,
             samples=all_samples,
             samples_path=samples_path,
+            execution_source=ExecutionSource.CURRENT_EVAL,
+            scenario_id=scenarios,
             samples_content_summary={
                 "line_count": len(all_samples),
                 "byte_count": out_samples.stat().st_size,

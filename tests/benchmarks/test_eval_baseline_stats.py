@@ -11,6 +11,7 @@ from benchmarks.eval_baseline_stats import (
     percentile,
     success_rate,
 )
+from benchmarks.eval_baseline_models import ExecutionSource
 
 from .helpers import make_failing_sample, make_sample
 
@@ -255,3 +256,72 @@ def test_build_snapshot_all_failed_still_generates() -> None:
     assert snapshot.global_summary.success_rate == 0.0
     assert snapshot.global_summary.failure_kinds == {"assertion": 2}
     assert snapshot.cases[0].failure_kinds == {"assertion": 2}
+
+
+# --------------------------------------------------------------------------- #
+# 历史来源聚合：null 缺失值不参与相应指标
+# --------------------------------------------------------------------------- #
+
+
+def _historical_sample(case_id: str = "tool_success", *, attempt: int = 0, wall_duration_ms: float = 3.0) -> object:
+    """构造历史适配器来源样本：无 Trace、token/内部时延缺失为 None。"""
+    return make_sample(
+        case_id=case_id,
+        attempt=attempt,
+        wall_duration_ms=wall_duration_ms,
+        execution_source="historical_adapter",
+        source_commit="4e4cdd3a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7",
+        scenario_id="tool_success",
+        evidence_kind="final_result",
+        trace_available=False,
+        run_id=None,
+        trace_source=None,
+        trace_metrics={
+            "llm_duration_ms": None,
+            "tool_duration_ms": None,
+            "approval_wait_ms": None,
+            "critical_path_ms": None,
+            "failed_tool_count": 0,
+        },
+        run_statistics={
+            "duration_ms": None,
+            "llm_call_count": 1,
+            "tool_call_count": 1,
+            "tokens_in": None,
+            "tokens_out": None,
+        },
+    )
+
+
+def test_historical_sample_aggregation_null_excluded() -> None:
+    """历史缺失的 Trace/内部时延/token 以 null 保留，不参与分位数与调用统计。"""
+    samples = [
+        _historical_sample(attempt=0, wall_duration_ms=3.0),
+        _historical_sample(attempt=1, wall_duration_ms=5.0),
+    ]
+    summary = aggregate_case_summary(samples)
+    # 外层 wall_duration_ms 仍可聚合（历史也有外围端到端耗时）
+    assert summary.wall_duration_ms.sample_count == 2
+    assert summary.wall_duration_ms.p50_ms == pytest.approx(4.0)
+    # 内部时延缺失 → 不产生 trace_metrics_ms 分位数
+    assert summary.trace_metrics_ms == {}
+    # 调用计数来自历史最低语义事实，正常加总
+    assert summary.llm_call_count_total == 2
+    assert summary.tool_call_count_total == 2
+    # Trace 缺失被列入健康指标
+    assert summary.trace_available_count == 0
+    assert summary.trace_missing_count == 2
+
+
+def test_historical_build_snapshot_propagates_source() -> None:
+    """历史样本聚合的快照保留执行来源与场景标识。"""
+    samples = [_historical_sample(attempt=0), _historical_sample(attempt=1)]
+    snapshot = _build(
+        samples,
+        execution_source=ExecutionSource.HISTORICAL_ADAPTER,
+        scenario_id="tool_success",
+    )
+    assert snapshot.execution_source.value == "historical_adapter"
+    assert snapshot.scenario_id == "tool_success"
+    assert snapshot.global_summary.sample_count == 2
+    assert snapshot.global_summary.passed_count == 2

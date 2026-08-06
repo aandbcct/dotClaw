@@ -59,16 +59,87 @@ python -m benchmarks.eval_baseline \
 - 快照不是 `EvalResult` / `RegressionReport` / Runtime 事实的替代品，不进入 CI Gate；
 - 历史 worktree 对比、并发 / 故障注入由后续 PR 提供，PR1 不做。
 
-### 当前基线（20260806T033707Z_7b1b093，commit `7b1b093`）
+### 当前基线（20260806T062539Z_c4511b3，commit `c4511b3`）
 
 - 环境：Python 3.13.5 / Windows-11 / config 哈希 `b9bea591d3252a9a`；
 - 采样：warmup=5, repeat=30，共 120 个正式样本，**120/120 通过（100%）**；
-- 全局耗时：Wall P50 **0.83 ms**、P95 **1.64 ms**、P99 **2.08 ms**、Max **2.19 ms**；
+- 全局耗时：Wall P50 **0.89 ms**、P95 **1.49 ms**、P99 **1.66 ms**、Max **1.70 ms**；
 - 调用统计：LLM 210 次、Tool 150 次，Trace 完整 120/120；
-- 各 Case（30 样本）：`approval_rejected` P50 0.68 ms、`approval_resume` P50 1.06 ms、
-  `context_retention` P50 0.80 ms、`tool_success` P50 0.82 ms，成功率均为 100%；
+- 各 Case（30 样本）成功率均为 100%：`approval_rejected` P50 0.68 ms、
+  `approval_resume` P50 1.04 ms、`context_retention` P50 0.80 ms、
+  `tool_success` P50 0.89 ms；
 - 原始证据：`benchmarks/baselines/runtime_core_v1/` 下快照 JSON 与 140 行 JSONL
-  （含 warmup 诊断记录）。
+  （含 warmup 诊断记录）；样本带 `execution_source` / `source_commit` /
+  `scenario_id` / `evidence_kind` 来源元数据。
+
+## 历史基线可复跑与对照（PR2）
+
+在独立 Git worktree 中审计并驱动旧执行链路，以与 PR1 `tool_success` 相同的业务
+语义生成历史快照，仅对可比指标输出当前/历史对照。
+
+```text
+候选历史提交 → 独立 worktree + 该提交声明的依赖环境 → 历史单工具场景外围启动
+    → 历史 AgentRun 终态/统计 + 记录型替身工具日志 → PR1 BenchmarkSample
+    → 历史 BenchmarkSnapshot + 当前/历史对照报告
+```
+
+### 审计命令
+
+候选提交必须显式传入，不隐式扫描历史：
+
+```bash
+python -m benchmarks.historical_baseline audit \
+  --candidate 4e4cdd3 \
+  --dataset runtime_core_v1 --case tool_success \
+  --warmup 1 --repeat 10 \
+  --output benchmarks/reports/historical-audits
+```
+
+审计顺序固定为六道门：解析完整提交号 → 创建 detached worktree → 独立解释器
+环境（记录 Python 与依赖证据）→ 子进程显式从历史 `src` 导入 → 固定场景执行与
+校验（终态、工具名、参数、调用次数、最终回答）→ 映射统一记录并连续开发期采样。
+任一门失败时记录候选、失败门、异常摘要和证据路径，不产出历史快照或对照百分比。
+
+### 生成历史基线并对照
+
+```bash
+# 1. 审计通过后，对同一完整提交执行正式采样（warmup=5, repeat=30）
+python -m benchmarks.historical_baseline run \
+  --candidate <audit.json 中的完整提交> \
+  --audit-output benchmarks/reports/historical-audits/<audit-id> \
+  --save-baseline benchmarks/baselines/runtime_core_v1
+
+# 2. 当前与历史两份快照对照
+python -m benchmarks.historical_baseline compare \
+  --current benchmarks/baselines/runtime_core_v1/<current-snapshot-id>.json \
+  --historical benchmarks/baselines/runtime_core_v1/<historical-snapshot-id>.json \
+  --output benchmarks/reports/historical-audits/<audit-id>/comparison.md
+```
+
+`run` 只接受通过同一审计输出确认的完整提交号（不以短哈希代替）。
+
+### 对照口径与结论边界
+
+- 仅在相同 Dataset、共享场景、正式 repeat、warmup、机器标识、Python 主/次版本和
+  固定替身配置时计算变化率；任一条件不一致或场景标识与 Case 列表不符（疑似篡改）
+  时拒绝百分比；
+- 历史链路没有的 Trace / token / 内部阶段时延序列化为 `null`，不参与聚合与变化率；
+- 历史值为 0 或缺失时仅列原值与不可比原因，不猜测为 0；
+- 成功率报告成功数/总数、Wilson 95% 区间和绝对错误数；变化率为
+  `(current - historical) / historical`；
+- PR2 只证明旧/新单工具执行主链的可比业务结果与编排成本；审批恢复、并发隔离、
+  操作节点恢复、Capability 安全、ContextVersion 与多 Agent 委派由后续 PR 以专用
+  实验建立。
+
+### 当前历史对照结果（commit `4e4cdd3`，AgentLoop 时代）
+
+- 候选审计：`4e4cdd3` 六道审计门全部通过（20260806T062421Z 审计报告）；
+- 历史正式采样：warmup=5, repeat=30，**30/30 通过（100%）**，Wall P50 **32.3 ms**；
+- 对照结论（共享场景 `tool_success`）：成功率与 LLM（2 轮）/Tool（1 次）调用均值
+  两侧完全一致（语义等价），当前端到端 Wall P50 0.89 ms，历史 32.3 ms，
+  **耗时下降 -97.26%**（P95 -96.88%、P99 -97.01%）；
+- 证据：`benchmarks/reports/historical-audits/4e4cdd3-20260806T062421Z/` 审计报告，
+  `benchmarks/baselines/runtime_core_v1/` 下当前与历史快照 JSON + JSONL。
 
 ## 目录结构
 
@@ -79,6 +150,10 @@ benchmarks/
 ├── eval_baseline.py   # PR1 Eval 基线 CLI 与编排（ReexecutionRunner + 计时采样）
 ├── eval_baseline_models.py   # PR1 BenchmarkSample / BenchmarkSnapshot 数据模型
 ├── eval_baseline_stats.py    # PR1 统计纯函数（分位数、成功率、聚合）
+├── historical_baseline.py    # PR2 历史审计 / 运行 / 对照 CLI
+├── historical_audit.py       # PR2 六道审计门与审计报告
+├── historical_legacy_agent_v1.py   # PR2 旧 Agent v1（AgentLoop）单场景适配
+├── historical_compare.py     # PR2 可比性检查与对照报告纯函数
 ├── datasets/runtime_core_v1/cases/   # PR1 Git 跟踪的四个 Eval Case JSON
 ├── cases/             # 6 个旧微基准评测用例
 │   ├── init_perf.py       # 初始化性能
@@ -94,10 +169,11 @@ benchmarks/
 ├── reports/           # 报告输出（gitignore）
 │   ├── benchmark_report_*.md
 │   ├── snapshots/
-│   └── <snapshot-id>/         # PR1 非提交运行工件（JSONL / JSON / MD）
+│   ├── <snapshot-id>/         # PR1 非提交运行工件（JSONL / JSON / MD）
+│   └── historical-audits/     # PR2 审计输出（audit.json / environment / worktrees）
 └── baselines/         # 基线快照（git tracked，用于回归对比）
     ├── v1.0/                  # 旧微基准基线
-    └── runtime_core_v1/       # PR1 Eval 基线（<snapshot-id>.json + samples/）
+    └── runtime_core_v1/       # PR1/PR2 Eval 基线（当前 + 历史快照 + samples/）
 ```
 
 ## 快速开始

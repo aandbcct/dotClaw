@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from benchmarks.eval_baseline_models import BenchmarkSample, SUITE_NAME
+from benchmarks.eval_baseline_models import BenchmarkSample, EvidenceKind, ExecutionSource, SUITE_NAME
 
 
 def make_sample(
@@ -67,6 +67,11 @@ def make_sample(
         },
     )
     base.update(overrides)
+    # 允许测试以字符串直接表达来源枚举，构造时统一转为枚举取值
+    if isinstance(base.get("execution_source"), str):
+        base["execution_source"] = ExecutionSource(base["execution_source"])
+    if isinstance(base.get("evidence_kind"), str):
+        base["evidence_kind"] = EvidenceKind(base["evidence_kind"])
     return BenchmarkSample(**base)
 
 

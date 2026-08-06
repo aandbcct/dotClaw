@@ -210,3 +210,82 @@ def test_snapshot_schema_version_constant() -> None:
     """默认 schema 版本必须与模块常量一致。"""
     assert _snapshot().schema_version == BENCHMARK_SCHEMA_VERSION
     assert make_sample().schema_version == BENCHMARK_SCHEMA_VERSION
+
+
+# --------------------------------------------------------------------------- #
+# PR2 来源元数据：execution_source / source_commit / scenario_id / evidence_kind
+# --------------------------------------------------------------------------- #
+
+
+def test_sample_source_metadata_round_trip() -> None:
+    """历史来源元数据可无损往返。"""
+    sample = make_sample(
+        execution_source="historical_adapter",
+        source_commit="4e4cdd3a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7",
+        scenario_id="tool_success",
+        evidence_kind="final_result",
+        trace_available=False,
+        run_id=None,
+        trace_source=None,
+    )
+    restored = BenchmarkSample.from_dict(sample.to_dict())
+    assert restored == sample
+    assert restored.execution_source.value == "historical_adapter"
+    assert restored.evidence_kind.value == "final_result"
+    assert restored.source_commit == sample.source_commit
+
+
+def test_sample_defaults_to_current_eval() -> None:
+    """缺省来源字段默认为当前 Eval 链路。"""
+    sample = make_sample()
+    assert sample.execution_source.value == "current_eval"
+    assert sample.evidence_kind.value == "run_trace"
+
+
+def test_legacy_sample_without_source_fields_reads_with_defaults() -> None:
+    """PR1 旧样本（无来源字段）读取时用默认值兼容，不破坏已提交基线。"""
+    payload = make_sample().to_dict()
+    for key in ("execution_source", "source_commit", "scenario_id", "evidence_kind"):
+        payload.pop(key)
+    restored = BenchmarkSample.from_dict(payload)
+    assert restored.execution_source.value == "current_eval"
+    assert restored.evidence_kind.value == "run_trace"
+    assert restored.source_commit == ""
+    assert restored.scenario_id == ""
+
+
+def test_sample_unknown_execution_source_rejected() -> None:
+    """未知执行来源取值必须明确失败。"""
+    payload = make_sample().to_dict()
+    payload["execution_source"] = "other_runtime"
+    with pytest.raises(BenchmarkSchemaError):
+        BenchmarkSample.from_dict(payload)
+
+
+def test_sample_unknown_evidence_kind_rejected() -> None:
+    """未知证据类型取值必须明确失败。"""
+    payload = make_sample().to_dict()
+    payload["evidence_kind"] = "screenshot"
+    with pytest.raises(BenchmarkSchemaError):
+        BenchmarkSample.from_dict(payload)
+
+
+def test_snapshot_source_metadata_round_trip() -> None:
+    """快照级执行来源与场景标识可无损往返。"""
+    snapshot = _snapshot()
+    payload = snapshot.to_dict()
+    payload["execution_source"] = "historical_adapter"
+    payload["scenario_id"] = "tool_success"
+    restored = BenchmarkSnapshot.from_dict(payload)
+    assert restored.execution_source.value == "historical_adapter"
+    assert restored.scenario_id == "tool_success"
+
+
+def test_legacy_snapshot_without_source_fields_reads_with_defaults() -> None:
+    """PR1 旧快照（无来源字段）读取时用默认值兼容。"""
+    payload = _snapshot().to_dict()
+    payload.pop("execution_source")
+    payload.pop("scenario_id")
+    restored = BenchmarkSnapshot.from_dict(payload)
+    assert restored.execution_source.value == "current_eval"
+    assert restored.scenario_id == ""

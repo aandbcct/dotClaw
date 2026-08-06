@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "snapshot_id": "20260806T062531Z_4e4cdd3",
+  "generated_at": "2026-08-06T06:25:32.060704+00:00",
+  "git_commit": "4e4cdd3",
+  "dataset": "runtime_core_v1",
+  "environment": {
+    "python_version": "3.13.5",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "config_hash": "historical-agent-v1-fixed-fixture",
+    "eval_schema_version": "1.0"
+  },
+  "warmup": 5,
+  "repeat": 30,
+  "cases": [
+    {
+      "case_id": "tool_success",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 32.28265012148768,
+        "p95_ms": 47.76194501901045,
+        "p99_ms": 55.57732803281397,
+        "max_ms": 58.464800007641315
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 60,
+      "tool_call_count_total": 30,
+      "trace_available_count": 0,
+      "trace_missing_count": 30,
+      "failed_tool_count_total": 0
+    }
+  ],
+  "global_summary": {
+    "sample_count": 30,
+    "passed_count": 30,
+    "failed_count": 0,
+    "success_rate": 1.0,
+    "failure_kinds": {},
+    "wall_duration_ms": {
+      "sample_count": 30,
+      "p50_ms": 32.28265012148768,
+      "p95_ms": 47.76194501901045,
+      "p99_ms": 55.57732803281397,
+      "max_ms": 58.464800007641315
+    },
+    "llm_call_count_total": 60,
+    "tool_call_count_total": 30,
+    "trace_available_count": 0,
+    "trace_missing_count": 30
+  },
+  "samples_path": "samples/20260806T062531Z_4e4cdd3.jsonl",
+  "execution_source": "historical_adapter",
+  "scenario_id": "tool_success",
+  "samples_content_summary": {}
+}
