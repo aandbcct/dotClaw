@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
 from benchmarks.concurrency_workloads import (
     ControlledSubmissionGate,
     FixedDelayLLM,
@@ -87,6 +90,21 @@ class TestControlledSubmissionGate:
         gate.reset()
         assert gate.accept("s1") == 1
         assert gate.accept("s2") == 1
+
+    @pytest.mark.asyncio
+    async def test_enter_releases_application_entry_in_accepted_order(self):
+        """受控闸门必须按接受序号放行协程进入应用入口。"""
+        gate = ControlledSubmissionGate()
+        sequences = [gate.accept("s1") for _ in range(3)]
+        observed: list[int] = []
+
+        async def enter(sequence: int) -> None:
+            await gate.enter("s1", sequence)
+            observed.append(sequence)
+            gate.release_next("s1", sequence)
+
+        await asyncio.gather(*(enter(sequence) for sequence in reversed(sequences)))
+        assert observed == [1, 2, 3]
 
 
 class TestWorkloadConfig:

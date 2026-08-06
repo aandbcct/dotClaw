@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
-from dotclaw.runtime.domain.facts import MessageRole
+from dotclaw.runtime.domain.facts import MessageRole, RunMessageKind
 
 from .concurrency_workloads import IdentifierCodec, RunFacts
 
@@ -248,52 +248,75 @@ def check_isolation(
     """
     total_requests: int = sum(len(v) for v in facts_by_session.values())
 
-    result = IsolationResult(total_requests=total_requests, message_leak_count=0,
-                             event_leak_count=0, context_leak_count=0,
-                             tool_leak_count=0, stream_leak_count=0)
+    counts: dict[str, int] = {
+        "message": 0, "event": 0, "context": 0, "tool": 0, "stream": 0,
+    }
+    details: list[str] = []
+
+    def count_foreign(contents: Sequence[str], session_index: int, category: str, run_id: str) -> None:
+        """从一类实际事实中累计外部 Session 标识，缺失事实同样判为不可验收。"""
+        if not contents:
+            counts[category] += 1
+            details.append(f"{category} 证据缺失: Session {session_index} Run {run_id}")
+            return
+        for content in contents:
+            foreign: set[int] = IdentifierCodec.extract_session_indices(content) - {session_index}
+            if foreign:
+                counts[category] += len(foreign)
+                details.append(
+                    f"{category} 串扰: Session {session_index} Run {run_id} 包含 Session {sorted(foreign)} 标识"
+                )
 
     for si in range(session_count):
         own_facts: list[RunFacts] = facts_by_session.get(si, [])
-        own_prefix: str = IdentifierCodec.session_prefix(si)
-
         for facts in own_facts:
-            # 检查消息内容中的跨 Session 引用
-            for msg in facts.messages:
-                if not msg.content:
-                    continue
-                indices: set[int] = IdentifierCodec.extract_session_indices(msg.content)
-                foreign = indices - {si}
-                if foreign:
-                    result = IsolationResult(
-                        total_requests=total_requests,
-                        message_leak_count=result.message_leak_count + len(foreign),
-                        event_leak_count=result.event_leak_count,
-                        context_leak_count=result.context_leak_count,
-                        tool_leak_count=result.tool_leak_count,
-                        stream_leak_count=result.stream_leak_count,
-                        details=result.details + [
-                            f"消息串扰: Session {si} Run {facts.run_id} 包含 Session {sorted(foreign)} 标识"
-                        ],
-                    )
+            count_foreign([message.content for message in facts.messages if message.content], si, "message", facts.run_id)
 
-            # 检查最终回答中的跨 Session 引用
-            if facts.final_message_content:
-                indices = IdentifierCodec.extract_session_indices(facts.final_message_content)
-                foreign = indices - {si}
-                if foreign:
-                    result = IsolationResult(
-                        total_requests=total_requests,
-                        message_leak_count=result.message_leak_count,
-                        event_leak_count=result.event_leak_count + len(foreign),
-                        context_leak_count=result.context_leak_count,
-                        tool_leak_count=result.tool_leak_count,
-                        stream_leak_count=result.stream_leak_count,
-                        details=result.details + [
-                            f"事件串扰: Session {si} Run {facts.run_id} 最终回答包含 Session {sorted(foreign)} 标识"
-                        ],
-                    )
+            # RunEvent 不含 Session 字段，因此以持久化读取路径、run_id 与消息引用三者校验归属。
+            event_message_ids = {message.message_id for message in facts.messages}
+            invalid_events = [
+                event for event in facts.events
+                if event.run_id != facts.run_id
+                or any(message_id not in event_message_ids for message_id in event.message_ids)
+            ]
+            if not facts.events:
+                counts["event"] += 1
+                details.append(f"event 证据缺失: Session {si} Run {facts.run_id}")
+            elif invalid_events:
+                counts["event"] += len(invalid_events)
+                details.append(f"event 归属异常: Session {si} Run {facts.run_id}")
 
-    return result
+            context_contents = [str(version) for version in facts.context_versions]
+            count_foreign(context_contents, si, "context", facts.run_id)
+            requested_tool_call_ids = {
+                call.call_id
+                for message in facts.messages
+                if message.kind is RunMessageKind.LLM_RESPONSE
+                for call in message.tool_calls
+            }
+            invalid_tool_records = [
+                record for record in facts.tool_records
+                if record.tool_call_id is None or record.tool_call_id not in requested_tool_call_ids
+            ]
+            if not facts.tool_records:
+                counts["tool"] += 1
+                details.append(f"tool 持久化记录缺失: Session {si} Run {facts.run_id}")
+            elif invalid_tool_records:
+                counts["tool"] += len(invalid_tool_records)
+                details.append(f"tool 归属异常: Session {si} Run {facts.run_id}")
+            else:
+                count_foreign([record.content for record in facts.tool_records], si, "tool", facts.run_id)
+            count_foreign(list(facts.stream_contents), si, "stream", facts.run_id)
+
+    return IsolationResult(
+        total_requests=total_requests,
+        message_leak_count=counts["message"],
+        event_leak_count=counts["event"],
+        context_leak_count=counts["context"],
+        tool_leak_count=counts["tool"],
+        stream_leak_count=counts["stream"],
+        details=details,
+    )
 
 
 def assert_isolation(isolation: IsolationResult) -> list[AssertionResult]:

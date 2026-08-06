@@ -54,8 +54,8 @@ class TestGlobalLockCoordinator:
 
         order: list[int] = []
 
-        class _FakeCoordinator:
-            async def submit_prepared(self, session_id, request_factory, output_port=None):
+        class _FakeInteraction:
+            async def submit(self, session_id, user_message, output_port=None):
                 order.append(int(session_id[-1]))
                 await asyncio.sleep(0.01)
                 from dotclaw.runtime.application.dto import RunResult
@@ -65,13 +65,13 @@ class TestGlobalLockCoordinator:
                     state=AgentRunState(mode=Ended(RunOutcome.COMPLETED)),
                 )
 
-        global_coord = _GlobalLockCoordinator(_FakeCoordinator())
+        global_coord = _GlobalLockCoordinator(_FakeInteraction())
 
         # 并发提交（全局锁下应串行）
         tasks = [
-            global_coord.submit_prepared("s1", lambda: None),
-            global_coord.submit_prepared("s2", lambda: None),
-            global_coord.submit_prepared("s3", lambda: None),
+            global_coord.submit("s1", "one"),
+            global_coord.submit("s2", "two"),
+            global_coord.submit("s3", "three"),
         ]
         await asyncio.gather(*tasks)
 

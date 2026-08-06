@@ -168,7 +168,7 @@ class TestAggregateScenarioStats:
         assert stats.cancel_passed_count == 2
 
     def test_leak_totals(self):
-        """串扰计数求和。"""
+        """泄漏条数与通过请求数必须采用独立口径。"""
         samples = [
             _make_concurrency_sample(message_leak_count=2, event_leak_count=1),
             _make_concurrency_sample(message_leak_count=1, event_leak_count=0),
@@ -176,6 +176,25 @@ class TestAggregateScenarioStats:
         stats = aggregate_scenario_stats("isolation", "session_lock", samples, 1)
         assert stats.message_leak_total == 3
         assert stats.event_leak_total == 1
+        assert stats.isolation_passed_count == 0
+        assert stats.isolation_total_count == 2
+
+    def test_fifo_failed_sample_cannot_count_as_passed(self):
+        """顺序字段即使相等，最终失败的请求也不得计入 FIFO 通过数。"""
+        samples = [_make_concurrency_sample(passed=False, failure_kind="runtime")]
+        stats = aggregate_scenario_stats("fifo", "session_lock", samples, 1)
+        assert stats.fifo_passed_count == 0
+        assert stats.fifo_total_count == 1
+
+    def test_non_isolation_samples_do_not_expand_isolation_denominator(self):
+        """没有隔离证据字段的场景不得计入隔离通过分母。"""
+        samples = [_make_concurrency_sample(
+            message_leak_count=None, event_leak_count=None, context_leak_count=None,
+            tool_leak_count=None, stream_leak_count=None,
+        )]
+        stats = aggregate_scenario_stats("scaling", "session_lock", samples, 1)
+        assert stats.isolation_total_count == 0
+        assert stats.isolation_passed_count == 0
 
 
 class TestCompareScheduleModes:

@@ -13,7 +13,7 @@ from benchmarks.concurrency_assertions import (
 )
 from benchmarks.concurrency_workloads import IdentifierCodec, RunFacts
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
-from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind
+from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 
 
 def _make_facts(
@@ -31,11 +31,16 @@ def _make_facts(
         session_id=session_id,
         state_outcome=state_outcome,
         messages=messages or (
-            RunMessage("msg-1", 1, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, final_content),
+            RunMessage("llm-tool", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "调用工具", tool_calls=(ToolCall("call-1", "benchmark_echo", {"identifier": identifier}),)),
+            RunMessage("tool-result", 2, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, f"工具执行结果: {identifier}", tool_call_id="call-1"),
+            RunMessage("msg-1", 3, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, final_content),
         ),
-        events=events or (),
+        events=events or (RunEvent(run_id, 1, RunEventType.TOOL_COMPLETED, "2026-01-01T00:00:00Z", message_ids=("tool-result",)),),
         final_message_content=final_content,
         identifier=identifier,
+        context_versions=({"messages": [identifier]},),
+        tool_records=(RunMessage("tool-result", 2, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, f"工具执行结果: {identifier}", tool_call_id="call-1"),),
+        stream_contents=(identifier,),
     )
 
 
@@ -102,16 +107,33 @@ class TestCheckIsolation:
         result = check_isolation(facts_by_session, 2)
         assert result.message_leak_count > 0
 
-    def test_event_leak_in_final(self):
-        """最终回答含其他 Session 标识。"""
+    def test_event_leak_with_foreign_run_id(self):
+        """持久化事件属于其他 Run 时必须失败。"""
         facts_by_session = {
-            0: [_make_facts("r0", final_content="回答: s0 and s2_r0_req")],
+            0: [_make_facts("r0", events=(RunEvent("foreign-run", 1, RunEventType.TOOL_COMPLETED, "2026-01-01T00:00:00Z", message_ids=("tool-result",)),))],
             1: [_make_facts("r1", final_content="回答: s1_r0_req")],
             2: [_make_facts("r2", final_content="回答: s2_r0_req")],
         }
         result = check_isolation(facts_by_session, 3)
-        # Session 0 的最终回答包含 s2 标识
+        # Session 0 的事件 run_id 与持久化读取目标不一致
         assert result.event_leak_count > 0
+
+    def test_missing_real_evidence_is_not_reported_as_zero_leak(self):
+        """缺少 ContextVersion、工具或流事实时，隔离结论必须失败而非伪报零串扰。"""
+        facts = _make_facts("r0", identifier="s0_r0_req", final_content="回答来自: s0_r0_req")
+        facts = RunFacts(
+            run_id=facts.run_id,
+            session_id=facts.session_id,
+            state_outcome=facts.state_outcome,
+            messages=facts.messages,
+            events=facts.events,
+            final_message_content=facts.final_message_content,
+            identifier=facts.identifier,
+        )
+        result = check_isolation({0: [facts]}, 1)
+        assert result.context_leak_count == 1
+        assert result.tool_leak_count == 1
+        assert result.stream_leak_count == 1
 
 
 class TestAssertIsolation:

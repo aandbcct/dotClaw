@@ -68,10 +68,13 @@ from .concurrency_workloads import (
     IdentifierCodec,
     LongDelayLLM,
     RunFacts,
+    RecordingOutputPort,
     SessionSelectiveDelayLLM,
+    ToolCallingFixedDelayLLM,
     WorkloadConfig,
     make_benchmark_request,
     read_run_facts,
+    read_session_conversation,
 )
 from .eval_baseline_models import (
     BENCHMARK_SCHEMA_VERSION,
@@ -120,8 +123,7 @@ class _FakeAgentRegistry:
             from dotclaw.agent.identity import AgentIdentity
             return AgentIdentity(
                 agent_id=agent_id,
-                version="bench-v1",
-                display_name="Benchmark Agent",
+                agent_name="Benchmark Agent",
             )
         return None
 
@@ -132,8 +134,7 @@ class _FakeAgentRegistry:
         from dotclaw.agent.identity import AgentIdentity
         return AgentIdentity(
             agent_id=agent_id,
-            version="bench-v1",
-            display_name="Benchmark Agent",
+            agent_name="Benchmark Agent",
         )
 
     def list_all(self) -> list[object]:
@@ -152,12 +153,13 @@ def _build_engine(
     llm_port,
     tool_port,
     delay_ms: int,
+    context_port: FixedContext,
 ) -> RuntimeEngine:
     """组装最小 Benchmark RuntimeEngine。"""
     return RuntimeEngine(
         run_repository=RunRepositoryAdapter(root),
         checkpoint_repository=CheckpointRepositoryAdapter(root),
-        context_port=FixedContext(),
+        context_port=context_port,
         llm_port=llm_port,
         tool_port=tool_port,
         policy_port=FixedPolicy(),
@@ -173,13 +175,14 @@ def _build_services(
     llm_port,
     tool_port,
     delay_ms: int,
-) -> tuple[SessionRunCoordinator, RunRepositoryAdapter, SessionManager, _FakeAgentRegistry]:
+) -> tuple[SessionRunCoordinator, RunRepositoryAdapter, SessionManager, _FakeAgentRegistry, FixedContext]:
     """组装 Benchmark Runtime 服务。
 
     ``abs_data_dir`` 是绝对路径的临时数据目录。
     """
     root = Path(abs_data_dir)
-    engine: RuntimeEngine = _build_engine(root, llm_port, tool_port, delay_ms)
+    context_port = FixedContext()
+    engine: RuntimeEngine = _build_engine(root, llm_port, tool_port, delay_ms, context_port)
     coordinator = SessionRunCoordinator(engine)
     repository = RunRepositoryAdapter(root)
     # SessionManager 需要相对路径，但我们直接用绝对路径创建 Session
@@ -188,7 +191,7 @@ def _build_services(
     # 覆盖 _data_dir 为绝对路径
     session_manager._data_dir = root.resolve()
     agent_registry = _FakeAgentRegistry()
-    return coordinator, repository, session_manager, agent_registry
+    return coordinator, repository, session_manager, agent_registry, context_port
 
 
 def _make_round_data_dir(round_index: int, scenario: str) -> str:
@@ -269,24 +272,29 @@ async def _run_fifo_same_session(
 
     # 为每个请求分配 accepted_seq
     accepted_seqs: list[int] = []
-    factories: list = []
+    user_messages: list[str] = []
     identifiers: list[str] = []
     for i in range(n):
         seq = gate.accept(session_id)
         accepted_seqs.append(seq)
         identifier, user_msg = make_benchmark_request(agent_id, 0, i)
         identifiers.append(identifier)
-        factories.append(_make_request_factory(session_id, agent_id, user_msg))
+        user_messages.append(user_msg)
 
     # 并发提交（同 Session 经锁 FIFO 串行化）
-    queue_start: float = time.perf_counter()
-    tasks = [
-        coordinator.submit_prepared(session_id, factory)
-        for factory in factories
-    ]
-    run_results = await asyncio.gather(*tasks)
-    batch_end: float = time.perf_counter()
-    batch_total_ms: float = (batch_end - batch_started) * 1000.0
+    async def submit_timed(accepted_seq: int, user_message: str):
+        """记录入口和终态时刻，避免用批次均摊冒充请求时延。"""
+        await gate.enter(session_id, accepted_seq)
+        accepted_at = datetime.now(timezone.utc)
+        result = await coordinator.submit(session_id, user_message)
+        gate.release_next(session_id, accepted_seq)
+        ended_at = datetime.now(timezone.utc)
+        return result, accepted_at, ended_at
+
+    observed_results = await asyncio.gather(
+        *(submit_timed(seq, message) for seq, message in zip(accepted_seqs, user_messages, strict=True))
+    )
+    run_results = [item[0] for item in observed_results]
 
     # 读取事实并构造样本
     facts_list: list[RunFacts] = []
@@ -296,9 +304,13 @@ async def _run_fifo_same_session(
             continue
         facts_list.append(facts)
 
-        # 排队等待 = 执行开始时间 - 批次开始时间（简化近似）
-        queue_wait_ms: float = 0.0
-        wall_ms: float = batch_total_ms / n  # 近似分摊
+        accepted_at = observed_results[i][1]
+        ended_at = observed_results[i][2]
+        started_at = next((event.occurred_at for event in facts.events if event.event_type.value == "llm_started"), None)
+        queue_wait_ms = None
+        if started_at is not None:
+            queue_wait_ms = (datetime.fromisoformat(started_at) - accepted_at).total_seconds() * 1000.0
+        wall_ms = (ended_at - accepted_at).total_seconds() * 1000.0
 
         samples.append(BenchmarkSample(
             dataset=SUITE_CONCURRENCY,
@@ -322,15 +334,37 @@ async def _run_fifo_same_session(
             requests_per_session=config.requests_per_session,
             fake_delay_ms=config.fake_delay_ms,
             accepted_seq=accepted_seqs[i],
-            execution_started_seq=i + 1,  # 按提交顺序近似
-            completed_seq=i + 1,
-            conversation_commit_seq=i + 1,
+            execution_started_seq=None,
+            completed_seq=None,
+            conversation_commit_seq=None,
             queue_wait_ms=queue_wait_ms,
             evidence_summary={
                 "identifier": identifiers[i],
-                "batch_total_ms": batch_total_ms,
+                "accepted_at": accepted_at.isoformat(),
+                "ended_at": ended_at.isoformat(),
             },
         ))
+
+    # 以 Runtime 事件和实际 Conversation 投影计算顺序，禁止用提交下标代替。
+    started_order = sorted(
+        ((event.occurred_at, facts.run_id) for facts in facts_list for event in facts.events if event.event_type.value == "llm_started"),
+    )
+    completed_order = sorted(
+        ((event.occurred_at, facts.run_id) for facts in facts_list for event in facts.events if event.event_type.value == "run_completed"),
+    )
+    started_seq = {run_id: index + 1 for index, (_, run_id) in enumerate(started_order)}
+    completed_seq = {run_id: index + 1 for index, (_, run_id) in enumerate(completed_order)}
+    conversation = await read_session_conversation(repository, session_id)
+    conversation_seq = {
+        facts.run_id: next((index + 1 for index, content in enumerate(conversation) if facts.identifier in content), None)
+        for facts in facts_list
+    }
+    for sample in samples:
+        if sample.run_id is None:
+            continue
+        object.__setattr__(sample, "execution_started_seq", started_seq.get(sample.run_id))
+        object.__setattr__(sample, "completed_seq", completed_seq.get(sample.run_id))
+        object.__setattr__(sample, "conversation_commit_seq", conversation_seq.get(sample.run_id))
 
     # FIFO 断言
     if facts_list:
@@ -354,6 +388,8 @@ async def _run_multi_session_isolation(
     batch_index: int,
     is_warmup: bool,
     batch_started: float,
+    tool_port: FixedDelayTool,
+    output_port: RecordingOutputPort,
 ) -> tuple[list[BenchmarkSample], IsolationResult]:
     """执行一轮多 Session 隔离场景。"""
     n_sessions: int = config.session_count
@@ -369,8 +405,12 @@ async def _run_multi_session_isolation(
         for ri in range(n_requests):
             seq = gates[sid].accept(sid)
             identifier, user_msg = make_benchmark_request(agent_id, si, ri)
-            factory = _make_request_factory(sid, agent_id, user_msg)
-            all_tasks.append(coordinator.submit_prepared(sid, factory))
+            async def submit_timed(session_id: str, message: str):
+                """记录单请求入口与终态，保留真实端到端时延。"""
+                accepted_at = datetime.now(timezone.utc)
+                result = await coordinator.submit(session_id, message, output_port)
+                return result, accepted_at, datetime.now(timezone.utc)
+            all_tasks.append(submit_timed(sid, user_msg))
             all_meta.append({
                 "session_index": si,
                 "request_index": ri,
@@ -389,12 +429,18 @@ async def _run_multi_session_isolation(
     for si in range(n_sessions):
         facts_by_session[si] = []
 
-    for i, rr in enumerate(run_results):
+    for i, observed in enumerate(run_results):
+        rr, accepted_at, ended_at = observed
         meta = all_meta[i]
         si = meta["session_index"]
         facts = await read_run_facts(repository, meta["session_id"], rr.run_id)
         if facts is None:
             continue
+        facts = replace(
+            facts,
+            tool_outputs=tuple(tool_port.outputs_by_run.get(rr.run_id, [])),
+            stream_contents=tuple(output_port.contents_by_run.get(rr.run_id, [])),
+        )
         facts_by_session[si].append(facts)
 
         samples.append(BenchmarkSample(
@@ -412,17 +458,23 @@ async def _run_multi_session_isolation(
             assertions_passed=1 if rr.state.outcome().value == "completed" else 0,
             assertions_total=1,
             trace_available=False,
-            wall_duration_ms=batch_total_ms / (n_sessions * n_requests),
+            wall_duration_ms=(ended_at - accepted_at).total_seconds() * 1000.0,
             run_id=rr.run_id,
             schedule_mode=config.schedule_mode,
             session_count=config.session_count,
             requests_per_session=config.requests_per_session,
             fake_delay_ms=config.fake_delay_ms,
             accepted_seq=meta["accepted_seq"],
+            queue_wait_ms=(
+                (datetime.fromisoformat(started_at) - accepted_at).total_seconds() * 1000.0
+                if (started_at := next((event.occurred_at for event in facts.events if event.event_type.value == "llm_started"), None)) is not None
+                else None
+            ),
             evidence_summary={
                 "session_index": si,
                 "identifier": meta["identifier"],
-                "batch_total_ms": batch_total_ms,
+                "accepted_at": accepted_at.isoformat(),
+                "ended_at": ended_at.isoformat(),
             },
         ))
 
@@ -454,7 +506,12 @@ async def _run_session_scaling(
         for ri in range(n_requests):
             identifier, user_msg = make_benchmark_request(agent_id, si, ri)
             factory = _make_request_factory(sid, agent_id, user_msg)
-            all_tasks.append(coordinator.submit_prepared(sid, factory))
+            async def submit_timed(session_id: str, message: str):
+                """记录单请求入口与终态，保留真实端到端时延。"""
+                accepted_at = datetime.now(timezone.utc)
+                result = await coordinator.submit(session_id, message)
+                return result, accepted_at, datetime.now(timezone.utc)
+            all_tasks.append(submit_timed(sid, user_msg))
             all_meta.append({
                 "session_index": si,
                 "request_index": ri,
@@ -462,11 +519,19 @@ async def _run_session_scaling(
                 "identifier": identifier,
             })
 
-    await asyncio.gather(*all_tasks)
+    observed_results = await asyncio.gather(*all_tasks)
     batch_end: float = time.perf_counter()
     batch_total_ms: float = (batch_end - batch_started) * 1000.0
 
     for i, meta in enumerate(all_meta):
+        result, accepted_at, ended_at = observed_results[i]
+        facts = await read_run_facts(repository, meta["session_id"], result.run_id)
+        started_at = None if facts is None else next(
+            (event.occurred_at for event in facts.events if event.event_type.value == "llm_started"), None
+        )
+        queue_wait_ms = None if started_at is None else (
+            datetime.fromisoformat(started_at) - accepted_at
+        ).total_seconds() * 1000.0
         samples.append(BenchmarkSample(
             dataset=SUITE_CONCURRENCY,
             case_id=ConcurrencyScenario.SESSION_SCALING.value,
@@ -482,17 +547,18 @@ async def _run_session_scaling(
             assertions_passed=1,
             assertions_total=1,
             trace_available=False,
-            wall_duration_ms=batch_total_ms / (n_sessions * n_requests),
-            run_id="",
+            wall_duration_ms=(ended_at - accepted_at).total_seconds() * 1000.0,
+            run_id=result.run_id,
             schedule_mode=config.schedule_mode,
             session_count=config.session_count,
             requests_per_session=config.requests_per_session,
             fake_delay_ms=config.fake_delay_ms,
-            queue_wait_ms=0.0,
+            queue_wait_ms=queue_wait_ms,
             evidence_summary={
                 "session_index": meta["session_index"],
                 "identifier": meta["identifier"],
-                "batch_total_ms": batch_total_ms,
+                "accepted_at": accepted_at.isoformat(),
+                "ended_at": ended_at.isoformat(),
             },
         ))
 
@@ -507,16 +573,14 @@ async def _run_session_scaling(
 class _GlobalLockCoordinator:
     """全局锁协调器包装：用一把全局异步锁包围所有提交。"""
 
-    def __init__(self, coordinator: SessionRunCoordinator) -> None:
-        self._coordinator: SessionRunCoordinator = coordinator
+    def __init__(self, interaction: SessionInteractionService) -> None:
+        self._interaction: SessionInteractionService = interaction
         self._global_lock: asyncio.Lock = asyncio.Lock()
 
-    async def submit_prepared(self, session_id: str, request_factory, output_port=None):
-        """在全局锁下提交请求，保证所有 Session 之间完全串行。"""
+    async def submit(self, session_id: str, user_message: str, output_port=None):
+        """在全局锁下仍经 SessionInteractionService 提交普通消息。"""
         async with self._global_lock:
-            return await self._coordinator.submit_prepared(
-                session_id, request_factory, output_port
-            )
+            return await self._interaction.submit(session_id, user_message, output_port)
 
 
 def _with_batch_metrics(stats: ScenarioStats, batch_total_ms: float) -> ScenarioStats:
@@ -783,18 +847,20 @@ class ConcurrencyReliabilityRunner:
 
             data_dir = _make_round_data_dir(batch_index, "fifo")
             try:
-                coordinator, repository, sm, registry = _build_services(
+                coordinator, repository, sm, registry, context_port = _build_services(
                     data_dir, FixedDelayLLM(config.fake_delay_ms),
                     FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
                 session = await sm.create(agent_id=agent_id, title="s-fifo")
+                interaction = SessionInteractionService(sm, registry, coordinator)
                 gate = ControlledSubmissionGate()
 
                 batch_started: float = time.perf_counter()
                 batch_samples, _ = await _run_fifo_same_session(
-                    coordinator, repository, session.id,
+                    interaction, repository, session.id,
                     agent_id, gate, config, batch_index, is_warmup, batch_started,
                 )
+                interaction = SessionInteractionService(sm, registry, coordinator)
                 batch_end: float = time.perf_counter()
                 total_batch_ms += (batch_end - batch_started) * 1000.0
                 samples.extend(batch_samples)
@@ -815,10 +881,12 @@ class ConcurrencyReliabilityRunner:
 
             data_dir = _make_round_data_dir(batch_index, "iso")
             try:
-                coordinator, repository, sm, registry = _build_services(
-                    data_dir, FixedDelayLLM(config.fake_delay_ms),
-                    FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
+                tool_port = FixedDelayTool(config.fake_delay_ms)
+                coordinator, repository, sm, registry, context_port = _build_services(
+                    data_dir, ToolCallingFixedDelayLLM(config.fake_delay_ms),
+                    tool_port, config.fake_delay_ms,
                 )
+                interaction = SessionInteractionService(sm, registry, coordinator)
                 session_ids: list[str] = []
                 gates: dict[str, ControlledSubmissionGate] = {}
                 for si in range(config.session_count):
@@ -828,8 +896,9 @@ class ConcurrencyReliabilityRunner:
 
                 batch_started: float = time.perf_counter()
                 batch_samples, isolation = await _run_multi_session_isolation(
-                    coordinator, repository, session_ids, agent_id,
+                    interaction, repository, session_ids, agent_id,
                     gates, config, batch_index, is_warmup, batch_started,
+                    tool_port, RecordingOutputPort(),
                 )
                 batch_end: float = time.perf_counter()
                 total_batch_ms += (batch_end - batch_started) * 1000.0
@@ -841,6 +910,9 @@ class ConcurrencyReliabilityRunner:
                     object.__setattr__(s, "context_leak_count", isolation.context_leak_count)
                     object.__setattr__(s, "tool_leak_count", isolation.tool_leak_count)
                     object.__setattr__(s, "stream_leak_count", isolation.stream_leak_count)
+                    if isolation.any_leak:
+                        object.__setattr__(s, "passed", False)
+                        object.__setattr__(s, "failure_kind", "isolation")
 
                 samples.extend(batch_samples)
             finally:
@@ -860,10 +932,11 @@ class ConcurrencyReliabilityRunner:
 
             data_dir = _make_round_data_dir(batch_index, "scale")
             try:
-                coordinator, repository, sm, registry = _build_services(
+                coordinator, repository, sm, registry, context_port = _build_services(
                     data_dir, FixedDelayLLM(config.fake_delay_ms),
                     FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
+                interaction = SessionInteractionService(sm, registry, coordinator)
                 session_ids: list[str] = []
                 for si in range(config.session_count):
                     session = await sm.create(agent_id=agent_id, title=f"s-scale-{si}")
@@ -871,7 +944,7 @@ class ConcurrencyReliabilityRunner:
 
                 batch_started: float = time.perf_counter()
                 batch_samples, batch_ms = await _run_session_scaling(
-                    coordinator, repository, session_ids, agent_id,
+                    interaction, repository, session_ids, agent_id,
                     config, batch_index, is_warmup, batch_started,
                 )
                 if not is_warmup:
@@ -894,11 +967,12 @@ class ConcurrencyReliabilityRunner:
 
             data_dir = _make_round_data_dir(batch_index, "global")
             try:
-                coordinator, repository, sm, registry = _build_services(
+                coordinator, repository, sm, registry, context_port = _build_services(
                     data_dir, FixedDelayLLM(config.fake_delay_ms),
                     FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
-                global_coordinator = _GlobalLockCoordinator(coordinator)
+                interaction = SessionInteractionService(sm, registry, coordinator)
+                global_coordinator = _GlobalLockCoordinator(interaction)
 
                 session_ids: list[str] = []
                 for si in range(config.session_count):
@@ -936,7 +1010,7 @@ class ConcurrencyReliabilityRunner:
             is_warmup: bool = batch_index < config.warmup
             data_dir = _make_round_data_dir(batch_index, "mixed-global" if global_lock else "mixed-session")
             try:
-                coordinator, repository, sm, registry = _build_services(
+                coordinator, repository, sm, registry, context_port = _build_services(
                     data_dir,
                     SessionSelectiveDelayLLM(
                         config.fake_delay_ms,
@@ -946,7 +1020,8 @@ class ConcurrencyReliabilityRunner:
                     FixedDelayTool(config.fake_delay_ms),
                     config.fake_delay_ms,
                 )
-                submitter = _GlobalLockCoordinator(coordinator) if global_lock else coordinator
+                interaction = SessionInteractionService(sm, registry, coordinator)
+                submitter = _GlobalLockCoordinator(interaction) if global_lock else interaction
                 session_ids: list[str] = []
                 for session_index in range(config.session_count):
                     session = await sm.create(agent_id=agent_id, title=f"s-mixed-{session_index}")
@@ -956,8 +1031,36 @@ class ConcurrencyReliabilityRunner:
                     submitter, repository, session_ids, agent_id,
                     config, batch_index, is_warmup, batch_started,
                 )
+                long_samples = [
+                    sample for sample in batch_samples
+                    if sample.evidence_summary.get("session_index") == config.long_request_session_index
+                ]
+                short_samples = [
+                    sample for sample in batch_samples
+                    if sample.evidence_summary.get("session_index") != config.long_request_session_index
+                ]
+                long_ended_at = max(
+                    (datetime.fromisoformat(str(sample.evidence_summary["ended_at"])) for sample in long_samples),
+                    default=None,
+                )
+                short_before_long = (
+                    long_ended_at is not None
+                    and bool(short_samples)
+                    and all(
+                        datetime.fromisoformat(str(sample.evidence_summary["ended_at"])) < long_ended_at
+                        for sample in short_samples
+                    )
+                )
                 for sample in batch_samples:
+                    object.__setattr__(sample, "case_id", ConcurrencyScenario.MIXED_LONG_SHORT.value)
                     object.__setattr__(sample, "schedule_mode", config.schedule_mode)
+                    object.__setattr__(sample, "evidence_summary", {
+                        **sample.evidence_summary,
+                        "short_completed_before_long": short_before_long,
+                    })
+                    if not global_lock and not short_before_long:
+                        object.__setattr__(sample, "passed", False)
+                        object.__setattr__(sample, "failure_kind", "long_short_blocking")
                 if not is_warmup:
                     total_batch_ms += batch_ms
                 samples.extend(batch_samples)
@@ -988,18 +1091,17 @@ class ConcurrencyReliabilityRunner:
                     cancel_barrier=cancel_barrier,
                 )
 
-                coordinator, repository, sm, registry = _build_services(
+                coordinator, repository, sm, registry, context_port = _build_services(
                     data_dir, long_llm, FixedDelayTool(config.fake_delay_ms), config.fake_delay_ms,
                 )
                 session = await sm.create(agent_id=agent_id, title="s-cancel")
                 interaction = SessionInteractionService(sm, registry, coordinator)
 
                 _, user_msg = make_benchmark_request(agent_id, 0, 0)
-                long_factory = _make_request_factory(session.id, agent_id, user_msg)
 
                 # 用 asyncio.ensure_future 启动长请求，确保两个协程可交替执行
                 submit_task = asyncio.ensure_future(
-                    coordinator.submit_prepared(session.id, long_factory)
+                    interaction.submit(session.id, user_msg)
                 )
                 barrier_task = asyncio.ensure_future(cancel_barrier.wait())
 
@@ -1046,10 +1148,9 @@ class ConcurrencyReliabilityRunner:
 
                 # 后续请求：验证锁已释放
                 _, followup_msg = make_benchmark_request(agent_id, 0, 1)
-                followup_factory = _make_request_factory(session.id, agent_id, followup_msg)
                 try:
                     followup_result = await asyncio.wait_for(
-                        coordinator.submit_prepared(session.id, followup_factory),
+                        interaction.submit(session.id, followup_msg),
                         timeout=10.0,
                     )
                     outcome = followup_result.state.outcome()
@@ -1312,8 +1413,8 @@ def _build_scheduling_report(
         f"- 原始样本：`samples/{samples_path.name}`",
         "- 对照对象：当前 Session 锁与 Benchmark 进程内全局串行锁；不代表真实 Provider/API 加速。",
         "",
-        "| 负载 | Session 锁吞吐 | 全局锁吞吐 | 吞吐变化 | Session 锁 Wall P95 | 全局锁 Wall P95 | Wall P95 变化 |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| 负载 | Session 锁吞吐 | 全局锁吞吐 | 吞吐变化 | Session 锁排队 P50/P95 | 全局锁排队 P50/P95 | 排队 P95 变化 | Session 锁 Wall P95 | 全局锁 Wall P95 | Wall P95 变化 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for key in sorted(set(sessions) & set(globals_)):
         comparison = compare_schedule_modes(sessions[key], globals_[key])
@@ -1324,11 +1425,14 @@ def _build_scheduling_report(
         lines.append(
             f"| `{key}` | {session.throughput_per_sec:.1f} | {global_.throughput_per_sec:.1f} | "
             f"{render(comparison.get('throughput_change_rate'))} | "
+            f"{session.queue_wait_ms.p50_ms:.1f}/{session.queue_wait_ms.p95_ms:.1f} | "
+            f"{global_.queue_wait_ms.p50_ms:.1f}/{global_.queue_wait_ms.p95_ms:.1f} | "
+            f"{render(comparison.get('queue_wait_p95_change_rate'))} | "
             f"{session.wall_duration_ms.p95_ms:.1f} | {global_.wall_duration_ms.p95_ms:.1f} | "
             f"{render(comparison.get('wall_p95_change_rate'))} |"
         )
     if not (set(sessions) & set(globals_)):
-        lines.append("| 无可比的完整对照负载 | — | — | — | — | — | — |")
+        lines.append("| 无可比的完整对照负载 | — | — | — | — | — | — | — | — | — |")
     return "\n".join(lines)
 
 

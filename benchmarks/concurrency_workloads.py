@@ -22,6 +22,8 @@ from dotclaw.runtime.adapters.run_repository import RunRepositoryAdapter
 from dotclaw.runtime.application.dto import (
     ContextBundle,
     ContextMetadata,
+    LLMOutputEvent,
+    LLMOutputKind,
     RunRequest,
     RunResult,
     ToolInvocation,
@@ -36,6 +38,7 @@ from dotclaw.runtime.domain.facts import (
     MessageRole,
     RunMessage,
     RunMessageKind,
+    ToolCall,
 )
 
 from .eval_baseline_models import ScheduleMode
@@ -164,6 +167,8 @@ class ControlledSubmissionGate:
     def __init__(self) -> None:
         self._counters: dict[str, int] = {}
         """Session ID -> 当前序号。"""
+        self._entry_events: dict[tuple[str, int], asyncio.Event] = {}
+        """按接受序号释放进入应用入口的协程。"""
 
     def accept(self, session_id: str) -> int:
         """为指定 Session 分配下一个单调递增的接受序号（1-based）。
@@ -173,11 +178,26 @@ class ControlledSubmissionGate:
         current: int = self._counters.get(session_id, 0)
         new_seq: int = current + 1
         self._counters[session_id] = new_seq
+        event = self._entry_events.setdefault((session_id, new_seq), asyncio.Event())
+        if new_seq == 1:
+            event.set()
         return new_seq
+
+    async def enter(self, session_id: str, accepted_seq: int) -> None:
+        """按 accepted_seq 放行协程进入应用提交入口。"""
+        event = self._entry_events.get((session_id, accepted_seq))
+        if event is None:
+            raise ValueError(f"未分配的 accepted_seq: {session_id}/{accepted_seq}")
+        await event.wait()
+
+    def release_next(self, session_id: str, accepted_seq: int) -> None:
+        """在当前提交已进入协调器后放行下一个接受序号。"""
+        self._entry_events.setdefault((session_id, accepted_seq + 1), asyncio.Event()).set()
 
     def reset(self) -> None:
         """重置所有 Session 的计数器（每轮开始时调用）。"""
         self._counters.clear()
+        self._entry_events.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -201,32 +221,95 @@ class FixedDelayLLM(LLMPort):
         self._delay_ms: int = delay_ms
         self._call_count: int = 0
         self._message_seq: int = 0
+        self.started_at_by_run: dict[str, float] = {}
+        """每个 Run 进入 LLM 替身的真实单调时刻。"""
 
     async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port=None) -> RunMessage:
         """模拟 LLM 调用：固定延迟后返回包含会话标识的回答。"""
         # 从用户消息中提取标识（由请求构造时注入）
         user_content: str = ""
         for msg in context.messages:
-            if msg.content:
+            if msg.role is MessageRole.USER and msg.content:
                 user_content = msg.content
                 break
 
+        self.started_at_by_run[execution.run_id] = time.perf_counter()
         # 延迟模拟
         self._call_count += 1
         await asyncio.sleep(self._delay_ms / 1000.0)
 
         self._message_seq += 1
-        return RunMessage(
+        response = RunMessage(
             message_id=f"llm-{self._call_count}",
             sequence=self._message_seq,
             kind=RunMessageKind.FINAL_RESPONSE,
             role=MessageRole.ASSISTANT,
             content=f"回答来自: {user_content}",
         )
+        if output_port is not None:
+            await output_port.emit(LLMOutputEvent(
+                session_id=execution.session_id,
+                run_id=execution.run_id,
+                kind=LLMOutputKind.RESPONSE_DELTA,
+                content=user_content,
+            ))
+        return response
 
     async def cancel(self, run_id: str) -> None:
         """取消当前 LLM 调用（不阻塞）。"""
         pass
+
+
+class ToolCallingFixedDelayLLM(FixedDelayLLM):
+    """工具链固定延迟 LLM 替身：每个 Run 先调用工具、再返回最终回答。"""
+
+    def __init__(self, delay_ms: int = 20) -> None:
+        """初始化每 Run 的模型轮次计数。"""
+        super().__init__(delay_ms)
+        self._calls_by_run: dict[str, int] = {}
+
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port=None) -> RunMessage:
+        """真实走 Runtime 工具轮，令工具结果和流输出均可作为隔离事实读取。"""
+        user_content: str = next(
+            (message.content for message in context.messages if message.role is MessageRole.USER and message.content),
+            "",
+        )
+        self.started_at_by_run.setdefault(execution.run_id, time.perf_counter())
+        self._call_count += 1
+        self._calls_by_run[execution.run_id] = self._calls_by_run.get(execution.run_id, 0) + 1
+        await asyncio.sleep(self._delay_ms / 1000.0)
+        call_index: int = self._calls_by_run[execution.run_id]
+        self._message_seq += 1
+        if call_index == 1:
+            if output_port is not None:
+                await output_port.emit(LLMOutputEvent(
+                    session_id=execution.session_id,
+                    run_id=execution.run_id,
+                    kind=LLMOutputKind.RESPONSE_DELTA,
+                    content=user_content,
+                ))
+            return RunMessage(
+                message_id=f"llm-tool-request-{self._call_count}",
+                sequence=self._message_seq,
+                kind=RunMessageKind.LLM_RESPONSE,
+                role=MessageRole.ASSISTANT,
+                content=f"调用工具: {user_content}",
+                tool_calls=(ToolCall(f"tool-{execution.run_id}", "benchmark_echo", {"identifier": user_content}),),
+            )
+        if output_port is not None:
+            await output_port.emit(LLMOutputEvent(
+                session_id=execution.session_id,
+                run_id=execution.run_id,
+                kind=LLMOutputKind.RESPONSE_DELTA,
+                content=user_content,
+            ))
+        return RunMessage(
+            message_id=f"llm-tool-final-{self._call_count}",
+            sequence=self._message_seq,
+            kind=RunMessageKind.FINAL_RESPONSE,
+            role=MessageRole.ASSISTANT,
+            content=f"工具后回答来自: {user_content}",
+        )
 
 
 class LongDelayLLM(FixedDelayLLM):
@@ -248,7 +331,7 @@ class LongDelayLLM(FixedDelayLLM):
         """长延迟 LLM 调用：等待屏障后再返回。"""
         user_content: str = ""
         for msg in context.messages:
-            if msg.content:
+            if msg.role is MessageRole.USER and msg.content:
                 user_content = msg.content
                 break
 
@@ -288,7 +371,7 @@ class SessionSelectiveDelayLLM(FixedDelayLLM):
         """根据用户标识选择固定延迟，并回显该标识。"""
         user_content: str = ""
         for message in context.messages:
-            if message.content:
+            if message.role is MessageRole.USER and message.content:
                 user_content = message.content
                 break
         delay_ms: int = (
@@ -322,15 +405,19 @@ class FixedDelayTool(ToolPort):
         """
         self._delay_ms: int = delay_ms
         self._call_count: int = 0
+        self.outputs_by_run: dict[str, list[str]] = {}
+        """按 Run 保存实际工具输出，供隔离断言读取。"""
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """模拟工具执行：固定延迟后返回带标识的输出。"""
         self._call_count += 1
         await asyncio.sleep(self._delay_ms / 1000.0)
+        output: str = f"工具执行结果: {invocation.call.arguments.get('identifier', '')}"
+        self.outputs_by_run.setdefault(invocation.run_id, []).append(output)
         return ToolResult(
             call_id=invocation.call.call_id,
             status=ToolResultStatus.COMPLETED,
-            output=f"工具执行结果: call-{self._call_count}",
+            output=output,
         )
 
     async def cancel(self, run_id: str) -> None:
@@ -338,11 +425,26 @@ class FixedDelayTool(ToolPort):
         pass
 
 
+class RecordingOutputPort:
+    """按 Run 收集真实 LLM 输出事件的 Benchmark 输出端口。"""
+
+    def __init__(self) -> None:
+        """初始化按 Run 分组的输出内容。"""
+        self.contents_by_run: dict[str, list[str]] = {}
+
+    async def emit(self, event: LLMOutputEvent) -> None:
+        """记录 Runtime 实际交付到本次提交输出端口的文本。"""
+        if event.content:
+            self.contents_by_run.setdefault(event.run_id, []).append(event.content)
+
+
 class FixedContext(ContextPort):
     """固定上下文替身：仅返回一条包含请求标识的 system 消息。"""
 
     def __init__(self, system_message: str = "你是一个受控 Benchmark 替身") -> None:
         self._system_message: str = system_message
+        self.contents_by_run: dict[str, tuple[str, ...]] = {}
+        """按 Run 保存实际交给 Runtime 的上下文内容摘要。"""
 
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """构建最小上下文：一条 system 消息。"""
@@ -353,7 +455,15 @@ class FixedContext(ContextPort):
             role=MessageRole.SYSTEM,
             content=self._system_message,
         )
-        return ContextBundle((msg,), (), ContextMetadata(estimated_tokens=1))
+        user_message = RunMessage(
+            message_id=request.user_message.message_id,
+            sequence=2,
+            kind=RunMessageKind.USER_INPUT,
+            role=MessageRole.USER,
+            content=request.user_message.content,
+        )
+        self.contents_by_run[execution.run_id] = (self._system_message, request.user_message.content)
+        return ContextBundle((msg, user_message), (), ContextMetadata(estimated_tokens=1))
 
     async def release_scope(self, owner, owner_key) -> None:
         pass
@@ -414,6 +524,18 @@ class RunFacts:
     identifier: str
     """从请求中提取的唯一标识（session/run 前缀）。"""
 
+    context_versions: tuple[dict[str, object], ...] = ()
+    """Runtime 持久化的实际 ContextVersion 快照。"""
+
+    tool_outputs: tuple[str, ...] = ()
+    """工具端口对该 Run 的实际输出。"""
+
+    tool_records: tuple[RunMessage, ...] = ()
+    """从持久化 RunMessage 读取的工具结果记录。"""
+
+    stream_contents: tuple[str, ...] = ()
+    """提交专属输出端口实际收到的流内容。"""
+
 
 async def read_run_facts(
     repository: RunRepositoryAdapter,
@@ -430,6 +552,7 @@ async def read_run_facts(
 
     messages: tuple[RunMessage, ...] = await repository.load_messages(session_id, run_id)
     events: tuple[RunEvent, ...] = await repository.load_events(session_id, run_id)
+    context_versions = await repository.load_context_versions(session_id, run_id)
 
     # 提取最终回答
     final_content: str = ""
@@ -453,6 +576,8 @@ async def read_run_facts(
         events=events,
         final_message_content=final_content,
         identifier=identifier,
+        context_versions=tuple(version.to_dict() for version in context_versions),
+        tool_records=tuple(message for message in messages if message.kind is RunMessageKind.TOOL_RESULT),
     )
 
 

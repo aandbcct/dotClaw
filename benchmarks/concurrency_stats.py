@@ -268,12 +268,17 @@ def aggregate_scenario_stats(
     ]
 
     # 正确性统计
+    fifo_samples = [sample for sample in formal if sample.accepted_seq is not None]
     fifo_passed: int = sum(
         1 for s in formal
-        if s.accepted_seq is not None and s.execution_started_seq == s.accepted_seq
+        if s.passed
+        and s.accepted_seq is not None
+        and s.execution_started_seq == s.accepted_seq
+        and s.completed_seq == s.accepted_seq
+        and s.conversation_commit_seq == s.accepted_seq
     )
 
-    # 隔离统计
+    # 隔离统计：通过数必须来自请求级布尔结论，不能由泄漏条数反推。
     message_leak_total: int = sum(
         s.message_leak_count for s in formal if s.message_leak_count is not None
     )
@@ -289,8 +294,31 @@ def aggregate_scenario_stats(
     stream_leak_total: int = sum(
         s.stream_leak_count for s in formal if s.stream_leak_count is not None
     )
+    isolation_samples = [
+        sample for sample in formal
+        if any(
+            value is not None
+            for value in (
+                sample.message_leak_count,
+                sample.event_leak_count,
+                sample.context_leak_count,
+                sample.tool_leak_count,
+                sample.stream_leak_count,
+            )
+        )
+    ]
+    isolation_passed: int = sum(
+        1 for sample in isolation_samples
+        if sample.passed
+        and sample.message_leak_count == 0
+        and sample.event_leak_count == 0
+        and sample.context_leak_count == 0
+        and sample.tool_leak_count == 0
+        and sample.stream_leak_count == 0
+    )
 
     # 取消统计
+    cancel_samples = [sample for sample in formal if sample.cancellation_delivered is not None]
     cancel_passed: int = sum(
         1 for s in formal
         if s.cancellation_delivered is True
@@ -309,11 +337,11 @@ def aggregate_scenario_stats(
         cancel_delivery_ms=ConcurrencyLatencyStats.from_values(cancel_delivery_values),
         cancel_effect_ms=ConcurrencyLatencyStats.from_values(cancel_effect_values),
         fifo_passed_count=fifo_passed,
-        fifo_total_count=len(formal),
-        isolation_passed_count=len(formal) - message_leak_total - event_leak_total - context_leak_total - tool_leak_total - stream_leak_total,
-        isolation_total_count=len(formal),
+        fifo_total_count=len(fifo_samples),
+        isolation_passed_count=isolation_passed,
+        isolation_total_count=len(isolation_samples),
         cancel_passed_count=cancel_passed,
-        cancel_total_count=len(formal),
+        cancel_total_count=len(cancel_samples),
         message_leak_total=message_leak_total,
         event_leak_total=event_leak_total,
         context_leak_total=context_leak_total,
