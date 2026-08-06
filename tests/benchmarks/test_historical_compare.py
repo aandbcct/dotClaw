@@ -86,11 +86,17 @@ def _snapshot(
     warmup: int = 5,
     environment: dict | None = None,
     cases: tuple[CaseSummary, ...] | None = None,
+    fixture_fingerprints: dict | None = None,
     git_commit: str = "HEAD",
     snapshot_id: str = "snap-1",
 ) -> BenchmarkSnapshot:
     """构造快照。"""
     case_list = cases or (_case(),)
+    fingerprints: dict = (
+        fixture_fingerprints
+        if fixture_fingerprints is not None
+        else {case.case_id: "fp-1234567890abcdef" for case in case_list}
+    )
     return BenchmarkSnapshot(
         snapshot_id=snapshot_id,
         generated_at="2026-08-06T00:00:00+00:00",
@@ -106,6 +112,7 @@ def _snapshot(
         samples_path="samples/x.jsonl",
         execution_source=execution_source,
         scenario_id=scenario_id,
+        fixture_fingerprints=fingerprints,
         environment=environment or _CURRENT_ENV,
         cases=case_list,
         samples_content_summary={"line_count": 1},
@@ -272,6 +279,32 @@ def test_comparability_tampered_scenario_rejected() -> None:
     result = check_comparability(_current(), historical)
     assert result.comparable is False
     assert any("篡改" in reason for reason in result.reasons)
+
+
+def test_comparability_fixture_fingerprint_mismatch_rejected() -> None:
+    """共享场景固定夹具指纹不一致：拒绝计算百分比（严格可比性门槛）。"""
+    historical = _snapshot(
+        execution_source=ExecutionSource.HISTORICAL_ADAPTER,
+        environment=_HISTORICAL_ENV,
+        fixture_fingerprints={"tool_success": "fp-9999different"},
+        git_commit="4e4cdd3",
+    )
+    result = check_comparability(_current(), historical)
+    assert result.comparable is False
+    assert any("固定夹具指纹不一致" in reason for reason in result.reasons)
+
+
+def test_comparability_fixture_fingerprint_missing_rejected() -> None:
+    """任一侧缺少共享场景的固定夹具指纹：拒绝计算百分比。"""
+    historical = _snapshot(
+        execution_source=ExecutionSource.HISTORICAL_ADAPTER,
+        environment=_HISTORICAL_ENV,
+        fixture_fingerprints={},
+        git_commit="4e4cdd3",
+    )
+    result = check_comparability(_current(), historical)
+    assert result.comparable is False
+    assert any("缺少共享场景" in reason for reason in result.reasons)
 
 
 # --------------------------------------------------------------------------- #

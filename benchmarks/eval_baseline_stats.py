@@ -217,6 +217,21 @@ def build_snapshot(
         for case_id in case_ids
     )
 
+    # 快照级固定夹具指纹：每个 Case 一个；同一 Case 样本指纹不一致时明确失败，
+    # 防止同一快照内夹具定义漂移破坏对照可信度。
+    fixture_fingerprints: dict[str, str] = {}
+    for case_id in case_ids:
+        fingerprints = {
+            sample.fixture_fingerprint
+            for sample in formal
+            if sample.case_id == case_id and sample.fixture_fingerprint
+        }
+        if len(fingerprints) > 1:
+            raise ValueError(
+                f"Case {case_id!r} 出现多个固定夹具指纹：{sorted(fingerprints)}"
+            )
+        fixture_fingerprints[case_id] = next(iter(fingerprints)) if fingerprints else ""
+
     return BenchmarkSnapshot(
         snapshot_id=snapshot_id,
         generated_at=generated_at,
@@ -229,6 +244,7 @@ def build_snapshot(
         schema_version=BENCHMARK_SCHEMA_VERSION,
         execution_source=execution_source,
         scenario_id=scenario_id,
+        fixture_fingerprints=fixture_fingerprints,
         environment=dict(environment),
         cases=case_summaries,
         samples_content_summary=dict(samples_content_summary),

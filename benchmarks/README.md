@@ -59,18 +59,18 @@ python -m benchmarks.eval_baseline \
 - 快照不是 `EvalResult` / `RegressionReport` / Runtime 事实的替代品，不进入 CI Gate；
 - 历史 worktree 对比、并发 / 故障注入由后续 PR 提供，PR1 不做。
 
-### 当前基线（20260806T062539Z_c4511b3，commit `c4511b3`）
+### 当前基线（20260806T065437Z_cd5a1cc，commit `cd5a1cc`）
 
 - 环境：Python 3.13.5 / Windows-11 / config 哈希 `b9bea591d3252a9a`；
 - 采样：warmup=5, repeat=30，共 120 个正式样本，**120/120 通过（100%）**；
-- 全局耗时：Wall P50 **0.89 ms**、P95 **1.49 ms**、P99 **1.66 ms**、Max **1.70 ms**；
+- 全局耗时：Wall P50 **2.3 ms**、P95 **4.4 ms**；
 - 调用统计：LLM 210 次、Tool 150 次，Trace 完整 120/120；
 - 各 Case（30 样本）成功率均为 100%：`approval_rejected` P50 0.68 ms、
   `approval_resume` P50 1.04 ms、`context_retention` P50 0.80 ms、
-  `tool_success` P50 0.89 ms；
+  `tool_success` P50 2.40 ms；
 - 原始证据：`benchmarks/baselines/runtime_core_v1/` 下快照 JSON 与 140 行 JSONL
   （含 warmup 诊断记录）；样本带 `execution_source` / `source_commit` /
-  `scenario_id` / `evidence_kind` 来源元数据。
+  `scenario_id` / `evidence_kind` / `fixture_fingerprint` 来源元数据。
 
 ## 历史基线可复跑与对照（PR2）
 
@@ -123,6 +123,9 @@ python -m benchmarks.historical_baseline compare \
 - 仅在相同 Dataset、共享场景、正式 repeat、warmup、机器标识、Python 主/次版本和
   固定替身配置时计算变化率；任一条件不一致或场景标识与 Case 列表不符（疑似篡改）
   时拒绝百分比；
+- 两侧必须记录**一致且非空**的固定夹具指纹（`fixture_fingerprint`，由 Git 跟踪的
+  Case 固定夹具派生），比较器只比较该指纹而非各版本自己的完整配置哈希；指纹
+  缺失或不同即拒绝输出百分比——这是当前/历史对照的严格可比性门槛；
 - 历史链路没有的 Trace / token / 内部阶段时延序列化为 `null`，不参与聚合与变化率；
 - 历史值为 0 或缺失时仅列原值与不可比原因，不猜测为 0；
 - 成功率报告成功数/总数、Wilson 95% 区间和绝对错误数；变化率为
@@ -133,12 +136,13 @@ python -m benchmarks.historical_baseline compare \
 
 ### 当前历史对照结果（commit `4e4cdd3`，AgentLoop 时代）
 
-- 候选审计：`4e4cdd3` 六道审计门全部通过（20260806T062421Z 审计报告）；
-- 历史正式采样：warmup=5, repeat=30，**30/30 通过（100%）**，Wall P50 **32.3 ms**；
+- 候选审计：`4e4cdd3` 六道审计门全部通过（20260806T065307Z 审计报告）；
+- 固定夹具指纹：`tool_success` 两侧一致 `e3e3e26ced9cd716`；
+- 历史正式采样：warmup=5, repeat=30，**30/30 通过（100%）**，Wall P50 **41.4 ms**；
 - 对照结论（共享场景 `tool_success`）：成功率与 LLM（2 轮）/Tool（1 次）调用均值
-  两侧完全一致（语义等价），当前端到端 Wall P50 0.89 ms，历史 32.3 ms，
-  **耗时下降 -97.26%**（P95 -96.88%、P99 -97.01%）；
-- 证据：`benchmarks/reports/historical-audits/4e4cdd3-20260806T062421Z/` 审计报告，
+  两侧完全一致（语义等价），当前端到端 Wall P50 2.4 ms，历史 41.4 ms，
+  **耗时下降 -94.21%**（P95 -93.39%、P99 -93.30%）；
+- 证据：`benchmarks/reports/historical-audits/4e4cdd3-20260806T065307Z/` 审计报告，
   `benchmarks/baselines/runtime_core_v1/` 下当前与历史快照 JSON + JSONL。
 
 ## 目录结构

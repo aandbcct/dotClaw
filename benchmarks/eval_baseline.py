@@ -31,7 +31,12 @@ from dotclaw.eval.reexecution import ReexecutionRunner
 from dotclaw.eval.results import EvalResult
 from dotclaw.runtime.domain.facts import RunStatistics
 
-from .eval_baseline_models import BenchmarkSample, BenchmarkSnapshot, ExecutionSource
+from .eval_baseline_models import (
+    BenchmarkSample,
+    BenchmarkSnapshot,
+    ExecutionSource,
+    compute_fixture_fingerprint,
+)
 from .eval_baseline_stats import build_snapshot
 
 # 可信结果的失败分类：None（全部通过）与 assertion（已可信执行但行为不符）。
@@ -118,6 +123,7 @@ def _sample_from_result(
     dataset: str,
     case_id: str,
     scenario_id: str,
+    fixture_fingerprint: str,
     attempt: int,
     is_warmup: bool,
     wall_duration_ms: float,
@@ -131,7 +137,8 @@ def _sample_from_result(
 
     只提取 EvalResult / RunTrace 的派生视图，不内联正文或敏感内容。
     当前 Eval 链路的样本以 ``CURRENT_EVAL`` / ``RUN_TRACE`` 标记来源，
-    ``source_commit`` 记录实际执行的完整提交号。
+    ``source_commit`` 记录实际执行的完整提交号，``fixture_fingerprint``
+    记录该 Case 固定夹具指纹供跨版本对照。
     """
     trace = result.trace
     assertion_results = result.assertion_results
@@ -154,6 +161,7 @@ def _sample_from_result(
         run_id=result.run_id,
         scenario_id=scenario_id,
         source_commit=source_commit,
+        fixture_fingerprint=fixture_fingerprint,
         trace_metrics=dict(trace.metrics.to_dict()) if trace is not None else {},
         run_statistics=_run_statistics_view(trace.run.statistics) if trace is not None else {},
         trace_source=dict(trace.source.to_dict()) if trace is not None else None,
@@ -361,6 +369,7 @@ class EvalBaselineRunner:
                     dataset=dataset_name,
                     case_id=case.case_id,
                     scenario_id=case.case_id,
+                    fixture_fingerprint=compute_fixture_fingerprint(case),
                     attempt=attempt,
                     is_warmup=is_warmup,
                     wall_duration_ms=wall_duration_ms,

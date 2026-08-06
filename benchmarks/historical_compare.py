@@ -126,6 +126,22 @@ def check_comparability(
             f"无共享场景：当前 {sorted(current_scenarios)}，历史 {sorted(historical_scenarios)}"
         )
 
+    # 固定夹具指纹：共享场景两侧必须记录同一指纹，否则拒绝计算百分比。
+    # 只比较“固定夹具指纹”而非各版本自己的完整配置哈希，证明两侧执行的是
+    # 同一固定替身语义；任一缺失或不同都视为未确认同一夹具。
+    for case_id in shared:
+        current_fingerprint = str(current.fixture_fingerprints.get(case_id, ""))
+        historical_fingerprint = str(historical.fixture_fingerprints.get(case_id, ""))
+        if not current_fingerprint:
+            reasons.append(f"当前快照缺少共享场景 {case_id!r} 的固定夹具指纹")
+        if not historical_fingerprint:
+            reasons.append(f"历史快照缺少共享场景 {case_id!r} 的固定夹具指纹")
+        if current_fingerprint and historical_fingerprint and current_fingerprint != historical_fingerprint:
+            reasons.append(
+                f"共享场景 {case_id!r} 固定夹具指纹不一致："
+                f"当前 {current_fingerprint}，历史 {historical_fingerprint}"
+            )
+
     return ComparabilityResult(
         comparable=not reasons,
         reasons=tuple(reasons),
@@ -257,7 +273,12 @@ def build_comparison_report(
     ]
     comparability = check_comparability(current, historical)
     if comparability.comparable:
+        fingerprint_line = ", ".join(
+            f"`{case_id}`: `{historical.fixture_fingerprints.get(case_id, '')[:12]}…`"
+            for case_id in comparability.shared_scenarios
+        )
         lines.append(f"- **可比**：共享场景 {', '.join(comparability.shared_scenarios)}")
+        lines.append(f"- 固定夹具指纹（两侧一致）：{fingerprint_line}")
     else:
         lines.append("- **不可比**，不计算任何变化率：")
         for reason in comparability.reasons:

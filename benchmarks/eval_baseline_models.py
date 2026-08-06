@@ -14,6 +14,8 @@ Runtime / Eval 既有事实的只读视图，不新增持久化容器，也不�
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Mapping, Sequence
@@ -26,6 +28,27 @@ SUITE_NAME: str = "runtime_core"
 
 SCENARIO_TOOL_SUCCESS: str = "tool_success"
 """PR2 统一业务场景标识：单工具成功（工具调用 → 固定输出 → 最终回答）。"""
+
+
+def compute_fixture_fingerprint(case) -> str:
+    """计算 EvalCase 固定夹具的稳定指纹。
+
+    只对决定执行行为的固定夹具部分（LLM / Context / Tool / Approval /
+    Delegation Fixture）做确定性哈希，不包含期望、策略或元数据，因此同一
+    业务场景定义必然产出同一指纹。当前 Eval 与历史适配器对照时要求两侧
+    该指纹一致，以证明执行的是同一固定替身语义。
+    """
+    payload: Mapping[str, object] = {
+        "llm_fixture": case.llm_fixture.to_dict() if case.llm_fixture is not None else None,
+        "context_fixtures": [fixture.to_dict() for fixture in case.context_fixtures],
+        "tool_fixtures": [fixture.to_dict() for fixture in case.tool_fixtures],
+        "approval_fixtures": [fixture.to_dict() for fixture in case.approval_fixtures],
+        "delegation_fixtures": [fixture.to_dict() for fixture in case.delegation_fixtures],
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    )
+    return digest.hexdigest()[:16]
 
 
 class ExecutionSource(StrEnum):
@@ -181,6 +204,7 @@ class BenchmarkSample:
     source_commit: str = ""
     scenario_id: str = ""
     evidence_kind: EvidenceKind = EvidenceKind.RUN_TRACE
+    fixture_fingerprint: str = ""
     trace_metrics: Mapping[str, object] = field(default_factory=dict)
     run_statistics: Mapping[str, object] = field(default_factory=dict)
     trace_source: Mapping[str, object] | None = None
@@ -212,6 +236,7 @@ class BenchmarkSample:
             "source_commit": self.source_commit,
             "scenario_id": self.scenario_id,
             "evidence_kind": self.evidence_kind.value,
+            "fixture_fingerprint": self.fixture_fingerprint,
             "trace_source": None if self.trace_source is None else dict(self.trace_source),
         }
 
@@ -252,6 +277,9 @@ class BenchmarkSample:
             scenario_id=_require_str(data.get("scenario_id") or "", f"{label}.scenario_id"),
             evidence_kind=_optional_enum(
                 EvidenceKind, data.get("evidence_kind"), f"{label}.evidence_kind", EvidenceKind.RUN_TRACE
+            ),
+            fixture_fingerprint=_require_str(
+                data.get("fixture_fingerprint") or "", f"{label}.fixture_fingerprint"
             ),
             trace_source=_optional_json_map(data.get("trace_source"), f"{label}.trace_source"),
         )
@@ -434,6 +462,7 @@ class BenchmarkSnapshot:
     schema_version: str = BENCHMARK_SCHEMA_VERSION
     execution_source: ExecutionSource = ExecutionSource.CURRENT_EVAL
     scenario_id: str = ""
+    fixture_fingerprints: Mapping[str, str] = field(default_factory=dict)
     environment: Mapping[str, str] = field(default_factory=dict)
     cases: Sequence[CaseSummary] = ()
     samples_content_summary: Mapping[str, object] = field(default_factory=dict)
@@ -454,6 +483,7 @@ class BenchmarkSnapshot:
             "samples_path": self.samples_path,
             "execution_source": self.execution_source.value,
             "scenario_id": self.scenario_id,
+            "fixture_fingerprints": dict(self.fixture_fingerprints),
             "samples_content_summary": dict(self.samples_content_summary),
         }
 
@@ -487,6 +517,9 @@ class BenchmarkSnapshot:
                 ExecutionSource, data.get("execution_source"), f"{label}.execution_source", ExecutionSource.CURRENT_EVAL
             ),
             scenario_id=_require_str(data.get("scenario_id") or "", f"{label}.scenario_id"),
+            fixture_fingerprints=_require_json_map(
+                data.get("fixture_fingerprints") or {}, f"{label}.fixture_fingerprints"
+            ),
             samples_content_summary=_require_json_map(
                 data.get("samples_content_summary"), f"{label}.samples_content_summary"
             ),

@@ -28,6 +28,7 @@ from .eval_baseline_models import (
     BenchmarkSample,
     BenchmarkSnapshot,
     ExecutionSource,
+    compute_fixture_fingerprint,
 )
 from .eval_baseline_stats import build_snapshot
 from .historical_audit import (
@@ -58,6 +59,18 @@ def _load_audit_report(audit_output: Path) -> dict[str, object]:
         raise ValueError(f"审计报告无法解析：{audit_json}：{error}") from error
 
 
+def _load_case_fingerprint(dataset_root: Path, dataset: str, case_id: str) -> str:
+    """从 Dataset 的 Case 定义计算固定夹具指纹。
+
+    当前 Eval 与历史适配器从同一 Git 跟踪的 Case 文件派生指纹，保证两侧
+    代表同一固定替身语义；Case 定义一旦变化，指纹随之变化，旧历史快照与
+    新当前快照将判为不可比。
+    """
+    from dotclaw.eval.dataset import load_case
+
+    return compute_fixture_fingerprint(load_case(Path(dataset_root), dataset, case_id))
+
+
 def _require_audited_candidate(report: dict[str, object], candidate: str) -> str:
     """校验候选已通过审计且为完整提交号；不以短哈希代替。"""
     if not report.get("passed"):
@@ -81,6 +94,9 @@ def _require_audited_candidate(report: dict[str, object], candidate: str) -> str
 def cmd_audit(args: argparse.Namespace) -> int:
     """执行一次候选审计（开发期采样），落盘审计报告。"""
     output_root: Path = Path(args.output) if args.output else DEFAULT_AUDIT_ROOT
+    fixture_fingerprint: str = _load_case_fingerprint(
+        Path(args.dataset_root), args.dataset, args.case
+    )
     adapter = LegacyAgentV1Adapter(
         dataset=args.dataset,
         case_id=args.case,
@@ -94,6 +110,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
         dataset=args.dataset,
         case_id=args.case,
         scenario_id=args.scenario,
+        fixture_fingerprint=fixture_fingerprint,
         adapter=adapter,
     )
     order: tuple[str, ...] = tuple(args.candidate_order) if args.candidate_order else ()
@@ -158,6 +175,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         subprocess_timeout=args.timeout,
     )
     adapter.verify_expected()
+    fixture_fingerprint: str = str(report.get("fixture_fingerprint", ""))
+    if not fixture_fingerprint:
+        raise ValueError(f"审计报告缺少固定夹具指纹：{report.get('audit_id')}")
 
     formal_dir: Path = audit_output / "formal"
     all_samples: list[BenchmarkSample] = []
@@ -182,6 +202,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 dataset=args.dataset,
                 case_id=args.case,
                 scenario_id=args.scenario,
+                fixture_fingerprint=fixture_fingerprint,
                 git_commit=git_commit,
                 full_commit=full_commit,
                 attempt=attempt,
@@ -298,6 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="对候选提交执行可复跑性审计")
     audit.add_argument("--candidate", type=str, required=True, help="候选提交（完整或短哈希）")
     _add_common(audit)
+    audit.add_argument("--dataset-root", type=str, default="benchmarks/datasets", help="Dataset 根目录")
     audit.add_argument("--warmup", type=int, default=1, help="开发期预热采样数（默认 1）")
     audit.add_argument("--repeat", type=int, default=10, help="开发期正式采样数（默认 10）")
     audit.add_argument("--output", type=str, default=None, help="审计输出根目录")
@@ -309,6 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="对已审计候选执行正式采样并生成历史快照")
     run.add_argument("--candidate", type=str, required=True, help="已审计通过的完整提交号")
     _add_common(run)
+    run.add_argument("--dataset-root", type=str, default="benchmarks/datasets", help="Dataset 根目录")
     run.add_argument("--warmup", type=int, default=5, help="正式预热采样数（默认 5）")
     run.add_argument("--repeat", type=int, default=30, help="正式采样数（默认 30）")
     run.add_argument("--audit-output", type=str, required=True, help="审计输出目录（含 audit.json）")

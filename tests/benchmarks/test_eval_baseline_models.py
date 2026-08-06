@@ -14,6 +14,7 @@ from benchmarks.eval_baseline_models import (
     CaseSummary,
     GlobalSummary,
     LatencyStats,
+    compute_fixture_fingerprint,
 )
 
 from .helpers import make_failing_sample, make_sample
@@ -289,3 +290,39 @@ def test_legacy_snapshot_without_source_fields_reads_with_defaults() -> None:
     restored = BenchmarkSnapshot.from_dict(payload)
     assert restored.execution_source.value == "current_eval"
     assert restored.scenario_id == ""
+
+
+# --------------------------------------------------------------------------- #
+# 固定夹具指纹：计算、往返与快照聚合
+# --------------------------------------------------------------------------- #
+
+
+def test_fixture_fingerprint_is_deterministic() -> None:
+    """同一 Case 定义反复计算产出同一指纹。"""
+    from dotclaw.eval.dataset import load_cases
+    from pathlib import Path
+
+    cases = load_cases(
+        Path(__file__).resolve().parents[2] / "benchmarks" / "datasets", "runtime_core_v1"
+    )
+    tool_success = next(case for case in cases if case.case_id == "tool_success")
+    first = compute_fixture_fingerprint(tool_success)
+    second = compute_fixture_fingerprint(tool_success)
+    assert first == second
+    assert len(first) == 16
+
+
+def test_sample_fixture_fingerprint_round_trip() -> None:
+    """样本固定夹具指纹可无损往返。"""
+    sample = make_sample(fixture_fingerprint="fp-1234567890abcdef")
+    restored = BenchmarkSample.from_dict(sample.to_dict())
+    assert restored.fixture_fingerprint == "fp-1234567890abcdef"
+
+
+def test_snapshot_fixture_fingerprints_round_trip() -> None:
+    """快照级固定夹具指纹映射可无损往返。"""
+    snapshot = _snapshot()
+    payload = snapshot.to_dict()
+    payload["fixture_fingerprints"] = {"tool_success": "fp-1234567890abcdef"}
+    restored = BenchmarkSnapshot.from_dict(payload)
+    assert restored.fixture_fingerprints == {"tool_success": "fp-1234567890abcdef"}

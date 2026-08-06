@@ -325,3 +325,23 @@ def test_historical_build_snapshot_propagates_source() -> None:
     assert snapshot.scenario_id == "tool_success"
     assert snapshot.global_summary.sample_count == 2
     assert snapshot.global_summary.passed_count == 2
+
+
+def test_build_snapshot_aggregates_fixture_fingerprint() -> None:
+    """快照从样本聚合固定夹具指纹；同 Case 指纹漂移时明确失败。"""
+    samples = [
+        make_sample(case_id="tool_success", attempt=0, fixture_fingerprint="fp-aaaa"),
+        make_sample(case_id="tool_success", attempt=1, fixture_fingerprint="fp-aaaa"),
+    ]
+    snapshot = _build(samples)
+    assert snapshot.fixture_fingerprints == {"tool_success": "fp-aaaa"}
+
+
+def test_build_snapshot_rejects_drifting_fixture_fingerprint() -> None:
+    """同一快照内 Case 出现多个固定夹具指纹：不生成快照。"""
+    samples = [
+        make_sample(case_id="tool_success", attempt=0, fixture_fingerprint="fp-aaaa"),
+        make_sample(case_id="tool_success", attempt=1, fixture_fingerprint="fp-bbbb"),
+    ]
+    with pytest.raises(ValueError, match="多个固定夹具指纹"):
+        _build(samples)

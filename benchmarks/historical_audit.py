@@ -94,6 +94,7 @@ class AuditReport:
     worktree_path: str | None = None
     environment_path: str | None = None
     samples_path: str | None = None
+    fixture_fingerprint: str = ""
     candidate_order: Sequence[str] = ()
     selection_note: str = ""
     created_at: str = ""
@@ -113,6 +114,7 @@ class AuditReport:
             "worktree_path": self.worktree_path,
             "environment_path": self.environment_path,
             "samples_path": self.samples_path,
+            "fixture_fingerprint": self.fixture_fingerprint,
             "candidate_order": list(self.candidate_order),
             "selection_note": self.selection_note,
             "created_at": self.created_at,
@@ -382,6 +384,7 @@ def to_sample_record(
     dataset: str,
     case_id: str,
     scenario_id: str,
+    fixture_fingerprint: str,
     git_commit: str,
     full_commit: str,
     attempt: int,
@@ -390,7 +393,8 @@ def to_sample_record(
     """把场景语义事实映射为与 PR1 相同 schema 的 JSON 记录（映射门）。
 
     历史链路没有的 Trace / token / 内部阶段时延序列化为 ``null``，不补 0。
-    ``source_commit`` 记录实际执行的完整提交号，展示短哈希只进 ``git_commit``。
+    ``source_commit`` 记录实际执行的完整提交号，展示短哈希只进 ``git_commit``；
+    ``fixture_fingerprint`` 记录该业务场景的固定夹具指纹，供当前/历史对照。
     """
     return {
         "schema_version": "1.0",
@@ -408,6 +412,7 @@ def to_sample_record(
         "source_commit": full_commit,
         "scenario_id": scenario_id,
         "evidence_kind": "final_result",
+        "fixture_fingerprint": fixture_fingerprint,
         "passed": scene.passed,
         "failure_kind": scene.failure_kind,
         "assertions_passed": 1 if scene.passed else 0,
@@ -443,17 +448,23 @@ class HistoricalAuditor:
         dataset: str,
         case_id: str,
         scenario_id: str = SCENARIO_TOOL_SUCCESS,
+        fixture_fingerprint: str = "",
         git: GitBoundary | None = None,
         environment: EnvironmentBoundary | None = None,
         adapter: HistoricalScenarioAdapter,
         base_python: str | None = None,
     ) -> None:
-        """绑定审计边界与场景适配器。"""
+        """绑定审计边界与场景适配器。
+
+        ``fixture_fingerprint`` 记录该业务场景的固定夹具指纹；审计报告与
+        开发期采样记录均携带它，供后续 ``run`` 固化到历史快照。
+        """
         self._repo_root: Path = Path(repo_root)
         self._output_root: Path = Path(output_root)
         self._dataset: str = dataset
         self._case_id: str = case_id
         self._scenario_id: str = scenario_id
+        self._fixture_fingerprint: str = fixture_fingerprint
         self._git: GitBoundary = git or GitBoundary(self._repo_root)
         self._environment: EnvironmentBoundary = environment or EnvironmentBoundary(base_python)
         self._adapter: HistoricalScenarioAdapter = adapter
@@ -614,6 +625,7 @@ class HistoricalAuditor:
                 worktree_path=str(worktree_path),
                 environment_path=str(environment_path),
                 samples_path=str(samples_path),
+                fixture_fingerprint=self._fixture_fingerprint,
                 candidate_order=order,
                 selection_note=note,
                 created_at=datetime.now(timezone.utc).isoformat(),
@@ -636,6 +648,7 @@ class HistoricalAuditor:
                 gates=tuple(gates),
                 worktree_path=str(worktree_path) if worktree_path is not None else None,
                 environment_path=str(environment_path) if environment_path is not None else None,
+                fixture_fingerprint=self._fixture_fingerprint,
                 candidate_order=order,
                 selection_note=f"审计失败：门 {error.gate.value} —— {error.summary}",
                 created_at=datetime.now(timezone.utc).isoformat(),
@@ -682,6 +695,7 @@ class HistoricalAuditor:
             dataset=self._dataset,
             case_id=self._case_id,
             scenario_id=self._scenario_id,
+            fixture_fingerprint=self._fixture_fingerprint,
             git_commit=self._git.short_commit(full_commit),
             full_commit=full_commit,
             attempt=attempt,
