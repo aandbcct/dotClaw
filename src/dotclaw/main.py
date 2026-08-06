@@ -32,6 +32,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from dotclaw.channel.cli import CLIChannel
 from dotclaw.channel.runtime_llm_output import ChannelLLMOutputAdapter
+from dotclaw.eval.draft_service import EvalCaseDraftService
 from dotclaw.session import Session, SessionManager
 from dotclaw.bootstrap import ApplicationHost
 from dotclaw.bootstrap.session_interaction import (
@@ -46,6 +47,7 @@ from dotclaw.skills.registry import SkillRegistry
 from dotclaw.runtime.application.dto import RunResult
 from dotclaw.runtime.application.ports import LLMOutputPort
 from dotclaw.runtime.domain.facts import RunErrorCode
+from dotclaw.trace.service import TraceService
 from dotclaw.tools.base import ToolDefinition, ToolSource
 from dotclaw.tools.executor import ToolExecutor
 
@@ -168,8 +170,10 @@ async def _run_cli(show_reasoning: bool = True) -> None:
                     elif cmd == "/model":
                         identity = service.get_identity(current_session)
                         channel.print_info(f"当前模型: {identity.resolve_model(config.llm.default_model)}")
+                    elif cmd == "/trace":
+                        await _cmd_trace(channel, host.trace_service, args)
                     elif cmd == "/eval":
-                        await _cmd_eval(channel, host.eval_draft_service, args)
+                        await _cmd_eval(channel, host.eval_draft_service, host.trace_service, args)
                     else:
                         channel.print_error(f"未知命令: {cmd}")
                     continue
@@ -206,7 +210,8 @@ dotClaw 命令:
   /retry <run_id>   重试中断运行
   /abandon <run_id> 放弃中断运行
   /model           查看当前模型
-  /eval            评测草案：list/show/review/confirm/run <dataset> ...
+  /trace <run_id>  查看指定运行的追踪摘要
+  /eval            评测草案：create/list/show/review/confirm/run <dataset> ...
   /help            显示帮助
   /quit            退出
 """)
@@ -400,19 +405,59 @@ async def _eval_run(
             channel.print_error(f"ERROR 详情: {report.error_detail}")
 
 
+async def _cmd_trace(
+    channel: CLIChannel,
+    trace_service: TraceService,
+    run_id: str,
+) -> None:
+    """读取指定 Run 的 Trace 并输出不含正文的摘要。"""
+    if not run_id:
+        channel.print_error("用法: /trace <run_id>")
+        return
+    try:
+        trace = await trace_service.get_trace(run_id)
+    except LookupError as error:
+        channel.print_error(f"trace 错误: {error}")
+        return
+
+    metrics = trace.metrics
+    channel.print_info(
+        f"Trace {trace.source.run_id}: partial={trace.is_partial}, "
+        f"spans={len(trace.spans)}, issues={len(trace.issues)}"
+    )
+    channel.print_info(
+        f"  critical_path={metrics.critical_path_ms}ms, "
+        f"llm={metrics.llm_duration_ms}ms, tool={metrics.tool_duration_ms}ms, "
+        f"failed_tools={metrics.failed_tool_count}, incomplete_spans={metrics.incomplete_span_count}"
+    )
+
+
 async def _cmd_eval(
     channel: CLIChannel,
-    service: "EvalCaseDraftService",  # 由 ApplicationHost 注入
+    service: EvalCaseDraftService,  # 由 ApplicationHost 注入
+    trace_service: TraceService,
     arg_str: str,
 ) -> None:
     """评测草案的 Channel 命令；仅经服务读写，不直接访问 Dataset 文件。"""
     parts = arg_str.split()
     if not parts:
-        channel.print_info("用法: /eval <list|show|review|confirm|run> <dataset> [<draft_id> [<case_id>]]")
+        channel.print_info("用法: /eval <create|list|show|review|confirm|run> <dataset> ...")
         return
     sub = parts[0]
     try:
-        if sub == "list":
+        if sub == "create":
+            if len(parts) < 3 or len(parts) > 4:
+                channel.print_error("用法: /eval create <dataset> <run_id> [case_id]（先读取 Trace）")
+                return
+            # run_id 仅用于定位权威记录；Draft 的直接来源始终是重建后的 Trace。
+            trace = await trace_service.get_trace(parts[2])
+            case_id = parts[3] if len(parts) == 4 else None
+            draft = await service.create_draft_from_trace(parts[1], trace, case_id=case_id)
+            channel.print_info(
+                f"已创建 Draft: {draft.draft_id} "
+                f"(requires_review={draft.requires_review})"
+            )
+        elif sub == "list":
             if len(parts) < 2:
                 channel.print_error("用法: /eval list <dataset>")
                 return
@@ -463,7 +508,7 @@ async def _cmd_eval(
             await _eval_run(channel, service.datasets_root, parts)
         else:
             channel.print_error(f"未知 /eval 子命令: {sub}")
-    except (FileNotFoundError, FileExistsError, ValueError) as error:
+    except (FileNotFoundError, FileExistsError, LookupError, ValueError) as error:
         channel.print_error(f"eval 错误: {error}")
 
 

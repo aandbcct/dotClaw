@@ -11,6 +11,7 @@ from dotclaw.eval.dataset import case_exists, case_path, draft_path, save_draft
 from dotclaw.eval.draft import EvalCaseDraft
 from dotclaw.eval.draft_service import EvalCaseDraftService
 from dotclaw.eval.models import EvalCaseValidationError
+from dotclaw.trace.models import RunTrace
 
 from .helpers import build_case, llm_response, make_llm_fixture, make_terminal_trace
 
@@ -256,6 +257,20 @@ class RecordingChannel:
         self.errors.append(message)
 
 
+class RecordingTraceService:
+    """返回固定 Trace 的最小只读服务替身。"""
+
+    def __init__(self, trace: RunTrace) -> None:
+        self._trace = trace
+        self.requested_run_ids: list[str] = []
+
+    async def get_trace(self, run_id: str) -> RunTrace:
+        self.requested_run_ids.append(run_id)
+        if run_id != self._trace.source.run_id:
+            raise LookupError(f"未找到 Run: {run_id}")
+        return self._trace
+
+
 async def test_channel_command_walks_full_review_flow(tmp_path: Path) -> None:
     """Channel 命令依次完成列出 / 查看 / 审阅 / 确认，全部经服务。"""
     from dotclaw.main import _cmd_eval
@@ -263,22 +278,23 @@ async def test_channel_command_walks_full_review_flow(tmp_path: Path) -> None:
     service = service_at(tmp_path)
     await service.create_draft_from_trace(DATASET, make_terminal_trace("run-1"))
     channel = RecordingChannel()
+    trace_service = RecordingTraceService(make_terminal_trace("run-1"))
 
-    await _cmd_eval(channel, service, f"list {DATASET}")
+    await _cmd_eval(channel, service, trace_service, f"list {DATASET}")
     assert any("1 个草案" in text for text in channel.infos)
 
-    await _cmd_eval(channel, service, f"show {DATASET} draft-run-1")
+    await _cmd_eval(channel, service, trace_service, f"show {DATASET} draft-run-1")
     assert any("draft-run-1" in text for text in channel.infos)
 
-    await _cmd_eval(channel, service, f"review {DATASET} draft-run-1")
+    await _cmd_eval(channel, service, trace_service, f"review {DATASET} draft-run-1")
     assert (await service.load_draft(DATASET, "draft-run-1")).requires_review is False
 
-    await _cmd_eval(channel, service, f"confirm {DATASET} draft-run-1 case-final")
+    await _cmd_eval(channel, service, trace_service, f"confirm {DATASET} draft-run-1 case-final")
     assert channel.errors == []
     assert case_exists(tmp_path, DATASET, "case-final") is True
 
     channel.infos.clear()
-    await _cmd_eval(channel, service, f"list {DATASET}")
+    await _cmd_eval(channel, service, trace_service, f"list {DATASET}")
     assert any("1 个 Case" in text for text in channel.infos)
 
 
@@ -288,11 +304,12 @@ async def test_channel_reports_service_errors_without_crashing(tmp_path: Path) -
 
     service = service_at(tmp_path)
     channel = RecordingChannel()
+    trace_service = RecordingTraceService(make_terminal_trace("run-1"))
 
-    await _cmd_eval(channel, service, f"show {DATASET} missing")
-    await _cmd_eval(channel, service, f"confirm {DATASET} missing case-x")
-    await _cmd_eval(channel, service, "bogus")
-    await _cmd_eval(channel, service, "")
+    await _cmd_eval(channel, service, trace_service, f"show {DATASET} missing")
+    await _cmd_eval(channel, service, trace_service, f"confirm {DATASET} missing case-x")
+    await _cmd_eval(channel, service, trace_service, "bogus")
+    await _cmd_eval(channel, service, trace_service, "")
 
     assert len(channel.errors) == 3
     assert all(text for text in channel.errors)
@@ -305,6 +322,24 @@ def test_channel_command_has_no_direct_file_access() -> None:
     source = inspect.getsource(_cmd_eval)
     for forbidden in ("open(", "json.", "Path(", "write_text", "read_text", "glob(", "dataset_path"):
         assert forbidden not in source, f"Channel 命令不应直接访问文件：{forbidden}"
+
+
+async def test_channel_reads_trace_and_creates_draft_from_it(tmp_path: Path) -> None:
+    """CLI 先读取 RunTrace，再从该 Trace 生成待审阅 Draft。"""
+    from dotclaw.main import _cmd_eval, _cmd_trace
+
+    trace = make_terminal_trace("run-1")
+    trace_service = RecordingTraceService(trace)
+    service = service_at(tmp_path)
+    channel = RecordingChannel()
+
+    await _cmd_trace(channel, trace_service, "run-1")
+    await _cmd_eval(channel, service, trace_service, f"create {DATASET} run-1")
+
+    assert trace_service.requested_run_ids == ["run-1", "run-1"]
+    assert (await service.load_draft(DATASET, "draft-run-1")).source_run_id == "run-1"
+    assert any(text.startswith("Trace run-1") for text in channel.infos)
+    assert any(text.startswith("已创建 Draft: draft-run-1") for text in channel.infos)
 
 
 def test_channel_package_does_not_import_dataset_layer() -> None:
