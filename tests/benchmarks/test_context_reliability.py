@@ -28,7 +28,11 @@ def test_context_suite_emits_all_required_scenarios(tmp_path) -> None:
     assert by_case["replay_efficiency_forced"].recovery_stage_duration_ms is not None
     for outcome in ("success", "failure", "cancelled", "abandoned"):
         sample = by_case[f"compression_{outcome}"]
+        baseline = by_case[f"compression_without_compression_{outcome}"]
         assert sample.passed is True
+        assert baseline.passed is True
+        assert baseline.tokens_before == sample.tokens_before
+        assert baseline.retained_conversation_count == 4
         assert sample.tokens_before is not None and sample.tokens_after is not None
         assert sample.tokens_after < sample.tokens_before
         assert sample.tool_pair_break_count == 0

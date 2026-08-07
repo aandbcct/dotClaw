@@ -119,20 +119,36 @@ async def _replay_control(config: ContextRunConfig, attempt: int, warmup: bool, 
     return _sample(ContextScenario.REPLAY_EFFICIENCY.value + ("_forced" if forced else "_replay"), attempt, warmup, passed, elapsed, replay_mode="forced_rebuild" if forced else "snapshot_replay", provider_load_count=source.load_count, context_version_count_delta=len(after) - len(before), recovery_stage_duration_ms=elapsed)
 
 
+async def _compression_history(root: Path, config: ContextRunConfig) -> tuple[object, object, object, tuple[object, ...], str]:
+    """构造关闭/开启对照共享的旧工具 Run 与三条固定 Conversation。"""
+    manager, session, historical_request = await session_with_history(root, 0)
+    historical_llm = ToolThenFinalLLM()
+    historical_engine, historical_repository = build_engine(root, manager, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), historical_llm, context_window=200, tool=CompletingTool())
+    historical_result = await historical_engine.execute(historical_request)
+    historical_messages = await historical_repository.load_messages(session.id, historical_result.run_id)
+    historical_session = await manager.load(session.id)
+    if historical_session is None:
+        raise RuntimeError("PR6 历史工具 Run 未投影 Session")
+    for index in range(3):
+        historical_session.add_conversation(f"旧问题-{index}", f"旧回答-{index}", [f"old-{index}"])
+    await manager.save(historical_session)
+    return manager, historical_session, create_run_request(historical_session, historical_session.agent_id, "当前问题"), historical_messages, historical_result.run_id
+
+
 async def _compression(config: ContextRunConfig) -> list[BenchmarkSample]:
     """执行真实成功、失败、取消、放弃 Run，并从 Session/ContextVersion 读取投影事实。"""
     samples: list[BenchmarkSample] = []
     for outcome in ("success", "failure", "cancelled", "abandoned"):
         for attempt in range(config.boundary_warmup + config.boundary_repeat):
             baseline_root = Path(tempfile.mkdtemp(prefix=f"dotclaw-pr6-compression-disabled-{outcome}-"))
-            baseline_manager, baseline_session, baseline_request = await session_with_history(baseline_root, 3)
+            baseline_manager, baseline_session, baseline_request, _, _ = await _compression_history(baseline_root, config)
             baseline_counter = FixedTokenizerCounter(config.tokenizer)
             baseline_engine, _ = build_engine(baseline_root, baseline_manager, baseline_counter, BenchmarkCompactor(), CapturingLLM(), context_window=200)
             baseline_result = await baseline_engine.execute(baseline_request)
             baseline_tokens = (await baseline_counter.count(baseline_counter.requests[0])).input_tokens
-            samples.append(_sample(f"compression_without_compression_{outcome}", attempt, attempt < config.boundary_warmup, baseline_result.state.outcome() is not None, 0.0, replay_mode="compression_disabled", tokens_before=baseline_tokens, tokens_after=baseline_tokens, token_reduction_ratio=0.0, budget_passed=baseline_tokens <= 70, retained_conversation_count=3, tool_pair_break_count=0, run_outcome=outcome))
+            samples.append(_sample(f"compression_without_compression_{outcome}", attempt, attempt < config.boundary_warmup, baseline_result.state.outcome() is not None, 0.0, replay_mode="compression_disabled", tokens_before=baseline_tokens, tokens_after=baseline_tokens, token_reduction_ratio=0.0, budget_passed=baseline_tokens <= 70, retained_conversation_count=4, tool_pair_break_count=0, run_outcome=outcome))
             root = Path(tempfile.mkdtemp(prefix=f"dotclaw-pr6-compression-{outcome}-"))
-            manager, session, request = await session_with_history(root, 3)
+            manager, session, request, historical_messages, historical_run_id = await _compression_history(root, config)
             counter, compactor = FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor()
             llm = BlockingLLM() if outcome == "cancelled" else ToolThenFinalLLM() if outcome == "success" else CapturingLLM(unavailable_first=outcome == "abandoned", fail_first=outcome == "failure")
             engine, repository = build_engine(root, manager, counter, compactor, llm, context_window=70, tool=CompletingTool() if outcome == "success" else None)
@@ -157,10 +173,11 @@ async def _compression(config: ContextRunConfig) -> list[BenchmarkSample]:
                 await next_engine.execute(create_run_request(persisted, session.agent_id, "下一次请求"))
                 next_text = "\n".join(content for _, content in _messages(next_llm.contexts[0].messages))
                 next_request_ok = "PR6 固定摘要" in next_text and "旧问题-2" in next_text
-            tool_messages = await repository.load_messages(session.id, result.run_id)
-            tool_facts = tuple({"kind": "tool_call" if message.tool_calls else "tool_result" if message.kind.value == "tool_result" else "other", "call_id": message.tool_call_id or (message.tool_calls[0].call_id if message.tool_calls else "")} for message in tool_messages)
+            historical_conversation = next((conversation for conversation in session.conversations if historical_run_id in conversation.agent_run_ids), None)
+            candidate_covers_tool = active is not None and historical_conversation is not None and session.conversations.index(historical_conversation) <= next(index for index, conversation in enumerate(session.conversations) if conversation.conversation_id == active.covered_through_conversation_id)
+            tool_facts = tuple({"kind": "tool_call" if message.tool_calls else "tool_result" if message.kind.value == "tool_result" else "other", "call_id": message.tool_call_id or (message.tool_calls[0].call_id if message.tool_calls else "")} for message in historical_messages)
             tool_breaks = tool_pair_break_count(tool_facts)
-            passed = bool(compactor.requests) and actual_state == expected_state and next_request_ok and tool_breaks == 0 and (outcome != "success" or projected == 1) and (outcome == "success" or pollution == 0)
+            passed = bool(compactor.requests) and actual_state == expected_state and next_request_ok and tool_breaks == 0 and (outcome != "success" or candidate_covers_tool) and (outcome != "success" or projected == 1) and (outcome == "success" or pollution == 0)
             duration = (time.perf_counter() - compression_started) * 1000
             samples.append(_sample(getattr(ContextScenario, f"COMPRESSION_{outcome.upper()}").value, attempt, attempt < config.boundary_warmup, passed, duration, replay_mode="compression_enabled", tokens_before=token_before, tokens_after=token_after, token_reduction_ratio=(token_before - token_after) / token_before, budget_passed=token_after <= 70, retained_conversation_count=len(after.history_messages) // 2, covered_through_id=active.covered_through_conversation_id if active is not None else None, compression_duration_ms=duration, tool_pair_break_count=tool_breaks, session_projection_count=projected, session_pollution_count=pollution, run_outcome=outcome, context_version_count_delta=len(versions)))
     return samples
@@ -168,17 +185,23 @@ async def _compression(config: ContextRunConfig) -> list[BenchmarkSample]:
 
 async def _owner_samples(config: ContextRunConfig) -> list[BenchmarkSample]:
     """以不同 Agent、Session、Run 的真实 ContextVersion 互相检查禁止标识。"""
-    identifiers = {ContextOwner.GLOBAL: "GLOBAL", ContextOwner.AGENT: "AGENT:alpha", ContextOwner.SESSION: "SESSION:one", ContextOwner.RUN: "RUN:one"}
-    forbidden = ("AGENT:beta", "RUN:two")
+    identifiers = {ContextOwner.GLOBAL: "GLOBAL", ContextOwner.AGENT: "AGENT:alpha", ContextOwner.SESSION: "SESSION:summary-one", ContextOwner.RUN: "RUN:one"}
+    forbidden = ("AGENT:beta", "SESSION:summary-two", "RUN:two")
     root = Path(tempfile.mkdtemp(prefix="dotclaw-pr6-owner-"))
     shared_source = ObservedKnowledgeBase("RUN:one")
     shared_provider = build_context_provider(ContextDependencies(knowledge_base=shared_source, user_profile=UserProfile(name="SESSION:one"), agent_registry=BenchmarkAgentDirectory()))
     manager, session, request = await session_with_history(root, agent_id="alpha", session_marker="HISTORY")
+    session.append_history_compression(1, session.conversations[0].conversation_id, "SESSION:summary-one", hashlib.sha256(b"SESSION:summary-one").hexdigest(), "source-one")
+    await manager.save(session)
+    request = create_run_request(session, "alpha", "RUN:current")
     engine, repository = build_engine(root, manager, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), CapturingLLM(), context_port=shared_provider)
     result = await engine.execute(request)
     version = (await repository.load_context_versions(session.id, result.run_id))[0]
     shared_source.value = "RUN:two"
     other_manager, other_session, other_request = await session_with_history(root, agent_id="beta", session_marker="HISTORY")
+    other_session.append_history_compression(1, other_session.conversations[0].conversation_id, "SESSION:summary-two", hashlib.sha256(b"SESSION:summary-two").hexdigest(), "source-two")
+    await other_manager.save(other_session)
+    other_request = create_run_request(other_session, "beta", "RUN:current")
     other_engine, other_repository = build_engine(root, other_manager, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), CapturingLLM(), context_port=shared_provider)
     other_result = await other_engine.execute(other_request)
     other_version = (await other_repository.load_context_versions(other_session.id, other_result.run_id))[0]
