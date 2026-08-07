@@ -398,6 +398,33 @@ class BenchmarkSample:
     capability_status: CapabilityStatus | None = None
     capability_reason: str | None = None
 
+    # ---- PR5 Capability 安全链观察字段（旧样本缺失时均为 None） ----
+    matrix_case_id: str | None = None
+    expected_decision: str | None = None
+    actual_decision: str | None = None
+    actual_error_code: str | None = None
+    decision_pass: bool | None = None
+    validation_entered: int | None = None
+    broker_entered: int | None = None
+    policy_entered: int | None = None
+    approval_entered: int | None = None
+    handler_entered: int | None = None
+    resource_kind: str | None = None
+    policy_profile: str | None = None
+    matched_rule: str | None = None
+    resolved_path_match: bool | None = None
+    network_service: str | None = None
+    network_host: str | None = None
+    mcp_server: str | None = None
+    journal_summary_redacted: bool | None = None
+    approval_summary_redacted: bool | None = None
+    sensitive_leak_count: int | None = None
+    agent_id: str | None = None
+    agent_rule_source: str | None = None
+    agent_policy_isolated: bool | None = None
+    measurement_mode: str | None = None
+    pre_handler_duration_ms: float | None = None
+
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
         result: dict[str, object] = {
@@ -475,6 +502,31 @@ class BenchmarkSample:
             "recovery_wall_duration_ms": self.recovery_wall_duration_ms,
             "capability_status": None if self.capability_status is None else self.capability_status.value,
             "capability_reason": self.capability_reason,
+            "matrix_case_id": self.matrix_case_id,
+            "expected_decision": self.expected_decision,
+            "actual_decision": self.actual_decision,
+            "actual_error_code": self.actual_error_code,
+            "decision_pass": self.decision_pass,
+            "validation_entered": self.validation_entered,
+            "broker_entered": self.broker_entered,
+            "policy_entered": self.policy_entered,
+            "approval_entered": self.approval_entered,
+            "handler_entered": self.handler_entered,
+            "resource_kind": self.resource_kind,
+            "policy_profile": self.policy_profile,
+            "matched_rule": self.matched_rule,
+            "resolved_path_match": self.resolved_path_match,
+            "network_service": self.network_service,
+            "network_host": self.network_host,
+            "mcp_server": self.mcp_server,
+            "journal_summary_redacted": self.journal_summary_redacted,
+            "approval_summary_redacted": self.approval_summary_redacted,
+            "sensitive_leak_count": self.sensitive_leak_count,
+            "agent_id": self.agent_id,
+            "agent_rule_source": self.agent_rule_source,
+            "agent_policy_isolated": self.agent_policy_isolated,
+            "measurement_mode": self.measurement_mode,
+            "pre_handler_duration_ms": self.pre_handler_duration_ms,
         }
         return result
 
@@ -571,6 +623,31 @@ class BenchmarkSample:
             recovery_wall_duration_ms=_optional_float(data.get("recovery_wall_duration_ms"), f"{label}.recovery_wall_duration_ms"),
             capability_status=_optional_enum(CapabilityStatus, data.get("capability_status"), f"{label}.capability_status", None),
             capability_reason=_optional_str(data.get("capability_reason"), f"{label}.capability_reason"),
+            matrix_case_id=_optional_str(data.get("matrix_case_id"), f"{label}.matrix_case_id"),
+            expected_decision=_optional_str(data.get("expected_decision"), f"{label}.expected_decision"),
+            actual_decision=_optional_str(data.get("actual_decision"), f"{label}.actual_decision"),
+            actual_error_code=_optional_str(data.get("actual_error_code"), f"{label}.actual_error_code"),
+            decision_pass=_optional_bool(data.get("decision_pass"), f"{label}.decision_pass"),
+            validation_entered=_optional_int(data.get("validation_entered"), f"{label}.validation_entered"),
+            broker_entered=_optional_int(data.get("broker_entered"), f"{label}.broker_entered"),
+            policy_entered=_optional_int(data.get("policy_entered"), f"{label}.policy_entered"),
+            approval_entered=_optional_int(data.get("approval_entered"), f"{label}.approval_entered"),
+            handler_entered=_optional_int(data.get("handler_entered"), f"{label}.handler_entered"),
+            resource_kind=_optional_str(data.get("resource_kind"), f"{label}.resource_kind"),
+            policy_profile=_optional_str(data.get("policy_profile"), f"{label}.policy_profile"),
+            matched_rule=_optional_str(data.get("matched_rule"), f"{label}.matched_rule"),
+            resolved_path_match=_optional_bool(data.get("resolved_path_match"), f"{label}.resolved_path_match"),
+            network_service=_optional_str(data.get("network_service"), f"{label}.network_service"),
+            network_host=_optional_str(data.get("network_host"), f"{label}.network_host"),
+            mcp_server=_optional_str(data.get("mcp_server"), f"{label}.mcp_server"),
+            journal_summary_redacted=_optional_bool(data.get("journal_summary_redacted"), f"{label}.journal_summary_redacted"),
+            approval_summary_redacted=_optional_bool(data.get("approval_summary_redacted"), f"{label}.approval_summary_redacted"),
+            sensitive_leak_count=_optional_int(data.get("sensitive_leak_count"), f"{label}.sensitive_leak_count"),
+            agent_id=_optional_str(data.get("agent_id"), f"{label}.agent_id"),
+            agent_rule_source=_optional_str(data.get("agent_rule_source"), f"{label}.agent_rule_source"),
+            agent_policy_isolated=_optional_bool(data.get("agent_policy_isolated"), f"{label}.agent_policy_isolated"),
+            measurement_mode=_optional_str(data.get("measurement_mode"), f"{label}.measurement_mode"),
+            pre_handler_duration_ms=_optional_float(data.get("pre_handler_duration_ms"), f"{label}.pre_handler_duration_ms"),
         )
 
 
