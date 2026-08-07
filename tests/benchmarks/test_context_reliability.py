@@ -16,6 +16,12 @@ def test_context_suite_emits_all_required_scenarios(tmp_path) -> None:
     assert recovery.same_context_version is True
     assert recovery.context_drift_count == 0
     assert recovery.provider_reload_count == 0
+    assert recovery.conversation_count_delta == 1
+    assert recovery.run_message_count_delta == 1
+    assert recovery.run_event_count_delta is not None and recovery.run_event_count_delta > 0
+    assert recovery.git_commit
+    assert recovery.config_hash
+    assert recovery.eval_schema_version == "2.0"
     assert by_case["replay_efficiency_replay"].provider_load_count == 0
     assert by_case["replay_efficiency_forced"].provider_load_count == 1
     assert by_case["replay_efficiency_replay"].recovery_stage_duration_ms is not None
@@ -25,6 +31,7 @@ def test_context_suite_emits_all_required_scenarios(tmp_path) -> None:
         assert sample.passed is True
         assert sample.tokens_before is not None and sample.tokens_after is not None
         assert sample.tokens_after < sample.tokens_before
+        assert sample.tool_pair_break_count == 0
         assert sample.session_pollution_count == 0
     assert by_case["compression_success"].session_projection_count == 1
     for owner in ("global", "agent", "session", "run"):
@@ -37,4 +44,8 @@ def test_context_suite_emits_all_required_scenarios(tmp_path) -> None:
     assert len(snapshots) == 2
     snapshot = next(path for path in snapshots if path.name != "context-config.json")
     import json
-    assert json.loads(snapshot.read_text(encoding="utf-8"))["samples_path"].startswith("samples/")
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert payload["samples_path"].startswith("samples/")
+    assert payload["replay_control"]["snapshot_provider_load_count"] == 0
+    assert payload["replay_control"]["forced_provider_load_count"] == 1
+    assert payload["compression"]["tool_pair_break_count"] == 0

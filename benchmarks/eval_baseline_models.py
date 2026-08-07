@@ -462,6 +462,9 @@ class BenchmarkSample:
     agent_leak_count: int | None = None
     session_leak_count: int | None = None
     run_leak_count: int | None = None
+    conversation_count_delta: int | None = None
+    run_message_count_delta: int | None = None
+    run_event_count_delta: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
@@ -593,6 +596,9 @@ class BenchmarkSample:
             "agent_leak_count": self.agent_leak_count,
             "session_leak_count": self.session_leak_count,
             "run_leak_count": self.run_leak_count,
+            "conversation_count_delta": self.conversation_count_delta,
+            "run_message_count_delta": self.run_message_count_delta,
+            "run_event_count_delta": self.run_event_count_delta,
         }
         return result
 
@@ -742,6 +748,9 @@ class BenchmarkSample:
             agent_leak_count=_optional_int(data.get("agent_leak_count"), f"{label}.agent_leak_count"),
             session_leak_count=_optional_int(data.get("session_leak_count"), f"{label}.session_leak_count"),
             run_leak_count=_optional_int(data.get("run_leak_count"), f"{label}.run_leak_count"),
+            conversation_count_delta=_optional_int(data.get("conversation_count_delta"), f"{label}.conversation_count_delta"),
+            run_message_count_delta=_optional_int(data.get("run_message_count_delta"), f"{label}.run_message_count_delta"),
+            run_event_count_delta=_optional_int(data.get("run_event_count_delta"), f"{label}.run_event_count_delta"),
         )
 
 
