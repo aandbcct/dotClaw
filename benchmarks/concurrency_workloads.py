@@ -191,7 +191,7 @@ class ControlledSubmissionGate:
         await event.wait()
 
     def release_next(self, session_id: str, accepted_seq: int) -> None:
-        """在当前提交已进入协调器后放行下一个接受序号。"""
+        """在当前协程进入应用入口后放行下一接受序号，不等待请求终态。"""
         self._entry_events.setdefault((session_id, accepted_seq + 1), asyncio.Event()).set()
 
     def reset(self) -> None:

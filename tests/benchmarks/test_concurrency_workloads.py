@@ -106,6 +106,29 @@ class TestControlledSubmissionGate:
         await asyncio.gather(*(enter(sequence) for sequence in reversed(sequences)))
         assert observed == [1, 2, 3]
 
+    @pytest.mark.asyncio
+    async def test_release_next_does_not_wait_for_previous_request_completion(self):
+        """下一请求进入应用入口时，前一请求仍可处于未完成状态。"""
+        gate = ControlledSubmissionGate()
+        first, second = gate.accept("s1"), gate.accept("s1")
+        first_can_finish = asyncio.Event()
+        second_entered = asyncio.Event()
+
+        async def submit(sequence: int) -> None:
+            await gate.enter("s1", sequence)
+            gate.release_next("s1", sequence)
+            if sequence == second:
+                second_entered.set()
+            if sequence == first:
+                await first_can_finish.wait()
+
+        first_task = asyncio.create_task(submit(first))
+        second_task = asyncio.create_task(submit(second))
+        await asyncio.wait_for(second_entered.wait(), timeout=0.5)
+        assert not first_task.done()
+        first_can_finish.set()
+        await asyncio.gather(first_task, second_task)
+
 
 class TestWorkloadConfig:
     """工作负载配置测试。"""

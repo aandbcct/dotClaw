@@ -150,6 +150,16 @@ class TestAggregateScenarioStats:
         stats = aggregate_scenario_stats("fifo", "session_lock", samples, 1)
         assert stats.total_requests == 1
 
+    def test_zero_queue_wait_is_included_in_distribution(self):
+        """零等待是有效测量值，必须参与排队分位数计算。"""
+        samples = [
+            _make_concurrency_sample(queue_wait_ms=0.0),
+            _make_concurrency_sample(queue_wait_ms=10.0),
+        ]
+        stats = aggregate_scenario_stats("queue", "session_lock", samples, 1)
+        assert stats.queue_wait_ms.sample_count == 2
+        assert stats.queue_wait_ms.p50_ms == 5.0
+
     def test_cancel_stats(self):
         """取消场景统计。"""
         samples = [

@@ -251,7 +251,7 @@ def aggregate_scenario_stats(
     # 排队等待时延
     queue_values: list[float] = [
         s.queue_wait_ms for s in formal
-        if s.queue_wait_ms is not None and s.queue_wait_ms > 0
+        if s.queue_wait_ms is not None
     ]
 
     # 端到端时延

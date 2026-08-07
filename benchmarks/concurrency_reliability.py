@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Sequence
 
 from dotclaw.bootstrap.session_interaction import SessionInteractionService
-from dotclaw.session.session import SessionManager
+from dotclaw.session.session import Session, SessionManager
 from dotclaw.runtime.adapters.approval_repository import ApprovalRepositoryAdapter
 from dotclaw.runtime.adapters.checkpoint_repository import CheckpointRepositoryAdapter
 from dotclaw.runtime.adapters.run_repository import RunRepositoryAdapter
@@ -257,7 +257,7 @@ def _make_request_factory(
 async def _run_fifo_same_session(
     coordinator: SessionRunCoordinator,
     repository: RunRepositoryAdapter,
-    session_id: str,
+    session: Session,
     agent_id: str,
     gate: ControlledSubmissionGate,
     config: WorkloadConfig,
@@ -275,7 +275,7 @@ async def _run_fifo_same_session(
     user_messages: list[str] = []
     identifiers: list[str] = []
     for i in range(n):
-        seq = gate.accept(session_id)
+        seq = gate.accept(session.id)
         accepted_seqs.append(seq)
         identifier, user_msg = make_benchmark_request(agent_id, 0, i)
         identifiers.append(identifier)
@@ -283,11 +283,13 @@ async def _run_fifo_same_session(
 
     # 并发提交（同 Session 经锁 FIFO 串行化）
     async def submit_timed(accepted_seq: int, user_message: str):
-        """记录入口和终态时刻，避免用批次均摊冒充请求时延。"""
-        await gate.enter(session_id, accepted_seq)
+        """按接受顺序放行真实入口，并让全部请求在 Runtime Session 锁上竞争。"""
+        await gate.enter(session.id, accepted_seq)
         accepted_at = datetime.now(timezone.utc)
-        result = await coordinator.submit(session_id, user_message)
-        gate.release_next(session_id, accepted_seq)
+        # 仅控制进入应用入口的先后；在请求结束前立即放行下一项，禁止 Benchmark 自行串行化。
+        gate.release_next(session.id, accepted_seq)
+        # 传递已创建 Session，避免异步磁盘读取竞争重排到达同一 Session 锁的先后。
+        result = await coordinator.submit(session, user_message)
         ended_at = datetime.now(timezone.utc)
         return result, accepted_at, ended_at
 
@@ -299,7 +301,7 @@ async def _run_fifo_same_session(
     # 读取事实并构造样本
     facts_list: list[RunFacts] = []
     for i, rr in enumerate(run_results):
-        facts = await read_run_facts(repository, session_id, rr.run_id)
+        facts = await read_run_facts(repository, session.id, rr.run_id)
         if facts is None:
             continue
         facts_list.append(facts)
@@ -354,7 +356,7 @@ async def _run_fifo_same_session(
     )
     started_seq = {run_id: index + 1 for index, (_, run_id) in enumerate(started_order)}
     completed_seq = {run_id: index + 1 for index, (_, run_id) in enumerate(completed_order)}
-    conversation = await read_session_conversation(repository, session_id)
+    conversation = await read_session_conversation(repository, session.id)
     conversation_seq = {
         facts.run_id: next((index + 1 for index, content in enumerate(conversation) if facts.identifier in content), None)
         for facts in facts_list
@@ -857,7 +859,7 @@ class ConcurrencyReliabilityRunner:
 
                 batch_started: float = time.perf_counter()
                 batch_samples, _ = await _run_fifo_same_session(
-                    interaction, repository, session.id,
+                    interaction, repository, session,
                     agent_id, gate, config, batch_index, is_warmup, batch_started,
                 )
                 interaction = SessionInteractionService(sm, registry, coordinator)
