@@ -102,6 +102,15 @@ class _McpHandler(ToolHandler):
     def definition(self) -> ToolDefinition:
         return self._definition
 
+    @property
+    def input_schema(self) -> dict:
+        """MCP 调用必须带结构化 operation，供参数校验屏障覆盖。"""
+        return {
+            "type": "object",
+            "properties": {"operation": {"type": "string"}},
+            "required": ["operation"],
+        }
+
     async def execute(self, arguments: Any, context: ToolExecutionContext | None = None) -> ToolResult:
         return ToolResult(output="mcp-recorded")
 
