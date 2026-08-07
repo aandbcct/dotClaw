@@ -13,12 +13,12 @@ from pathlib import Path
 from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter, SessionConversationProjector
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
-from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot, RunMessage, RunRequest, ToolInvocation, ToolResult, ToolResultStatus
+from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot, DelegationRequest, DelegationResult, DelegationSubmission, RunMessage, RunRequest, ToolInvocation, ToolResult, ToolResultStatus
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.context_budget import TokenCountRequest, TokenCountResult
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
-from dotclaw.runtime.application.ports import ContextPort, HistoryCompactorPort, LLMPort, SuccessCommitFaultPort, ToolPort
+from dotclaw.runtime.application.ports import ContextPort, DelegationPort, HistoryCompactorPort, LLMPort, SuccessCommitFaultPort, ToolPort
 from dotclaw.runtime.domain.context import SuccessCommitFaultPoint, SuccessCommitIntent
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, MessageRole, RunCheckpoint, RunMessageKind, ToolCall
@@ -26,6 +26,8 @@ from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.state import AgentRunState, Ended, RunOutcome, RunStage, Running
 from dotclaw.session.session import SessionManager
 from dataclasses import replace
+
+from .recovery_assertions import checkpoint_summary
 
 
 class RecoveryInterrupted(BaseException):
@@ -144,6 +146,29 @@ class ScriptedTool(ToolPort):
         """替身没有远程请求。"""
 
 
+class BoundaryDelegatingLLM(LLMPort):
+    """只发起一次委派，用于构造父 Run（父级运行）挂起持久化事实。"""
+
+    async def complete(self, context, execution: RunExecutionView, output_port=None) -> RunMessage:
+        return RunMessage("delegation-request", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(ToolCall("delegate-call", "delegate", {"target_agent_id": "child-agent", "title": "child", "objective": "audit"}),))
+
+    async def cancel(self, run_id: str) -> None:
+        """替身没有远程请求。"""
+
+
+class BoundaryDelegation(DelegationPort):
+    """仅提交子标识而不持久化子 Run，复现当前冷重建后无法回灌的边界。"""
+
+    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
+        return DelegationSubmission("boundary-child", "boundary-task", "boundary-child-session")
+
+    async def result(self, child_run_id: str) -> DelegationResult | None:
+        return DelegationResult(child_run_id, RunOutcome.COMPLETED, "child")
+
+    async def cancel(self, child_run_id: str) -> None:
+        """边界审计不触发取消。"""
+
+
 def make_engine(root: Path, mode: str, *, resume: bool) -> RuntimeEngine:
     """从同一存储根新装配服务对象，作为 PR4 冷重建唯一入口。"""
     effects = EffectLog(root)
@@ -153,6 +178,30 @@ def make_engine(root: Path, mode: str, *, resume: bool) -> RuntimeEngine:
         RecoveryPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(),
         token_counter=RecoveryTokenCounter(), history_compactor=RecoveryHistoryCompactor(),
     )
+
+
+async def audit_delegation_cold_rebuild(root: Path) -> dict[str, object]:
+    """构造父 Run 等待子 Run，冷重建后尝试回灌并返回可追溯失败事实。"""
+    session = await SessionManager(root).create(agent_id="recovery-agent")
+    initial = RuntimeEngine(
+        RunRepositoryAdapter(root), CheckpointRepositoryAdapter(root), RecoveryContext(), BoundaryDelegatingLLM(),
+        ScriptedTool(EffectLog(root), "delegation", resume=False), RecoveryPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)),
+        CancellationService(), delegation_port=BoundaryDelegation(), token_counter=RecoveryTokenCounter(), history_compactor=RecoveryHistoryCompactor(),
+    )
+    waiting = await initial.execute(make_request(session.id))
+    checkpoint, _ = await checkpoint_summary(root, session.id, waiting.run_id)
+    events = await RunRepositoryAdapter(root).load_events(session.id, waiting.run_id)
+    # 冷重建时不携带旧 DelegationPort（委派端口）的进程内映射；公开入口必须明确拒绝回灌。
+    cold = make_engine(root, "delegation", resume=True)
+    result = await cold.resume_delegation(waiting.child_run_id or "")
+    return {
+        "parent_run_id": waiting.run_id,
+        "child_run_id": waiting.child_run_id,
+        "checkpoint_action": checkpoint,
+        "event_types": [event.event_type.value for event in events],
+        "replay_outcome": result.state.outcome().value,
+        "failure": None if result.error is None else result.error.message,
+    }
 
 
 def make_request(session_id: str) -> RunRequest:
