@@ -107,8 +107,29 @@ python -m benchmarks.concurrency_reliability \
 | 固定并发对照 | 8×4 请求，Session 锁 vs 全局锁主对照 | 吞吐变化率 |
 | 取消不阻塞 | 1 长 Run + 后续请求，验证取消送达/生效/锁释放 | 送达/生效 P50/P95 |
 
-> PR3 正在验收修正阶段。`reliability_concurrency_v1` 的既有 5+100 工件仅为候选数据，
-> 在真实入口、时序、隔离、排队等待和长短混合证据修正并复跑前，不作为正式基线或性能结论。
+### 正式基线（20260807T030719Z_24d6b1f，commit `24d6b1f`）
+
+- 复现命令：
+
+  ```bash
+  python -m benchmarks.concurrency_reliability \
+    --suite reliability_concurrency_v1 \
+    --core-warmup 5 --core-repeat 50 \
+    --scaling-warmup 5 --scaling-repeat 30 \
+    --fake-delay-ms 20 \
+    --output benchmarks/reports/concurrency/pr3-formal-20260807-rerun \
+    --save-baseline benchmarks/baselines/reliability_concurrency_v1
+  ```
+
+- 核心正确性：同 Session FIFO **1,000/1,000** 请求开始、完成和 Conversation 顺序一致；
+  多 Session 隔离 **1,600/1,600** 请求通过，消息、事件、ContextVersion、持久化工具记录和
+  输出串流泄漏均为 **0**；取消 **50/50** 送达、生效、锁释放和后续请求可用。
+- 取消时延：送达 P50/P95 **1.0 / 2.1 ms**，生效 P50/P95 **118.7 / 126.7 ms**。
+- 8×4 固定并发对照：Session 锁吞吐 **54.2 req/s**，全局锁 **9.7 req/s**；相对 Benchmark
+  全局串行吞吐 **+456.99%**，排队 P95 **-83.71%**，端到端 P95 **-81.45%**。
+- 原始证据：基线快照与 JSONL 位于 `benchmarks/baselines/reliability_concurrency_v1/`；
+  同次 `correctness.md`、`scheduling-comparison.md` 和 `workload-config.json` 位于
+  `benchmarks/reports/concurrency/pr3-formal-20260807-rerun/`。
 
 ### 口径与边界
 
