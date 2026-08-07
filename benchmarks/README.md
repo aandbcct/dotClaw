@@ -284,6 +284,13 @@ python -m benchmarks.capability_reliability `
 - `security-chain-overhead.md` 只比较相同 Handler、已验证参数和执行上下文下的直接 Handler 与完整链抵达 Handler entry 的 P50/P95；预热不进入统计；
 - 进程结论仅为 `process.exec` 档案级策略，不表达命令文本内容级治理。
 
+### 正式基线（20260807T113238Z_96940b5）
+
+- 环境：Windows、Python 3.13.5；矩阵 SHA-256 配置摘要为 `7e10f439fc1204ce`，原始 JSONL 与快照位于 `benchmarks/baselines/reliability_capability_v1/`；
+- 安全正确性：27 个适用 Case **27/27** 策略判定符合预期；参数校验失败、Policy deny 与未获审批调用进入 Handler 的次数均为 **0**；敏感测试标记泄露为 **0**；Windows Junction 逃逸用例实际执行；
+- 前置开销：同一已验证输入与记录型 Handler 下，直接 Handler P50/P95 为 **0.0026 / 0.0048 ms**；完整安全链 P50/P95 为 **2.0568 / 2.5199 ms**；安全链额外 P50/P95 为 **2.0542 / 2.5151 ms**（warmup=5、每种模式 50 个正式样本）；
+- 边界：结果仅代表本机、无副作用替身和固定有限矩阵；不证明命令内容级治理、TOCTOU 防护、真实外部 Tool 安全性或真实网络/API 性能。
+
 ## 目录结构
 
 ```
@@ -322,6 +329,7 @@ benchmarks/
     ├── v1.0/                  # 旧微基准基线
     ├── runtime_core_v1/       # PR1/PR2 Eval 基线（当前 + 历史快照 + samples/）
     └── reliability_concurrency_v1/  # PR3 并发基线（JSON + samples/）
+    └── reliability_capability_v1/   # PR5 安全矩阵（JSON + samples/）
 ```
 
 ## 快速开始
