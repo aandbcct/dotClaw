@@ -226,6 +226,24 @@ python -m benchmarks.concurrency_reliability \
   （含 warmup 诊断记录）；样本带 `execution_source` / `source_commit` /
   `scenario_id` / `evidence_kind` / `fixture_fingerprint` 来源元数据。
 
+## PR4：操作节点故障注入与恢复
+
+PR4 使用隔离存储根、记录型 LLM（大语言模型替身）和工具替身，在故障后销毁旧服务对象并从同一根目录冷重建。它分别报告控制状态、内部持久化事实和外部副作用；后两者不得互相改写结论。
+
+```powershell
+python -m benchmarks.recovery_reliability `
+  --warmup 5 --repeat 30 `
+  --process-warmup 5 --process-repeat 50 `
+  --output benchmarks/reports/recovery/<run-id> `
+  --save-baseline benchmarks/baselines/reliability_recovery_v1
+```
+
+- `llm_response_unknown` 只说明控制恢复是否正确；外部 LLM 请求可能重复，绝不表示 exactly-once。
+- `tool_after_effect` 会记录可观察重复副作用，但 ToolResult（工具结果）、完成事件和 Conversation（会话投影）重复属于内部事实失败。
+- 成功提交的六个边界逐点报告；工具前 checkpoint（检查点）另有子进程强制退出验证。
+- 委派等待冷重建是当前能力边界，不进入恢复成功率；PR4 不证明跨版本、分布式或真实 API 的 exactly-once。
+
+
 ## 目录结构
 
 ```

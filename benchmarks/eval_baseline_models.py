@@ -34,6 +34,9 @@ SUITE_NAME: str = "runtime_core"
 SUITE_CONCURRENCY: str = "reliability_concurrency"
 """PR3 实验族标识：并发隔离与调度收益套件。"""
 
+SUITE_RECOVERY: str = "reliability_recovery_v1"
+"""PR4 实验族标识：操作节点故障注入与冷重建恢复套件。"""
+
 SCENARIO_TOOL_SUCCESS: str = "tool_success"
 """PR2 统一业务场景标识：单工具成功（工具调用 → 固定输出 → 最终回答）。"""
 
@@ -68,6 +71,35 @@ class ConcurrencyScenario(StrEnum):
 
     CANCEL_NON_BLOCKING = "cancel_non_blocking"
     """取消不阻塞：长 Run 持锁期间取消，验证送达/生效时延与锁释放。"""
+
+
+class RecoveryFaultScenario(StrEnum):
+    """PR4 固定恢复故障场景标识。"""
+
+    LLM_BEFORE_SEND_FAILURE = "llm_before_send_failure"
+    LLM_RESPONSE_UNKNOWN = "llm_response_unknown"
+    TOOL_BEFORE_EFFECT = "tool_before_effect"
+    TOOL_AFTER_EFFECT = "tool_after_effect"
+    APPROVAL_COLD_REBUILD = "approval_cold_rebuild"
+    SUCCESS_COMMIT = "success_commit"
+    DELEGATION_COLD_REBUILD_BOUNDARY = "delegation_cold_rebuild_boundary"
+
+
+class ExternalEffectStatus(StrEnum):
+    """记录型外部副作用的可观察结论，不表达跨崩溃 exactly-once 承诺。"""
+
+    NOT_OCCURRED = "not_occurred"
+    ONCE = "once"
+    DUPLICATE_OBSERVED = "duplicate_observed"
+    UNKNOWN = "unknown"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class CapabilityStatus(StrEnum):
+    """场景是否属于正式恢复能力；边界审计不得计入成功率。"""
+
+    FORMAL = "formal"
+    BOUNDARY = "boundary"
 
 
 def compute_fixture_fingerprint(case) -> str:
@@ -338,6 +370,34 @@ class BenchmarkSample:
     evidence_summary: Mapping[str, object] | None = None
     """运行事实引用与内容摘要（不保存 Prompt、密钥或完整输出正文）。"""
 
+    # ---- PR4 操作节点恢复观察字段（旧样本缺失时均为 None） ----
+    fault_scenario: RecoveryFaultScenario | None = None
+    fault_point: str | None = None
+    fault_mechanism: str | None = None
+    restart_kind: str | None = None
+    rebuild_count: int | None = None
+    checkpoint_action_before: str | None = None
+    checkpoint_action_resumed: str | None = None
+    same_run_id: bool | None = None
+    same_context_version: bool | None = None
+    control_recovery_pass: bool | None = None
+    tool_result_count: int | None = None
+    state_transition_count: int | None = None
+    completed_event_count: int | None = None
+    conversation_projection_count: int | None = None
+    checkpoint_cleaned: bool | None = None
+    success_intent_cleaned: bool | None = None
+    internal_facts_pass: bool | None = None
+    llm_request_sent_count: int | None = None
+    tool_effect_count: int | None = None
+    external_duplicate_count: int | None = None
+    external_effect_status: ExternalEffectStatus | None = None
+    fault_to_restart_ms: float | None = None
+    restart_to_terminal_ms: float | None = None
+    recovery_wall_duration_ms: float | None = None
+    capability_status: CapabilityStatus | None = None
+    capability_reason: str | None = None
+
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
         result: dict[str, object] = {
@@ -389,6 +449,32 @@ class BenchmarkSample:
             "lock_released": self.lock_released,
             "followup_completed": self.followup_completed,
             "evidence_summary": None if self.evidence_summary is None else dict(self.evidence_summary),
+            "fault_scenario": None if self.fault_scenario is None else self.fault_scenario.value,
+            "fault_point": self.fault_point,
+            "fault_mechanism": self.fault_mechanism,
+            "restart_kind": self.restart_kind,
+            "rebuild_count": self.rebuild_count,
+            "checkpoint_action_before": self.checkpoint_action_before,
+            "checkpoint_action_resumed": self.checkpoint_action_resumed,
+            "same_run_id": self.same_run_id,
+            "same_context_version": self.same_context_version,
+            "control_recovery_pass": self.control_recovery_pass,
+            "tool_result_count": self.tool_result_count,
+            "state_transition_count": self.state_transition_count,
+            "completed_event_count": self.completed_event_count,
+            "conversation_projection_count": self.conversation_projection_count,
+            "checkpoint_cleaned": self.checkpoint_cleaned,
+            "success_intent_cleaned": self.success_intent_cleaned,
+            "internal_facts_pass": self.internal_facts_pass,
+            "llm_request_sent_count": self.llm_request_sent_count,
+            "tool_effect_count": self.tool_effect_count,
+            "external_duplicate_count": self.external_duplicate_count,
+            "external_effect_status": None if self.external_effect_status is None else self.external_effect_status.value,
+            "fault_to_restart_ms": self.fault_to_restart_ms,
+            "restart_to_terminal_ms": self.restart_to_terminal_ms,
+            "recovery_wall_duration_ms": self.recovery_wall_duration_ms,
+            "capability_status": None if self.capability_status is None else self.capability_status.value,
+            "capability_reason": self.capability_reason,
         }
         return result
 
@@ -459,6 +545,32 @@ class BenchmarkSample:
             lock_released=_optional_bool(data.get("lock_released"), f"{label}.lock_released"),
             followup_completed=_optional_bool(data.get("followup_completed"), f"{label}.followup_completed"),
             evidence_summary=_optional_json_map(data.get("evidence_summary"), f"{label}.evidence_summary"),
+            fault_scenario=_optional_enum(RecoveryFaultScenario, data.get("fault_scenario"), f"{label}.fault_scenario", None),
+            fault_point=_optional_str(data.get("fault_point"), f"{label}.fault_point"),
+            fault_mechanism=_optional_str(data.get("fault_mechanism"), f"{label}.fault_mechanism"),
+            restart_kind=_optional_str(data.get("restart_kind"), f"{label}.restart_kind"),
+            rebuild_count=_optional_int(data.get("rebuild_count"), f"{label}.rebuild_count"),
+            checkpoint_action_before=_optional_str(data.get("checkpoint_action_before"), f"{label}.checkpoint_action_before"),
+            checkpoint_action_resumed=_optional_str(data.get("checkpoint_action_resumed"), f"{label}.checkpoint_action_resumed"),
+            same_run_id=_optional_bool(data.get("same_run_id"), f"{label}.same_run_id"),
+            same_context_version=_optional_bool(data.get("same_context_version"), f"{label}.same_context_version"),
+            control_recovery_pass=_optional_bool(data.get("control_recovery_pass"), f"{label}.control_recovery_pass"),
+            tool_result_count=_optional_int(data.get("tool_result_count"), f"{label}.tool_result_count"),
+            state_transition_count=_optional_int(data.get("state_transition_count"), f"{label}.state_transition_count"),
+            completed_event_count=_optional_int(data.get("completed_event_count"), f"{label}.completed_event_count"),
+            conversation_projection_count=_optional_int(data.get("conversation_projection_count"), f"{label}.conversation_projection_count"),
+            checkpoint_cleaned=_optional_bool(data.get("checkpoint_cleaned"), f"{label}.checkpoint_cleaned"),
+            success_intent_cleaned=_optional_bool(data.get("success_intent_cleaned"), f"{label}.success_intent_cleaned"),
+            internal_facts_pass=_optional_bool(data.get("internal_facts_pass"), f"{label}.internal_facts_pass"),
+            llm_request_sent_count=_optional_int(data.get("llm_request_sent_count"), f"{label}.llm_request_sent_count"),
+            tool_effect_count=_optional_int(data.get("tool_effect_count"), f"{label}.tool_effect_count"),
+            external_duplicate_count=_optional_int(data.get("external_duplicate_count"), f"{label}.external_duplicate_count"),
+            external_effect_status=_optional_enum(ExternalEffectStatus, data.get("external_effect_status"), f"{label}.external_effect_status", None),
+            fault_to_restart_ms=_optional_float(data.get("fault_to_restart_ms"), f"{label}.fault_to_restart_ms"),
+            restart_to_terminal_ms=_optional_float(data.get("restart_to_terminal_ms"), f"{label}.restart_to_terminal_ms"),
+            recovery_wall_duration_ms=_optional_float(data.get("recovery_wall_duration_ms"), f"{label}.recovery_wall_duration_ms"),
+            capability_status=_optional_enum(CapabilityStatus, data.get("capability_status"), f"{label}.capability_status", None),
+            capability_reason=_optional_str(data.get("capability_reason"), f"{label}.capability_reason"),
         )
 
 
