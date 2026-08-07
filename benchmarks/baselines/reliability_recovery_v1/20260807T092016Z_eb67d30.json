@@ -1,0 +1,308 @@
+{
+  "schema_version": "2.0",
+  "snapshot_id": "20260807T092016Z_eb67d30",
+  "generated_at": "2026-08-07T09:20:16.694041+00:00",
+  "git_commit": "eb67d30",
+  "dataset": "reliability_recovery_v1",
+  "environment": {
+    "python_version": "3.13.5",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "config_hash": "recovery-v1-fixed",
+    "eval_schema_version": "runtime-v4"
+  },
+  "warmup": 60,
+  "repeat": 380,
+  "cases": [
+    {
+      "case_id": "llm_before_send_failure",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 87.89255000010598,
+        "p95_ms": 104.79085499882785,
+        "p99_ms": 111.68972099858367,
+        "max_ms": 114.0053999988595
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "llm_response_unknown",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 99.60150000006252,
+        "p95_ms": 146.3977499988686,
+        "p99_ms": 226.93002699907092,
+        "max_ms": 254.20849999864004
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "tool_before_effect",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 120.3789000010147,
+        "p95_ms": 134.0262250017986,
+        "p99_ms": 135.56819299981726,
+        "max_ms": 136.06649999928777
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "tool_after_effect",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 125.47134999840637,
+        "p95_ms": 173.77851500095858,
+        "p99_ms": 234.43379900287263,
+        "max_ms": 258.0389000031573
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval_cold_rebuild",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 147.25759999964794,
+        "p95_ms": 198.23205499942554,
+        "p99_ms": 210.27868000015587,
+        "max_ms": 210.57389999987208
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "success_commit:before_session_projection",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 40.174000001570676,
+        "p95_ms": 49.76521000025967,
+        "p99_ms": 53.35760699872481,
+        "max_ms": 54.190399998333305
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "success_commit:after_session_projection",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 39.816000000428176,
+        "p95_ms": 46.167784999670396,
+        "p99_ms": 48.66606200066599,
+        "max_ms": 49.24670000036713
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "success_commit:before_completed_event",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 39.226750001034816,
+        "p95_ms": 41.9212199991307,
+        "p99_ms": 42.409038999539916,
+        "max_ms": 42.53690000041388
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "success_commit:after_completed_event",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 39.57470000023022,
+        "p95_ms": 44.76923999973222,
+        "p99_ms": 48.90555299833068,
+        "max_ms": 49.97399999774643
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "success_commit:before_run_finalization",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 40.049450002697995,
+        "p95_ms": 46.00975999928778,
+        "p99_ms": 46.8840079997608,
+        "max_ms": 47.01589999967837
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "success_commit:after_run_finalization",
+      "sample_count": 30,
+      "passed_count": 30,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 30,
+        "p50_ms": 42.86484999829554,
+        "p95_ms": 47.98912000096607,
+        "p99_ms": 52.07062900011806,
+        "max_ms": 53.691699999035336
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 30,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "tool_before_effect_subprocess",
+      "sample_count": 50,
+      "passed_count": 50,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 50,
+        "p50_ms": 66.14674999946146,
+        "p95_ms": 79.1392050010472,
+        "p99_ms": 95.12639999844393,
+        "max_ms": 101.34939999989001
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 50,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    }
+  ],
+  "global_summary": {
+    "sample_count": 380,
+    "passed_count": 380,
+    "failed_count": 0,
+    "success_rate": 1.0,
+    "failure_kinds": {},
+    "wall_duration_ms": {
+      "sample_count": 380,
+      "p50_ms": 63.67895000039425,
+      "p95_ms": 153.4140099987781,
+      "p99_ms": 189.67626099834837,
+      "max_ms": 258.0389000031573
+    },
+    "llm_call_count_total": 0,
+    "tool_call_count_total": 0,
+    "trace_available_count": 380,
+    "trace_missing_count": 0
+  },
+  "samples_path": "samples/20260807T092016Z_eb67d30.jsonl",
+  "execution_source": "current_eval",
+  "scenario_id": "reliability_recovery_v1",
+  "fixture_fingerprints": {
+    "llm_before_send_failure": "",
+    "llm_response_unknown": "",
+    "tool_before_effect": "",
+    "tool_after_effect": "",
+    "approval_cold_rebuild": "",
+    "success_commit:before_session_projection": "",
+    "success_commit:after_session_projection": "",
+    "success_commit:before_completed_event": "",
+    "success_commit:after_completed_event": "",
+    "success_commit:before_run_finalization": "",
+    "success_commit:after_run_finalization": "",
+    "tool_before_effect_subprocess": ""
+  },
+  "samples_content_summary": {
+    "line_count": 475,
+    "byte_count": 1092694
+  }
+}
