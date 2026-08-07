@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from dotclaw.runtime.application.history_compaction import HistoryCompactionRequ
 from dotclaw.runtime.application.ports import ContextPort, HistoryCompactorPort, LLMPort, LLMOutputPort, LLMUnavailableError, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.request_factory import create_run_request
 from dotclaw.runtime.domain.context import ContextOwner
-from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, ToolCall
 from dotclaw.session.session import Session, SessionManager
 
 
@@ -106,10 +107,13 @@ class BenchmarkCompactor(HistoryCompactorPort):
 
     def __init__(self) -> None:
         self.requests: list[HistoryCompactionRequest] = []
+        self.durations_ms: list[float] = []
 
     async def compact_history(self, request: HistoryCompactionRequest) -> HistoryCompactionResult:
         """返回确定性摘要，便于只验证预算和污染边界。"""
+        started = time.perf_counter()
         self.requests.append(request)
+        self.durations_ms.append((time.perf_counter() - started) * 1000)
         return HistoryCompactionResult("PR6 固定摘要")
 
 
@@ -170,6 +174,29 @@ class NoTool(ToolPort):
         """PR6 工具端口没有运行资源。"""
 
 
+class ToolThenFinalLLM(CapturingLLM):
+    """真实 ReAct 两轮 LLM，产生一组完整工具调用与结果事实。"""
+
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
+        """首轮请求工具，次轮在真实结果事实后完成。"""
+        self.calls += 1
+        self.contexts.append(context)
+        if self.calls == 1:
+            return RunMessage("pr6-tool-call", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(ToolCall("pr6-tool", "lookup", {}),))
+        return RunMessage("pr6-tool-final", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "工具完成")
+
+
+class CompletingTool(ToolPort):
+    """返回确定性结果的真实 ToolPort，用于持久化工具事实。"""
+
+    async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        """返回与调用标识精确关联的完成结果。"""
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="PR6 工具结果")
+
+    async def cancel(self, run_id: str) -> None:
+        """该确定性工具没有额外取消资源。"""
+
+
 class ForceRebuildContextPort(ContextPort):
     """Benchmark 反事实适配器：在回放期调用同一生产 Provider 重建 Slot。"""
 
@@ -193,13 +220,13 @@ class ForceRebuildContextPort(ContextPort):
         self._inner.request_refresh(slot_id, owner, owner_key)
 
 
-def build_engine(root: Path, manager: SessionManager, counter: FixedTokenizerCounter, compactor: BenchmarkCompactor, llm: LLMPort | None = None, knowledge: ObservedKnowledgeBase | None = None, force_rebuild: bool = False, context_window: int = 200, profile: str = "SESSION:default") -> tuple[RuntimeEngine, RunRepositoryAdapter]:
+def build_engine(root: Path, manager: SessionManager, counter: FixedTokenizerCounter, compactor: BenchmarkCompactor, llm: LLMPort | None = None, knowledge: ObservedKnowledgeBase | None = None, force_rebuild: bool = False, context_window: int = 200, profile: str = "SESSION:default", tool: ToolPort | None = None) -> tuple[RuntimeEngine, RunRepositoryAdapter]:
     """构造生产 ContextProvider、文件仓储和 RuntimeEngine。"""
     provider: ContextPort = build_context_provider(ContextDependencies(knowledge_base=knowledge, user_profile=UserProfile(name=profile), agent_registry=BenchmarkAgentDirectory()))
     if force_rebuild:
         provider = ForceRebuildContextPort(provider)
     repository = RunRepositoryAdapter(root, SessionConversationProjector(manager))
-    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), provider, llm or CapturingLLM(), NoTool(), BenchmarkPolicy(context_window), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), token_counter=counter, history_compactor=compactor)
+    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), provider, llm or CapturingLLM(), tool or NoTool(), BenchmarkPolicy(context_window), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), token_counter=counter, history_compactor=compactor)
     return engine, repository
 
 
