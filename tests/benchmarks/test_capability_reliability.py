@@ -31,7 +31,9 @@ async def test_artifacts_include_matrix_and_overhead_reports(tmp_path: Path) -> 
     samples = await run_suite(matrix, performance_warmup=0, performance_repeat=1)
     baseline = tmp_path / "baseline"
     write_artifacts(samples, tmp_path, baseline, matrix)
-    assert (tmp_path / "security-matrix.md").is_file()
+    report = tmp_path / "security-matrix.md"
+    assert report.is_file()
+    assert "策略判定：27/27" in report.read_text(encoding="utf-8")
     assert (tmp_path / "security-chain-overhead.md").is_file()
     assert (tmp_path / "matrix-config.json").is_file()
     snapshots = [
