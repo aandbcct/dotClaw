@@ -64,6 +64,11 @@ def test_sample_field_type_error_rejected() -> None:
         BenchmarkSample.from_dict(payload)
 
     payload = make_sample().to_dict()
+    payload["normalized_slot_hashes"] = {"system": 1}
+    with pytest.raises(BenchmarkSchemaError):
+        BenchmarkSample.from_dict(payload)
+
+    payload = make_sample().to_dict()
     payload["passed"] = "yes"
     with pytest.raises(BenchmarkSchemaError):
         BenchmarkSample.from_dict(payload)

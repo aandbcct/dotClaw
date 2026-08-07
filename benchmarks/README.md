@@ -291,6 +291,26 @@ python -m benchmarks.capability_reliability `
 - 前置开销：同一已验证输入与记录型 Handler 下，直接 Handler P50/P95 为 **0.0026 / 0.0048 ms**；完整安全链 P50/P95 为 **2.0568 / 2.5199 ms**；安全链额外 P50/P95 为 **2.0542 / 2.5151 ms**（warmup=5、每种模式 50 个正式样本）；
 - 边界：结果仅代表本机、无副作用替身和固定有限矩阵；不证明命令内容级治理、TOCTOU 防护、真实外部 Tool 安全性或真实网络/API 性能。
 
+## PR6：ContextVersion 与 Session 历史压缩
+
+PR6 以固定 Slot、固定历史语料和记录型外部 Provider 验证已实现的版本化上下文回放、
+Session 历史压缩预算与 GLOBAL/AGENT/SESSION/RUN 内容隔离。强制重建只在 Benchmark
+对照控制中存在，不会修改生产 `ContextProvider`（上下文提供者）或 Runtime（运行时）。
+
+```powershell
+python -m benchmarks.context_reliability `
+  --suite reliability_context_v1 `
+  --compression-tokenizer cl100k_base `
+  --recovery-warmup 5 --recovery-repeat 30 `
+  --performance-warmup 5 --performance-repeat 30 `
+  --output benchmarks/reports/context/<run-id> `
+  --save-baseline benchmarks/baselines/reliability_context_v1
+```
+
+工件包括 JSONL、`context-config.json` 与 `consistency.md`、`recovery-replay.md`、
+`compression.md`、`owner-isolation.md`。Token/预算仅针对固定语料与 tokenizer，
+不评估摘要质量或真实模型效果；冷恢复不代表普通新 Run 忽略外部最新数据。
+
 ## 目录结构
 
 ```
@@ -304,6 +324,11 @@ benchmarks/
 ├── concurrency_workloads.py      # PR3 固定工作负载与受控延迟替身
 ├── concurrency_assertions.py     # PR3 顺序/归属/隔离/取消断言
 ├── concurrency_stats.py          # PR3 吞吐/排队/端到端时延与对照聚合
+├── context_reliability.py         # PR6 ContextVersion 实验 CLI 与工件写出
+├── context_workloads.py           # PR6 固定 Slot / 语料 / Owner 场景
+├── context_assertions.py          # PR6 结构、边界与可比性断言
+├── context_controls.py            # PR6 仅 Benchmark 的强制重建对照
+├── context_stats.py               # PR6 token、错误数与时延聚合
 ├── historical_baseline.py    # PR2 历史审计 / 运行 / 对照 CLI
 ├── historical_audit.py       # PR2 六道审计门与审计报告
 ├── historical_legacy_agent_v1.py   # PR2 旧 Agent v1（AgentLoop）单场景适配

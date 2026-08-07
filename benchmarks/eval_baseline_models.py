@@ -239,6 +239,14 @@ def _optional_json_map(value: object, label: str) -> Mapping[str, object] | None
     return _require_json_map(value, label)
 
 
+def _optional_string_map(value: object, label: str) -> Mapping[str, str] | None:
+    """读取可空字符串映射；Slot 哈希不得混入数值或嵌套正文。"""
+    if value is None:
+        return None
+    mapping: Mapping[str, object] = _require_json_map(value, label)
+    return {key: _require_str(item, f"{label}.{key}") for key, item in mapping.items()}
+
+
 def _optional_int(value: object, label: str) -> int | None:
     """读取可选整数字段；缺失时为 None，存在时校验类型（布尔不算整数）。"""
     if value is None:
@@ -425,6 +433,36 @@ class BenchmarkSample:
     measurement_mode: str | None = None
     pre_handler_duration_ms: float | None = None
 
+    # ---- PR6 ContextVersion / 历史压缩观察字段（旧样本缺失时均为 None） ----
+    content_hash: str | None = None
+    tool_schema_hash: str | None = None
+    normalized_slot_hashes: Mapping[str, str] | None = None
+    slot_order_match: bool | None = None
+    message_sequence_match: bool | None = None
+    replay_mode: str | None = None
+    context_version_count_delta: int | None = None
+    context_drift_count: int | None = None
+    provider_reload_count: int | None = None
+    provider_load_count: int | None = None
+    cache_hit_count: int | None = None
+    recovery_stage_duration_ms: float | None = None
+    tokens_before: int | None = None
+    tokens_after: int | None = None
+    token_reduction_ratio: float | None = None
+    budget_passed: bool | None = None
+    retained_conversation_count: int | None = None
+    covered_through_id: str | None = None
+    compression_duration_ms: float | None = None
+    tool_pair_break_count: int | None = None
+    session_projection_count: int | None = None
+    session_pollution_count: int | None = None
+    run_outcome: str | None = None
+    owner_case_id: str | None = None
+    global_leak_count: int | None = None
+    agent_leak_count: int | None = None
+    session_leak_count: int | None = None
+    run_leak_count: int | None = None
+
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
         result: dict[str, object] = {
@@ -527,6 +565,34 @@ class BenchmarkSample:
             "agent_policy_isolated": self.agent_policy_isolated,
             "measurement_mode": self.measurement_mode,
             "pre_handler_duration_ms": self.pre_handler_duration_ms,
+            "content_hash": self.content_hash,
+            "tool_schema_hash": self.tool_schema_hash,
+            "normalized_slot_hashes": None if self.normalized_slot_hashes is None else dict(self.normalized_slot_hashes),
+            "slot_order_match": self.slot_order_match,
+            "message_sequence_match": self.message_sequence_match,
+            "replay_mode": self.replay_mode,
+            "context_version_count_delta": self.context_version_count_delta,
+            "context_drift_count": self.context_drift_count,
+            "provider_reload_count": self.provider_reload_count,
+            "provider_load_count": self.provider_load_count,
+            "cache_hit_count": self.cache_hit_count,
+            "recovery_stage_duration_ms": self.recovery_stage_duration_ms,
+            "tokens_before": self.tokens_before,
+            "tokens_after": self.tokens_after,
+            "token_reduction_ratio": self.token_reduction_ratio,
+            "budget_passed": self.budget_passed,
+            "retained_conversation_count": self.retained_conversation_count,
+            "covered_through_id": self.covered_through_id,
+            "compression_duration_ms": self.compression_duration_ms,
+            "tool_pair_break_count": self.tool_pair_break_count,
+            "session_projection_count": self.session_projection_count,
+            "session_pollution_count": self.session_pollution_count,
+            "run_outcome": self.run_outcome,
+            "owner_case_id": self.owner_case_id,
+            "global_leak_count": self.global_leak_count,
+            "agent_leak_count": self.agent_leak_count,
+            "session_leak_count": self.session_leak_count,
+            "run_leak_count": self.run_leak_count,
         }
         return result
 
@@ -648,6 +714,34 @@ class BenchmarkSample:
             agent_policy_isolated=_optional_bool(data.get("agent_policy_isolated"), f"{label}.agent_policy_isolated"),
             measurement_mode=_optional_str(data.get("measurement_mode"), f"{label}.measurement_mode"),
             pre_handler_duration_ms=_optional_float(data.get("pre_handler_duration_ms"), f"{label}.pre_handler_duration_ms"),
+            content_hash=_optional_str(data.get("content_hash"), f"{label}.content_hash"),
+            tool_schema_hash=_optional_str(data.get("tool_schema_hash"), f"{label}.tool_schema_hash"),
+            normalized_slot_hashes=_optional_string_map(data.get("normalized_slot_hashes"), f"{label}.normalized_slot_hashes"),
+            slot_order_match=_optional_bool(data.get("slot_order_match"), f"{label}.slot_order_match"),
+            message_sequence_match=_optional_bool(data.get("message_sequence_match"), f"{label}.message_sequence_match"),
+            replay_mode=_optional_str(data.get("replay_mode"), f"{label}.replay_mode"),
+            context_version_count_delta=_optional_int(data.get("context_version_count_delta"), f"{label}.context_version_count_delta"),
+            context_drift_count=_optional_int(data.get("context_drift_count"), f"{label}.context_drift_count"),
+            provider_reload_count=_optional_int(data.get("provider_reload_count"), f"{label}.provider_reload_count"),
+            provider_load_count=_optional_int(data.get("provider_load_count"), f"{label}.provider_load_count"),
+            cache_hit_count=_optional_int(data.get("cache_hit_count"), f"{label}.cache_hit_count"),
+            recovery_stage_duration_ms=_optional_float(data.get("recovery_stage_duration_ms"), f"{label}.recovery_stage_duration_ms"),
+            tokens_before=_optional_int(data.get("tokens_before"), f"{label}.tokens_before"),
+            tokens_after=_optional_int(data.get("tokens_after"), f"{label}.tokens_after"),
+            token_reduction_ratio=_optional_float(data.get("token_reduction_ratio"), f"{label}.token_reduction_ratio"),
+            budget_passed=_optional_bool(data.get("budget_passed"), f"{label}.budget_passed"),
+            retained_conversation_count=_optional_int(data.get("retained_conversation_count"), f"{label}.retained_conversation_count"),
+            covered_through_id=_optional_str(data.get("covered_through_id"), f"{label}.covered_through_id"),
+            compression_duration_ms=_optional_float(data.get("compression_duration_ms"), f"{label}.compression_duration_ms"),
+            tool_pair_break_count=_optional_int(data.get("tool_pair_break_count"), f"{label}.tool_pair_break_count"),
+            session_projection_count=_optional_int(data.get("session_projection_count"), f"{label}.session_projection_count"),
+            session_pollution_count=_optional_int(data.get("session_pollution_count"), f"{label}.session_pollution_count"),
+            run_outcome=_optional_str(data.get("run_outcome"), f"{label}.run_outcome"),
+            owner_case_id=_optional_str(data.get("owner_case_id"), f"{label}.owner_case_id"),
+            global_leak_count=_optional_int(data.get("global_leak_count"), f"{label}.global_leak_count"),
+            agent_leak_count=_optional_int(data.get("agent_leak_count"), f"{label}.agent_leak_count"),
+            session_leak_count=_optional_int(data.get("session_leak_count"), f"{label}.session_leak_count"),
+            run_leak_count=_optional_int(data.get("run_leak_count"), f"{label}.run_leak_count"),
         )
 
 
