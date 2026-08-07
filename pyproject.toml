@@ -48,6 +48,7 @@ packages = ["src/dotclaw"]
 # 历史测试使用 legacy 标记隔离；执行迁移验证时可显式传入 -m legacy。
 testpaths = [
     "tests/agent",
+    "tests/benchmarks",
     "tests/channel",
     "tests/context",
     "tests/journal",

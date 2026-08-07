@@ -48,8 +48,36 @@ class ReexecutionRunner:
         """绑定 Re-execution 所需的生产端口。"""
         self._deps: EvalDependencies | None = dependencies
 
+    async def run_case(self, case: EvalCase) -> EvalResult:
+        """以 REEXECUTION 模式执行单个 Case。
+
+        覆写 Case 为既有的 ``ExecutionMode.REEXECUTION`` 后调用 ``EvalRunner``，
+        不改变 Fixture、依赖注入、隔离 Repository 或真实依赖回退的既有语义。
+        Benchmark 用该入口对每个 Case 计量真实端到端耗时，避免复制覆写与
+        错误分类逻辑。
+
+        参数：
+            case: 要执行的评测用例。
+
+        返回：
+            单条评测结果；执行异常时转为不可信的错误结果。
+        """
+        # REEXECUTION 覆写：保留 Conversation 与隔离 Fixture，允许真实 LLM
+        reexec_case = dataclasses.replace(case, execution_mode=ExecutionMode.REEXECUTION)
+        runner = EvalRunner()
+        try:
+            return await runner.run(reexec_case, dependencies=self._deps)
+        except Exception as e:
+            return _error_result(
+                case.case_id,
+                f"Case {case.case_id!r} 执行异常：{type(e).__name__}: {e}",
+            )
+
     async def run_dataset(self, root: Path, dataset_name: str) -> tuple[EvalResult, ...]:
         """加载并以 REEXECUTION 模式逐个执行 Dataset 全部 Case。
+
+        复用 ``run_case()`` 保持单条执行与错误转换行为一致，按 Case 加载顺序
+        返回对应的评测结果元组。
 
         参数：
             root: Dataset 根目录。
@@ -59,7 +87,6 @@ class ReexecutionRunner:
             按 Case 加载顺序对应的评测结果元组。
         """
         results: list[EvalResult] = []
-        runner = EvalRunner()
 
         try:
             cases = load_cases(root, dataset_name)
@@ -70,15 +97,6 @@ class ReexecutionRunner:
             return (_error_result("", f"Dataset {dataset_name!r} 未包含任何 Case"),)
 
         for case in cases:
-            # REEXECUTION 覆写：保留 Conversation 与隔离 Fixture，允许真实 LLM
-            reexec_case = dataclasses.replace(case, execution_mode=ExecutionMode.REEXECUTION)
-            try:
-                result = await runner.run(reexec_case, dependencies=self._deps)
-            except Exception as e:
-                result = _error_result(
-                    case.case_id,
-                    f"Case {case.case_id!r} 执行异常：{type(e).__name__}: {e}",
-                )
-            results.append(result)
+            results.append(await self.run_case(case))
 
         return tuple(results)

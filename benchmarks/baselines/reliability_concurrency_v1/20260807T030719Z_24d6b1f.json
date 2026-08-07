@@ -1,0 +1,817 @@
+{
+  "suite": "reliability_concurrency",
+  "generated_at": "2026-08-07T03:07:19.040243+00:00",
+  "git_commit": "24d6b1f",
+  "warmup": 5,
+  "repeat": 50,
+  "fake_delay_ms": 20,
+  "scenarios": [
+    {
+      "scenario_id": "fifo_same_session",
+      "schedule_mode": "session_lock",
+      "total_requests": 1000,
+      "total_batches": 50,
+      "queue_wait_ms": {
+        "sample_count": 1000,
+        "p50_ms": 1036.25,
+        "p95_ms": 2011.07395,
+        "max_ms": 2272.544
+      },
+      "wall_duration_ms": {
+        "sample_count": 1000,
+        "p50_ms": 1108.4185,
+        "p95_ms": 2087.8284,
+        "max_ms": 2347.279
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 1000,
+      "fifo_total_count": 1000,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": null,
+      "batch_total_ms": null
+    },
+    {
+      "scenario_id": "multi_session_isolation",
+      "schedule_mode": "session_lock",
+      "total_requests": 1600,
+      "total_batches": 50,
+      "queue_wait_ms": {
+        "sample_count": 1600,
+        "p50_ms": 512.6695,
+        "p95_ms": 957.032,
+        "max_ms": 1234.5
+      },
+      "wall_duration_ms": {
+        "sample_count": 1600,
+        "p50_ms": 762.0519999999999,
+        "p95_ms": 1204.9061500000003,
+        "max_ms": 1571.9289999999999
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 1600,
+      "isolation_total_count": 1600,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": null,
+      "batch_total_ms": null
+    },
+    {
+      "scenario_id": "session_scaling_1s",
+      "schedule_mode": "session_lock",
+      "total_requests": 120,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 120,
+        "p50_ms": 193.4675,
+        "p95_ms": 365.30115,
+        "max_ms": 444.403
+      },
+      "wall_duration_ms": {
+        "sample_count": 120,
+        "p50_ms": 278.353,
+        "p95_ms": 431.48605,
+        "max_ms": 528.023
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 9.758042108701266,
+      "batch_total_ms": 12297.548899998674
+    },
+    {
+      "scenario_id": "session_scaling_1s",
+      "schedule_mode": "global_lock",
+      "total_requests": 120,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 120,
+        "p50_ms": 175.47,
+        "p95_ms": 350.99250000000006,
+        "max_ms": 382.306
+      },
+      "wall_duration_ms": {
+        "sample_count": 120,
+        "p50_ms": 250.257,
+        "p95_ms": 428.33245,
+        "max_ms": 479.25
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 9.774465689217905,
+      "batch_total_ms": 12276.885900000707
+    },
+    {
+      "scenario_id": "session_scaling_2s",
+      "schedule_mode": "session_lock",
+      "total_requests": 240,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 240,
+        "p50_ms": 207.6975,
+        "p95_ms": 370.51619999999997,
+        "max_ms": 387.923
+      },
+      "wall_duration_ms": {
+        "sample_count": 240,
+        "p50_ms": 287.7645,
+        "p95_ms": 446.38399999999996,
+        "max_ms": 461.166
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 18.319991443344417,
+      "batch_total_ms": 13100.442799998746
+    },
+    {
+      "scenario_id": "session_scaling_2s",
+      "schedule_mode": "global_lock",
+      "total_requests": 240,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 240,
+        "p50_ms": 407.80549999999994,
+        "p95_ms": 789.7911,
+        "max_ms": 901.361
+      },
+      "wall_duration_ms": {
+        "sample_count": 240,
+        "p50_ms": 488.8645,
+        "p95_ms": 864.02955,
+        "max_ms": 977.469
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 9.325503687065241,
+      "batch_total_ms": 25735.87529999986
+    },
+    {
+      "scenario_id": "session_scaling_4s",
+      "schedule_mode": "session_lock",
+      "total_requests": 480,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 480,
+        "p50_ms": 233.6495,
+        "p95_ms": 431.13795,
+        "max_ms": 476.84
+      },
+      "wall_duration_ms": {
+        "sample_count": 480,
+        "p50_ms": 318.0895,
+        "p95_ms": 518.1797,
+        "max_ms": 560.1429999999999
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 32.0096579539979,
+      "batch_total_ms": 14995.47419999999
+    },
+    {
+      "scenario_id": "session_scaling_4s",
+      "schedule_mode": "global_lock",
+      "total_requests": 480,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 480,
+        "p50_ms": 783.932,
+        "p95_ms": 1517.7078,
+        "max_ms": 1693.459
+      },
+      "wall_duration_ms": {
+        "sample_count": 480,
+        "p50_ms": 857.437,
+        "p95_ms": 1588.5680499999999,
+        "max_ms": 1771.191
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 9.85974871037743,
+      "batch_total_ms": 48682.782299998966
+    },
+    {
+      "scenario_id": "session_scaling_8s",
+      "schedule_mode": "session_lock",
+      "total_requests": 960,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 960,
+        "p50_ms": 280.5225,
+        "p95_ms": 515.2945,
+        "max_ms": 601.403
+      },
+      "wall_duration_ms": {
+        "sample_count": 960,
+        "p50_ms": 389.1485,
+        "p95_ms": 602.6569,
+        "max_ms": 690.086
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 53.86211325936865,
+      "batch_total_ms": 17823.288799999318
+    },
+    {
+      "scenario_id": "session_scaling_8s",
+      "schedule_mode": "global_lock",
+      "total_requests": 960,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 960,
+        "p50_ms": 1883.8165,
+        "p95_ms": 3852.657349999999,
+        "max_ms": 5224.321
+      },
+      "wall_duration_ms": {
+        "sample_count": 960,
+        "p50_ms": 1973.7060000000001,
+        "p95_ms": 3959.227999999999,
+        "max_ms": 5312.915
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 8.255525095305154,
+      "batch_total_ms": 116285.75879999972
+    },
+    {
+      "scenario_id": "fixed_concurrency_session",
+      "schedule_mode": "session_lock",
+      "total_requests": 960,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 960,
+        "p50_ms": 266.101,
+        "p95_ms": 505.4266,
+        "max_ms": 547.362
+      },
+      "wall_duration_ms": {
+        "sample_count": 960,
+        "p50_ms": 362.97450000000003,
+        "p95_ms": 590.5471,
+        "max_ms": 634.3870000000001
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 54.162621748478145,
+      "batch_total_ms": 17724.40049999932
+    },
+    {
+      "scenario_id": "fixed_concurrency_global",
+      "schedule_mode": "global_lock",
+      "total_requests": 960,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 960,
+        "p50_ms": 1616.027,
+        "p95_ms": 3102.9010500000004,
+        "max_ms": 3472.921
+      },
+      "wall_duration_ms": {
+        "sample_count": 960,
+        "p50_ms": 1692.2224999999999,
+        "p95_ms": 3183.6764,
+        "max_ms": 3537.3920000000003
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 9.724207959792345,
+      "batch_total_ms": 98722.69330000016
+    },
+    {
+      "scenario_id": "mixed_long_short",
+      "schedule_mode": "session_lock",
+      "total_requests": 240,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 240,
+        "p50_ms": 49.7205,
+        "p95_ms": 68.63479999999997,
+        "max_ms": 76.977
+      },
+      "wall_duration_ms": {
+        "sample_count": 240,
+        "p50_ms": 146.7695,
+        "p95_ms": 313.1245,
+        "max_ms": 338.04
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 25.790217364357684,
+      "batch_total_ms": 9305.854100000033
+    },
+    {
+      "scenario_id": "mixed_long_short",
+      "schedule_mode": "global_lock",
+      "total_requests": 240,
+      "total_batches": 30,
+      "queue_wait_ms": {
+        "sample_count": 240,
+        "p50_ms": 588.617,
+        "p95_ms": 971.64435,
+        "max_ms": 1102.2350000000001
+      },
+      "wall_duration_ms": {
+        "sample_count": 240,
+        "p50_ms": 665.6914999999999,
+        "p95_ms": 1049.59195,
+        "max_ms": 1190.476
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "cancel_effect_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 0,
+      "cancel_total_count": 0,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": 7.686939572260782,
+      "batch_total_ms": 31221.78829999757
+    },
+    {
+      "scenario_id": "cancel_non_blocking",
+      "schedule_mode": "session_lock",
+      "total_requests": 50,
+      "total_batches": 50,
+      "queue_wait_ms": {
+        "sample_count": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "wall_duration_ms": {
+        "sample_count": 50,
+        "p50_ms": 118.65900000020702,
+        "p95_ms": 126.74299500017696,
+        "max_ms": 134.1084999994564
+      },
+      "cancel_delivery_ms": {
+        "sample_count": 50,
+        "p50_ms": 1.017250000131753,
+        "p95_ms": 2.103789999955552,
+        "max_ms": 2.489600000444625
+      },
+      "cancel_effect_ms": {
+        "sample_count": 50,
+        "p50_ms": 118.65900000020702,
+        "p95_ms": 126.74299500017696,
+        "max_ms": 134.1084999994564
+      },
+      "fifo_passed_count": 0,
+      "fifo_total_count": 0,
+      "isolation_passed_count": 0,
+      "isolation_total_count": 0,
+      "cancel_passed_count": 50,
+      "cancel_total_count": 50,
+      "message_leak_total": 0,
+      "event_leak_total": 0,
+      "context_leak_total": 0,
+      "tool_leak_total": 0,
+      "stream_leak_total": 0,
+      "throughput_per_sec": null,
+      "batch_total_ms": null
+    }
+  ],
+  "workload_configs": [
+    {
+      "session_count": 1,
+      "requests_per_session": 20,
+      "fake_delay_ms": 20,
+      "schedule_mode": "session_lock",
+      "warmup": 5,
+      "repeat": 50,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 8,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "session_lock",
+      "warmup": 5,
+      "repeat": 50,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 1,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "session_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 1,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "global_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 2,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "session_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 2,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "global_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 4,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "session_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 4,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "global_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 8,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "session_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 8,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "global_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 8,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "session_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 8,
+      "requests_per_session": 4,
+      "fake_delay_ms": 20,
+      "schedule_mode": "global_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": null,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 8,
+      "requests_per_session": 1,
+      "fake_delay_ms": 20,
+      "schedule_mode": "session_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": 200,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 8,
+      "requests_per_session": 1,
+      "fake_delay_ms": 20,
+      "schedule_mode": "global_lock",
+      "warmup": 5,
+      "repeat": 30,
+      "long_delay_ms": 200,
+      "long_request_session_index": 0
+    },
+    {
+      "session_count": 1,
+      "requests_per_session": 2,
+      "fake_delay_ms": 20,
+      "schedule_mode": "session_lock",
+      "warmup": 5,
+      "repeat": 50,
+      "long_delay_ms": 200,
+      "long_request_session_index": 0
+    }
+  ],
+  "sampling_configs": {
+    "core": {
+      "warmup": 5,
+      "repeat": 50
+    },
+    "scaling": {
+      "warmup": 5,
+      "repeat": 30
+    }
+  }
+}

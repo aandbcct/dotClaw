@@ -6,27 +6,264 @@
 
 与 `tests/`（功能正确性）互补——tests 回答"对不对"，benchmarks 回答"快不快"。
 
+## Eval 基线快照（PR1）
+
+基于 Git 跟踪的 Eval Dataset，重复执行当前隔离 Runtime，输出逐次 JSONL 原始记录、
+JSON 基线快照与 Markdown 汇总报告。它回答"当前提交对固定 Eval 任务是否稳定完成、
+耗时构成如何"，并作为后续版本对照的当前基线。
+
+```text
+benchmarks/datasets/runtime_core_v1/cases/*.json
+    → ReexecutionRunner
+    → EvalResult + RunTrace
+    → BenchmarkSample（单次采样记录）JSONL
+    → BenchmarkSnapshot（当前基线快照）JSON + Markdown 报告
+```
+
+### 入口命令
+
+```bash
+# 开发期快速验证（warmup=1, repeat=10 即可）
+python -m benchmarks.eval_baseline --dataset runtime_core_v1 --warmup 1 --repeat 10
+
+# 正式基线（warmup=5, repeat=30），可选 --save-baseline 提交基线目录
+python -m benchmarks.eval_baseline \
+  --dataset-root benchmarks/datasets \
+  --dataset runtime_core_v1 \
+  --warmup 5 --repeat 30 \
+  --output benchmarks/reports/<run-id> \
+  --save-baseline benchmarks/baselines/runtime_core_v1
+```
+
+参数：`--dataset-root`（默认 `benchmarks/datasets`）、`--dataset`（默认 `runtime_core_v1`）、
+`--warmup`（默认 5，预热不进入正式统计）、`--repeat`（默认 30，必须 > 0）、
+`--output`（非提交运行工件目录）、`--save-baseline`（可选提交基线目录）。
+
+### 产物与布局
+
+- 非提交运行输出写入 `--output`（默认 `benchmarks/reports/<snapshot-id>/`）：
+  JSONL 原始记录、JSON 快照、Markdown 报告；
+- 提交基线写入 `benchmarks/baselines/<dataset>/`：
+  `<snapshot-id>.json` 与 `samples/<snapshot-id>.jsonl`；
+- `<snapshot-id>` 固定为 `YYYYMMDDTHHMMSSZ_<short-git-commit>`（UTC），目标文件已
+  存在时拒绝覆盖，新运行总是创建新快照。
+
+### 口径与边界
+
+- 通过率是隔离 Fixture 下的 Eval 语义通过率（`runtime_core_v1` 四个 Case），
+  不等同于真实模型线上成功率；断言失败但 Trace 完整仍是有效样本；
+- `wall_duration_ms` 是跨提交性能比较的端到端口径，Trace 关键路径用于解释内部
+  耗时构成，两者分开报告且不可互相替代；
+- P50/P95/P99 只在同机、同 Python、同 Dataset、同配置、同 repeat 下可比；
+- Fixture 未产生的 token / 时延以 `null` 记录，不得猜测为 0；
+- 快照不是 `EvalResult` / `RegressionReport` / Runtime 事实的替代品，不进入 CI Gate；
+- 历史 worktree 对比、并发 / 故障注入由后续 PR 提供，PR1 不做。
+
+## 历史基线可复跑与对照（PR2）
+
+在独立 Git worktree 中审计并驱动旧执行链路，以与 PR1 `tool_success` 相同的业务
+语义生成历史快照，仅对可比指标输出当前/历史对照。
+
+```text
+候选历史提交 → 独立 worktree + 该提交声明的依赖环境 → 历史单工具场景外围启动
+    → 历史 AgentRun 终态/统计 + 记录型替身工具日志 → PR1 BenchmarkSample
+    → 历史 BenchmarkSnapshot + 当前/历史对照报告
+```
+
+### 审计命令
+
+候选提交必须显式传入，不隐式扫描历史：
+
+```bash
+python -m benchmarks.historical_baseline audit \
+  --candidate 4e4cdd3 \
+  --dataset runtime_core_v1 --case tool_success \
+  --warmup 1 --repeat 10 \
+  --output benchmarks/reports/historical-audits
+```
+
+审计顺序固定为六道门：解析完整提交号 → 创建 detached worktree → 独立解释器
+环境（记录 Python 与依赖证据）→ 子进程显式从历史 `src` 导入 → 固定场景执行与
+校验（终态、工具名、参数、调用次数、最终回答）→ 映射统一记录并连续开发期采样。
+任一门失败时记录候选、失败门、异常摘要和证据路径，不产出历史快照或对照百分比。
+
+### 生成历史基线并对照
+
+```bash
+# 1. 审计通过后，对同一完整提交执行正式采样（warmup=5, repeat=30）
+python -m benchmarks.historical_baseline run \
+  --candidate <audit.json 中的完整提交> \
+  --audit-output benchmarks/reports/historical-audits/<audit-id> \
+  --save-baseline benchmarks/baselines/runtime_core_v1
+
+# 2. 当前与历史两份快照对照
+python -m benchmarks.historical_baseline compare \
+  --current benchmarks/baselines/runtime_core_v1/<current-snapshot-id>.json \
+  --historical benchmarks/baselines/runtime_core_v1/<historical-snapshot-id>.json \
+  --output benchmarks/reports/historical-audits/<audit-id>/comparison.md
+```
+
+`run` 只接受通过同一审计输出确认的完整提交号（不以短哈希代替）。
+
+### 对照口径与结论边界
+
+- 仅在相同 Dataset、共享场景、正式 repeat、warmup、机器标识、Python 主/次版本和
+  固定替身配置时计算变化率；任一条件不一致或场景标识与 Case 列表不符（疑似篡改）
+  时拒绝百分比；
+- 两侧必须记录**一致且非空**的固定夹具指纹（`fixture_fingerprint`，由 Git 跟踪的
+  Case 固定夹具派生），比较器只比较该指纹而非各版本自己的完整配置哈希；指纹
+  缺失或不同即拒绝输出百分比——这是当前/历史对照的严格可比性门槛；
+- 历史链路没有的 Trace / token / 内部阶段时延序列化为 `null`，不参与聚合与变化率；
+- 历史值为 0 或缺失时仅列原值与不可比原因，不猜测为 0；
+- 成功率报告成功数/总数、Wilson 95% 区间和绝对错误数；变化率为
+  `(current - historical) / historical`；
+- PR2 只证明旧/新单工具执行主链的可比业务结果与编排成本；审批恢复、并发隔离、
+  操作节点恢复、Capability 安全、ContextVersion 与多 Agent 委派由后续 PR 以专用
+  实验建立。
+
+### 当前历史对照结果（commit `4e4cdd3`，AgentLoop 时代）
+
+- 候选审计：`4e4cdd3` 六道审计门全部通过（20260806T065307Z 审计报告）；
+- 固定夹具指纹：`tool_success` 两侧一致 `e3e3e26ced9cd716`；
+- 历史正式采样：warmup=5, repeat=30，**30/30 通过（100%）**，Wall P50 **41.4 ms**；
+- 对照结论（共享场景 `tool_success`）：成功率与 LLM（2 轮）/Tool（1 次）调用均值
+  两侧完全一致（语义等价），当前端到端 Wall P50 2.4 ms，历史 41.4 ms，
+  **耗时下降 -94.21%**（P95 -93.39%、P99 -93.30%）；
+- 证据：`benchmarks/reports/historical-audits/4e4cdd3-20260806T065307Z/` 审计报告，
+  `benchmarks/baselines/runtime_core_v1/` 下当前与历史快照 JSON + JSONL。
+
+## 并发隔离与调度收益（PR3）
+
+以固定的并发工作负载量化当前 Session 级串行、跨 Session 并行、状态隔离与取消
+不阻塞行为，并在相同 Runtime 下对照 Benchmark 内部全局串行调度的成本。
+
+```text
+固定并发场景 + 固定延迟 Fake LLM / Fake Tool
+    → SessionInteractionService
+    → SessionRunCoordinator → RuntimeEngine
+    → 持久化事实读取 → BenchmarkSample（JSONL）
+    → ConcurrencySnapshot（JSON + Markdown 报告）
+```
+
+### 入口命令
+
+```bash
+# 开发期快速验证（核心与扩展各 1 轮）
+python -m benchmarks.concurrency_reliability \
+  --core-warmup 0 --core-repeat 1 \
+  --scaling-warmup 0 --scaling-repeat 1 \
+  --fake-delay-ms 20
+
+# 正式实验（核心正确性 5+50；扩展调度 5+30）
+python -m benchmarks.concurrency_reliability \
+  --suite reliability_concurrency_v1 \
+  --core-warmup 5 --core-repeat 50 \
+  --scaling-warmup 5 --scaling-repeat 30 \
+  --fake-delay-ms 20 \
+  --output benchmarks/reports/concurrency/<run-id> \
+  --save-baseline benchmarks/baselines/reliability_concurrency_v1
+```
+
+参数：`--suite`（实验族，默认 `reliability_concurrency_v1`）、
+`--core-warmup` / `--core-repeat`（FIFO、隔离、取消，默认 5 / 50）、
+`--scaling-warmup` / `--scaling-repeat`（扩展、固定并发、长短混合，默认 5 / 30）、
+`--fake-delay-ms`（固定延迟毫秒，默认 20）、
+`--output`（工件输出目录）、`--save-baseline`（可选基线目录）。
+
+### 覆盖场景
+
+| 场景 | 说明 | 核心指标 |
+|------|------|---------|
+| 同 Session FIFO | 1 Session × 20 请求，验证开始/完成/Conversation 顺序 | 乱序/重复/遗漏 = 0/N |
+| 多 Session 隔离 | 8 Session × 4 请求，验证跨 Session 消息/事件/上下文/工具/输出零串扰 | 串扰 = 0/N |
+| Session 数扩展 | 1/2/4/8 Session × 4 请求，绘制吞吐随 Session 数变化 | 吞吐(req/s) |
+| 固定并发对照 | 8×4 请求，Session 锁 vs 全局锁主对照 | 吞吐变化率 |
+| 取消不阻塞 | 1 长 Run + 后续请求，验证取消送达/生效/锁释放 | 送达/生效 P50/P95 |
+
+### 正式基线（20260807T030719Z_24d6b1f，commit `24d6b1f`）
+
+- 复现命令：
+
+  ```bash
+  python -m benchmarks.concurrency_reliability \
+    --suite reliability_concurrency_v1 \
+    --core-warmup 5 --core-repeat 50 \
+    --scaling-warmup 5 --scaling-repeat 30 \
+    --fake-delay-ms 20 \
+    --output benchmarks/reports/concurrency/pr3-formal-20260807-rerun \
+    --save-baseline benchmarks/baselines/reliability_concurrency_v1
+  ```
+
+- 核心正确性：同 Session FIFO **1,000/1,000** 请求开始、完成和 Conversation 顺序一致；
+  多 Session 隔离 **1,600/1,600** 请求通过，消息、事件、ContextVersion、持久化工具记录和
+  输出串流泄漏均为 **0**；取消 **50/50** 送达、生效、锁释放和后续请求可用。
+- 取消时延：送达 P50/P95 **1.0 / 2.1 ms**，生效 P50/P95 **118.7 / 126.7 ms**。
+- 8×4 固定并发对照：Session 锁吞吐 **54.2 req/s**，全局锁 **9.7 req/s**；相对 Benchmark
+  全局串行吞吐 **+456.99%**，排队 P95 **-83.71%**，端到端 P95 **-81.45%**。
+- 原始证据：基线快照与 JSONL 位于 `benchmarks/baselines/reliability_concurrency_v1/`；
+  同次 `correctness.md`、`scheduling-comparison.md` 和 `workload-config.json` 位于
+  `benchmarks/reports/concurrency/pr3-formal-20260807-rerun/`。
+
+### 口径与边界
+
+- FIFO 结论只针对同进程、单 `SessionRunCoordinator` 实例内的同 Session 提交；
+- 隔离判据以持久化运行事实中的标识回显为准，Fake LLM/Tool 只消除外部不确定性；
+- 全局锁对照仅证明调度结构容量影响，不等同于真实 API 端到端加速；
+- 取消结论仅证明 Runtime 内取消信号、终态收口与租约释放；不涉及外部副作用停止；
+- 不修改 `SessionRunCoordinator`、`RuntimeEngine`、`SessionInteractionService`
+  的锁、排队或取消生产语义。
+
+### 当前基线（20260806T065437Z_cd5a1cc，commit `cd5a1cc`）
+
+- 环境：Python 3.13.5 / Windows-11 / config 哈希 `b9bea591d3252a9a`；
+- 采样：warmup=5, repeat=30，共 120 个正式样本，**120/120 通过（100%）**；
+- 全局耗时：Wall P50 **2.3 ms**、P95 **4.4 ms**；
+- 调用统计：LLM 210 次、Tool 150 次，Trace 完整 120/120；
+- 各 Case（30 样本）成功率均为 100%：`approval_rejected` P50 0.68 ms、
+  `approval_resume` P50 1.04 ms、`context_retention` P50 0.80 ms、
+  `tool_success` P50 2.40 ms；
+- 原始证据：`benchmarks/baselines/runtime_core_v1/` 下快照 JSON 与 140 行 JSONL
+  （含 warmup 诊断记录）；样本带 `execution_source` / `source_commit` /
+  `scenario_id` / `evidence_kind` / `fixture_fingerprint` 来源元数据。
+
 ## 目录结构
 
 ```
 benchmarks/
-├── runner.py          # 评测入口（CLI）
-├── stats.py           # 公共工具（p50/p95/snapshot 转换）
-├── cases/             # 6 个评测用例
+├── runner.py          # 旧 Agent/Journal 微基准评测入口（CLI）
+├── stats.py           # 旧微基准公共工具（p50/p95/snapshot 转换）
+├── eval_baseline.py   # PR1 Eval 基线 CLI 与编排（ReexecutionRunner + 计时采样）
+├── eval_baseline_models.py   # PR1 BenchmarkSample / BenchmarkSnapshot 数据模型
+├── eval_baseline_stats.py    # PR1 统计纯函数（分位数、成功率、聚合）
+├── concurrency_reliability.py    # PR3 并发 CLI 与编排
+├── concurrency_workloads.py      # PR3 固定工作负载与受控延迟替身
+├── concurrency_assertions.py     # PR3 顺序/归属/隔离/取消断言
+├── concurrency_stats.py          # PR3 吞吐/排队/端到端时延与对照聚合
+├── historical_baseline.py    # PR2 历史审计 / 运行 / 对照 CLI
+├── historical_audit.py       # PR2 六道审计门与审计报告
+├── historical_legacy_agent_v1.py   # PR2 旧 Agent v1（AgentLoop）单场景适配
+├── historical_compare.py     # PR2 可比性检查与对照报告纯函数
+├── datasets/runtime_core_v1/cases/   # PR1 Git 跟踪的四个 Eval Case JSON
+├── cases/             # 6 个旧微基准评测用例
 │   ├── init_perf.py       # 初始化性能
 │   ├── tool_dispatch.py   # 工具调度延迟
 │   ├── llm_stream.py      # LLM 流式延迟
 │   ├── memory_perf.py     # 记忆检索性能
 │   ├── skill_load.py      # Skill 加载性能
 │   └── stress.py          # 压力测试
-├── dataset/           # 测试数据集（自动生成）
+├── dataset/           # 旧微基准测试数据集（自动生成）
 │   ├── sample_skills/         # 100 个测试 Skill
 │   ├── memory_corpus/         # 100 / 1000 / 10000 行语料
 │   └── stress_prompts.json    # 压力测试用 prompts
 ├── reports/           # 报告输出（gitignore）
 │   ├── benchmark_report_*.md
-│   └── snapshots/
+│   ├── snapshots/
+│   ├── <snapshot-id>/         # PR1 非提交运行工件（JSONL / JSON / MD）
+│   └── historical-audits/     # PR2 审计输出（audit.json / environment / worktrees）
 └── baselines/         # 基线快照（git tracked，用于回归对比）
+    ├── v1.0/                  # 旧微基准基线
+    ├── runtime_core_v1/       # PR1/PR2 Eval 基线（当前 + 历史快照 + samples/）
+    └── reliability_concurrency_v1/  # PR3 并发基线（JSON + samples/）
 ```
 
 ## 快速开始
