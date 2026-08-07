@@ -1,31 +1,24 @@
-"""PR6 ContextVersion（版本化上下文）可靠性实验入口。
-
-所有场景在临时 Benchmark 事实中执行；强制重建仅通过 ReplayControl（回放对照）实现，
-不向生产 Runtime 注入开关。
-"""
+"""PR6 ContextVersion（版本化上下文）可靠性实验入口。"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import platform
 import shutil
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from dotclaw.runtime.domain.context import (
-    ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotSnapshot,
-    ContextSlotStatus, ContextVersion, TextSlotContent, new_context_version,
-)
+from dotclaw.runtime.domain.context import ContextOwner
 
-from .context_assertions import assert_comparable_controls, assert_context_versions_equal, normalized_slot_hashes, owner_leak_counts, tool_pair_break_count
-from .context_controls import ObservedExternalSlotProvider, ReplayControl
+from .context_assertions import assert_comparable_controls, assert_context_versions_equal, normalized_slot_hashes, owner_leak_counts
+from .context_runtime_fixture import BenchmarkCompactor, BlockingLLM, CapturingLLM, FixedTokenizerCounter, ObservedKnowledgeBase, build_engine, session_with_history
 from .context_stats import absolute_error_count, budget_pass_rate, latency_stats
-from .context_workloads import ContextScenario, compression_corpus, fixed_context_fixtures
+from .context_workloads import ContextScenario, compression_corpus
 from .eval_baseline_models import BenchmarkSample
 
 SUITE_CONTEXT = "reliability_context_v1"
@@ -41,94 +34,139 @@ class ContextRunConfig:
     recovery_repeat: int = 30
     performance_warmup: int = 5
     performance_repeat: int = 30
+    boundary_warmup: int = 0
+    boundary_repeat: int = 30
     provider_delay_ms: int = 1
-
-
-def _version(external_value: str = "v1") -> ContextVersion:
-    """从固定 Slot 夹具创建可比较 ContextVersion，创建时间不参与断言。"""
-    slots = tuple(
-        ContextSlotSnapshot(
-            fixture.slot_id, fixture.owner, ContextContributionKind.SYSTEM_CONTENT,
-            ContextPersistenceMode.SNAPSHOT, ContextSlotStatus.INCLUDED,
-            fixture.injection_order, TextSlotContent(external_value if fixture.slot_id == "run_retrieval" else fixture.content),
-            hashlib.sha256((external_value if fixture.slot_id == "run_retrieval" else fixture.content).encode()).hexdigest(),
-        )
-        for fixture in fixed_context_fixtures()
-    )
-    content_hash = hashlib.sha256("|".join(slot.content_hash for slot in slots).encode()).hexdigest()
-    return new_context_version(1, slots, content_hash, "tools-fixed-v1")
 
 
 def _sample(case_id: str, attempt: int, warmup: bool, passed: bool, duration_ms: float, **fields: object) -> BenchmarkSample:
     """构造带 PR6 证据字段的统一单次记录。"""
-    return BenchmarkSample(
-        dataset=SUITE_CONTEXT, case_id=case_id, attempt=attempt, is_warmup=warmup,
-        git_commit="", python_version=sys.version.split()[0], platform=platform.platform(),
-        config_hash="", eval_schema_version="", passed=passed,
-        failure_kind=None if passed else "assertion", assertions_passed=int(passed), assertions_total=1,
-        trace_available=False, wall_duration_ms=duration_ms, run_id=f"context-{case_id}-{attempt}", **fields,
-    )
+    return BenchmarkSample(dataset=SUITE_CONTEXT, case_id=case_id, attempt=attempt, is_warmup=warmup, git_commit="", python_version=sys.version.split()[0], platform=platform.platform(), config_hash="", eval_schema_version="", passed=passed, failure_kind=None if passed else "assertion", assertions_passed=int(passed), assertions_total=1, trace_available=False, wall_duration_ms=duration_ms, run_id=f"context-{case_id}-{attempt}", **fields)
+
+
+def _messages(bundle_messages: object) -> tuple[tuple[str, str], ...]:
+    """提取实际送入 LLM 的角色与正文序列。"""
+    return tuple((message.role.value, message.content) for message in bundle_messages)  # type: ignore[union-attr]
+
+
+async def _cold_recovery(config: ContextRunConfig, attempt: int, warmup: bool) -> BenchmarkSample:
+    """通过真实 checkpoint、服务销毁和公开 resume_run 验证 v1 快照恢复。"""
+    root = Path(tempfile.mkdtemp(prefix="dotclaw-pr6-recovery-"))
+    manager, session, request = await session_with_history(root)
+    initial_source = ObservedKnowledgeBase("RUN:v1", config.provider_delay_ms)
+    initial_llm = CapturingLLM(unavailable_first=True)
+    engine, repository = build_engine(root, manager, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), initial_llm, initial_source)
+    interrupted = await engine.execute(request)
+    before = await repository.load_context_versions(session.id, interrupted.run_id)
+    # 新对象使用 v2 来源；若 replay 生效，该对象不会被生产 ContextProvider 调用。
+    resumed_source = ObservedKnowledgeBase("RUN:v2", config.provider_delay_ms)
+    resumed_llm = CapturingLLM()
+    resumed_engine, resumed_repository = build_engine(root, manager, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), resumed_llm, resumed_source)
+    started = time.perf_counter()
+    resumed = await resumed_engine.resume_run(interrupted.run_id)
+    elapsed = (time.perf_counter() - started) * 1000
+    after = await resumed_repository.load_context_versions(session.id, interrupted.run_id)
+    actual = _messages(resumed_llm.contexts[-1].messages) if resumed_llm.contexts else ()
+    actual_text = "\n".join(content for _, content in actual)
+    same = len(before) == len(after) == 1 and before[0] == after[0]
+    passed = resumed.state.outcome() is not None and same and "RUN:v1" in actual_text and "RUN:v2" not in actual_text and resumed_source.load_count == 0
+    return _sample(ContextScenario.COLD_RECOVERY.value, attempt, warmup, passed, elapsed, replay_mode="snapshot_replay", same_context_version=same, context_version_count_delta=len(after) - len(before), context_drift_count=int("RUN:v2" in actual_text or "RUN:v1" not in actual_text), provider_reload_count=resumed_source.load_count, recovery_stage_duration_ms=elapsed)
+
+
+async def _replay_control(config: ContextRunConfig, attempt: int, warmup: bool, forced: bool) -> BenchmarkSample:
+    """在相同真实恢复节点比较快照重放与 Provider 重建。"""
+    root = Path(tempfile.mkdtemp(prefix="dotclaw-pr6-control-"))
+    manager, session, request = await session_with_history(root)
+    engine, repository = build_engine(root, manager, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), CapturingLLM(unavailable_first=True), ObservedKnowledgeBase("RUN:v1", config.provider_delay_ms))
+    interrupted = await engine.execute(request)
+    before = await repository.load_context_versions(session.id, interrupted.run_id)
+    source = ObservedKnowledgeBase("RUN:v1", config.provider_delay_ms)
+    llm = CapturingLLM()
+    resumed_engine, resumed_repository = build_engine(root, manager, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), llm, source, force_rebuild=forced)
+    started = time.perf_counter()
+    resumed = await resumed_engine.resume_run(interrupted.run_id)
+    elapsed = (time.perf_counter() - started) * 1000
+    after = await resumed_repository.load_context_versions(session.id, interrupted.run_id)
+    expected_loads = 1 if forced else 0
+    passed = resumed.state.outcome() is not None and source.load_count == expected_loads
+    return _sample(ContextScenario.REPLAY_EFFICIENCY.value + ("_forced" if forced else "_replay"), attempt, warmup, passed, elapsed, replay_mode="forced_rebuild" if forced else "snapshot_replay", provider_load_count=source.load_count, context_version_count_delta=len(after) - len(before), recovery_stage_duration_ms=elapsed)
+
+
+async def _compression(config: ContextRunConfig) -> list[BenchmarkSample]:
+    """执行真实成功、失败、取消、放弃 Run，并从 Session/ContextVersion 读取投影事实。"""
+    samples: list[BenchmarkSample] = []
+    for outcome in ("success", "failure", "cancelled", "abandoned"):
+        for attempt in range(config.boundary_warmup + config.boundary_repeat):
+            root = Path(tempfile.mkdtemp(prefix=f"dotclaw-pr6-compression-{outcome}-"))
+            manager, session, request = await session_with_history(root, 3)
+            counter, compactor = FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor()
+            llm = BlockingLLM() if outcome == "cancelled" else CapturingLLM(unavailable_first=outcome == "abandoned", fail_first=outcome == "failure")
+            engine, repository = build_engine(root, manager, counter, compactor, llm, context_window=70)
+            if outcome == "cancelled":
+                task = asyncio.create_task(engine.execute(request)); await llm.started.wait(); await engine.cancel(llm.run_id, "PR6 取消"); result = await task
+            else:
+                result = await engine.execute(request)
+            if outcome == "abandoned":
+                result = await engine.abandon_run(result.run_id)
+            persisted = await manager.load(session.id); versions = await repository.load_context_versions(session.id, result.run_id)
+            before, after = counter.requests[0], counter.requests[-1]
+            active = persisted.active_history_compression() if persisted is not None else None
+            projected, pollution = int(active is not None), int(outcome != "success" and active is not None)
+            token_before, token_after = (await counter.count(before)).input_tokens, (await counter.count(after)).input_tokens
+            expected_state = {"success": "completed", "failure": "failed", "cancelled": "cancelled", "abandoned": "abandoned"}[outcome]
+            actual_state = result.state.outcome().value if result.state.outcome() is not None else ""
+            passed = bool(compactor.requests) and actual_state == expected_state and (outcome != "success" or projected == 1) and (outcome == "success" or pollution == 0)
+            samples.append(_sample(getattr(ContextScenario, f"COMPRESSION_{outcome.upper()}").value, attempt, attempt < config.boundary_warmup, passed, 0.0, tokens_before=token_before, tokens_after=token_after, token_reduction_ratio=(token_before - token_after) / token_before, budget_passed=token_after <= 70, retained_conversation_count=len(after.history_messages) // 2, covered_through_id=active.covered_through_conversation_id if active is not None else None, compression_duration_ms=0.0, tool_pair_break_count=0, session_projection_count=projected, session_pollution_count=pollution, run_outcome=outcome, context_version_count_delta=len(versions)))
+    return samples
+
+
+async def _owner_samples(config: ContextRunConfig) -> list[BenchmarkSample]:
+    """创建真实 GLOBAL/AGENT/SESSION/RUN 内容并检查实际 ContextVersion Slot。"""
+    identifiers = {ContextOwner.GLOBAL: "GLOBAL", ContextOwner.AGENT: "AGENT:agent-pr6", ContextOwner.SESSION: "SESSION:one", ContextOwner.RUN: "RUN:one"}
+    root = Path(tempfile.mkdtemp(prefix="dotclaw-pr6-owner-"))
+    manager, session, request = await session_with_history(root, agent_id="agent-pr6", session_marker="HISTORY")
+    source = ObservedKnowledgeBase("RUN:one")
+    engine, repository = build_engine(root, manager, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), CapturingLLM(), source, profile="SESSION:one")
+    result = await engine.execute(request)
+    version = (await repository.load_context_versions(session.id, result.run_id))[0]
+    visible_by_owner: dict[ContextOwner, str] = {}
+    for slot in version.slots:
+        visible_by_owner[slot.owner] = visible_by_owner.get(slot.owner, "") + json.dumps(slot.to_dict(), ensure_ascii=False)
+    samples: list[BenchmarkSample] = []
+    for owner, marker in identifiers.items():
+        visible = visible_by_owner.get(owner, "")
+        leaks = owner_leak_counts(visible, owner, identifiers)
+        allowed = marker in visible
+        samples.append(_sample(ContextScenario.OWNER_ISOLATION.value + f"_{owner.value}", 0, False, allowed and sum(leaks.values()) == 0, 0.0, owner_case_id=owner.value, global_leak_count=leaks["global"], agent_leak_count=leaks["agent"], session_leak_count=leaks["session"], run_leak_count=leaks["run"], provider_load_count=source.load_count, cache_hit_count=0))
+    return samples
 
 
 async def run_context_suite(config: ContextRunConfig) -> list[BenchmarkSample]:
-    """执行所有 PR6 场景；调用方决定是否以正式 repeat 写出工件。"""
+    """执行所有 PR6 场景；正式重复由 CLI 参数明确决定。"""
     samples: list[BenchmarkSample] = []
-    baseline = _version("v1")
-    rebuilt = _version("v1")
+    root_one, root_two = Path(tempfile.mkdtemp(prefix="dotclaw-pr6-consistency-")), Path(tempfile.mkdtemp(prefix="dotclaw-pr6-consistency-"))
+    manager_one, session_one, request_one = await session_with_history(root_one)
+    llm_one = CapturingLLM(); engine_one, repository_one = build_engine(root_one, manager_one, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), llm_one, ObservedKnowledgeBase("RUN:one"))
+    result_one = await engine_one.execute(request_one)
+    manager_two, session_two, request_two = await session_with_history(root_two)
+    llm_two = CapturingLLM(); engine_two, repository_two = build_engine(root_two, manager_two, FixedTokenizerCounter(config.tokenizer), BenchmarkCompactor(), llm_two, ObservedKnowledgeBase("RUN:one"))
+    result_two = await engine_two.execute(request_two)
+    baseline, rebuilt = (await repository_one.load_context_versions(session_one.id, result_one.run_id))[0], (await repository_two.load_context_versions(session_two.id, result_two.run_id))[0]
     try:
         assert_context_versions_equal(baseline, rebuilt)
-        consistency = True
+        consistency = _messages(llm_one.contexts[-1].messages) == _messages(llm_two.contexts[-1].messages)
     except AssertionError:
         consistency = False
-    samples.append(_sample(ContextScenario.CONSISTENCY.value, 0, False, consistency, 0.0,
-        content_hash=baseline.content_hash, tool_schema_hash=baseline.tool_schema_hash,
-        normalized_slot_hashes=normalized_slot_hashes(baseline), slot_order_match=consistency,
-        message_sequence_match=consistency, context_version_count_delta=0))
-
-    total = config.recovery_warmup + config.recovery_repeat
-    for attempt in range(total):
-        provider = ObservedExternalSlotProvider("v2", config.provider_delay_ms)
-        started = time.perf_counter()
-        replayed = await ReplayControl().materialize("v1", provider)
-        elapsed = (time.perf_counter() - started) * 1000
-        passed = replayed == "v1" and provider.load_count == 0
-        samples.append(_sample(ContextScenario.COLD_RECOVERY.value, attempt, attempt < config.recovery_warmup, passed, elapsed,
-            replay_mode="snapshot_replay", same_context_version=True, context_version_count_delta=0,
-            context_drift_count=int(replayed != "v1"), provider_reload_count=provider.load_count,
-            recovery_stage_duration_ms=elapsed))
-
-    controls = {"input_hash": baseline.content_hash, "provider_delay_ms": config.provider_delay_ms, "tokenizer": config.tokenizer, "budget_window": 0, "timing_scope": "resume_to_before_llm"}
+    samples.append(_sample(ContextScenario.CONSISTENCY.value, 0, False, consistency, 0.0, content_hash=baseline.content_hash, tool_schema_hash=baseline.tool_schema_hash, normalized_slot_hashes=normalized_slot_hashes(baseline), slot_order_match=consistency, message_sequence_match=consistency, context_version_count_delta=0))
+    for attempt in range(config.recovery_warmup + config.recovery_repeat):
+        samples.append(await _cold_recovery(config, attempt, attempt < config.recovery_warmup))
+    controls = {"input_hash": baseline.content_hash, "provider_delay_ms": config.provider_delay_ms, "tokenizer": config.tokenizer, "budget_window": 200, "timing_scope": "resume_to_first_llm"}
     assert_comparable_controls(controls, dict(controls))
     for forced in (False, True):
         for attempt in range(config.performance_warmup + config.performance_repeat):
-            provider = ObservedExternalSlotProvider("v1", config.provider_delay_ms)
-            started = time.perf_counter()
-            actual = await ReplayControl(force_rebuild=forced).materialize("v1", provider)
-            elapsed = (time.perf_counter() - started) * 1000
-            samples.append(_sample(ContextScenario.REPLAY_EFFICIENCY.value + ("_forced" if forced else "_replay"), attempt, attempt < config.performance_warmup, actual == "v1", elapsed,
-                replay_mode="forced_rebuild" if forced else "snapshot_replay", provider_load_count=provider.load_count,
-                context_version_count_delta=int(forced), recovery_stage_duration_ms=elapsed))
-
-    corpus = compression_corpus()
-    before = sum(len(item.split()) for item in corpus.conversations)
-    after = len(corpus.conversations[-1].split()) + 1
-    for outcome in ("success", "failure", "cancelled", "abandoned"):
-        scenario = getattr(ContextScenario, f"COMPRESSION_{outcome.upper()}")
-        projected = int(outcome == "success")
-        pollution = int(outcome != "success" and projected != 0)
-        samples.append(_sample(scenario.value, 0, False, pollution == 0, 0.0,
-            tokens_before=before, tokens_after=after, token_reduction_ratio=(before-after)/before,
-            budget_passed=after <= corpus.budget_window, retained_conversation_count=1,
-            covered_through_id="conversation-2", compression_duration_ms=0.0,
-            tool_pair_break_count=tool_pair_break_count(({"kind":"tool_call","call_id":"a"},{"kind":"tool_result","call_id":"a"})),
-            session_projection_count=projected, session_pollution_count=pollution, run_outcome=outcome))
-
-    identifiers = {ContextOwner.GLOBAL: "GLOBAL:directory", ContextOwner.AGENT: "AGENT:alpha", ContextOwner.SESSION: "SESSION:one", ContextOwner.RUN: "RUN:one"}
-    for owner, marker in identifiers.items():
-        leaks = owner_leak_counts(marker, owner, identifiers)
-        samples.append(_sample(ContextScenario.OWNER_ISOLATION.value + f"_{owner.value}", 0, False, sum(leaks.values()) == 0, 0.0,
-            owner_case_id=owner.value, global_leak_count=leaks["global"], agent_leak_count=leaks["agent"],
-            session_leak_count=leaks["session"], run_leak_count=leaks["run"], provider_load_count=0, cache_hit_count=0))
+            samples.append(await _replay_control(config, attempt, attempt < config.performance_warmup, forced))
+    samples.extend(await _compression(config))
+    samples.extend(await _owner_samples(config))
     return samples
 
 
@@ -143,50 +181,27 @@ def write_artifacts(samples: list[BenchmarkSample], config: ContextRunConfig, ou
     formal = [sample for sample in samples if not sample.is_warmup]
     recovery = [sample for sample in formal if sample.case_id == ContextScenario.COLD_RECOVERY.value]
     compression = [sample for sample in formal if sample.case_id.startswith("compression_")]
-    replay = [sample for sample in formal if sample.replay_mode == "snapshot_replay"]
-    forced = [sample for sample in formal if sample.replay_mode == "forced_rebuild"]
-    snapshot = {
-        "schema_version": "2.0",
-        "suite": config.suite,
-        "snapshot_id": snapshot_id,
-        "sample_count": len(formal),
-        "recovery": {
-            "sample_count": len(recovery),
-            "context_drift_count": absolute_error_count(recovery, "context_drift_count"),
-            "provider_reload_count": absolute_error_count(recovery, "provider_reload_count"),
-        },
-        "compression": {"budget_pass_rate": budget_pass_rate(compression)},
-        "replay_control": {
-            "snapshot_replay_ms": latency_stats([item.recovery_stage_duration_ms for item in replay if item.recovery_stage_duration_ms is not None]).to_dict(),
-            "forced_rebuild_ms": latency_stats([item.recovery_stage_duration_ms for item in forced if item.recovery_stage_duration_ms is not None]).to_dict(),
-        },
-        "samples_path": str(jsonl),
-    }
-    snapshot_path = output / f"{snapshot_id}.json"
-    snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-    (output / "consistency.md").write_text("# PR6 一致性\n\n固定输入只比较内容与结构，不比较 created_at。\n", encoding="utf-8")
-    (output / "recovery-replay.md").write_text(f"# PR6 冷恢复与回放\n\n样本数：{len(recovery)}；漂移：{absolute_error_count(recovery, 'context_drift_count')}；Provider 重载：{absolute_error_count(recovery, 'provider_reload_count')}。\n", encoding="utf-8")
-    (output / "compression.md").write_text(f"# PR6 历史压缩\n\n预算通过率：{budget_pass_rate(compression):.2%}。仅反映固定语料的预算与编排，不评估摘要质量。\n", encoding="utf-8")
-    (output / "owner-isolation.md").write_text("# PR6 Owner 隔离\n\nGLOBAL/AGENT/SESSION/RUN 均按允许和禁止标识检查；加载计数仅为观察证据。\n", encoding="utf-8")
+    replay = [sample for sample in formal if sample.case_id.endswith("_replay")]
+    forced = [sample for sample in formal if sample.case_id.endswith("_forced")]
+    snapshot = {"schema_version": "2.0", "suite": config.suite, "snapshot_id": snapshot_id, "sample_count": len(formal), "recovery": {"sample_count": len(recovery), "context_drift_count": absolute_error_count(recovery, "context_drift_count"), "provider_reload_count": absolute_error_count(recovery, "provider_reload_count")}, "compression": {"budget_pass_rate": budget_pass_rate(compression)}, "replay_control": {"snapshot_replay_ms": latency_stats([item.recovery_stage_duration_ms for item in replay if item.recovery_stage_duration_ms is not None]).to_dict(), "forced_rebuild_ms": latency_stats([item.recovery_stage_duration_ms for item in forced if item.recovery_stage_duration_ms is not None]).to_dict()}, "samples_path": f"samples/{jsonl.name}"}
+    snapshot_path = output / f"{snapshot_id}.json"; snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    for name, text in (("consistency.md", "# PR6 一致性\n\n结论来自生产 ContextProvider 与实际 LLM 消息。\n"), ("recovery-replay.md", f"# PR6 冷恢复与回放\n\n样本数：{len(recovery)}；漂移：{absolute_error_count(recovery, 'context_drift_count')}；Provider 重载：{absolute_error_count(recovery, 'provider_reload_count')}。\n"), ("compression.md", f"# PR6 历史压缩\n\n预算通过率：{budget_pass_rate(compression):.2%}。仅反映固定语料的预算与编排。\n"), ("owner-isolation.md", "# PR6 Owner 隔离\n\n结论读取真实 ContextVersion Slot。\n")):
+        (output / name).write_text(text, encoding="utf-8")
     if baseline is not None:
         baseline.mkdir(parents=True, exist_ok=True); (baseline / "samples").mkdir(exist_ok=True)
-        shutil.copy2(jsonl, baseline / "samples" / jsonl.name)
-        shutil.copy2(snapshot_path, baseline / snapshot_path.name)
+        shutil.copy2(jsonl, baseline / "samples" / jsonl.name); shutil.copy2(snapshot_path, baseline / snapshot_path.name)
 
 
 def main(argv: list[str] | None = None) -> int:
     """解析 CLI 并执行 Context 实验。"""
     parser = argparse.ArgumentParser(description="dotClaw PR6：ContextVersion 可靠性实验")
     parser.add_argument("--suite", default=SUITE_CONTEXT); parser.add_argument("--compression-tokenizer", default="cl100k_base")
-    parser.add_argument("--recovery-warmup", type=int, default=5); parser.add_argument("--recovery-repeat", type=int, default=30)
-    parser.add_argument("--performance-warmup", type=int, default=5); parser.add_argument("--performance-repeat", type=int, default=30)
-    parser.add_argument("--output", required=True); parser.add_argument("--save-baseline")
+    parser.add_argument("--recovery-warmup", type=int, default=5); parser.add_argument("--recovery-repeat", type=int, default=30); parser.add_argument("--performance-warmup", type=int, default=5); parser.add_argument("--performance-repeat", type=int, default=30); parser.add_argument("--boundary-warmup", type=int, default=0); parser.add_argument("--boundary-repeat", type=int, default=30); parser.add_argument("--output", required=True); parser.add_argument("--save-baseline")
     args = parser.parse_args(argv)
-    if min(args.recovery_warmup, args.performance_warmup) < 0 or min(args.recovery_repeat, args.performance_repeat) <= 0:
+    if min(args.recovery_warmup, args.performance_warmup, args.boundary_warmup) < 0 or min(args.recovery_repeat, args.performance_repeat, args.boundary_repeat) <= 0:
         parser.error("warmup 必须大于等于 0，repeat 必须大于 0")
-    config = ContextRunConfig(args.suite, args.compression_tokenizer, args.recovery_warmup, args.recovery_repeat, args.performance_warmup, args.performance_repeat)
-    samples = asyncio.run(run_context_suite(config))
-    write_artifacts(samples, config, Path(args.output), None if args.save_baseline is None else Path(args.save_baseline))
+    config = ContextRunConfig(args.suite, args.compression_tokenizer, args.recovery_warmup, args.recovery_repeat, args.performance_warmup, args.performance_repeat, args.boundary_warmup, args.boundary_repeat)
+    write_artifacts(asyncio.run(run_context_suite(config)), config, Path(args.output), None if args.save_baseline is None else Path(args.save_baseline))
     return 0
 
 
