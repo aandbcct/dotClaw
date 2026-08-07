@@ -31,6 +31,16 @@ def test_matrix_duplicate_case_id_rejected(tmp_path: Path) -> None:
         load_matrix(target)
 
 
+def test_matrix_unknown_tool_rejected(tmp_path: Path) -> None:
+    """未知工具属于矩阵配置错误，不能延后为运行期失败。"""
+    payload = json.loads(_matrix_path().read_text(encoding="utf-8"))
+    payload["cases"][0]["tool"] = "cap.unknown.tool"
+    target = tmp_path / "matrix.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="未知工具"):
+        load_matrix(target)
+
+
 def test_registry_contains_only_recording_tools() -> None:
     """固定装配包含文件、进程、网络与 MCP 的记录型 Handler。"""
     assert set(build_registry().all_names()) == {

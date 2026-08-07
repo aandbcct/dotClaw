@@ -19,6 +19,10 @@ from dotclaw.tools.registry import ToolRegistry
 MATRIX_SCHEMA_VERSION = "1.0"
 SUITE_CAPABILITY = "reliability_capability_v1"
 SENSITIVE_MARKER = "PR5_SECRET"
+_KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
+    "cap.file.read", "cap.file.write", "cap.process.exec", "cap.network.tavily",
+    "cap.network.bad_host", "cap.mcp.github", "cap.mcp.evil",
+})
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,8 @@ def load_matrix(path: Path) -> tuple[CapabilityMatrixCase, ...]:
             raise ValueError(f"矩阵第 {index} 行缺少有效 case_id/tool/expected")
         if case_id in seen or not isinstance(arguments, dict):
             raise ValueError(f"矩阵第 {index} 行 case_id 重复或 arguments 非对象")
+        if tool not in _KNOWN_TOOL_NAMES:
+            raise ValueError(f"矩阵第 {index} 行引用未知工具 {tool!r}")
         if expected not in {"ALLOW", "INVALID_ARGUMENTS", "POLICY_DENIED", "APPROVAL_DENIED"}:
             raise ValueError(f"矩阵第 {index} 行 expected 不受支持")
         approval = row.get("approval", "none")

@@ -18,6 +18,7 @@
     {"case_id":"process_no_channel","tool":"cap.process.exec","arguments":{"command":"echo ok"},"approval":"none","expected":"APPROVAL_DENIED"},
     {"case_id":"process_preapproved_still_denied","tool":"cap.process.exec","arguments":{"command":"echo ok"},"pre_approved":true,"global_rules":{"process.exec":"deny"},"expected":"POLICY_DENIED"},
     {"case_id":"network_static_allow","tool":"cap.network.tavily","arguments":{"url":"https://evil.invalid"},"global_rules":{"network.http":"allow"},"network_services":{"tavily":["api.tavily.com"]},"expected":"ALLOW"},
+    {"case_id":"network_service_disabled_fail_closed","tool":"cap.network.tavily","arguments":{},"global_rules":{"network.http":"allow"},"network_services":{},"expected":"POLICY_DENIED"},
     {"case_id":"network_host_mismatch","tool":"cap.network.bad_host","arguments":{"url":"https://evil.invalid"},"global_rules":{"network.http":"allow"},"network_services":{"tavily":["api.tavily.com"]},"expected":"POLICY_DENIED"},
     {"case_id":"network_agent_ask","tool":"cap.network.tavily","arguments":{},"global_rules":{"network.http":"allow"},"network_services":{"tavily":["api.tavily.com"]},"agent_id":"agent-ask","agent_rules":{"agent-ask":{"network.http":"ask"}},"approval":"none","expected":"APPROVAL_DENIED"},
     {"case_id":"network_agent_deny","tool":"cap.network.tavily","arguments":{},"global_rules":{"network.http":"allow"},"network_services":{"tavily":["api.tavily.com"]},"agent_id":"agent-deny","agent_rules":{"agent-deny":{"network.http":"deny"}},"expected":"POLICY_DENIED"},
@@ -27,6 +28,6 @@
     {"case_id":"mcp_agent_deny","tool":"cap.mcp.github","arguments":{"operation":"status"},"allowed_mcp_servers":["github"],"agent_id":"agent-mcp-deny","agent_rules":{"agent-mcp-deny":{"mcp.call":"deny"}},"expected":"POLICY_DENIED"},
     {"case_id":"agent_a_narrows_deny","tool":"cap.file.read","arguments":{"path":"notes.txt"},"agent_id":"agent-a","agent_rules":{"agent-a":{"workspace.read":"deny"}},"expected":"POLICY_DENIED"},
     {"case_id":"agent_b_no_leak","tool":"cap.file.read","arguments":{"path":"notes.txt"},"agent_id":"agent-b","agent_rules":{"agent-a":{"workspace.read":"deny"}},"expected":"ALLOW"},
-    {"case_id":"windows_junction_escape","tool":"cap.file.read","arguments":{"path":"junction-outside.txt"},"expected":"POLICY_DENIED","windows_junction":true}
+    {"case_id":"windows_junction_escape","tool":"cap.file.read","arguments":{"path":"junction-outside/sentinel.txt"},"expected":"POLICY_DENIED","windows_junction":true}
   ]
 }

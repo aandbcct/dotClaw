@@ -95,17 +95,21 @@ async def _run_junction_case(case: CapabilityMatrixCase, attempt: int, is_warmup
         return _sample(case, attempt, is_warmup, ChainObservation(), None, skipped="当前平台不是 Windows", config_hash=matrix_hash)
     with tempfile.TemporaryDirectory(prefix="dotclaw-capability-junction-") as temporary:
         root = Path(temporary)
-        workspace, outside, link = root / "workspace", root / "outside", root / "workspace" / "junction-outside.txt"
+        workspace, outside, link = root / "workspace", root / "outside", root / "workspace" / "junction-outside"
         workspace.mkdir()
-        outside.write_text("outside", encoding="utf-8")
+        outside.mkdir()
+        (outside / "sentinel.txt").write_text("outside", encoding="utf-8")
         try:
-            os.symlink(outside, link)
-        except OSError as error:
-            return _sample(case, attempt, is_warmup, ChainObservation(), None, skipped=f"当前用户无法创建 Windows 联接点：{error.winerror or error.errno}", config_hash=matrix_hash)
-        observation = ChainObservation()
-        executor = _executor(case, workspace, observation)
-        result = await executor.execute(case.tool, dict(case.arguments), None, RecordingJournal(observation), ToolExecutionContext())
-        return _sample(case, attempt, is_warmup, observation, result, config_hash=matrix_hash)
+            created = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True, text=True, check=False)
+            if created.returncode != 0:
+                return _sample(case, attempt, is_warmup, ChainObservation(), None, skipped=f"当前用户无法创建 Windows Junction：{created.stderr.strip() or created.stdout.strip()}", config_hash=matrix_hash)
+            observation = ChainObservation()
+            executor = _executor(case, workspace, observation)
+            result = await executor.execute(case.tool, dict(case.arguments), None, RecordingJournal(observation), ToolExecutionContext())
+            return _sample(case, attempt, is_warmup, observation, result, config_hash=matrix_hash)
+        finally:
+            if link.exists():
+                os.rmdir(link)
 
 
 def _sample(case: CapabilityMatrixCase, attempt: int, is_warmup: bool, observation: ChainObservation, result: Any, *, elapsed: float = 0.0, skipped: str | None = None, measurement_mode: str | None = None, duration: float | None = None, config_hash: str = "") -> BenchmarkSample:
@@ -132,13 +136,13 @@ async def run_performance(repeat: int, warmup: int, matrix_hash: str) -> list[Be
                 observation = ChainObservation()
                 executor = _executor(case, Path(temporary), observation)
                 handler = executor.get_handler(case.tool)
+                arguments = validate_args(handler.args_model, dict(case.arguments))
                 if mode == "direct_handler":
-                    arguments = validate_args(handler.args_model, dict(case.arguments))
                     start = time.perf_counter()
                     await handler.execute(arguments, ToolExecutionContext())
                 else:
                     start = time.perf_counter()
-                    await executor.execute(case.tool, dict(case.arguments), None, RecordingJournal(observation), ToolExecutionContext())
+                    await executor.execute(case.tool, arguments, None, RecordingJournal(observation), ToolExecutionContext())
                 if observation.handler_entry_at is None:
                     raise ValueError("性能采样未进入 Handler")
                 samples.append(_sample(case, attempt, attempt < warmup, observation, type("Result", (), {"is_error": False, "error_code": None})(), measurement_mode=mode, duration=(observation.handler_entry_at - start) * 1000.0, config_hash=matrix_hash))
@@ -157,14 +161,15 @@ def write_artifacts(samples: list[BenchmarkSample], output: Path, baseline: Path
     """写出 JSONL、配置与两份 Markdown 报告；可选复制为基线。"""
     output.mkdir(parents=True, exist_ok=True)
     identifier = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "_" + _commit()
-    sample_path = output / f"{identifier}.jsonl"
+    sample_path = output / "samples" / f"{identifier}.jsonl"
+    sample_path.parent.mkdir(exist_ok=True)
     sample_path.write_text("".join(json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in samples), encoding="utf-8")
     snapshot = build_snapshot(
         snapshot_id=identifier, generated_at=datetime.now(UTC).isoformat(), git_commit=_commit(),
         dataset=SUITE_CAPABILITY,
         environment={"python_version": sys.version.split()[0], "platform": platform.platform(), "config_hash": samples[0].config_hash, "eval_schema_version": "tool-v1"},
         warmup=sum(1 for item in samples if item.is_warmup), repeat=sum(1 for item in samples if not item.is_warmup),
-        samples=samples, samples_path=sample_path.name, scenario_id=SUITE_CAPABILITY,
+        samples=samples, samples_path=f"samples/{identifier}.jsonl", scenario_id=SUITE_CAPABILITY,
         samples_content_summary={"line_count": len(samples), "byte_count": sample_path.stat().st_size},
     )
     snapshot_path = output / f"{identifier}.json"
