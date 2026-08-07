@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
+from benchmarks.eval_baseline_models import BenchmarkSample, CapabilityStatus
 from benchmarks.recovery_reliability import run_process_sample, run_recovery_sample, write_artifacts
 
 
@@ -36,3 +38,22 @@ def test_write_artifacts_rejects_mixed_formal_configuration(tmp_path: Path) -> N
     object.__setattr__(second, "config_hash", "different-config")
     with pytest.raises(ValueError, match="不一致"):
         write_artifacts([first, second], tmp_path / "output")
+
+
+def test_snapshot_excludes_capability_boundary_from_global_success_rate(tmp_path: Path) -> None:
+    """能力边界失败保留在 JSONL（逐行 JSON），但不得污染快照成功率。"""
+    formal = asyncio.run(run_recovery_sample(tmp_path / "formal", "tool_before_effect", 0, False))
+    boundary = BenchmarkSample.from_dict({
+        **formal.to_dict(),
+        "case_id": "delegation_cold_rebuild_boundary",
+        "passed": False,
+        "failure_kind": "capability_boundary",
+        "capability_status": CapabilityStatus.BOUNDARY.value,
+        "capability_reason": "已知边界",
+    })
+    output = tmp_path / "output"
+    write_artifacts([formal, boundary], output)
+    snapshot_path = next(path for path in output.glob("*.json") if path.name != "fault-config.json")
+    payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert payload["global_summary"]["sample_count"] == 1
+    assert payload["global_summary"]["passed_count"] == 1
