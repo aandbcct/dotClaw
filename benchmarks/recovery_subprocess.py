@@ -10,6 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 from .recovery_assertions import checkpoint_summary, collect_recovery_facts
 from .recovery_faults import EffectLog, interrupt_initial_run, make_engine
@@ -28,6 +29,7 @@ class SubprocessRecoveryResult:
     internal_pass: bool
     tool_effect_count: int
     recovery_ms: float
+    evidence_summary: Mapping[str, object]
 
 
 async def _child_prepare(root: Path) -> None:
@@ -58,7 +60,23 @@ async def run_subprocess_recovery(root: Path) -> SubprocessRecoveryResult:
     result = await make_engine(root, "tool_before_effect", resume=True).resume_run(run.run_id)
     recovery_ms = (time.perf_counter() - started) * 1000.0
     facts = await collect_recovery_facts(root, run.session_id, run.run_id, before_action=before_action, before_context_count=before_context_count)
-    return SubprocessRecoveryResult(process.returncode, run.run_id, facts.control_recovery_pass and before_action == "execute_tools" and result.run_id == run.run_id, facts.internal_facts_pass and facts.tool_result_count == 1, EffectLog(root).count("tool_effect"), recovery_ms)
+    persisted_files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+    evidence = {
+        "subprocess_command": command,
+        "subprocess_exit_code": process.returncode,
+        "python_version": sys.version.split()[0],
+        "platform": sys.platform,
+        "source_commit": _source_commit(),
+        "persisted_files": persisted_files,
+        "checkpoint_action_before": before_action,
+    }
+    return SubprocessRecoveryResult(process.returncode, run.run_id, facts.control_recovery_pass and before_action == "execute_tools" and result.run_id == run.run_id, facts.internal_facts_pass and facts.tool_result_count == 1, EffectLog(root).count("tool_effect"), recovery_ms, evidence)
+
+
+def _source_commit() -> str:
+    """记录验证时的源码提交；不可用时明确写 unknown（未知）。"""
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path.cwd(), capture_output=True, text=True, check=False)
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
 def main(argv: list[str] | None = None) -> int:

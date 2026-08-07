@@ -242,6 +242,7 @@ python -m benchmarks.recovery_reliability `
 - `tool_after_effect` 会记录可观察重复副作用，但 ToolResult（工具结果）、完成事件和 Conversation（会话投影）重复属于内部事实失败。
 - 成功提交的六个边界逐点报告；工具前 checkpoint（检查点）另有子进程强制退出验证。
 - 委派等待冷重建是当前能力边界，不进入恢复成功率；PR4 不证明跨版本、分布式或真实 API 的 exactly-once。
+- 工件按统一布局写出 `<snapshot-id>.json` 和 `samples/<snapshot-id>.jsonl`；保存基线时二者会一并复制。
 
 
 ## 目录结构

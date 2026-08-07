@@ -18,8 +18,9 @@ from dotclaw.runtime.adapters import RunRepositoryAdapter
 from dotclaw.runtime.domain.context import SuccessCommitFaultPoint
 
 from .eval_baseline_models import BenchmarkSample, CapabilityStatus, ExternalEffectStatus, RecoveryFaultScenario, SUITE_RECOVERY
+from .eval_baseline_stats import build_snapshot
 from .recovery_assertions import checkpoint_summary, collect_recovery_facts, expected_checkpoint_action
-from .recovery_faults import EffectLog, interrupt_initial_run, make_engine, prepare_success_commit_fault, recover_success_commit, start_waiting_approval
+from .recovery_faults import EffectLog, audit_delegation_cold_rebuild, interrupt_initial_run, make_engine, prepare_success_commit_fault, recover_success_commit, start_waiting_approval
 from .recovery_subprocess import run_subprocess_recovery
 from .recovery_stats import aggregate_recovery_scenarios
 
@@ -120,23 +121,25 @@ async def run_process_sample(root: Path, attempt: int, is_warmup: bool) -> Bench
         git_commit=_git_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash="recovery-v1-fixed", eval_schema_version="runtime-v4",
         passed=passed, failure_kind=None if passed else "subprocess_recovery_assertion", assertions_passed=int(passed), assertions_total=1, trace_available=True,
         wall_duration_ms=result.recovery_ms, run_id=result.run_id, suite=SUITE_RECOVERY, scenario_id=RecoveryFaultScenario.TOOL_BEFORE_EFFECT.value,
-        fault_scenario=RecoveryFaultScenario.TOOL_BEFORE_EFFECT, fault_point="execute_tools", fault_mechanism="subprocess_forced_exit", restart_kind="new_process", rebuild_count=1,
+        fault_scenario=RecoveryFaultScenario.TOOL_BEFORE_EFFECT, fault_point="execute_tools_subprocess", fault_mechanism="subprocess_forced_exit", restart_kind="new_process", rebuild_count=1,
         checkpoint_action_before="execute_tools", checkpoint_action_resumed="execute_tools", same_run_id=result.control_pass, same_context_version=result.control_pass,
         control_recovery_pass=result.control_pass, tool_result_count=1, internal_facts_pass=result.internal_pass, tool_effect_count=result.tool_effect_count,
         external_duplicate_count=0, external_effect_status=ExternalEffectStatus.ONCE, recovery_wall_duration_ms=result.recovery_ms, capability_status=CapabilityStatus.FORMAL,
-        evidence_summary={"subprocess_exit_code": result.exit_code},
+        evidence_summary=result.evidence_summary,
     )
 
 
-def delegation_boundary_sample(attempt: int, is_warmup: bool) -> BenchmarkSample:
-    """记录当前委派等待冷重建的明确能力边界，不伪造可恢复性实验。"""
+async def delegation_boundary_sample(root: Path, attempt: int, is_warmup: bool) -> BenchmarkSample:
+    """执行真实父 Run（父级运行）挂起、冷重建与回灌失败审计。"""
+    evidence = await audit_delegation_cold_rebuild(root)
+    reason = str(evidence["failure"])
     return BenchmarkSample(
         dataset=SUITE_RECOVERY, case_id="delegation_cold_rebuild_boundary", attempt=attempt, is_warmup=is_warmup,
         git_commit=_git_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash="recovery-v1-fixed", eval_schema_version="runtime-v4",
         passed=False, failure_kind="capability_boundary", assertions_passed=0, assertions_total=0, trace_available=False, wall_duration_ms=0.0, run_id=None,
         suite=SUITE_RECOVERY, scenario_id=RecoveryFaultScenario.DELEGATION_COLD_REBUILD_BOUNDARY.value,
         fault_scenario=RecoveryFaultScenario.DELEGATION_COLD_REBUILD_BOUNDARY, fault_point="parent_wait_mapping", fault_mechanism="capability_audit", restart_kind="cold_rebuild",
-        capability_status=CapabilityStatus.BOUNDARY, capability_reason="父子 Run 关系、等待映射与结果回灌尚非跨进程持久化事实", external_effect_status=ExternalEffectStatus.NOT_APPLICABLE,
+        capability_status=CapabilityStatus.BOUNDARY, capability_reason=reason, external_effect_status=ExternalEffectStatus.NOT_APPLICABLE, evidence_summary=evidence,
     )
 
 
@@ -166,31 +169,58 @@ async def run_suite(*, warmup: int, repeat: int, process_warmup: int = 0, proces
         with tempfile.TemporaryDirectory(prefix="dotclaw-subprocess-") as temporary:
             samples.append(await run_process_sample(Path(temporary), attempt, attempt < process_warmup))
     for attempt in range(warmup + repeat):
-        samples.append(delegation_boundary_sample(attempt, attempt < warmup))
+        with tempfile.TemporaryDirectory(prefix="dotclaw-delegation-boundary-") as temporary:
+            samples.append(await delegation_boundary_sample(Path(temporary), attempt, attempt < warmup))
     return samples
 
 
 def write_artifacts(samples: list[BenchmarkSample], output_dir: Path, baseline_dir: Path | None = None) -> None:
     """写出可追溯 JSONL、分层报告、故障配置和能力边界声明。"""
+    _validate_comparable_samples(samples)
     output_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = output_dir / "evidence"
     evidence_dir.mkdir(exist_ok=True)
     snapshot_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "_" + _git_commit()
-    samples_path = output_dir / "recovery-samples.jsonl"
+    samples_path = output_dir / "samples" / f"{snapshot_id}.jsonl"
+    samples_path.parent.mkdir(exist_ok=True)
     samples_path.write_text("".join(json.dumps(sample.to_dict(), ensure_ascii=False) + "\n" for sample in samples), encoding="utf-8")
+    content_summary = {"line_count": len(samples), "byte_count": samples_path.stat().st_size}
+    snapshot = build_snapshot(
+        snapshot_id=snapshot_id, generated_at=datetime.now(UTC).isoformat(), git_commit=_git_commit(),
+        dataset=SUITE_RECOVERY, environment={"python_version": sys.version.split()[0], "platform": platform.platform(), "config_hash": "recovery-v1-fixed", "eval_schema_version": "runtime-v4"},
+        warmup=sum(1 for sample in samples if sample.is_warmup), repeat=sum(1 for sample in samples if not sample.is_warmup),
+        samples=samples, samples_path=f"samples/{snapshot_id}.jsonl", scenario_id=SUITE_RECOVERY, samples_content_summary=content_summary,
+    )
+    snapshot_path = output_dir / f"{snapshot_id}.json"
+    snapshot_path.write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     summaries = aggregate_recovery_scenarios(samples)
     lines = ["# PR4 操作节点故障注入与恢复", "", "仅统计正式非预热样本；外部副作用不并入内部事实成功率。", "", "| 场景 | 控制状态 | 内部事实 | 恢复 P50/P95 (ms) | 外部副作用 |", "|---|---:|---:|---:|---|"]
     for item in summaries:
         label = item.scenario.value if item.fault_point is None else f"{item.scenario.value}:{item.fault_point}"
         lines.append(f"| {label} | {item.control_passed_count}/{item.sample_count} | {item.internal_passed_count}/{item.sample_count} | {item.recovery_p50_ms}/{item.recovery_p95_ms} | {dict(item.external_effect_status_counts)} |")
-    lines.extend(["", "## 边界", "", "LLM 响应未知与工具执行后中断不承诺跨崩溃 exactly-once；委派等待冷重建不计入本报告成功率。", "", "## 原始证据", "", "- `recovery-samples.jsonl`", "- `fault-config.json`", ""])
+    lines.extend(["", "## 边界", "", "LLM 响应未知与工具执行后中断不承诺跨崩溃 exactly-once；委派等待冷重建不计入本报告成功率。", "", "## 原始证据", "", f"- `samples/{snapshot_id}.jsonl`", f"- `{snapshot_id}.json`", "- `fault-config.json`", ""])
     (output_dir / "recovery-report.md").write_text("\n".join(lines), encoding="utf-8")
     (output_dir / "capability-boundary.md").write_text("# 能力边界\n\n委派等待父子映射尚未作为跨进程权威事实持久化，因此不纳入 PR4 恢复成功率。\n", encoding="utf-8")
     (output_dir / "fault-config.json").write_text(json.dumps({"suite": SUITE_RECOVERY, "scenarios": list(_FORMAL_MODES), "git_commit": _git_commit()}, ensure_ascii=False, indent=2), encoding="utf-8")
     (evidence_dir / "samples-summary.json").write_text(json.dumps([sample.evidence_summary for sample in samples], ensure_ascii=False, indent=2), encoding="utf-8")
     if baseline_dir is not None:
         baseline_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(samples_path, baseline_dir / f"{snapshot_id}.jsonl")
+        baseline_samples = baseline_dir / "samples" / f"{snapshot_id}.jsonl"
+        baseline_samples.parent.mkdir(exist_ok=True)
+        shutil.copy2(samples_path, baseline_samples)
+        shutil.copy2(snapshot_path, baseline_dir / f"{snapshot_id}.json")
+
+
+def _validate_comparable_samples(samples: list[BenchmarkSample]) -> None:
+    """拒绝不同提交或固定故障配置混入同一恢复成本快照。"""
+    formal = [sample for sample in samples if not sample.is_warmup and sample.capability_status is CapabilityStatus.FORMAL]
+    if not formal:
+        raise ValueError("恢复工件至少需要一个正式样本")
+    commits = {sample.git_commit for sample in formal}
+    configs = {sample.config_hash for sample in formal}
+    schemas = {sample.eval_schema_version for sample in formal}
+    if len(commits) != 1 or len(configs) != 1 or len(schemas) != 1:
+        raise ValueError("正式恢复样本的源码提交、故障配置或 Runtime schema 不一致")
 
 
 def main(argv: list[str] | None = None) -> int:

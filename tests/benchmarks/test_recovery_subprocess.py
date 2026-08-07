@@ -15,3 +15,7 @@ def test_tool_before_effect_survives_forced_subprocess_exit(tmp_path: Path) -> N
     assert result.control_pass is True
     assert result.internal_pass is True
     assert result.tool_effect_count == 1
+    assert result.evidence_summary["subprocess_exit_code"] == 97
+    assert result.evidence_summary["subprocess_command"]
+    assert result.evidence_summary["persisted_files"]
+    assert result.evidence_summary["source_commit"]
