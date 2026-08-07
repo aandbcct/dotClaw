@@ -220,9 +220,9 @@ class ForceRebuildContextPort(ContextPort):
         self._inner.request_refresh(slot_id, owner, owner_key)
 
 
-def build_engine(root: Path, manager: SessionManager, counter: FixedTokenizerCounter, compactor: BenchmarkCompactor, llm: LLMPort | None = None, knowledge: ObservedKnowledgeBase | None = None, force_rebuild: bool = False, context_window: int = 200, profile: str = "SESSION:default", tool: ToolPort | None = None) -> tuple[RuntimeEngine, RunRepositoryAdapter]:
+def build_engine(root: Path, manager: SessionManager, counter: FixedTokenizerCounter, compactor: BenchmarkCompactor, llm: LLMPort | None = None, knowledge: ObservedKnowledgeBase | None = None, force_rebuild: bool = False, context_window: int = 200, profile: str = "SESSION:default", tool: ToolPort | None = None, context_port: ContextPort | None = None) -> tuple[RuntimeEngine, RunRepositoryAdapter]:
     """构造生产 ContextProvider、文件仓储和 RuntimeEngine。"""
-    provider: ContextPort = build_context_provider(ContextDependencies(knowledge_base=knowledge, user_profile=UserProfile(name=profile), agent_registry=BenchmarkAgentDirectory()))
+    provider: ContextPort = context_port or build_context_provider(ContextDependencies(knowledge_base=knowledge, user_profile=UserProfile(name=profile), agent_registry=BenchmarkAgentDirectory()))
     if force_rebuild:
         provider = ForceRebuildContextPort(provider)
     repository = RunRepositoryAdapter(root, SessionConversationProjector(manager))

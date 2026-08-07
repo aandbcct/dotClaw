@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from math import sqrt
 
 from .eval_baseline_models import BenchmarkSample, LatencyStats
 from .eval_baseline_stats import percentile, success_rate
@@ -29,3 +30,14 @@ def budget_pass_rate(samples: Sequence[BenchmarkSample]) -> float:
     if not values or any(value is None for value in values):
         raise ValueError("budget_passed 缺失，不能聚合")
     return success_rate(sum(value is True for value in values), len(values))
+
+
+def wilson_interval(errors: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """返回二项错误率的 Wilson 区间，空样本拒绝统计。"""
+    if total <= 0 or errors < 0 or errors > total:
+        raise ValueError("Wilson 区间输入无效")
+    proportion = errors / total
+    denominator = 1 + z * z / total
+    center = (proportion + z * z / (2 * total)) / denominator
+    margin = z * sqrt(proportion * (1 - proportion) / total + z * z / (4 * total * total)) / denominator
+    return center - margin, center + margin
