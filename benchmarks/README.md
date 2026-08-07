@@ -266,6 +266,24 @@ JSONL 和能力边界报告，不进入恢复成功率。
   **30 / 30** 未知结果。因此上述结论不承诺外部调用 exactly-once。
 
 
+## PR5：Capability 安全链实验
+
+PR5 使用 Git 跟踪的完整有限安全决策矩阵，验证现有工具链的参数校验、资源解析、策略收敛、审批、Handler 屏障、Agent 策略隔离、路径回填与摘要脱敏；所有 Handler 均为无副作用记录型替身，不执行真实文件、进程、网络或 MCP 调用。
+
+```powershell
+python -m benchmarks.capability_reliability `
+  --suite reliability_capability_v1 `
+  --matrix benchmarks/datasets/reliability_capability_v1/matrix.json `
+  --performance-warmup 5 --performance-repeat 50 `
+  --output benchmarks/reports/capability/<run-id> `
+  --save-baseline benchmarks/baselines/reliability_capability_v1
+```
+
+- 矩阵每个适用 Case 只执行一次；Windows 联接点无法由当前用户建立时记录为环境跳过，不计为安全通过；
+- `security-matrix.md` 报告适用/通过/失败/跳过、三类阻断分支的 Handler 进入次数和测试敏感标记泄露数；路径对齐不表示已解决 TOCTOU；
+- `security-chain-overhead.md` 只比较相同 Handler、已验证参数和执行上下文下的直接 Handler 与完整链抵达 Handler entry 的 P50/P95；预热不进入统计；
+- 进程结论仅为 `process.exec` 档案级策略，不表达命令文本内容级治理。
+
 ## 目录结构
 
 ```
