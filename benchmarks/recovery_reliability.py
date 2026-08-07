@@ -185,11 +185,12 @@ def write_artifacts(samples: list[BenchmarkSample], output_dir: Path, baseline_d
     samples_path.parent.mkdir(exist_ok=True)
     samples_path.write_text("".join(json.dumps(sample.to_dict(), ensure_ascii=False) + "\n" for sample in samples), encoding="utf-8")
     content_summary = {"line_count": len(samples), "byte_count": samples_path.stat().st_size}
+    snapshot_samples = [sample for sample in samples if sample.capability_status is CapabilityStatus.FORMAL]
     snapshot = build_snapshot(
         snapshot_id=snapshot_id, generated_at=datetime.now(UTC).isoformat(), git_commit=_git_commit(),
         dataset=SUITE_RECOVERY, environment={"python_version": sys.version.split()[0], "platform": platform.platform(), "config_hash": "recovery-v1-fixed", "eval_schema_version": "runtime-v4"},
-        warmup=sum(1 for sample in samples if sample.is_warmup), repeat=sum(1 for sample in samples if not sample.is_warmup),
-        samples=samples, samples_path=f"samples/{snapshot_id}.jsonl", scenario_id=SUITE_RECOVERY, samples_content_summary=content_summary,
+        warmup=sum(1 for sample in snapshot_samples if sample.is_warmup), repeat=sum(1 for sample in snapshot_samples if not sample.is_warmup),
+        samples=snapshot_samples, samples_path=f"samples/{snapshot_id}.jsonl", scenario_id=SUITE_RECOVERY, samples_content_summary=content_summary,
     )
     snapshot_path = output_dir / f"{snapshot_id}.json"
     snapshot_path.write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -200,7 +201,11 @@ def write_artifacts(samples: list[BenchmarkSample], output_dir: Path, baseline_d
         lines.append(f"| {label} | {item.control_passed_count}/{item.sample_count} | {item.internal_passed_count}/{item.sample_count} | {item.recovery_p50_ms}/{item.recovery_p95_ms} | {dict(item.external_effect_status_counts)} |")
     lines.extend(["", "## 边界", "", "LLM 响应未知与工具执行后中断不承诺跨崩溃 exactly-once；委派等待冷重建不计入本报告成功率。", "", "## 原始证据", "", f"- `samples/{snapshot_id}.jsonl`", f"- `{snapshot_id}.json`", "- `fault-config.json`", ""])
     (output_dir / "recovery-report.md").write_text("\n".join(lines), encoding="utf-8")
-    (output_dir / "capability-boundary.md").write_text("# 能力边界\n\n委派等待父子映射尚未作为跨进程权威事实持久化，因此不纳入 PR4 恢复成功率。\n", encoding="utf-8")
+    boundaries = [sample for sample in samples if sample.capability_status is CapabilityStatus.BOUNDARY]
+    boundary_lines = ["# 能力边界", "", "以下样本保存在原始 JSONL，但不会进入快照 global_summary（全局汇总）或正式恢复成功率。", ""]
+    for sample in boundaries:
+        boundary_lines.append(f"- `{sample.case_id}`：{sample.capability_reason}")
+    (output_dir / "capability-boundary.md").write_text("\n".join(boundary_lines) + "\n", encoding="utf-8")
     (output_dir / "fault-config.json").write_text(json.dumps({"suite": SUITE_RECOVERY, "scenarios": list(_FORMAL_MODES), "git_commit": _git_commit()}, ensure_ascii=False, indent=2), encoding="utf-8")
     (evidence_dir / "samples-summary.json").write_text(json.dumps([sample.evidence_summary for sample in samples], ensure_ascii=False, indent=2), encoding="utf-8")
     if baseline_dir is not None:
