@@ -10,7 +10,7 @@ from benchmarks.concurrency_stats import (
     compute_change_rate,
     compute_throughput,
 )
-from benchmarks.eval_baseline_models import BenchmarkSample
+from benchmarks.eval_baseline_models import BenchmarkSample, ConcurrencyScenario, ScheduleMode
 
 
 def _make_concurrency_sample(**overrides) -> BenchmarkSample:
@@ -33,7 +33,7 @@ def _make_concurrency_sample(**overrides) -> BenchmarkSample:
         wall_duration_ms=50.0,
         run_id="run-1",
         queue_wait_ms=10.0,
-        schedule_mode=None,
+        schedule_mode=ScheduleMode.SESSION_LOCK,
         session_count=1,
         requests_per_session=20,
         fake_delay_ms=20,
@@ -136,7 +136,7 @@ class TestAggregateScenarioStats:
             _make_concurrency_sample(wall_duration_ms=20.0, queue_wait_ms=3.0),
             _make_concurrency_sample(wall_duration_ms=30.0, queue_wait_ms=5.0),
         ]
-        stats = aggregate_scenario_stats("fifo", "session_lock", samples, 1)
+        stats = aggregate_scenario_stats("fifo", "session_lock", samples, 1, ConcurrencyScenario.FIFO_SAME_SESSION)
         assert stats.total_requests == 3
         assert stats.wall_duration_ms.sample_count == 3
         assert stats.queue_wait_ms.p50_ms == 3.0
@@ -147,7 +147,7 @@ class TestAggregateScenarioStats:
             _make_concurrency_sample(is_warmup=True, wall_duration_ms=10.0),
             _make_concurrency_sample(wall_duration_ms=20.0),
         ]
-        stats = aggregate_scenario_stats("fifo", "session_lock", samples, 1)
+        stats = aggregate_scenario_stats("fifo", "session_lock", samples, 1, ConcurrencyScenario.FIFO_SAME_SESSION)
         assert stats.total_requests == 1
 
     def test_zero_queue_wait_is_included_in_distribution(self):
@@ -156,7 +156,7 @@ class TestAggregateScenarioStats:
             _make_concurrency_sample(queue_wait_ms=0.0),
             _make_concurrency_sample(queue_wait_ms=10.0),
         ]
-        stats = aggregate_scenario_stats("queue", "session_lock", samples, 1)
+        stats = aggregate_scenario_stats("queue", "session_lock", samples, 1, ConcurrencyScenario.FIFO_SAME_SESSION)
         assert stats.queue_wait_ms.sample_count == 2
         assert stats.queue_wait_ms.p50_ms == 5.0
 
@@ -164,26 +164,28 @@ class TestAggregateScenarioStats:
         """取消场景统计。"""
         samples = [
             _make_concurrency_sample(
+                case_id=ConcurrencyScenario.CANCEL_NON_BLOCKING.value,
                 cancel_delivery_ms=5.0, cancel_effect_ms=50.0,
                 cancellation_delivered=True, cancellation_effective=True,
                 lock_released=True, followup_completed=True,
             ),
             _make_concurrency_sample(
+                case_id=ConcurrencyScenario.CANCEL_NON_BLOCKING.value,
                 cancel_delivery_ms=10.0, cancel_effect_ms=100.0,
                 cancellation_delivered=True, cancellation_effective=True,
                 lock_released=True, followup_completed=True,
             ),
         ]
-        stats = aggregate_scenario_stats("cancel", "session_lock", samples, 1)
+        stats = aggregate_scenario_stats("cancel", "session_lock", samples, 1, ConcurrencyScenario.CANCEL_NON_BLOCKING)
         assert stats.cancel_passed_count == 2
 
     def test_leak_totals(self):
         """泄漏条数与通过请求数必须采用独立口径。"""
         samples = [
-            _make_concurrency_sample(message_leak_count=2, event_leak_count=1),
-            _make_concurrency_sample(message_leak_count=1, event_leak_count=0),
+            _make_concurrency_sample(case_id=ConcurrencyScenario.MULTI_SESSION_ISOLATION.value, message_leak_count=2, event_leak_count=1),
+            _make_concurrency_sample(case_id=ConcurrencyScenario.MULTI_SESSION_ISOLATION.value, message_leak_count=1, event_leak_count=0),
         ]
-        stats = aggregate_scenario_stats("isolation", "session_lock", samples, 1)
+        stats = aggregate_scenario_stats("isolation", "session_lock", samples, 1, ConcurrencyScenario.MULTI_SESSION_ISOLATION)
         assert stats.message_leak_total == 3
         assert stats.event_leak_total == 1
         assert stats.isolation_passed_count == 0
@@ -192,17 +194,18 @@ class TestAggregateScenarioStats:
     def test_fifo_failed_sample_cannot_count_as_passed(self):
         """顺序字段即使相等，最终失败的请求也不得计入 FIFO 通过数。"""
         samples = [_make_concurrency_sample(passed=False, failure_kind="runtime")]
-        stats = aggregate_scenario_stats("fifo", "session_lock", samples, 1)
+        stats = aggregate_scenario_stats("fifo", "session_lock", samples, 1, ConcurrencyScenario.FIFO_SAME_SESSION)
         assert stats.fifo_passed_count == 0
         assert stats.fifo_total_count == 1
 
     def test_non_isolation_samples_do_not_expand_isolation_denominator(self):
         """没有隔离证据字段的场景不得计入隔离通过分母。"""
         samples = [_make_concurrency_sample(
+            case_id=ConcurrencyScenario.SESSION_SCALING.value,
             message_leak_count=None, event_leak_count=None, context_leak_count=None,
             tool_leak_count=None, stream_leak_count=None,
         )]
-        stats = aggregate_scenario_stats("scaling", "session_lock", samples, 1)
+        stats = aggregate_scenario_stats("scaling", "session_lock", samples, 1, ConcurrencyScenario.SESSION_SCALING)
         assert stats.isolation_total_count == 0
         assert stats.isolation_passed_count == 0
 

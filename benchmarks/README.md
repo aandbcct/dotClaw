@@ -75,20 +75,25 @@ python -m benchmarks.eval_baseline \
 ### 入口命令
 
 ```bash
-# 开发期快速验证（warmup=2, repeat=10）
-python -m benchmarks.concurrency_reliability --warmup 2 --repeat 10 --fake-delay-ms 20
+# 开发期快速验证（核心与扩展各 1 轮）
+python -m benchmarks.concurrency_reliability \
+  --core-warmup 0 --core-repeat 1 \
+  --scaling-warmup 0 --scaling-repeat 1 \
+  --fake-delay-ms 20
 
-# 正式实验（warmup=5, repeat=100）
+# 正式实验（核心正确性 5+50；扩展调度 5+30）
 python -m benchmarks.concurrency_reliability \
   --suite reliability_concurrency_v1 \
-  --warmup 5 --repeat 100 \
+  --core-warmup 5 --core-repeat 50 \
+  --scaling-warmup 5 --scaling-repeat 30 \
   --fake-delay-ms 20 \
   --output benchmarks/reports/concurrency/<run-id> \
   --save-baseline benchmarks/baselines/reliability_concurrency_v1
 ```
 
 参数：`--suite`（实验族，默认 `reliability_concurrency_v1`）、
-`--warmup`（默认 5）、`--repeat`（默认 100）、
+`--core-warmup` / `--core-repeat`（FIFO、隔离、取消，默认 5 / 50）、
+`--scaling-warmup` / `--scaling-repeat`（扩展、固定并发、长短混合，默认 5 / 30）、
 `--fake-delay-ms`（固定延迟毫秒，默认 20）、
 `--output`（工件输出目录）、`--save-baseline`（可选基线目录）。
 

@@ -609,17 +609,19 @@ class ConcurrencyReliabilityRunner:
     async def run(
         self,
         *,
-        warmup: int,
-        repeat: int,
+        core_warmup: int,
+        core_repeat: int,
+        scaling_warmup: int,
+        scaling_repeat: int,
         fake_delay_ms: int,
         output_dir: Path,
         baseline_dir: Path | None = None,
     ) -> ConcurrencySnapshot:
         """执行完整并发实验套件并返回快照。"""
-        if warmup < 0:
-            raise ValueError(f"warmup 必须 >= 0，实际 {warmup}")
-        if repeat <= 0:
-            raise ValueError(f"repeat 必须 > 0，实际 {repeat}")
+        if core_warmup < 0 or scaling_warmup < 0:
+            raise ValueError("core/scaling warmup 必须 >= 0")
+        if core_repeat <= 0 or scaling_repeat <= 0:
+            raise ValueError("core/scaling repeat 必须 > 0")
 
         agent_id: str = "bench-agent"
         all_samples: list[BenchmarkSample] = []
@@ -630,7 +632,7 @@ class ConcurrencyReliabilityRunner:
         print("=== 场景 1：同 Session FIFO ===")
         fifo_config = WorkloadConfig(
             session_count=1, requests_per_session=20, fake_delay_ms=fake_delay_ms,
-            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=warmup, repeat=repeat,
+            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=core_warmup, repeat=core_repeat,
         )
         fifo_samples, _ = await self._run_scenario_fifo(
             fifo_config, agent_id, output_dir,
@@ -640,7 +642,8 @@ class ConcurrencyReliabilityRunner:
             ConcurrencyScenario.FIFO_SAME_SESSION.value,
             ScheduleMode.SESSION_LOCK.value,
             fifo_samples,
-            repeat,
+            core_repeat,
+            ConcurrencyScenario.FIFO_SAME_SESSION,
         )
         all_scenarios.append(fifo_stats)
         all_configs.append(fifo_config.to_dict())
@@ -650,7 +653,7 @@ class ConcurrencyReliabilityRunner:
         print("=== 场景 2：多 Session 隔离 ===")
         iso_config = WorkloadConfig(
             session_count=8, requests_per_session=4, fake_delay_ms=fake_delay_ms,
-            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=warmup, repeat=repeat,
+            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=core_warmup, repeat=core_repeat,
         )
         iso_samples, _ = await self._run_scenario_isolation(
             iso_config, agent_id, output_dir,
@@ -660,7 +663,8 @@ class ConcurrencyReliabilityRunner:
             ConcurrencyScenario.MULTI_SESSION_ISOLATION.value,
             ScheduleMode.SESSION_LOCK.value,
             iso_samples,
-            repeat,
+            core_repeat,
+            ConcurrencyScenario.MULTI_SESSION_ISOLATION,
         )
         all_scenarios.append(iso_stats)
         all_configs.append(iso_config.to_dict())
@@ -671,7 +675,7 @@ class ConcurrencyReliabilityRunner:
         for n_sessions in (1, 2, 4, 8):
             session_config = WorkloadConfig(
                 session_count=n_sessions, requests_per_session=4, fake_delay_ms=fake_delay_ms,
-                schedule_mode=ScheduleMode.SESSION_LOCK, warmup=warmup, repeat=repeat,
+                schedule_mode=ScheduleMode.SESSION_LOCK, warmup=scaling_warmup, repeat=scaling_repeat,
             )
             scale_samples, batch_total = await self._run_scenario_scaling(
                 session_config, agent_id, output_dir,
@@ -681,7 +685,8 @@ class ConcurrencyReliabilityRunner:
                 f"{ConcurrencyScenario.SESSION_SCALING.value}_{n_sessions}s",
                 ScheduleMode.SESSION_LOCK.value,
                 scale_samples,
-                repeat,
+                scaling_repeat,
+                ConcurrencyScenario.SESSION_SCALING,
             )
             scale_stats = _with_batch_metrics(scale_stats, batch_total)
             all_scenarios.append(scale_stats)
@@ -689,7 +694,7 @@ class ConcurrencyReliabilityRunner:
 
             global_config = WorkloadConfig(
                 session_count=n_sessions, requests_per_session=4, fake_delay_ms=fake_delay_ms,
-                schedule_mode=ScheduleMode.GLOBAL_LOCK, warmup=warmup, repeat=repeat,
+                schedule_mode=ScheduleMode.GLOBAL_LOCK, warmup=scaling_warmup, repeat=scaling_repeat,
             )
             global_samples, global_batch = await self._run_scenario_scaling_global(
                 global_config, agent_id, output_dir,
@@ -699,7 +704,8 @@ class ConcurrencyReliabilityRunner:
                 f"{ConcurrencyScenario.SESSION_SCALING.value}_{n_sessions}s",
                 ScheduleMode.GLOBAL_LOCK.value,
                 global_samples,
-                repeat,
+                scaling_repeat,
+                ConcurrencyScenario.SESSION_SCALING,
             )
             global_stats = _with_batch_metrics(global_stats, global_batch)
             all_scenarios.append(global_stats)
@@ -714,35 +720,41 @@ class ConcurrencyReliabilityRunner:
         print("=== 场景 4：固定并发对照 ===")
         fixed_config = WorkloadConfig(
             session_count=8, requests_per_session=4, fake_delay_ms=fake_delay_ms,
-            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=warmup, repeat=repeat,
+            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=scaling_warmup, repeat=scaling_repeat,
         )
 
         # Session 锁
         session_samples, session_batch = await self._run_scenario_scaling(
             fixed_config, agent_id, output_dir,
         )
+        for sample in session_samples:
+            object.__setattr__(sample, "case_id", ConcurrencyScenario.FIXED_CONCURRENCY.value)
         all_samples.extend(session_samples)
         session_stats = aggregate_scenario_stats(
             f"{ConcurrencyScenario.FIXED_CONCURRENCY.value}_session",
             ScheduleMode.SESSION_LOCK.value,
             session_samples,
-            repeat,
+            scaling_repeat,
+            ConcurrencyScenario.FIXED_CONCURRENCY,
         )
 
         # 全局锁
         global_config = WorkloadConfig(
             session_count=8, requests_per_session=4, fake_delay_ms=fake_delay_ms,
-            schedule_mode=ScheduleMode.GLOBAL_LOCK, warmup=warmup, repeat=repeat,
+            schedule_mode=ScheduleMode.GLOBAL_LOCK, warmup=scaling_warmup, repeat=scaling_repeat,
         )
         global_samples, global_batch = await self._run_scenario_scaling_global(
             global_config, agent_id, output_dir,
         )
+        for sample in global_samples:
+            object.__setattr__(sample, "case_id", ConcurrencyScenario.FIXED_CONCURRENCY.value)
         all_samples.extend(global_samples)
         global_stats = aggregate_scenario_stats(
             f"{ConcurrencyScenario.FIXED_CONCURRENCY.value}_global",
             ScheduleMode.GLOBAL_LOCK.value,
             global_samples,
-            repeat,
+            scaling_repeat,
+            ConcurrencyScenario.FIXED_CONCURRENCY,
         )
         session_stats = _with_batch_metrics(session_stats, session_batch)
         global_stats = _with_batch_metrics(global_stats, global_batch)
@@ -759,7 +771,7 @@ class ConcurrencyReliabilityRunner:
         print("=== 场景 5：长短混合 ===")
         mixed_session_config = WorkloadConfig(
             session_count=8, requests_per_session=1, fake_delay_ms=fake_delay_ms,
-            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=warmup, repeat=repeat,
+            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=scaling_warmup, repeat=scaling_repeat,
             long_delay_ms=200, long_request_session_index=0,
         )
         mixed_session_samples, mixed_session_batch = await self._run_scenario_mixed(
@@ -767,7 +779,7 @@ class ConcurrencyReliabilityRunner:
         )
         mixed_global_config = WorkloadConfig(
             session_count=8, requests_per_session=1, fake_delay_ms=fake_delay_ms,
-            schedule_mode=ScheduleMode.GLOBAL_LOCK, warmup=warmup, repeat=repeat,
+            schedule_mode=ScheduleMode.GLOBAL_LOCK, warmup=scaling_warmup, repeat=scaling_repeat,
             long_delay_ms=200, long_request_session_index=0,
         )
         mixed_global_samples, mixed_global_batch = await self._run_scenario_mixed(
@@ -780,7 +792,8 @@ class ConcurrencyReliabilityRunner:
                 ConcurrencyScenario.MIXED_LONG_SHORT.value,
                 ScheduleMode.SESSION_LOCK.value,
                 mixed_session_samples,
-                repeat,
+                scaling_repeat,
+                ConcurrencyScenario.MIXED_LONG_SHORT,
             ),
             mixed_session_batch,
         )
@@ -789,7 +802,8 @@ class ConcurrencyReliabilityRunner:
                 ConcurrencyScenario.MIXED_LONG_SHORT.value,
                 ScheduleMode.GLOBAL_LOCK.value,
                 mixed_global_samples,
-                repeat,
+                scaling_repeat,
+                ConcurrencyScenario.MIXED_LONG_SHORT,
             ),
             mixed_global_batch,
         )
@@ -801,7 +815,7 @@ class ConcurrencyReliabilityRunner:
         print("=== 场景 6：取消不阻塞 ===")
         cancel_config = WorkloadConfig(
             session_count=1, requests_per_session=2, fake_delay_ms=fake_delay_ms,
-            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=warmup, repeat=repeat,
+            schedule_mode=ScheduleMode.SESSION_LOCK, warmup=core_warmup, repeat=core_repeat,
             long_delay_ms=200,
         )
         cancel_samples = await self._run_scenario_cancel(
@@ -812,7 +826,8 @@ class ConcurrencyReliabilityRunner:
             ConcurrencyScenario.CANCEL_NON_BLOCKING.value,
             ScheduleMode.SESSION_LOCK.value,
             cancel_samples,
-            repeat,
+            core_repeat,
+            ConcurrencyScenario.CANCEL_NON_BLOCKING,
         )
         all_scenarios.append(cancel_stats)
         all_configs.append(cancel_config.to_dict())
@@ -823,11 +838,15 @@ class ConcurrencyReliabilityRunner:
             suite=SUITE_CONCURRENCY,
             generated_at=datetime.now(timezone.utc).isoformat(),
             git_commit=self._git_commit,
-            warmup=warmup,
-            repeat=repeat,
+            warmup=core_warmup,
+            repeat=core_repeat,
             fake_delay_ms=fake_delay_ms,
             scenarios=tuple(all_scenarios),
             workload_configs=tuple(all_configs),
+            sampling_configs={
+                "core": {"warmup": core_warmup, "repeat": core_repeat},
+                "scaling": {"warmup": scaling_warmup, "repeat": scaling_repeat},
+            },
         )
 
         # 写出工件
@@ -1255,7 +1274,10 @@ class ConcurrencyReliabilityRunner:
         config_path: Path = out / "workload-config.json"
         config_path.write_text(
             json.dumps(
-                {"workload_configs": [list(snapshot.workload_configs)]},
+                {
+                    "sampling_configs": snapshot.sampling_configs,
+                    "workload_configs": list(snapshot.workload_configs),
+                },
                 ensure_ascii=False, indent=2,
             ),
             encoding="utf-8",
@@ -1294,7 +1316,8 @@ def _build_concurrency_report(
         "",
         f"> 生成时间：{snapshot.generated_at}",
         f"> Git：`{snapshot.git_commit}`",
-        f"> Warmup：{snapshot.warmup} | Repeat：{snapshot.repeat}",
+        f"> 核心采样 Warmup/Repeat：{snapshot.sampling_configs.get('core', {}).get('warmup', snapshot.warmup)} / {snapshot.sampling_configs.get('core', {}).get('repeat', snapshot.repeat)}",
+        f"> 扩展采样 Warmup/Repeat：{snapshot.sampling_configs.get('scaling', {}).get('warmup', snapshot.warmup)} / {snapshot.sampling_configs.get('scaling', {}).get('repeat', snapshot.repeat)}",
         f"> 固定延迟：{snapshot.fake_delay_ms} ms",
         "",
         "## 场景汇总",
@@ -1373,7 +1396,7 @@ def _build_correctness_report(
         "",
         f"- 快照：`{snapshot_id}`",
         f"- 原始样本：`samples/{samples_path.name}`",
-        f"- Warmup / Repeat：{snapshot.warmup} / {snapshot.repeat}",
+        f"- 核心采样 Warmup / Repeat：{snapshot.sampling_configs.get('core', {}).get('warmup', snapshot.warmup)} / {snapshot.sampling_configs.get('core', {}).get('repeat', snapshot.repeat)}",
         "",
         "| 场景 | 请求数 | FIFO | 消息 | 事件 | 上下文 | 工具 | 输出串流 | 取消 |",
         "|---|---:|---|---:|---:|---:|---:|---:|---|",
@@ -1448,10 +1471,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="dotClaw PR3：并发隔离与调度收益")
     parser.add_argument("--suite", type=str, default="reliability_concurrency_v1",
                         help="实验族标识（默认 reliability_concurrency_v1）")
-    parser.add_argument("--warmup", type=int, default=5,
-                        help="预热采样数，>= 0（默认 5）")
-    parser.add_argument("--repeat", type=int, default=100,
-                        help="正式采样数，> 0（默认 100）")
+    parser.add_argument("--core-warmup", type=int, default=5,
+                        help="FIFO、隔离与取消的预热轮数，>= 0（默认 5）")
+    parser.add_argument("--core-repeat", type=int, default=50,
+                        help="FIFO、隔离与取消的正式轮数，> 0（默认 50）")
+    parser.add_argument("--scaling-warmup", type=int, default=5,
+                        help="扩展、固定并发与长短混合的预热轮数，>= 0（默认 5）")
+    parser.add_argument("--scaling-repeat", type=int, default=30,
+                        help="扩展、固定并发与长短混合的正式轮数，> 0（默认 30）")
     parser.add_argument("--fake-delay-ms", type=int, default=20,
                         help="固定延迟替身的延迟毫秒数（默认 20）")
     parser.add_argument("--output", type=str, default=None,
@@ -1460,10 +1487,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="可选提交基线目录")
     args = parser.parse_args(argv)
 
-    if args.warmup < 0:
-        parser.error("--warmup 必须大于等于 0")
-    if args.repeat <= 0:
-        parser.error("--repeat 必须大于 0")
+    if args.core_warmup < 0 or args.scaling_warmup < 0:
+        parser.error("--core-warmup 与 --scaling-warmup 必须大于等于 0")
+    if args.core_repeat <= 0 or args.scaling_repeat <= 0:
+        parser.error("--core-repeat 与 --scaling-repeat 必须大于 0")
     if args.fake_delay_ms < 1:
         parser.error("--fake-delay-ms 必须大于 0")
 
@@ -1476,8 +1503,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         snapshot: ConcurrencySnapshot = asyncio.run(
             ConcurrencyReliabilityRunner().run(
-                warmup=args.warmup,
-                repeat=args.repeat,
+                core_warmup=args.core_warmup,
+                core_repeat=args.core_repeat,
+                scaling_warmup=args.scaling_warmup,
+                scaling_repeat=args.scaling_repeat,
                 fake_delay_ms=args.fake_delay_ms,
                 output_dir=output_dir,
                 baseline_dir=baseline_dir,

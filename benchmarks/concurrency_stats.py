@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
-from .eval_baseline_models import BenchmarkSample, ScheduleMode
+from .eval_baseline_models import BenchmarkSample, ConcurrencyScenario, ScheduleMode
 from .eval_baseline_stats import percentile
 
 
@@ -215,6 +215,9 @@ class ConcurrencySnapshot:
     workload_configs: Sequence[dict[str, object]] = ()
     """各场景的工作负载配置。"""
 
+    sampling_configs: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+    """核心正确性与扩展调度两套独立采样配置。"""
+
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典。"""
         return {
@@ -226,6 +229,9 @@ class ConcurrencySnapshot:
             "fake_delay_ms": self.fake_delay_ms,
             "scenarios": [s.to_dict() for s in self.scenarios],
             "workload_configs": list(self.workload_configs),
+            "sampling_configs": {
+                group: dict(config) for group, config in self.sampling_configs.items()
+            },
         }
 
 
@@ -239,13 +245,20 @@ def aggregate_scenario_stats(
     schedule_mode: str,
     samples: Sequence[BenchmarkSample],
     total_batches: int,
+    sample_case_id: ConcurrencyScenario,
 ) -> ScenarioStats:
     """从一组 BenchmarkSample 聚合单个场景的统计。
 
     仅统计 is_warmup=False 的正式采样。
     """
-    # 过滤正式采样
-    formal = [s for s in samples if not s.is_warmup]
+    # 先按原始场景和调度模式过滤，禁止相邻场景的样本污染当前汇总。
+    formal = [
+        sample for sample in samples
+        if not sample.is_warmup
+        and sample.case_id == sample_case_id.value
+        and sample.schedule_mode is not None
+        and sample.schedule_mode.value == schedule_mode
+    ]
     total_requests = len(formal)
 
     # 排队等待时延
@@ -268,7 +281,7 @@ def aggregate_scenario_stats(
     ]
 
     # 正确性统计
-    fifo_samples = [sample for sample in formal if sample.accepted_seq is not None]
+    fifo_samples = formal if sample_case_id is ConcurrencyScenario.FIFO_SAME_SESSION else []
     fifo_passed: int = sum(
         1 for s in formal
         if s.passed
@@ -294,19 +307,7 @@ def aggregate_scenario_stats(
     stream_leak_total: int = sum(
         s.stream_leak_count for s in formal if s.stream_leak_count is not None
     )
-    isolation_samples = [
-        sample for sample in formal
-        if any(
-            value is not None
-            for value in (
-                sample.message_leak_count,
-                sample.event_leak_count,
-                sample.context_leak_count,
-                sample.tool_leak_count,
-                sample.stream_leak_count,
-            )
-        )
-    ]
+    isolation_samples = formal if sample_case_id is ConcurrencyScenario.MULTI_SESSION_ISOLATION else []
     isolation_passed: int = sum(
         1 for sample in isolation_samples
         if sample.passed
@@ -318,7 +319,7 @@ def aggregate_scenario_stats(
     )
 
     # 取消统计
-    cancel_samples = [sample for sample in formal if sample.cancellation_delivered is not None]
+    cancel_samples = formal if sample_case_id is ConcurrencyScenario.CANCEL_NON_BLOCKING else []
     cancel_passed: int = sum(
         1 for s in formal
         if s.cancellation_delivered is True

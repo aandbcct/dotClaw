@@ -17,29 +17,31 @@ from benchmarks.concurrency_stats import (
     ScenarioStats,
 )
 from benchmarks.concurrency_workloads import WorkloadConfig
-from benchmarks.eval_baseline_models import ScheduleMode
+from benchmarks.eval_baseline_models import BenchmarkSample, ConcurrencyScenario, ScheduleMode
 
 
 class TestConcurrencyReliabilityRunner:
     """编排器测试。"""
 
     @pytest.mark.asyncio
-    async def test_invalid_warmup(self, tmp_path):
+    async def test_invalid_core_warmup(self, tmp_path):
         """负数 warmup 拒绝。"""
         runner = ConcurrencyReliabilityRunner()
         with pytest.raises(ValueError, match="warmup"):
             await runner.run(
-                warmup=-1, repeat=1, fake_delay_ms=20,
+                core_warmup=-1, core_repeat=1,
+                scaling_warmup=0, scaling_repeat=1, fake_delay_ms=20,
                 output_dir=tmp_path,
             )
 
     @pytest.mark.asyncio
-    async def test_invalid_repeat(self, tmp_path):
-        """repeat=0 拒绝。"""
+    async def test_invalid_scaling_repeat(self, tmp_path):
+        """scaling_repeat=0 拒绝。"""
         runner = ConcurrencyReliabilityRunner()
         with pytest.raises(ValueError, match="repeat"):
             await runner.run(
-                warmup=0, repeat=0, fake_delay_ms=20,
+                core_warmup=0, core_repeat=1,
+                scaling_warmup=0, scaling_repeat=0, fake_delay_ms=20,
                 output_dir=tmp_path,
             )
 
@@ -110,6 +112,80 @@ class TestWorkloadConfigValidation:
         d = config.to_dict()
         assert d["session_count"] == 8
         assert d["long_delay_ms"] == 200
+
+
+def _runner_sample(config: WorkloadConfig, case_id: ConcurrencyScenario) -> BenchmarkSample:
+    """构造完整 Runner 编排测试所需的一条正式样本。"""
+    is_fifo = case_id is ConcurrencyScenario.FIFO_SAME_SESSION
+    is_isolation = case_id is ConcurrencyScenario.MULTI_SESSION_ISOLATION
+    is_cancel = case_id is ConcurrencyScenario.CANCEL_NON_BLOCKING
+    return BenchmarkSample(
+        dataset="reliability_concurrency", case_id=case_id.value, attempt=0,
+        is_warmup=False, git_commit="test", python_version="3.13.5", platform="Windows",
+        config_hash="", eval_schema_version="", passed=True, failure_kind=None,
+        assertions_passed=1, assertions_total=1, trace_available=False, wall_duration_ms=1.0,
+        run_id="run-1", schedule_mode=config.schedule_mode, session_count=config.session_count,
+        requests_per_session=config.requests_per_session, fake_delay_ms=config.fake_delay_ms,
+        accepted_seq=1 if is_fifo else None,
+        execution_started_seq=1 if is_fifo else None,
+        completed_seq=1 if is_fifo else None,
+        conversation_commit_seq=1 if is_fifo else None,
+        message_leak_count=0 if is_isolation else None,
+        event_leak_count=0 if is_isolation else None,
+        context_leak_count=0 if is_isolation else None,
+        tool_leak_count=0 if is_isolation else None,
+        stream_leak_count=0 if is_isolation else None,
+        cancel_delivery_ms=1.0 if is_cancel else None,
+        cancel_effect_ms=2.0 if is_cancel else None,
+        cancellation_delivered=True if is_cancel else None,
+        cancellation_effective=True if is_cancel else None,
+        lock_released=True if is_cancel else None,
+        followup_completed=True if is_cancel else None,
+        evidence_summary={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_separates_sampling_groups_and_scenario_statistics(tmp_path, monkeypatch):
+    """完整 Runner 必须分别配置两类采样，并且不把正确性字段聚合到其他场景。"""
+    runner = ConcurrencyReliabilityRunner()
+
+    async def fifo(config, agent_id, output_dir):
+        return [_runner_sample(config, ConcurrencyScenario.FIFO_SAME_SESSION)], 1.0
+
+    async def isolation(config, agent_id, output_dir):
+        return [_runner_sample(config, ConcurrencyScenario.MULTI_SESSION_ISOLATION)], 1.0
+
+    async def scaling(config, agent_id, output_dir):
+        return [_runner_sample(config, ConcurrencyScenario.SESSION_SCALING)], 1.0
+
+    async def mixed(config, agent_id, *, global_lock):
+        return [_runner_sample(config, ConcurrencyScenario.MIXED_LONG_SHORT)], 1.0
+
+    async def cancel(config, agent_id, output_dir):
+        return [_runner_sample(config, ConcurrencyScenario.CANCEL_NON_BLOCKING)]
+
+    monkeypatch.setattr(runner, "_run_scenario_fifo", fifo)
+    monkeypatch.setattr(runner, "_run_scenario_isolation", isolation)
+    monkeypatch.setattr(runner, "_run_scenario_scaling", scaling)
+    monkeypatch.setattr(runner, "_run_scenario_scaling_global", scaling)
+    monkeypatch.setattr(runner, "_run_scenario_mixed", mixed)
+    monkeypatch.setattr(runner, "_run_scenario_cancel", cancel)
+
+    snapshot = await runner.run(
+        core_warmup=2, core_repeat=3, scaling_warmup=4, scaling_repeat=5,
+        fake_delay_ms=1, output_dir=tmp_path,
+    )
+    isolation_stats = next(item for item in snapshot.scenarios if item.scenario_id == "multi_session_isolation")
+    cancel_stats = next(item for item in snapshot.scenarios if item.scenario_id == "cancel_non_blocking")
+    scaling_stats = next(item for item in snapshot.scenarios if item.scenario_id == "session_scaling_1s")
+    assert snapshot.sampling_configs == {
+        "core": {"warmup": 2, "repeat": 3},
+        "scaling": {"warmup": 4, "repeat": 5},
+    }
+    assert (isolation_stats.fifo_total_count, isolation_stats.isolation_total_count) == (0, 1)
+    assert (cancel_stats.fifo_total_count, cancel_stats.isolation_total_count, cancel_stats.cancel_total_count) == (0, 0, 1)
+    assert (scaling_stats.fifo_total_count, scaling_stats.isolation_total_count, scaling_stats.cancel_total_count) == (0, 0, 0)
 
 
 def _scenario(scenario_id: str, schedule_mode: str, throughput: float) -> ScenarioStats:
