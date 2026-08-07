@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -41,6 +43,11 @@ def _commit() -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
+def _matrix_hash(matrix: Path) -> str:
+    """计算矩阵原始字节的稳定摘要，避免配置变更被固定占位掩盖。"""
+    return hashlib.sha256(matrix.read_bytes()).hexdigest()[:16]
+
+
 def _scope(case: CapabilityMatrixCase, workspace: Path) -> PolicyScope:
     """从矩阵行构造隔离策略作用域。"""
     scope = default_policy_scope(str(workspace))
@@ -65,10 +72,10 @@ def _executor(case: CapabilityMatrixCase, workspace: Path, observation: ChainObs
     return ToolExecutor(registry, approval_manager=CountingApprovalManager(observation), policy_engine=CountingPolicyEngine(observation, _scope(case, workspace)), capability_broker=CountingBroker(observation), agent_policy_resolver=lambda agent_id: dict(rules.get(agent_id, {})))
 
 
-async def run_matrix_case(case: CapabilityMatrixCase, attempt: int = 0, is_warmup: bool = False) -> BenchmarkSample:
+async def run_matrix_case(case: CapabilityMatrixCase, attempt: int = 0, is_warmup: bool = False, matrix_hash: str = "") -> BenchmarkSample:
     """执行一行安全矩阵；Windows 联接点能力不足时只记录环境跳过。"""
     if case.windows_junction:
-        return _sample(case, attempt, is_warmup, ChainObservation(), None, skipped="当前实现仅在可创建真实 Windows 联接点时执行")
+        return await _run_junction_case(case, attempt, is_warmup, matrix_hash)
     with tempfile.TemporaryDirectory(prefix="dotclaw-capability-") as temporary:
         workspace = Path(temporary)
         observation = ChainObservation()
@@ -79,10 +86,29 @@ async def run_matrix_case(case: CapabilityMatrixCase, attempt: int = 0, is_warmu
             result = await executor.execute_approved(case.tool, dict(case.arguments), ToolExecutionContext(agent_id=case.agent_id), RecordingJournal(observation))
         else:
             result = await executor.execute(case.tool, dict(case.arguments), channel, RecordingJournal(observation), ToolExecutionContext(agent_id=case.agent_id))
-        return _sample(case, attempt, is_warmup, observation, result, elapsed=(time.perf_counter() - started) * 1000.0)
+        return _sample(case, attempt, is_warmup, observation, result, elapsed=(time.perf_counter() - started) * 1000.0, config_hash=matrix_hash)
 
 
-def _sample(case: CapabilityMatrixCase, attempt: int, is_warmup: bool, observation: ChainObservation, result: Any, *, elapsed: float = 0.0, skipped: str | None = None, measurement_mode: str | None = None, duration: float | None = None) -> BenchmarkSample:
+async def _run_junction_case(case: CapabilityMatrixCase, attempt: int, is_warmup: bool, matrix_hash: str) -> BenchmarkSample:
+    """在 Windows 可建立联接点时执行真实解析；不可建立则保留明确环境跳过。"""
+    if os.name != "nt":
+        return _sample(case, attempt, is_warmup, ChainObservation(), None, skipped="当前平台不是 Windows", config_hash=matrix_hash)
+    with tempfile.TemporaryDirectory(prefix="dotclaw-capability-junction-") as temporary:
+        root = Path(temporary)
+        workspace, outside, link = root / "workspace", root / "outside", root / "workspace" / "junction-outside.txt"
+        workspace.mkdir()
+        outside.write_text("outside", encoding="utf-8")
+        try:
+            os.symlink(outside, link)
+        except OSError as error:
+            return _sample(case, attempt, is_warmup, ChainObservation(), None, skipped=f"当前用户无法创建 Windows 联接点：{error.winerror or error.errno}", config_hash=matrix_hash)
+        observation = ChainObservation()
+        executor = _executor(case, workspace, observation)
+        result = await executor.execute(case.tool, dict(case.arguments), None, RecordingJournal(observation), ToolExecutionContext())
+        return _sample(case, attempt, is_warmup, observation, result, config_hash=matrix_hash)
+
+
+def _sample(case: CapabilityMatrixCase, attempt: int, is_warmup: bool, observation: ChainObservation, result: Any, *, elapsed: float = 0.0, skipped: str | None = None, measurement_mode: str | None = None, duration: float | None = None, config_hash: str = "") -> BenchmarkSample:
     """将一次观察规范为统一 BenchmarkSample（单次采样记录）。"""
     error = None if result is None else result.error_code
     actual = "ALLOW" if result is not None and not result.is_error else error
@@ -93,10 +119,10 @@ def _sample(case: CapabilityMatrixCase, attempt: int, is_warmup: bool, observati
     if request is not None and request.absolute_path is not None and observation.handler_paths:
         path_match = observation.handler_paths[0] == request.absolute_path
     leaks = observation.sensitive_leak_count(SENSITIVE_MARKER)
-    return BenchmarkSample(dataset=SUITE_CAPABILITY, case_id=case.case_id, attempt=attempt, is_warmup=is_warmup, git_commit=_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash="capability-v1-fixed", eval_schema_version="tool-v1", passed=expected_ok, failure_kind=None if expected_ok else ("environment_skip" if skipped else "security_assertion"), assertions_passed=int(expected_ok), assertions_total=1, trace_available=True, wall_duration_ms=elapsed, run_id=None, suite=SUITE_CAPABILITY, scenario_id=case.case_id, matrix_case_id=case.case_id, expected_decision=case.expected, actual_decision=actual, actual_error_code=error, decision_pass=None if skipped else expected_ok, validation_entered=0 if error == "INVALID_ARGUMENTS" else 1, broker_entered=observation.broker_entered, policy_entered=observation.policy_entered, approval_entered=observation.approval_entered, handler_entered=observation.handler_entered, resource_kind=None if request is None else request.kind.value, policy_profile=None if request is None else request.profile, matched_rule=None if observation.outcome is None else observation.outcome.matched_rule, resolved_path_match=path_match, network_service=None if request is None else request.service, network_host=None if request is None else request.host, mcp_server=None if request is None else request.server, journal_summary_redacted=leaks == 0, approval_summary_redacted=leaks == 0, sensitive_leak_count=leaks, agent_id=case.agent_id or None, agent_rule_source=case.agent_id or None, agent_policy_isolated=True if case.agent_id else None, measurement_mode=measurement_mode, pre_handler_duration_ms=duration, capability_reason=skipped)
+    return BenchmarkSample(dataset=SUITE_CAPABILITY, case_id=case.case_id, attempt=attempt, is_warmup=is_warmup, git_commit=_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=config_hash, eval_schema_version="tool-v1", passed=expected_ok, failure_kind=None if expected_ok else ("environment_skip" if skipped else "security_assertion"), assertions_passed=int(expected_ok), assertions_total=1, trace_available=True, wall_duration_ms=elapsed, run_id=None, suite=SUITE_CAPABILITY, scenario_id=case.case_id, matrix_case_id=case.case_id, expected_decision=case.expected, actual_decision=actual, actual_error_code=error, decision_pass=None if skipped else expected_ok, validation_entered=0 if error == "INVALID_ARGUMENTS" else 1, broker_entered=observation.broker_entered, policy_entered=observation.policy_entered, approval_entered=observation.approval_entered, handler_entered=observation.handler_entered, resource_kind=None if request is None else request.kind.value, policy_profile=None if request is None else request.profile, matched_rule=None if observation.outcome is None else observation.outcome.matched_rule, resolved_path_match=path_match, network_service=None if request is None else request.service, network_host=None if request is None else request.host, mcp_server=None if request is None else request.server, journal_summary_redacted=leaks == 0, approval_summary_redacted=leaks == 0, sensitive_leak_count=leaks, agent_id=case.agent_id or None, agent_rule_source=case.agent_id or None, agent_policy_isolated=True if case.agent_id else None, measurement_mode=measurement_mode, pre_handler_duration_ms=duration, capability_reason=skipped)
 
 
-async def run_performance(repeat: int, warmup: int) -> list[BenchmarkSample]:
+async def run_performance(repeat: int, warmup: int, matrix_hash: str) -> list[BenchmarkSample]:
     """以同一个 allow Handler 与调用上下文采集直接/完整链 Handler-entry 时延。"""
     case = CapabilityMatrixCase("performance_allow", "cap.file.read", {"path": "notes.txt"}, "ALLOW")
     samples: list[BenchmarkSample] = []
@@ -106,22 +132,24 @@ async def run_performance(repeat: int, warmup: int) -> list[BenchmarkSample]:
                 observation = ChainObservation()
                 executor = _executor(case, Path(temporary), observation)
                 handler = executor.get_handler(case.tool)
-                start = time.perf_counter()
                 if mode == "direct_handler":
                     arguments = validate_args(handler.args_model, dict(case.arguments))
+                    start = time.perf_counter()
                     await handler.execute(arguments, ToolExecutionContext())
                 else:
+                    start = time.perf_counter()
                     await executor.execute(case.tool, dict(case.arguments), None, RecordingJournal(observation), ToolExecutionContext())
                 if observation.handler_entry_at is None:
                     raise ValueError("性能采样未进入 Handler")
-                samples.append(_sample(case, attempt, attempt < warmup, observation, type("Result", (), {"is_error": False, "error_code": None})(), measurement_mode=mode, duration=(observation.handler_entry_at - start) * 1000.0))
+                samples.append(_sample(case, attempt, attempt < warmup, observation, type("Result", (), {"is_error": False, "error_code": None})(), measurement_mode=mode, duration=(observation.handler_entry_at - start) * 1000.0, config_hash=matrix_hash))
     return samples
 
 
 async def run_suite(matrix: Path, performance_warmup: int, performance_repeat: int) -> list[BenchmarkSample]:
     """执行一次完整有限矩阵与可选性能采样。"""
-    samples = [await run_matrix_case(case) for case in load_matrix(matrix)]
-    samples.extend(await run_performance(performance_repeat, performance_warmup))
+    matrix_hash = _matrix_hash(matrix)
+    samples = [await run_matrix_case(case, matrix_hash=matrix_hash) for case in load_matrix(matrix)]
+    samples.extend(await run_performance(performance_repeat, performance_warmup, matrix_hash))
     return samples
 
 
@@ -134,7 +162,7 @@ def write_artifacts(samples: list[BenchmarkSample], output: Path, baseline: Path
     snapshot = build_snapshot(
         snapshot_id=identifier, generated_at=datetime.now(UTC).isoformat(), git_commit=_commit(),
         dataset=SUITE_CAPABILITY,
-        environment={"python_version": sys.version.split()[0], "platform": platform.platform(), "config_hash": "capability-v1-fixed", "eval_schema_version": "tool-v1"},
+        environment={"python_version": sys.version.split()[0], "platform": platform.platform(), "config_hash": samples[0].config_hash, "eval_schema_version": "tool-v1"},
         warmup=sum(1 for item in samples if item.is_warmup), repeat=sum(1 for item in samples if not item.is_warmup),
         samples=samples, samples_path=sample_path.name, scenario_id=SUITE_CAPABILITY,
         samples_content_summary={"line_count": len(samples), "byte_count": sample_path.stat().st_size},
@@ -148,7 +176,9 @@ def write_artifacts(samples: list[BenchmarkSample], output: Path, baseline: Path
     shutil.copy2(matrix, output / "matrix-config.json")
     if baseline is not None:
         baseline.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(sample_path, baseline / f"{identifier}.jsonl")
+        baseline_samples = baseline / "samples"
+        baseline_samples.mkdir(exist_ok=True)
+        shutil.copy2(sample_path, baseline_samples / f"{identifier}.jsonl")
         shutil.copy2(snapshot_path, baseline / f"{identifier}.json")
 
 

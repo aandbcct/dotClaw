@@ -17,7 +17,7 @@ def _matrix_path() -> Path:
 def test_matrix_is_non_empty_and_case_ids_unique() -> None:
     """Git 跟踪的完整有限矩阵有稳定且唯一的 Case 标识。"""
     cases = load_matrix(_matrix_path())
-    assert len(cases) >= 10
+    assert len(cases) >= 25
     assert len({case.case_id for case in cases}) == len(cases)
 
 
