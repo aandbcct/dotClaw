@@ -31,6 +31,11 @@ async def test_concurrent_parent_chains_are_isolated(tmp_path) -> None:
     assert len({item["child_run_id"] for item in facts}) == 3
     assert len({item["task_id"] for item in facts}) == 3
     assert all(item["result_backfill_count"] == 1 for item in facts)
+    assert all(item["cross_chain_message_count"] == 0 for item in facts)
+    assert all(item["cross_chain_context_count"] == 0 for item in facts)
+    assert all(item["cross_chain_tool_count"] == 0 for item in facts)
+    assert all(item["cross_chain_stream_count"] == 0 for item in facts)
+    assert all(item["misdelivery_count"] == 0 for item in facts)
 
 
 @pytest.mark.asyncio

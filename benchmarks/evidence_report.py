@@ -77,9 +77,10 @@ def coverage_groups(coverage: Mapping[str, object]) -> dict[str, dict[str, int |
     return result
 
 
-def generate(snapshot_root: Path, coverage_path: Path, output: Path) -> Path:
+def generate(snapshot_root: Path, coverage_path: Path, output: Path, selected_snapshots: Sequence[Path] = ()) -> Path:
     """生成 JSON 清单和 Markdown 覆盖率报告；不会改写 README。"""
-    entries = [qualify(path) for path in sorted(snapshot_root.rglob("*.json")) if "/v1.0/" not in path.as_posix()]
+    candidates = tuple(selected_snapshots) if selected_snapshots else tuple(sorted(snapshot_root.rglob("*.json")))
+    entries = [qualify(path) for path in candidates if path.suffix == ".json" and "/v1.0/" not in path.as_posix()]
     if not entries:
         raise EvidenceQualificationError("未找到可资格校验的快照")
     coverage = _read_json(coverage_path)
@@ -100,8 +101,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--snapshots", type=Path, required=True)
     parser.add_argument("--coverage", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--snapshot", type=Path, action="append", default=[])
     args = parser.parse_args(argv)
-    generate(args.snapshots, args.coverage, args.output)
+    generate(args.snapshots, args.coverage, args.output, args.snapshot)
     return 0
 
 
