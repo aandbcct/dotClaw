@@ -77,11 +77,11 @@ def write_artifacts(samples: Sequence[BenchmarkSample], config: DelegationWorklo
     sample_path = output / "samples" / f"{identifier}.jsonl"
     formal_sample_path = output / "samples" / f"{identifier}.formal.jsonl"
     sample_path.parent.mkdir(exist_ok=True)
-    sample_path.write_text("".join(json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in samples), encoding="utf-8")
-    (output / "delegation-config.json").write_text(json.dumps(config.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    sample_path.write_text("".join(json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in samples), encoding="utf-8", newline="\n")
+    (output / "delegation-config.json").write_text(json.dumps(config.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
     _validate_snapshot_samples(samples, config)
     formal_samples = [item for item in samples if not item.is_warmup]
-    formal_sample_path.write_text("".join(json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in formal_samples), encoding="utf-8")
+    formal_sample_path.write_text("".join(json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in formal_samples), encoding="utf-8", newline="\n")
     outcome = [item for item in samples if item.case_id in {kind.value for kind in ChildOutcome} and not item.is_warmup]
     cancellation = [item for item in samples if item.case_id == "parent_cancellation" and not item.is_warmup]
     concurrent = [item for item in samples if item.case_id == "concurrent_isolation" and not item.is_warmup]
@@ -100,7 +100,7 @@ def write_artifacts(samples: Sequence[BenchmarkSample], config: DelegationWorklo
         warmup=sum(item.is_warmup for item in samples), repeat=sum(not item.is_warmup for item in samples), samples=samples,
         samples_path=f"samples/{identifier}.formal.jsonl", scenario_id=SUITE_DELEGATION, samples_content_summary={"line_count": len(formal_samples), "byte_count": formal_sample_path.stat().st_size})
     snapshot_path = output / f"{identifier}.json"
-    snapshot_path.write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    snapshot_path.write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
     if baseline is not None:
         (baseline / "samples").mkdir(parents=True, exist_ok=True)
         shutil.copy2(sample_path, baseline / "samples" / sample_path.name)
