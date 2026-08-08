@@ -37,6 +37,9 @@ SUITE_CONCURRENCY: str = "reliability_concurrency"
 SUITE_RECOVERY: str = "reliability_recovery_v1"
 """PR4 实验族标识：操作节点故障注入与冷重建恢复套件。"""
 
+SUITE_DELEGATION: str = "reliability_delegation_v1"
+"""PR7 实验族标识：单进程父子 Run 委派可靠性套件。"""
+
 SCENARIO_TOOL_SUCCESS: str = "tool_success"
 """PR2 统一业务场景标识：单工具成功（工具调用 → 固定输出 → 最终回答）。"""
 
@@ -466,6 +469,35 @@ class BenchmarkSample:
     run_message_count_delta: int | None = None
     run_event_count_delta: int | None = None
 
+    # ---- PR7 委派链路与正式证据观察字段（旧样本缺失时均为 None） ----
+    parent_run_id: str | None = None
+    child_run_id: str | None = None
+    task_id: str | None = None
+    parent_session_id: str | None = None
+    child_session_id: str | None = None
+    target_agent_id: str | None = None
+    chain_request_id: str | None = None
+    child_outcome: str | None = None
+    parent_outcome: str | None = None
+    delegation_submit_count: int | None = None
+    result_backfill_count: int | None = None
+    delegation_submitted_event_count: int | None = None
+    delegation_completed_event_count: int | None = None
+    cross_chain_message_count: int | None = None
+    cross_chain_context_count: int | None = None
+    cross_chain_tool_count: int | None = None
+    cross_chain_stream_count: int | None = None
+    misdelivery_count: int | None = None
+    parent_cancel_effect_ms: float | None = None
+    child_cancel_effect_ms: float | None = None
+    followup_started: bool | None = None
+    suspend_to_backfill_ms: float | None = None
+    parent_end_to_end_ms: float | None = None
+    fixture_version: str | None = None
+    environment: Mapping[str, str] | None = None
+    raw_sample_path: str | None = None
+    formal_sampling: bool | None = None
+
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
         result: dict[str, object] = {
@@ -599,6 +631,33 @@ class BenchmarkSample:
             "conversation_count_delta": self.conversation_count_delta,
             "run_message_count_delta": self.run_message_count_delta,
             "run_event_count_delta": self.run_event_count_delta,
+            "parent_run_id": self.parent_run_id,
+            "child_run_id": self.child_run_id,
+            "task_id": self.task_id,
+            "parent_session_id": self.parent_session_id,
+            "child_session_id": self.child_session_id,
+            "target_agent_id": self.target_agent_id,
+            "chain_request_id": self.chain_request_id,
+            "child_outcome": self.child_outcome,
+            "parent_outcome": self.parent_outcome,
+            "delegation_submit_count": self.delegation_submit_count,
+            "result_backfill_count": self.result_backfill_count,
+            "delegation_submitted_event_count": self.delegation_submitted_event_count,
+            "delegation_completed_event_count": self.delegation_completed_event_count,
+            "cross_chain_message_count": self.cross_chain_message_count,
+            "cross_chain_context_count": self.cross_chain_context_count,
+            "cross_chain_tool_count": self.cross_chain_tool_count,
+            "cross_chain_stream_count": self.cross_chain_stream_count,
+            "misdelivery_count": self.misdelivery_count,
+            "parent_cancel_effect_ms": self.parent_cancel_effect_ms,
+            "child_cancel_effect_ms": self.child_cancel_effect_ms,
+            "followup_started": self.followup_started,
+            "suspend_to_backfill_ms": self.suspend_to_backfill_ms,
+            "parent_end_to_end_ms": self.parent_end_to_end_ms,
+            "fixture_version": self.fixture_version,
+            "environment": None if self.environment is None else dict(self.environment),
+            "raw_sample_path": self.raw_sample_path,
+            "formal_sampling": self.formal_sampling,
         }
         return result
 
@@ -751,6 +810,33 @@ class BenchmarkSample:
             conversation_count_delta=_optional_int(data.get("conversation_count_delta"), f"{label}.conversation_count_delta"),
             run_message_count_delta=_optional_int(data.get("run_message_count_delta"), f"{label}.run_message_count_delta"),
             run_event_count_delta=_optional_int(data.get("run_event_count_delta"), f"{label}.run_event_count_delta"),
+            parent_run_id=_optional_str(data.get("parent_run_id"), f"{label}.parent_run_id"),
+            child_run_id=_optional_str(data.get("child_run_id"), f"{label}.child_run_id"),
+            task_id=_optional_str(data.get("task_id"), f"{label}.task_id"),
+            parent_session_id=_optional_str(data.get("parent_session_id"), f"{label}.parent_session_id"),
+            child_session_id=_optional_str(data.get("child_session_id"), f"{label}.child_session_id"),
+            target_agent_id=_optional_str(data.get("target_agent_id"), f"{label}.target_agent_id"),
+            chain_request_id=_optional_str(data.get("chain_request_id"), f"{label}.chain_request_id"),
+            child_outcome=_optional_str(data.get("child_outcome"), f"{label}.child_outcome"),
+            parent_outcome=_optional_str(data.get("parent_outcome"), f"{label}.parent_outcome"),
+            delegation_submit_count=_optional_int(data.get("delegation_submit_count"), f"{label}.delegation_submit_count"),
+            result_backfill_count=_optional_int(data.get("result_backfill_count"), f"{label}.result_backfill_count"),
+            delegation_submitted_event_count=_optional_int(data.get("delegation_submitted_event_count"), f"{label}.delegation_submitted_event_count"),
+            delegation_completed_event_count=_optional_int(data.get("delegation_completed_event_count"), f"{label}.delegation_completed_event_count"),
+            cross_chain_message_count=_optional_int(data.get("cross_chain_message_count"), f"{label}.cross_chain_message_count"),
+            cross_chain_context_count=_optional_int(data.get("cross_chain_context_count"), f"{label}.cross_chain_context_count"),
+            cross_chain_tool_count=_optional_int(data.get("cross_chain_tool_count"), f"{label}.cross_chain_tool_count"),
+            cross_chain_stream_count=_optional_int(data.get("cross_chain_stream_count"), f"{label}.cross_chain_stream_count"),
+            misdelivery_count=_optional_int(data.get("misdelivery_count"), f"{label}.misdelivery_count"),
+            parent_cancel_effect_ms=_optional_float(data.get("parent_cancel_effect_ms"), f"{label}.parent_cancel_effect_ms"),
+            child_cancel_effect_ms=_optional_float(data.get("child_cancel_effect_ms"), f"{label}.child_cancel_effect_ms"),
+            followup_started=_optional_bool(data.get("followup_started"), f"{label}.followup_started"),
+            suspend_to_backfill_ms=_optional_float(data.get("suspend_to_backfill_ms"), f"{label}.suspend_to_backfill_ms"),
+            parent_end_to_end_ms=_optional_float(data.get("parent_end_to_end_ms"), f"{label}.parent_end_to_end_ms"),
+            fixture_version=_optional_str(data.get("fixture_version"), f"{label}.fixture_version"),
+            environment=_optional_string_map(data.get("environment"), f"{label}.environment"),
+            raw_sample_path=_optional_str(data.get("raw_sample_path"), f"{label}.raw_sample_path"),
+            formal_sampling=_optional_bool(data.get("formal_sampling"), f"{label}.formal_sampling"),
         )
 
 

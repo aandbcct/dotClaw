@@ -525,3 +525,14 @@ python -m benchmarks.runner --baseline benchmarks/baselines/<baseline_file>.json
 - 当前默认模型 qwen3.7-max 是推理模型，TTFT 偏高（~6s）。建议用 fast 模型（如 deepseek-v4-flash ~0.8s）来测框架流式链路
 - Windows 上 `time.time()` 精度 ~15ms，sub-ms 操作可能显示 0（不影响趋势）
 - 报告中的 `[EXT]` 标记表示包含外部依赖延迟（网络/API），与框架内部延迟含义不同
+# PR7：多 Agent 委派可靠性
+
+PR7 使用固定 Fixture 的单进程父子 Run 委派实验，原始 JSONL、快照和报告必须同时存在，才可作为专项结论或由 PR8 消费。正式采样完成后运行：
+
+```powershell
+python -m benchmarks.delegation_reliability --suite reliability_delegation_v1 --outcome-warmup 1 --outcome-repeat 1 --cancellation-warmup 5 --cancellation-repeat 50 --concurrent-parents 8 --concurrent-warmup 5 --concurrent-repeat 50 --output benchmarks/reports/delegation/<run-id> --save-baseline benchmarks/baselines/reliability_delegation_v1
+pytest --cov=src/dotclaw --cov-report=json --cov-report=term-missing
+python -m benchmarks.evidence_report --snapshots benchmarks/baselines --coverage coverage.json --output benchmarks/reports/evidence/<run-id>
+```
+
+该实验只描述本机、单进程、单层委派和固定 Fixture 下的编排行为；不证明真实 API 时延、跨进程恢复、远程委派或外部副作用 exactly-once。未产生正式快照时，本文件不写入百分比或零错误结论。
