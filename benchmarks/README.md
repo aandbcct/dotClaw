@@ -311,6 +311,38 @@ python -m benchmarks.context_reliability `
 `compression.md`、`owner-isolation.md`。Token/预算仅针对固定语料与 tokenizer，
 不评估摘要质量或真实模型效果；冷恢复不代表普通新 Run 忽略外部最新数据。
 
+### 正式基线（20260807T212132Z，提交 7796ddd）
+
+基线快照与 350 行原始 JSONL（其中 15 行 warmup、335 条正式样本）已提交到
+`benchmarks/baselines/reliability_context_v1/`。正式配置为冷恢复与回放各预热 5、
+正式 30 次，压缩边界每种终态 30 次。
+
+- 冷恢复：30 次正式样本的上下文漂移、外部 Provider 重载与重复 ContextVersion
+  均为 0；恢复时只新增 1 条预期 Conversation 与 1 条最终 RunMessage；
+- 快照复用对照：复用/强制重建各 30 次，恢复 P95 为 **67.92 / 111.28 ms**；
+  快照复用相对 Benchmark 强制重建降低 **38.96%**，外部 Provider 加载为 **0 / 30**；
+- Session 历史压缩：120 组同构开启/关闭对照中，预算通过率从 **0% 升至 100%**；
+  输入为 75 tokens 时压缩到 53–59 tokens（平均降低 **27.3%**），工具边界错误为 0；
+- Owner 隔离：GLOBAL、AGENT、SESSION、RUN 四层场景均通过，泄漏计数均为 0。
+
+复现本正式基线的命令如下；`--output` 应使用新的非提交报告目录，
+`--save-baseline` 仅在审核后写入新的 Git 基线快照。
+
+```powershell
+python -m benchmarks.context_reliability `
+  --suite reliability_context_v1 `
+  --compression-tokenizer cl100k_base `
+  --recovery-warmup 5 --recovery-repeat 30 `
+  --performance-warmup 5 --performance-repeat 30 `
+  --boundary-warmup 0 --boundary-repeat 30 `
+  --output benchmarks/reports/context/<new-run-id> `
+  --save-baseline benchmarks/baselines/reliability_context_v1
+```
+
+这些结论仅代表本机 Windows/Python 3.13、固定 `cl100k_base` tokenizer、
+确定性 LLM/摘要替身、固定 Slot 与固定历史语料下的 Runtime 编排；不代表真实模型
+回答质量、真实 API 成本、网络/MCP 性能或普通新 Run 对外部最新内容的处理语义。
+
 ## 目录结构
 
 ```
