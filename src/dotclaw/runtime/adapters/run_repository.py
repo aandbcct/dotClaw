@@ -8,6 +8,7 @@ import os
 from hashlib import sha256
 from dataclasses import dataclass, replace
 from pathlib import Path
+from collections.abc import Callable
 
 from ..application.ports import ConversationProjectionPort, SuccessCommitFaultPort
 from ..application.dto import ConversationMessage
@@ -91,12 +92,23 @@ class RunRepositoryAdapter:
     async def load_run(self, session_id: str, run_id: str) -> AgentRun | None:
         """读取指定运行摘要；文件不存在时返回 None。"""
         await self._recover_success_commit(session_id, run_id)
-        return await asyncio.to_thread(self._load_run_sync, session_id, run_id)
+        return await self._read_run_with_retry(self._load_run_sync, session_id, run_id)
 
     async def find_run(self, run_id: str) -> AgentRun | None:
         """跨 Session 定位运行摘要，供取消和审批恢复使用。"""
         await self.recover_pending_success_commits()
-        return await asyncio.to_thread(self._find_run_sync, run_id)
+        return await self._read_run_with_retry(self._find_run_sync, run_id)
+
+    async def _read_run_with_retry(self, reader: Callable[..., AgentRun | None], *arguments: str) -> AgentRun | None:
+        """在 Windows 原子替换瞬间有限重试 run.json 读取，其他错误仍立即暴露。"""
+        for attempt in range(5):
+            try:
+                return await asyncio.to_thread(reader, *arguments)
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                await asyncio.sleep(0.005 * (attempt + 1))
+        raise AssertionError("run.json 读取重试循环未返回")
 
     async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
         """扫描指定 Session 的 run.json，返回持久化的未终态占用。"""

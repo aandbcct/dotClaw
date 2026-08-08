@@ -465,6 +465,54 @@ async def test_file_load_events_rejects_corrupted_json(tmp_path: Path) -> None:
         await repository.load_events("session-1", "run-1")
 
 
+async def test_find_run_retries_transient_permission_error(tmp_path: Path, monkeypatch) -> None:
+    """Windows 原子替换短暂拒读时，仓储有限重试后返回读取结果。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    attempts = 0
+
+    def reader(run_id: str):
+        """前两次模拟文件锁，第三次返回未找到。"""
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("临时文件锁")
+        return None
+
+    monkeypatch.setattr(repository, "_find_run_sync", reader)
+    assert await repository.find_run("run-1") is None
+    assert attempts == 3
+
+
+async def test_find_run_permission_error_exhaustion_is_visible(tmp_path: Path, monkeypatch) -> None:
+    """超过有限重试次数的文件锁必须继续失败，不能伪造缺失结果。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+
+    def reader(run_id: str):
+        """持续模拟文件锁。"""
+        raise PermissionError("持续文件锁")
+
+    monkeypatch.setattr(repository, "_find_run_sync", reader)
+    with pytest.raises(PermissionError):
+        await repository.find_run("run-1")
+
+
+async def test_find_run_non_permission_error_is_not_retried(tmp_path: Path, monkeypatch) -> None:
+    """数据错误必须立即抛出，不能被读取重试隐藏。"""
+    repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    attempts = 0
+
+    def reader(run_id: str):
+        """模拟损坏数据读取。"""
+        nonlocal attempts
+        attempts += 1
+        raise ValueError("run.json 损坏")
+
+    monkeypatch.setattr(repository, "_find_run_sync", reader)
+    with pytest.raises(ValueError, match="损坏"):
+        await repository.find_run("run-1")
+    assert attempts == 1
+
+
 async def test_file_load_events_rejects_non_object_root(tmp_path: Path) -> None:
     """根节点不是对象时失败。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
