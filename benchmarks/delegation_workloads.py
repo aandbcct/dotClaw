@@ -46,11 +46,20 @@ class DelegationWorkloadConfig:
     fixture_version: str = "delegation-fixture-v1"
     fake_delay_ms: int = 10
     concurrent_parents: int = 8
+    outcome_warmup: int = 1
+    outcome_repeat: int = 1
+    cancellation_warmup: int = 5
+    cancellation_repeat: int = 50
+    concurrent_warmup: int = 5
+    concurrent_repeat: int = 50
 
     def to_dict(self) -> Mapping[str, object]:
         """返回可写入配置工件的稳定字典。"""
         return {"fixture_version": self.fixture_version, "fake_delay_ms": self.fake_delay_ms,
-                "concurrent_parents": self.concurrent_parents}
+                "concurrent_parents": self.concurrent_parents, "outcome_warmup": self.outcome_warmup,
+                "outcome_repeat": self.outcome_repeat, "cancellation_warmup": self.cancellation_warmup,
+                "cancellation_repeat": self.cancellation_repeat, "concurrent_warmup": self.concurrent_warmup,
+                "concurrent_repeat": self.concurrent_repeat}
 
 
 def chain_request_id(parent_index: int, attempt: int) -> str:
@@ -204,7 +213,14 @@ async def run_completed_chain(root: Path, config: DelegationWorkloadConfig, requ
 async def run_concurrent_completed(root: Path, config: DelegationWorkloadConfig, attempt: int) -> tuple[Mapping[str, object], ...]:
     """并发执行多个独立父 Session，返回每条链路的持久化归属事实。"""
     tasks = [run_completed_chain(root / f"parent-{index}", config, chain_request_id(index, attempt)) for index in range(config.concurrent_parents)]
-    return tuple(await asyncio.gather(*tasks))
+    facts = tuple(await asyncio.gather(*tasks))
+    parent_ids = [str(item["parent_run_id"]) for item in facts]
+    child_ids = [str(item["child_run_id"]) for item in facts]
+    task_ids = [str(item["task_id"]) for item in facts]
+    duplicate_count = (len(parent_ids) - len(set(parent_ids)) + len(child_ids) - len(set(child_ids)) + len(task_ids) - len(set(task_ids)))
+    return tuple({**item, "cross_chain_message_count": duplicate_count, "cross_chain_context_count": None,
+                  "cross_chain_tool_count": None, "cross_chain_stream_count": None,
+                  "misdelivery_count": duplicate_count} for item in facts)
 
 
 async def run_parent_cancellation(root: Path, config: DelegationWorkloadConfig, request_id: str) -> Mapping[str, object]:

@@ -50,8 +50,8 @@ def qualify(snapshot_path: Path) -> dict[str, object]:
     for sample in formal:
         if sample.git_commit != snapshot.git_commit:
             raise EvidenceQualificationError(f"{snapshot_path} 混入不同 Git 提交样本")
-        if sample.formal_sampling is False:
-            raise EvidenceQualificationError(f"{snapshot_path} 包含明确标记为非正式的样本")
+        if sample.formal_sampling is not True:
+            raise EvidenceQualificationError(f"{snapshot_path} 包含未明确标记为正式的样本")
     return {"snapshot": str(snapshot_path), "suite": snapshot.dataset, "git_commit": snapshot.git_commit,
             "samples_path": snapshot.samples_path, "formal_sample_count": len(formal),
             "fixture_fingerprints": dict(snapshot.fixture_fingerprints), "environment": dict(snapshot.environment)}
