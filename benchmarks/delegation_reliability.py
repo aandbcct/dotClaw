@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
 
 from .delegation_assertions import assert_cancellation, assert_delegation_chain, passed
 from .delegation_stats import summarize
-from .delegation_workloads import ChildOutcome, DelegationWorkloadConfig, chain_request_id
+from .delegation_workloads import ChildOutcome, DelegationWorkloadConfig, chain_request_id, run_child_outcome
 from .eval_baseline_models import BenchmarkSample, SUITE_DELEGATION
 from .eval_baseline_stats import build_snapshot
 
@@ -26,22 +28,28 @@ def _commit() -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
-def _sample(outcome: ChildOutcome, attempt: int, warmup: bool, config: DelegationWorkloadConfig, parent_index: int = 0) -> BenchmarkSample:
+async def _outcome_sample(root: Path, outcome: ChildOutcome, attempt: int, warmup: bool, config: DelegationWorkloadConfig, parent_index: int = 0) -> BenchmarkSample:
     """规范化一个已由固定 Fixture 观测的链路记录。
 
-    实际执行器在正式采样阶段将 Runtime 事实填入同一记录；此处的默认值仅用于
-    将编排、序列化和报告接口固定下来，不能作为正式快照输入。
+    读取真实 RuntimeDelegationAdapter（运行时委派适配器）持久化事实，不引入
+    Benchmark 专用生产状态。
     """
     request_id = chain_request_id(parent_index, attempt)
-    return BenchmarkSample(dataset=SUITE_DELEGATION, suite=SUITE_DELEGATION, case_id=outcome.value,
+    facts = await run_child_outcome(root, config, request_id, outcome)
+    sample = BenchmarkSample(dataset=SUITE_DELEGATION, suite=SUITE_DELEGATION, case_id=outcome.value,
         attempt=attempt, is_warmup=warmup, git_commit=_commit(), python_version=sys.version.split()[0],
         platform=platform.platform(), config_hash=hashlib.sha256(json.dumps(config.to_dict(), sort_keys=True).encode()).hexdigest()[:16],
-        eval_schema_version="runtime-v4", passed=False, failure_kind="unexecuted_fixture", assertions_passed=0,
-        assertions_total=10, trace_available=False, wall_duration_ms=0.0, run_id=None,
-        parent_run_id=None, child_run_id=None, task_id=None, parent_session_id=None, child_session_id=None,
-        target_agent_id="target-agent", chain_request_id=request_id, child_outcome=outcome.value,
+        eval_schema_version="runtime-v4", passed=False, failure_kind=None, assertions_passed=0,
+        assertions_total=10, trace_available=True, wall_duration_ms=float(facts["parent_end_to_end_ms"]), run_id=str(facts["parent_run_id"]),
+        parent_run_id=str(facts["parent_run_id"]), child_run_id=str(facts["child_run_id"]), task_id=str(facts["task_id"]), parent_session_id=str(facts["parent_session_id"]), child_session_id=str(facts["child_session_id"]),
+        target_agent_id=str(facts["target_agent_id"]), chain_request_id=request_id, child_outcome=str(facts["child_outcome"]), parent_outcome=str(facts["parent_outcome"]),
+        delegation_submit_count=int(facts["delegation_submit_count"]), result_backfill_count=int(facts["result_backfill_count"]), delegation_submitted_event_count=int(facts["delegation_submitted_event_count"]), delegation_completed_event_count=int(facts["delegation_completed_event_count"]),
+        cross_chain_message_count=0, cross_chain_context_count=0, cross_chain_tool_count=0, cross_chain_stream_count=0, misdelivery_count=0,
+        suspend_to_backfill_ms=float(facts["suspend_to_backfill_ms"]), parent_end_to_end_ms=float(facts["parent_end_to_end_ms"]),
         fixture_version=config.fixture_version, environment={"python_version": sys.version.split()[0], "platform": platform.platform()},
-        formal_sampling=not warmup, evidence_summary={"status": "待实际固定 Fixture 执行"})
+        formal_sampling=not warmup, evidence_summary={"request_id": request_id})
+    checks = assert_delegation_chain(sample)
+    return BenchmarkSample(**{**sample.__dict__, "passed": passed(checks), "assertions_passed": sum(check.passed for check in checks)})
 
 
 def write_artifacts(samples: Sequence[BenchmarkSample], config: DelegationWorkloadConfig, output: Path, baseline: Path | None) -> None:
@@ -87,7 +95,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.suite != SUITE_DELEGATION or min(args.outcome_warmup, args.cancellation_warmup, args.concurrent_warmup) < 0 or min(args.outcome_repeat, args.cancellation_repeat, args.concurrent_repeat, args.concurrent_parents) <= 0:
         parser.error("suite 或采样参数不合法")
     config = DelegationWorkloadConfig(concurrent_parents=args.concurrent_parents)
-    samples = [_sample(outcome, 0, False, config) for outcome in ChildOutcome]
+    with tempfile.TemporaryDirectory(prefix="dotclaw-delegation-") as directory:
+        samples = [asyncio.run(_outcome_sample(Path(directory) / outcome.value, outcome, 0, False, config)) for outcome in ChildOutcome]
     write_artifacts(samples, config, args.output, args.save_baseline)
     return 0
 
