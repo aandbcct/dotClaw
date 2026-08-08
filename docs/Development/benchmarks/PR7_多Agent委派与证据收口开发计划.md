@@ -100,7 +100,7 @@ tests/benchmarks/test_eval_baseline_stats.py
 ### 3.3 不新增或修改的内容
 
 - 不新建平行样本、快照、报告格式；PR7 使用 PR1 的 `BenchmarkSample`（单次采样记录）与 `BenchmarkSnapshot`（汇总基线快照）；
-- 不在 `src/dotclaw/runtime/`、`src/dotclaw/orchestration/` 或 `src/dotclaw/tools/` 注入 Benchmark 标识、计时、覆盖率或测试开关；
+- 不在 `src/dotclaw/runtime/`、`src/dotclaw/orchestration/` 或 `src/dotclaw/tools/` 注入 Benchmark 标识、计时、覆盖率或测试开关；唯一例外是 PR7 共享并发委派暴露的 Windows 原子替换短暂读锁：`RunRepositoryAdapter` 仅对 `run.json` 读取的 `PermissionError` 作有限退避重试。该修复不改变委派业务语义；重试耗尽仍失败，JSON 损坏、路径或领域数据错误立即抛出，并由仓储级测试覆盖；
 - 不将报告生成器变成生产分析服务，也不自动改写 README 的数字。
 
 ## 4. 场景与接口设计
@@ -258,7 +258,7 @@ PR7 不把历史 Git 委派实现纳入同口径性能比较。它验证 PR1 至
 5. `pytest-cov` 报告总体及 Runtime、Tool、Context、Orchestration、LLM 的真实行/分支覆盖率，未设置虚假阈值；
 6. 每一条 PR7 专项 README 结论及进入证据清单的指标，都能追溯到固定提交、环境、Dataset/Fixture、配置、正式样本、JSONL、快照和报告；
 7. 未宣称跨进程恢复、远程/嵌套委派、外部副作用 exactly-once、真实 API 性能或覆盖率即可靠性；
-8. Runtime、Task、Broker、取消、Context 与生产持久化语义未因 Benchmark 改写。
+8. Runtime、Task、Broker、取消、Context 与生产持久化语义未因 Benchmark 改写；唯一允许的 Runtime 例外是 3.3 所述的 `run.json` 短暂 Windows 锁读取重试，且其仓储级测试已通过。
 
 ## 11. 最终交付结果
 

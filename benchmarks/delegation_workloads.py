@@ -264,11 +264,7 @@ async def run_concurrent_completed(root: Path, config: DelegationWorkloadConfig,
     submitted = await asyncio.gather(*(coordinator.submit(request, output) for request in requests))
     suspended_at = time.perf_counter()
     await asyncio.sleep(0.005)
-    resumed = []
-    for result in submitted:
-        # 子 Run 已在共享 Adapter 的任务表中独立运行；父恢复是控制面写入，顺序执行可避免
-        # Windows 原子替换 run.json 时多个恢复读取互相放大短暂文件锁竞争。
-        resumed.append(await coordinator.resume_delegation(result.child_run_id or ""))
+    resumed = await asyncio.gather(*(coordinator.resume_delegation(result.child_run_id or "") for result in submitted))
     ended = time.perf_counter()
     facts: list[Mapping[str, object]] = []
     all_parent_ids = {result.run_id for result in submitted}
