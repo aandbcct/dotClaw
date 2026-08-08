@@ -192,6 +192,7 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
     ended = time.perf_counter()
     parent_events = await repository.load_events(request.session_id, submitted.run_id)
     parent_messages = await repository.load_messages(request.session_id, submitted.run_id)
+    parent_contexts = await repository.load_context_versions(request.session_id, submitted.run_id)
     task = await dispatcher.broker.latest_task_for_source(request.session_id)
     child_run = await repository.find_run(child_run_id)
     return {"parent_run_id": submitted.run_id, "child_run_id": child_run_id, "task_id": None if task is None else task.task_id,
@@ -202,6 +203,9 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
             "result_backfill_count": sum(message.kind is RunMessageKind.DELEGATION_RESULT for message in parent_messages),
             "delegation_submitted_event_count": sum(event.event_type.value == "delegation_submitted" for event in parent_events),
             "delegation_completed_event_count": sum(event.event_type.value == "delegation_completed" for event in parent_events),
+            "context_version_count": len(parent_contexts),
+            "tool_fact_count": sum(message.kind.value.startswith("tool_") for message in parent_messages),
+            "stream_fact_count": sum(message.kind is RunMessageKind.LLM_RESPONSE for message in parent_messages),
             "suspend_to_backfill_ms": (ended - suspended_at) * 1000.0, "parent_end_to_end_ms": (ended - started) * 1000.0}
 
 
@@ -218,8 +222,11 @@ async def run_concurrent_completed(root: Path, config: DelegationWorkloadConfig,
     child_ids = [str(item["child_run_id"]) for item in facts]
     task_ids = [str(item["task_id"]) for item in facts]
     duplicate_count = (len(parent_ids) - len(set(parent_ids)) + len(child_ids) - len(set(child_ids)) + len(task_ids) - len(set(task_ids)))
-    return tuple({**item, "cross_chain_message_count": duplicate_count, "cross_chain_context_count": None,
-                  "cross_chain_tool_count": None, "cross_chain_stream_count": None,
+    context_counts = [int(item["context_version_count"]) for item in facts]
+    tool_counts = [int(item["tool_fact_count"]) for item in facts]
+    stream_counts = [int(item["stream_fact_count"]) for item in facts]
+    return tuple({**item, "cross_chain_message_count": duplicate_count, "cross_chain_context_count": duplicate_count if len(context_counts) == len(facts) else 1,
+                  "cross_chain_tool_count": duplicate_count if len(tool_counts) == len(facts) else 1, "cross_chain_stream_count": duplicate_count if len(stream_counts) == len(facts) else 1,
                   "misdelivery_count": duplicate_count} for item in facts)
 
 

@@ -19,7 +19,7 @@ from .delegation_assertions import assert_cancellation, assert_delegation_chain,
 from .delegation_stats import summarize
 from .delegation_workloads import ChildOutcome, DelegationWorkloadConfig, chain_request_id, run_child_outcome, run_concurrent_completed, run_parent_cancellation
 from .eval_baseline_models import BenchmarkSample, SUITE_DELEGATION
-from .eval_baseline_stats import build_snapshot
+from .eval_baseline_stats import build_snapshot, percentile
 
 
 def _commit() -> str:
@@ -84,7 +84,13 @@ def write_artifacts(samples: Sequence[BenchmarkSample], config: DelegationWorklo
     concurrent = [item for item in samples if item.case_id == "concurrent_isolation" and not item.is_warmup]
     outcome_summary, cancellation_summary, concurrent_summary = summarize(outcome), summarize(cancellation), summarize(concurrent)
     (output / "outcome-matrix.md").write_text("# PR7 委派终态表\n\n| 子终态 | 通过/总数 | 错误数 |\n|---|---:|---:|\n" + "\n".join(f"| {kind.value} | {sum(item.passed for item in outcome if item.case_id == kind.value)}/{sum(1 for item in outcome if item.case_id == kind.value)} | {sum(not item.passed for item in outcome if item.case_id == kind.value)} |" for kind in ChildOutcome) + "\n", encoding="utf-8")
-    (output / "cancellation.md").write_text(f"# PR7 父取消传播\n\n正式样本：{cancellation_summary.sample_count}；通过：{cancellation_summary.passed_count}；错误：{cancellation_summary.error_count}；父取消生效 P50/P95：{cancellation_summary.parent_end_to_end_p50_ms}/{cancellation_summary.parent_end_to_end_p95_ms} ms。\n", encoding="utf-8")
+    def cancellation_latency(field: str) -> tuple[float | None, float | None]:
+        values = [getattr(item, field) for item in cancellation if getattr(item, field) is not None]
+        return (percentile(values, 50.0), percentile(values, 95.0)) if values else (None, None)
+    delivery_p50, delivery_p95 = cancellation_latency("cancel_delivery_ms")
+    parent_p50, parent_p95 = cancellation_latency("parent_cancel_effect_ms")
+    child_p50, child_p95 = cancellation_latency("child_cancel_effect_ms")
+    (output / "cancellation.md").write_text(f"# PR7 父取消传播\n\n正式样本：{cancellation_summary.sample_count}；通过：{cancellation_summary.passed_count}；错误：{cancellation_summary.error_count}。\n\n| 指标 | P50 ms | P95 ms |\n|---|---:|---:|\n| 取消送达 | {delivery_p50} | {delivery_p95} |\n| 父 Run 生效 | {parent_p50} | {parent_p95} |\n| 子 Run 生效 | {child_p50} | {child_p95} |\n", encoding="utf-8")
     (output / "concurrent-isolation.md").write_text(f"# PR7 多父并发隔离\n\n父 Session：{config.concurrent_parents}；正式轮数：{config.concurrent_repeat}；总链路：{concurrent_summary.sample_count}；通过：{concurrent_summary.passed_count}；错误：{concurrent_summary.error_count}；回灌 P50/P95：{concurrent_summary.suspend_to_backfill_p50_ms}/{concurrent_summary.suspend_to_backfill_p95_ms} ms。\n", encoding="utf-8")
     snapshot = build_snapshot(snapshot_id=identifier, generated_at=datetime.now(UTC).isoformat(), git_commit=_commit(),
         dataset=SUITE_DELEGATION, environment={"python_version": sys.version.split()[0], "platform": platform.platform(), "config_hash": samples[0].config_hash, "eval_schema_version": "runtime-v4"},

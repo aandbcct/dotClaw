@@ -71,7 +71,9 @@ def coverage_groups(coverage: Mapping[str, object]) -> dict[str, dict[str, int |
             continue
         covered = sum(int(item.get("covered_lines", 0)) for item in summaries if isinstance(item, dict))
         total = sum(int(item.get("num_statements", 0)) for item in summaries if isinstance(item, dict))
-        result[name] = {"covered_lines": covered, "num_statements": total}
+        covered_branches = sum(int(item.get("covered_branches", 0)) for item in summaries if isinstance(item, dict))
+        total_branches = sum(int(item.get("num_branches", 0)) for item in summaries if isinstance(item, dict))
+        result[name] = {"covered_lines": covered, "num_statements": total, "covered_branches": covered_branches, "num_branches": total_branches}
     return result
 
 
@@ -84,10 +86,10 @@ def generate(snapshot_root: Path, coverage_path: Path, output: Path) -> Path:
     groups = coverage_groups(coverage)
     output.mkdir(parents=True, exist_ok=True)
     (output / "evidence-manifest.json").write_text(json.dumps({"entries": entries, "coverage_groups": groups}, ensure_ascii=False, indent=2), encoding="utf-8")
-    lines = ["# PR7 证据清单", "", "仅完整正式样本可供 PR8 消费。", "", "## 覆盖率分层", "", "| 范围 | 已覆盖行 | 语句数 |", "|---|---:|---:|"]
+    lines = ["# PR7 证据清单", "", "仅完整正式样本可供 PR8 消费。", "", "## 覆盖率分层", "", "| 范围 | 已覆盖行 | 语句数 | 已覆盖分支 | 分支数 |", "|---|---:|---:|---:|---:|"]
     for name, value in groups.items():
         covered = value.get("covered_lines", value.get("status", "不适用/未覆盖"))
-        lines.append(f"| {name} | {covered} | {value.get('num_statements', '')} |")
+        lines.append(f"| {name} | {covered} | {value.get('num_statements', '')} | {value.get('covered_branches', '')} | {value.get('num_branches', '')} |")
     (output / "coverage.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return output / "evidence-manifest.json"
 
