@@ -20,6 +20,11 @@ async def test_child_outcome_backfills_once(tmp_path, outcome: ChildOutcome) -> 
     assert facts["result_backfill_count"] == 1
     assert facts["delegation_submitted_event_count"] == 1
     assert facts["delegation_completed_event_count"] == 1
+    assert facts["cross_chain_message_count"] == 0
+    assert facts["cross_chain_context_count"] == 0
+    assert facts["cross_chain_tool_count"] == 0
+    assert facts["cross_chain_stream_count"] == 0
+    assert facts["misdelivery_count"] == 0
 
 
 @pytest.mark.asyncio

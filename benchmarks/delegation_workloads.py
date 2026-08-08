@@ -227,6 +227,13 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
     task = await dispatcher.broker.latest_task_for_source(request.session_id)
     child_run = await _wait_for_terminal(repository, child_run_id)
     child_messages = () if child_run is None else await repository.load_messages(child_run.session_id, child_run_id)
+    allowed_run_ids = {submitted.run_id, child_run_id}
+    message_run_ids = [submitted.run_id for _ in parent_messages] + [child_run_id for _ in child_messages]
+    foreign_message = sum(run_id not in allowed_run_ids for run_id in message_run_ids)
+    foreign_context = sum(run_id not in allowed_run_ids for run_id in context.run_ids)
+    foreign_tool = sum(run_id not in allowed_run_ids for run_id in tools.run_ids)
+    foreign_stream = sum(request_id not in content for run_id, contents in output.contents_by_run.items() if run_id in allowed_run_ids for content in contents)
+    misdelivery = foreign_message + foreign_context + foreign_tool + foreign_stream
     return {"parent_run_id": submitted.run_id, "child_run_id": child_run_id, "task_id": None if task is None else task.task_id,
             "parent_session_id": request.session_id, "child_session_id": None if child_run is None else child_run.session_id,
             "target_agent_id": "target-agent", "parent_outcome": resumed.state.outcome().value,
@@ -238,6 +245,9 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
             "context_version_count": len(parent_contexts),
             "tool_fact_count": sum(message.kind.value.startswith("tool_") for message in parent_messages),
             "stream_fact_count": sum(message.kind is RunMessageKind.LLM_RESPONSE for message in parent_messages),
+            "cross_chain_message_count": foreign_message, "cross_chain_context_count": foreign_context,
+            "cross_chain_tool_count": foreign_tool, "cross_chain_stream_count": foreign_stream,
+            "misdelivery_count": misdelivery,
             "observed_context_run_ids": tuple(context.run_ids), "observed_tool_run_ids": tuple(tools.run_ids), "observed_stream_run_ids": tuple(output.run_ids),
             "message_contents": tuple(message.content for message in (*parent_messages, *child_messages)),
             "suspend_to_backfill_ms": (ended - suspended_at) * 1000.0, "parent_end_to_end_ms": (ended - started) * 1000.0}
