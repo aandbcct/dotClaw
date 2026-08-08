@@ -532,7 +532,7 @@ PR7 使用固定 Fixture 的单进程父子 Run 委派实验，原始 JSONL、�
 ```powershell
 python -m benchmarks.delegation_reliability --suite reliability_delegation_v1 --outcome-warmup 1 --outcome-repeat 1 --cancellation-warmup 5 --cancellation-repeat 50 --concurrent-parents 8 --concurrent-warmup 5 --concurrent-repeat 50 --output benchmarks/reports/delegation/<run-id> --save-baseline benchmarks/baselines/reliability_delegation_v1
 pytest --cov=src/dotclaw --cov-branch --cov-report=json --cov-report=term-missing
-python -m benchmarks.evidence_report --snapshots benchmarks/baselines --coverage coverage.json --output benchmarks/reports/evidence/<run-id>
+python -m benchmarks.evidence_report --snapshots benchmarks/baselines --snapshot benchmarks/baselines/reliability_delegation_v1/<snapshot-id>.json --coverage coverage.json --output benchmarks/reports/evidence/<run-id>
 ```
 
 该实验只描述本机、单进程、单层委派和固定 Fixture 下的编排行为；不证明真实 API 时延、跨进程恢复、远程委派或外部副作用 exactly-once。未产生正式快照时，本文件不写入百分比或零错误结论。

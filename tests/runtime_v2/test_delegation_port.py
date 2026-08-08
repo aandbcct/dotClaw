@@ -40,6 +40,7 @@ from dotclaw.runtime.domain.facts import (
     AgentRun,
     JSONMap,
     MessageRole,
+    RunErrorCode,
     RunMessage,
     RunMessageKind,
     ToolCall,
@@ -313,8 +314,8 @@ async def test_engine_submits_delegation_and_suspends_parent(tmp_path: Path) -> 
     assert parent_run.state.is_waiting_delegation()
 
 
-async def test_engine_resume_delegation_restores_parent_to_completed(tmp_path: Path) -> None:
-    """阶段3：resume_delegation 回灌子结果并经 DelegationCompleted 恢复父运行至 COMPLETED。"""
+async def test_engine_resume_delegation_backfills_once_when_repeated(tmp_path: Path) -> None:
+    """重复回灌同一子 Run 时拒绝第二次恢复，且不新增消息、事件或子 Run。"""
     target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent", model="model")
     registry: AgentRegistry = AgentRegistry()
     registry.register(target)
@@ -354,6 +355,19 @@ async def test_engine_resume_delegation_restores_parent_to_completed(tmp_path: P
         event for event in events if event["event_type"] == "delegation_completed"
     )
     assert completed_event["data"]["outcome"] == RunOutcome.COMPLETED.value
+    result_messages = [message for message in await repository.load_messages("parent-session", submit_result.run_id) if message.kind.value == "delegation_result"]
+    child_run_paths = list(tmp_path.glob("*/agent_runs/*/run.json"))
+    child_runs = [json.loads(path.read_text(encoding="utf-8")) for path in child_run_paths if json.loads(path.read_text(encoding="utf-8")).get("parent_run_id") == submit_result.run_id]
+
+    repeated: RunResult = await coordinator.resume_delegation(child_run_id)
+
+    assert repeated.error is not None
+    assert repeated.error.code is RunErrorCode.INVALID_STATE
+    repeated_events: list[JSONMap] = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    repeated_result_messages = [message for message in await repository.load_messages("parent-session", submit_result.run_id) if message.kind.value == "delegation_result"]
+    assert [event["event_type"] for event in repeated_events].count("delegation_completed") == 1
+    assert len(repeated_result_messages) == len(result_messages) == 1
+    assert len(child_runs) == 1
 
 
 async def test_engine_resume_delegation_rejects_mismatched_child_id(tmp_path: Path) -> None:

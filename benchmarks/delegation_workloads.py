@@ -217,7 +217,8 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
     child_run_id = submitted.child_run_id
     if child_run_id is None:
         raise RuntimeError("委派 Fixture 未返回子 Run 标识")
-    await asyncio.sleep(0.005)
+    await adapter.result(child_run_id)
+    await _wait_for_terminal(repository, child_run_id)
     resumed = await coordinator.resume_delegation(child_run_id)
     ended = time.perf_counter()
     parent_events = await repository.load_events(request.session_id, submitted.run_id)
@@ -263,15 +264,19 @@ async def run_concurrent_completed(root: Path, config: DelegationWorkloadConfig,
     started = time.perf_counter()
     submitted = await asyncio.gather(*(coordinator.submit(request, output) for request in requests))
     suspended_at = time.perf_counter()
-    await asyncio.sleep(0.005)
+    # 先并发等待适配器确认子执行任务已结束，再读取持久化事实。Repository 的
+    # 恢复扫描会遍历共享根；不能在子 Run 仍写入时并发触发该只读观察。
+    await asyncio.gather(*(adapter.result(result.child_run_id or "") for result in submitted))
+    child_runs: list[AgentRun] = []
+    for result in submitted:
+        child_runs.append(await _wait_for_terminal(repository, result.child_run_id or ""))
     resumed = await asyncio.gather(*(coordinator.resume_delegation(result.child_run_id or "") for result in submitted))
     ended = time.perf_counter()
     facts: list[Mapping[str, object]] = []
     all_parent_ids = {result.run_id for result in submitted}
     all_child_ids = {result.child_run_id or "" for result in submitted}
-    for request, request_id, submit_result, resume_result in zip(requests, request_ids, submitted, resumed, strict=True):
+    for request, request_id, submit_result, resume_result, child_run in zip(requests, request_ids, submitted, resumed, child_runs, strict=True):
         child_run_id = submit_result.child_run_id or ""
-        child_run = await _wait_for_terminal(repository, child_run_id)
         parent_messages = await repository.load_messages(request.session_id, submit_result.run_id)
         child_messages = await repository.load_messages(child_run.session_id, child_run_id)
         parent_events = await repository.load_events(request.session_id, submit_result.run_id)

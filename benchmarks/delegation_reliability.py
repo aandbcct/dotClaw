@@ -47,7 +47,7 @@ async def _outcome_sample(root: Path, outcome: ChildOutcome, attempt: int, warmu
         cross_chain_message_count=facts.get("cross_chain_message_count"), cross_chain_context_count=facts.get("cross_chain_context_count"), cross_chain_tool_count=facts.get("cross_chain_tool_count"), cross_chain_stream_count=facts.get("cross_chain_stream_count"), misdelivery_count=facts.get("misdelivery_count"),
         suspend_to_backfill_ms=float(facts["suspend_to_backfill_ms"]), parent_end_to_end_ms=float(facts["parent_end_to_end_ms"]),
         fixture_version=config.fixture_version, environment={"python_version": sys.version.split()[0], "platform": platform.platform()},
-        formal_sampling=not warmup, evidence_summary={"request_id": request_id})
+        fixture_fingerprint=config.fixture_version, formal_sampling=not warmup, evidence_summary={"request_id": request_id})
     checks = assert_delegation_chain(sample)
     return BenchmarkSample(**{**sample.__dict__, "passed": passed(checks), "assertions_passed": sum(check.passed for check in checks)})
 
@@ -55,7 +55,7 @@ async def _outcome_sample(root: Path, outcome: ChildOutcome, attempt: int, warmu
 async def _cancellation_sample(root: Path, attempt: int, warmup: bool, config: DelegationWorkloadConfig) -> BenchmarkSample:
     """将父取消真实观测转换为统一采样记录。"""
     facts = await run_parent_cancellation(root, config, f"cancellation-{attempt}")
-    sample = BenchmarkSample(dataset=SUITE_DELEGATION, suite=SUITE_DELEGATION, case_id="parent_cancellation", attempt=attempt, is_warmup=warmup, git_commit=_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=hashlib.sha256(json.dumps(config.to_dict(), sort_keys=True).encode()).hexdigest()[:16], eval_schema_version="runtime-v4", passed=False, failure_kind=None, assertions_passed=0, assertions_total=5, trace_available=True, wall_duration_ms=float(facts["parent_cancel_effect_ms"]), run_id=str(facts["parent_run_id"]), parent_run_id=str(facts["parent_run_id"]), child_run_id=str(facts["child_run_id"]), parent_session_id=f"parent-cancellation-{attempt}", child_outcome="cancelled", parent_outcome="cancelled", cancel_delivery_ms=float(facts["cancel_delivery_ms"]), parent_cancel_effect_ms=float(facts["parent_cancel_effect_ms"]), child_cancel_effect_ms=float(facts["child_cancel_effect_ms"]), followup_started=bool(facts["followup_started"]), followup_completed=bool(facts["followup_completed"]), fixture_version=config.fixture_version, environment={"python_version": sys.version.split()[0], "platform": platform.platform()}, formal_sampling=not warmup, evidence_summary=dict(facts))
+    sample = BenchmarkSample(dataset=SUITE_DELEGATION, suite=SUITE_DELEGATION, case_id="parent_cancellation", attempt=attempt, is_warmup=warmup, git_commit=_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=hashlib.sha256(json.dumps(config.to_dict(), sort_keys=True).encode()).hexdigest()[:16], eval_schema_version="runtime-v4", passed=False, failure_kind=None, assertions_passed=0, assertions_total=5, trace_available=True, wall_duration_ms=float(facts["parent_cancel_effect_ms"]), run_id=str(facts["parent_run_id"]), parent_run_id=str(facts["parent_run_id"]), child_run_id=str(facts["child_run_id"]), parent_session_id=f"parent-cancellation-{attempt}", child_outcome="cancelled", parent_outcome="cancelled", cancel_delivery_ms=float(facts["cancel_delivery_ms"]), parent_cancel_effect_ms=float(facts["parent_cancel_effect_ms"]), child_cancel_effect_ms=float(facts["child_cancel_effect_ms"]), followup_started=bool(facts["followup_started"]), followup_completed=bool(facts["followup_completed"]), fixture_version=config.fixture_version, fixture_fingerprint=config.fixture_version, environment={"python_version": sys.version.split()[0], "platform": platform.platform()}, formal_sampling=not warmup, evidence_summary=dict(facts))
     checks = assert_cancellation(sample)
     return BenchmarkSample(**{**sample.__dict__, "passed": passed(checks) and bool(facts["parent_cancelled"]) and bool(facts["child_cancelled"]), "assertions_passed": sum(check.passed for check in checks)})
 
@@ -75,10 +75,13 @@ def write_artifacts(samples: Sequence[BenchmarkSample], config: DelegationWorklo
     output.mkdir(parents=True, exist_ok=True)
     identifier = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "_" + _commit()
     sample_path = output / "samples" / f"{identifier}.jsonl"
+    formal_sample_path = output / "samples" / f"{identifier}.formal.jsonl"
     sample_path.parent.mkdir(exist_ok=True)
     sample_path.write_text("".join(json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in samples), encoding="utf-8")
     (output / "delegation-config.json").write_text(json.dumps(config.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     _validate_snapshot_samples(samples, config)
+    formal_samples = [item for item in samples if not item.is_warmup]
+    formal_sample_path.write_text("".join(json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in formal_samples), encoding="utf-8")
     outcome = [item for item in samples if item.case_id in {kind.value for kind in ChildOutcome} and not item.is_warmup]
     cancellation = [item for item in samples if item.case_id == "parent_cancellation" and not item.is_warmup]
     concurrent = [item for item in samples if item.case_id == "concurrent_isolation" and not item.is_warmup]
@@ -95,12 +98,13 @@ def write_artifacts(samples: Sequence[BenchmarkSample], config: DelegationWorklo
     snapshot = build_snapshot(snapshot_id=identifier, generated_at=datetime.now(UTC).isoformat(), git_commit=_commit(),
         dataset=SUITE_DELEGATION, environment={"python_version": sys.version.split()[0], "platform": platform.platform(), "config_hash": samples[0].config_hash, "eval_schema_version": "runtime-v4"},
         warmup=sum(item.is_warmup for item in samples), repeat=sum(not item.is_warmup for item in samples), samples=samples,
-        samples_path=f"samples/{identifier}.jsonl", scenario_id=SUITE_DELEGATION, samples_content_summary={"line_count": len(samples), "byte_count": sample_path.stat().st_size})
+        samples_path=f"samples/{identifier}.formal.jsonl", scenario_id=SUITE_DELEGATION, samples_content_summary={"line_count": len(formal_samples), "byte_count": formal_sample_path.stat().st_size})
     snapshot_path = output / f"{identifier}.json"
     snapshot_path.write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     if baseline is not None:
         (baseline / "samples").mkdir(parents=True, exist_ok=True)
         shutil.copy2(sample_path, baseline / "samples" / sample_path.name)
+        shutil.copy2(formal_sample_path, baseline / "samples" / formal_sample_path.name)
         shutil.copy2(snapshot_path, baseline / snapshot_path.name)
 
 

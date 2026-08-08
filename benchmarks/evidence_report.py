@@ -43,17 +43,31 @@ def qualify(snapshot_path: Path) -> dict[str, object]:
     required_environment = {"python_version", "platform", "config_hash", "eval_schema_version"}
     if not required_environment.issubset(snapshot.environment):
         raise EvidenceQualificationError(f"{snapshot_path} 缺少环境或配置追溯字段")
+    if not snapshot.fixture_fingerprints or any(not value for value in snapshot.fixture_fingerprints.values()):
+        raise EvidenceQualificationError(f"{snapshot_path} 缺少固定 Fixture 指纹")
     samples = load_samples(snapshot_path, snapshot)
-    formal = [item for item in samples if not item.is_warmup]
-    if not formal:
+    if not samples:
         raise EvidenceQualificationError(f"{snapshot_path} 不含正式样本")
-    for sample in formal:
+    expected_cases = {sample.case_id for sample in samples}
+    if set(snapshot.fixture_fingerprints) != expected_cases:
+        raise EvidenceQualificationError(f"{snapshot_path} 的 Fixture 指纹与样本场景不一致")
+    for sample in samples:
+        if sample.is_warmup:
+            raise EvidenceQualificationError(f"{snapshot_path} 的正式 JSONL 混入预热样本")
         if sample.git_commit != snapshot.git_commit:
             raise EvidenceQualificationError(f"{snapshot_path} 混入不同 Git 提交样本")
         if sample.formal_sampling is not True:
             raise EvidenceQualificationError(f"{snapshot_path} 包含未明确标记为正式的样本")
+        if sample.fixture_fingerprint != snapshot.fixture_fingerprints[sample.case_id]:
+            raise EvidenceQualificationError(f"{snapshot_path} 的样本 Fixture 指纹不一致")
+        if sample.config_hash != snapshot.environment["config_hash"]:
+            raise EvidenceQualificationError(f"{snapshot_path} 的样本配置哈希不一致")
+        if sample.python_version != snapshot.environment["python_version"] or sample.platform != snapshot.environment["platform"]:
+            raise EvidenceQualificationError(f"{snapshot_path} 的样本环境不一致")
+        if sample.eval_schema_version != snapshot.environment["eval_schema_version"]:
+            raise EvidenceQualificationError(f"{snapshot_path} 的样本评估 Schema 不一致")
     return {"snapshot": str(snapshot_path), "suite": snapshot.dataset, "git_commit": snapshot.git_commit,
-            "samples_path": snapshot.samples_path, "formal_sample_count": len(formal),
+            "samples_path": snapshot.samples_path, "formal_sample_count": len(samples),
             "fixture_fingerprints": dict(snapshot.fixture_fingerprints), "environment": dict(snapshot.environment)}
 
 
@@ -79,7 +93,12 @@ def coverage_groups(coverage: Mapping[str, object]) -> dict[str, dict[str, int |
 
 def generate(snapshot_root: Path, coverage_path: Path, output: Path, selected_snapshots: Sequence[Path] = ()) -> Path:
     """生成 JSON 清单和 Markdown 覆盖率报告；不会改写 README。"""
-    candidates = tuple(selected_snapshots) if selected_snapshots else tuple(sorted(snapshot_root.rglob("*.json")))
+    if not selected_snapshots:
+        raise EvidenceQualificationError("必须通过 --snapshot 显式选择待收口快照")
+    root = snapshot_root.resolve()
+    candidates = tuple(path.resolve() for path in selected_snapshots)
+    if any(root not in path.parents for path in candidates):
+        raise EvidenceQualificationError("显式选择的快照必须位于 --snapshots 目录内")
     entries = [qualify(path) for path in candidates if path.suffix == ".json" and "/v1.0/" not in path.as_posix()]
     if not entries:
         raise EvidenceQualificationError("未找到可资格校验的快照")

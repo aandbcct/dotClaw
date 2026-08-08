@@ -116,9 +116,10 @@ python -m benchmarks.delegation_reliability \
   --output benchmarks/reports/delegation/<run-id> \
   --save-baseline benchmarks/baselines/reliability_delegation_v1
 
-pytest --cov=src/dotclaw --cov-report=json --cov-report=term-missing
+pytest --cov=src/dotclaw --cov-branch --cov-report=json --cov-report=term-missing
 python -m benchmarks.evidence_report \
   --snapshots benchmarks/baselines \
+  --snapshot benchmarks/baselines/reliability_delegation_v1/<snapshot-id>.json \
   --coverage coverage.json \
   --output benchmarks/reports/evidence/<run-id>
 ```
