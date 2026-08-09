@@ -5,7 +5,8 @@ import pytest
 from benchmarks.business_baseline import judge_deterministic_candidate
 from .helpers import make_sample
 
-from benchmarks.business_judge import JudgeProtocolError, JudgeSpec, parse_verdict, render_prompt
+from benchmarks.business_judge import JudgeProtocolError, JudgeSpec, LLMProxyJudge, parse_verdict, render_prompt
+from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind
 
 
 def _spec() -> JudgeSpec:
@@ -42,3 +43,22 @@ async def test_judge_called_once_only_after_deterministic_pass() -> None:
     skipped = await judge_deterministic_candidate(make_sample(execution_mode="ext", deterministic_passed=False), "x", _spec(), judge)
     passed = await judge_deterministic_candidate(make_sample(execution_mode="ext", deterministic_passed=True), "x", _spec(), judge)
     assert judge.calls == 1 and skipped.judge_verdict is None and passed.judge_verdict == "pass"
+
+
+@pytest.mark.asyncio
+async def test_proxy_judge_transmits_timeout_and_retry() -> None:
+    """模型代理裁判必须复用调用级超时和重试条件。"""
+    class CapturingProxy:
+        """记录裁判调用条件的最小流式代理替身。"""
+
+        def __init__(self) -> None:
+            self.conditions: dict[str, object] | None = None
+
+        async def chat(self, _messages: list[object], **kwargs: object):
+            """保存传入条件并提供最终响应增量。"""
+            self.conditions = kwargs
+            yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "{}"),))
+
+    proxy = CapturingProxy()
+    await LLMProxyJudge(proxy, "judge-model", 19.0, 3).judge("prompt")
+    assert proxy.conditions == {"model": "judge-model", "purpose": "chat", "stream": True, "timeout_seconds": 19.0, "retry_count": 3}

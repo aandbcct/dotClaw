@@ -12,6 +12,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from dataclasses import replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -24,7 +25,7 @@ from dotclaw.eval.reexecution import ReexecutionRunner
 from dotclaw.runtime.adapters import LLMProxyAdapter
 from dotclaw.runtime.application.dto import ContextBundle
 from dotclaw.runtime.application.execution import RunExecutionView
-from dotclaw.runtime.application.ports import LLMOutputPort, LLMPort, LLMUnavailableError
+from dotclaw.runtime.application.ports import LLMOutputPort
 from dotclaw.runtime.domain.facts import RunMessage
 
 from .business_judge import JudgePort, JudgeProtocolError, JudgeSpec, LLMProxyJudge, parse_verdict, prompt_hash, render_prompt
@@ -42,11 +43,12 @@ class BusinessDatasetError(ValueError):
 
 
 class _TimeoutBoundLLMPort:
-    """仅为 PR8 EXT 注入单次模型调用时限，避免真实流式调用无界阻塞正式采样。"""
+    """为 PR8 EXT 向已支持取消的运行时适配器注入固定模型调用条件。"""
 
-    def __init__(self, delegate: LLMPort, timeout_seconds: float) -> None:
-        self._delegate: LLMPort = delegate
+    def __init__(self, delegate: LLMProxyAdapter, timeout_seconds: float, retry_count: int) -> None:
+        self._delegate: LLMProxyAdapter = delegate
         self._timeout_seconds: float = timeout_seconds
+        self._retry_count: int = retry_count
 
     async def complete(
         self,
@@ -54,18 +56,71 @@ class _TimeoutBoundLLMPort:
         execution: RunExecutionView,
         output_port: LLMOutputPort | None = None,
     ) -> RunMessage:
-        """在固定时限内转发模型调用；超时统一映射为可归因的外部服务不可用。"""
-        try:
-            return await asyncio.wait_for(
-                self._delegate.complete(context, execution, output_port),
-                timeout=self._timeout_seconds,
-            )
-        except TimeoutError as error:
-            raise LLMUnavailableError("业务模型调用超时") from error
+        """透传固定条件到运行时适配器，令 Proxy/Client 负责真实流的关闭与取消。"""
+        return await self._delegate.complete(
+            context,
+            execution,
+            output_port,
+            timeout_seconds=self._timeout_seconds,
+            retry_count=self._retry_count,
+        )
 
     async def cancel(self, run_id: str) -> None:
         """透传 Runtime 的尽力取消请求。"""
         await self._delegate.cancel(run_id)
+
+
+class _ProgressPhase(StrEnum):
+    """EXT 运行日志中的单样本阶段；不属于正式样本 schema。"""
+
+    SAMPLE_STARTED = "sample_started"
+    DETERMINISTIC_FINISHED = "deterministic_finished"
+    JUDGE_STARTED = "judge_started"
+    JUDGE_FINISHED = "judge_finished"
+    SAMPLE_FINISHED = "sample_finished"
+    SAMPLE_ERROR = "sample_error"
+
+
+class _ExtProgressRecorder:
+    """追加写 EXT 诊断阶段日志；中断日志不可代替完整正式 JSONL。"""
+
+    def __init__(self, output: Path, timeout_seconds: float, retry_count: int) -> None:
+        self._path: Path = output / "progress.jsonl"
+        self._timeout_seconds: float = timeout_seconds
+        self._retry_count: int = retry_count
+        if self._path.exists():
+            raise FileExistsError("PR8 EXT 进度日志已存在，拒绝覆盖")
+
+    def record(
+        self,
+        phase: _ProgressPhase,
+        task_id: str,
+        attempt: int,
+        is_warmup: bool,
+        *,
+        run_id: str | None = None,
+        deterministic_passed: bool | None = None,
+        failure_attribution: str | None = None,
+        judge_verdict: str | None = None,
+    ) -> None:
+        """立即刷写单个阶段，便于定位中断前最后完成的真实调用边界。"""
+        entry = {
+            "schema_version": "1.0",
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "phase": phase.value,
+            "task_id": task_id,
+            "attempt": attempt,
+            "is_warmup": is_warmup,
+            "run_id": run_id,
+            "timeout_seconds": self._timeout_seconds,
+            "retry_count": self._retry_count,
+            "deterministic_passed": deterministic_passed,
+            "failure_attribution": failure_attribution,
+            "judge_verdict": judge_verdict,
+        }
+        with self._path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
 
 
 def load_business_documents(root: Path, dataset: str) -> tuple[dict[str, Mapping[str, object]], dict[str, Mapping[str, object]]]:
@@ -188,6 +243,8 @@ async def run_ext_dataset(
     requested_ids = frozenset(ext_cases) if ext_cases is not None else frozenset(ext_ids)
     if requested_ids != ext_ids:
         raise BusinessDatasetError("EXT 任务必须精确覆盖冻结的六个任务，不能增删或替换")
+    output.mkdir(parents=True, exist_ok=True)
+    progress = _ExtProgressRecorder(output, timeout_seconds, retry_count)
     samples: list[BenchmarkSample] = []
     runner = ReexecutionRunner(dependencies)
     for task_id in sorted(requested_ids):
@@ -196,13 +253,27 @@ async def run_ext_dataset(
             workflow_fingerprint = _workflow_fixture_fingerprint(doc)
             spec = load_judge_spec(root, dataset, task_id)
             for index in range(warmup + repeat):
+                attempt = index if index < warmup else index - warmup
+                is_warmup = index < warmup
+                progress.record(_ProgressPhase.SAMPLE_STARTED, task_id, attempt, is_warmup)
                 started = time.perf_counter()
-                with tempfile.TemporaryDirectory(prefix="dotclaw-pr8-ext-") as temporary_root:
-                    result = await run_preference_aware_followup(Path(temporary_root), dependencies.llm_port)
-                sample = BenchmarkSample(dataset=dataset, case_id=task_id, attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, git_commit=git_short_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=config_hash(), eval_schema_version="1.0", passed=result.passed, failure_kind=None if result.passed else "workflow", assertions_passed=1 if result.passed else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=(time.perf_counter() - started) * 1000, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="ext", deterministic_passed=result.passed, failure_attribution=None if result.passed else "assertion_failure", fixture_fingerprint=workflow_fingerprint, provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2", workflow_version=str(doc["version"]), formal_sampling=formal_sampling)
-                if not sample.is_warmup and sample.deterministic_passed:
-                    sample = await judge_deterministic_candidate(sample, result.final_output, spec, judge)
+                try:
+                    with tempfile.TemporaryDirectory(prefix="dotclaw-pr8-ext-") as temporary_root:
+                        result = await run_preference_aware_followup(Path(temporary_root), dependencies.llm_port)
+                    sample = BenchmarkSample(dataset=dataset, case_id=task_id, attempt=attempt, is_warmup=is_warmup, git_commit=git_short_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=config_hash(), eval_schema_version="1.0", passed=result.passed, failure_kind=None if result.passed else "workflow", assertions_passed=1 if result.passed else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=(time.perf_counter() - started) * 1000, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="ext", deterministic_passed=result.passed, failure_attribution=None if result.passed else "assertion_failure", fixture_fingerprint=workflow_fingerprint, provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2", workflow_version=str(doc["version"]), formal_sampling=formal_sampling)
+                    progress.record(_ProgressPhase.DETERMINISTIC_FINISHED, task_id, attempt, is_warmup, run_id=sample.run_id, deterministic_passed=sample.deterministic_passed, failure_attribution=sample.failure_attribution)
+                    if not sample.is_warmup and sample.deterministic_passed:
+                        progress.record(_ProgressPhase.JUDGE_STARTED, task_id, attempt, is_warmup, run_id=sample.run_id, deterministic_passed=True)
+                        sample = await judge_deterministic_candidate(sample, result.final_output, spec, judge)
+                        progress.record(_ProgressPhase.JUDGE_FINISHED, task_id, attempt, is_warmup, run_id=sample.run_id, deterministic_passed=True, failure_attribution=sample.failure_attribution, judge_verdict=sample.judge_verdict)
+                except asyncio.CancelledError:
+                    progress.record(_ProgressPhase.SAMPLE_ERROR, task_id, attempt, is_warmup, failure_attribution="CancelledError")
+                    raise
+                except Exception as error:
+                    progress.record(_ProgressPhase.SAMPLE_ERROR, task_id, attempt, is_warmup, failure_attribution=type(error).__name__)
+                    raise
                 samples.append(sample)
+                progress.record(_ProgressPhase.SAMPLE_FINISHED, task_id, attempt, is_warmup, run_id=sample.run_id, deterministic_passed=sample.deterministic_passed, failure_attribution=sample.failure_attribution, judge_verdict=sample.judge_verdict)
             continue
         doc = cases[task_id]
         source_case = load_case(root, dataset, task_id)
@@ -215,19 +286,32 @@ async def run_ext_dataset(
         )
         spec = load_judge_spec(root, dataset, task_id)
         for index in range(warmup + repeat):
+            attempt = index if index < warmup else index - warmup
+            is_warmup = index < warmup
+            progress.record(_ProgressPhase.SAMPLE_STARTED, task_id, attempt, is_warmup)
             started = time.perf_counter()
-            result = await runner.run_case(ext_case)
-            sample = _sample_from_result(result, dataset=dataset, case_id=task_id, scenario_id=task_id, fixture_fingerprint=compute_fixture_fingerprint(ext_case), attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, wall_duration_ms=(time.perf_counter() - started) * 1000, git_commit=git_short_commit(), source_commit=git_full_commit(), python_version=sys.version.split()[0], platform_name=platform.platform(), config_hash_value=config_hash())
-            deterministic = sample.passed and _business_delivery_passed(result, doc)
-            sample = replace(sample, passed=deterministic, failure_kind=sample.failure_kind if sample.failure_kind is not None else (None if deterministic else "business_delivery"), task_category=str(doc["category"]), task_kind="standard_case", execution_mode="ext", deterministic_passed=deterministic, failure_attribution=_attribution(replace(sample, passed=deterministic)), llm_call_count=int(sample.run_statistics.get("llm_call_count", 0)), tool_call_count=int(sample.run_statistics.get("tool_call_count", 0)), provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2", formal_sampling=formal_sampling)
-            if not sample.is_warmup and sample.deterministic_passed:
-                sample = await judge_deterministic_candidate(sample, _candidate_output(result), spec, judge)
+            try:
+                result = await runner.run_case(ext_case)
+                sample = _sample_from_result(result, dataset=dataset, case_id=task_id, scenario_id=task_id, fixture_fingerprint=compute_fixture_fingerprint(ext_case), attempt=attempt, is_warmup=is_warmup, wall_duration_ms=(time.perf_counter() - started) * 1000, git_commit=git_short_commit(), source_commit=git_full_commit(), python_version=sys.version.split()[0], platform_name=platform.platform(), config_hash_value=config_hash())
+                deterministic = sample.passed and _business_delivery_passed(result, doc)
+                sample = replace(sample, passed=deterministic, failure_kind=sample.failure_kind if sample.failure_kind is not None else (None if deterministic else "business_delivery"), task_category=str(doc["category"]), task_kind="standard_case", execution_mode="ext", deterministic_passed=deterministic, failure_attribution=_attribution(replace(sample, passed=deterministic)), llm_call_count=int(sample.run_statistics.get("llm_call_count", 0)), tool_call_count=int(sample.run_statistics.get("tool_call_count", 0)), provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2", formal_sampling=formal_sampling)
+                progress.record(_ProgressPhase.DETERMINISTIC_FINISHED, task_id, attempt, is_warmup, run_id=sample.run_id, deterministic_passed=sample.deterministic_passed, failure_attribution=sample.failure_attribution)
+                if not sample.is_warmup and sample.deterministic_passed:
+                    progress.record(_ProgressPhase.JUDGE_STARTED, task_id, attempt, is_warmup, run_id=sample.run_id, deterministic_passed=True)
+                    sample = await judge_deterministic_candidate(sample, _candidate_output(result), spec, judge)
+                    progress.record(_ProgressPhase.JUDGE_FINISHED, task_id, attempt, is_warmup, run_id=sample.run_id, deterministic_passed=True, failure_attribution=sample.failure_attribution, judge_verdict=sample.judge_verdict)
+            except asyncio.CancelledError:
+                progress.record(_ProgressPhase.SAMPLE_ERROR, task_id, attempt, is_warmup, failure_attribution="CancelledError")
+                raise
+            except Exception as error:
+                progress.record(_ProgressPhase.SAMPLE_ERROR, task_id, attempt, is_warmup, failure_attribution=type(error).__name__)
+                raise
             samples.append(sample)
+            progress.record(_ProgressPhase.SAMPLE_FINISHED, task_id, attempt, is_warmup, run_id=sample.run_id, deterministic_passed=sample.deterministic_passed, failure_attribution=sample.failure_attribution, judge_verdict=sample.judge_verdict)
     if len([item for item in samples if not item.is_warmup]) != 6 * repeat:
         raise BusinessDatasetError("EXT 正式样本数与 6*repeat 不一致")
     snapshot_id = make_snapshot_id()
     snapshot = build_snapshot(snapshot_id=snapshot_id, generated_at=datetime.now(timezone.utc).isoformat(), git_commit=git_short_commit(), dataset=dataset, environment={"config_hash": config_hash(), "provider": provider, "model": model, "temperature": str(temperature), "judge_provider": judge_provider, "judge_model": judge_model, "judge_temperature": str(judge_temperature), "timeout_seconds": str(timeout_seconds), "retry_count": str(retry_count), "formal_sampling": str(formal_sampling).lower()}, warmup=warmup, repeat=repeat, samples=samples, samples_path=f"samples/ext-{snapshot_id}.jsonl", samples_content_summary={"line_count": len(samples)})
-    output.mkdir(parents=True, exist_ok=True)
     _write_ext_artifacts(samples, snapshot, output, baseline)
     return snapshot
 
@@ -328,9 +412,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not all((args.provider, args.model, args.judge_provider, args.judge_model)):
             parser.error("EXT CLI 必须提供 provider、model、judge-provider、judge-model")
         proxy = _build_llm(load_config(), Path.cwd())
-        dependencies = EvalDependencies(llm_port=_TimeoutBoundLLMPort(LLMProxyAdapter(proxy), args.timeout_seconds))
+        dependencies = EvalDependencies(llm_port=_TimeoutBoundLLMPort(LLMProxyAdapter(proxy), args.timeout_seconds, args.retry_count))
         requested = tuple(item.strip() for item in args.ext_cases.split(",") if item.strip()) if args.ext_cases else None
-        asyncio.run(run_ext_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, dependencies=dependencies, judge=LLMProxyJudge(proxy, args.judge_model, args.timeout_seconds), provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model, judge_temperature=args.judge_temperature, timeout_seconds=args.timeout_seconds, retry_count=args.retry_count, ext_cases=requested, formal_sampling=args.formal_sampling))
+        asyncio.run(run_ext_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, dependencies=dependencies, judge=LLMProxyJudge(proxy, args.judge_model, args.timeout_seconds, args.retry_count), provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model, judge_temperature=args.judge_temperature, timeout_seconds=args.timeout_seconds, retry_count=args.retry_count, ext_cases=requested, formal_sampling=args.formal_sampling))
         return 0
     asyncio.run(run_fixture_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, formal_sampling=args.formal_sampling))
     return 0

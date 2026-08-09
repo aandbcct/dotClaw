@@ -26,10 +26,17 @@ class JudgePort(Protocol):
 class LLMProxyJudge(JudgePort):
     """复用既有 LLMProxy 的一次性裁判适配器，不落盘原始请求。"""
 
-    def __init__(self, proxy: LLMProxy, model: str, timeout_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        proxy: LLMProxy,
+        model: str,
+        timeout_seconds: float | None = None,
+        retry_count: int | None = None,
+    ) -> None:
         self._proxy = proxy
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._retry_count = retry_count
 
     async def judge(self, prompt: str) -> str:
         """聚合最终回复文本；推理增量不进入裁判解析或样本。"""
@@ -40,7 +47,18 @@ class LLMProxyJudge(JudgePort):
     async def _collect(self, prompt: str) -> str:
         """读取一次流式响应；只保留最终文本增量。"""
         parts: list[str] = []
-        async for chunk in self._proxy.chat([LegacyMessage(role="user", content=prompt)], model=self._model, purpose="chat", stream=True):
+        conditions: dict[str, float | int] = {}
+        if self._timeout_seconds is not None:
+            conditions["timeout_seconds"] = self._timeout_seconds
+        if self._retry_count is not None:
+            conditions["retry_count"] = self._retry_count
+        async for chunk in self._proxy.chat(
+            [LegacyMessage(role="user", content=prompt)],
+            model=self._model,
+            purpose="chat",
+            stream=True,
+            **conditions,
+        ):
             parts.extend(delta.content for delta in chunk.text_deltas if delta.kind is not TextDeltaKind.REASONING)
         return "".join(parts)
 

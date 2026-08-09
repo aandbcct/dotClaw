@@ -1,6 +1,5 @@
 """PR8 业务基线编排与工件测试。"""
 
-import asyncio
 import json
 import platform
 import shutil
@@ -10,14 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from benchmarks.business_baseline import BusinessDatasetError, _TimeoutBoundLLMPort, load_business_documents, main, run_ext_dataset, run_fixture_dataset
+import benchmarks.business_baseline as business_baseline
+from benchmarks.business_baseline import BusinessDatasetError, load_business_documents, main, run_ext_dataset, run_fixture_dataset
 from dotclaw.eval.dataset import load_case
 from dotclaw.eval.environment import EvalDependencies
 from dotclaw.eval.reexecution import ReexecutionRunner
+from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind
 from dotclaw.runtime.application.dto import ContextBundle
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.ports import LLMOutputPort
-from dotclaw.runtime.application.ports import LLMUnavailableError
 from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 
 
@@ -99,18 +99,52 @@ def test_ext_cli_requires_provider_and_judge_conditions(tmp_path: Path) -> None:
     assert error.value.code == 2
 
 
-@pytest.mark.asyncio
-async def test_ext_model_timeout_is_bounded_and_attributable() -> None:
-    """EXT 被测模型超时时必须在固定时限返回可归因错误，不能无界卡住正式采样。"""
-    async def complete(*_args: object) -> object:
-        await asyncio.Event().wait()
+def test_ext_cli_transmits_timeout_and_retry_to_runtime_adapter_and_judge(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """EXT CLI 必须把同一调用条件传到候选模型与 Judge 的 Proxy 边界。"""
+    class CapturingProxy:
+        """记录 PR8 两类真实调用参数的最小代理替身。"""
 
-    async def cancel(_run_id: str) -> None:
-        return None
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
 
-    port = _TimeoutBoundLLMPort(SimpleNamespace(complete=complete, cancel=cancel), 0.01)
-    with pytest.raises(LLMUnavailableError, match="调用超时"):
-        await port.complete(None, None)
+        async def chat(
+            self,
+            messages: list[object],
+            tools: list[object] | None = None,
+            model: str | None = None,
+            purpose: str = "chat",
+            stream: bool = True,
+            timeout_seconds: float | None = None,
+            retry_count: int | None = None,
+        ):
+            """记录调用条件并返回一段最终响应。"""
+            del messages, tools, stream
+            self.calls.append({"model": model, "purpose": purpose, "timeout_seconds": timeout_seconds, "retry_count": retry_count})
+            yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "{}"),))
+
+    proxy = CapturingProxy()
+
+    async def fake_run_ext_dataset(*_args: object, dependencies: EvalDependencies, judge: object, **_kwargs: object) -> object:
+        """只走 CLI 装配后的 Adapter 与 Judge，不启动真实采样。"""
+        await dependencies.llm_port.complete(
+            SimpleNamespace(messages=(), tools=()),
+            SimpleNamespace(run_id="candidate-run", session_id="candidate-session", policy=SimpleNamespace(model_id="candidate-model")),
+        )
+        await judge.judge("judge prompt")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(business_baseline, "_build_llm", lambda _config, _root: proxy)
+    monkeypatch.setattr(business_baseline, "run_ext_dataset", fake_run_ext_dataset)
+    assert main([
+        "--mode", "ext", "--output", str(tmp_path),
+        "--provider", "candidate-provider", "--model", "candidate-model",
+        "--judge-provider", "judge-provider", "--judge-model", "judge-model",
+        "--timeout-seconds", "17", "--retry-count", "2",
+    ]) == 0
+    assert proxy.calls == [
+        {"model": "candidate-model", "purpose": "chat", "timeout_seconds": 17.0, "retry_count": 2},
+        {"model": "judge-model", "purpose": "chat", "timeout_seconds": 17.0, "retry_count": 2},
+    ]
 
 
 @pytest.mark.asyncio
@@ -183,6 +217,10 @@ async def test_ext_run_uses_injected_llm_judges_once_and_writes_artifacts(tmp_pa
     workflow_sample = next(item for item in samples if item["task_kind"] == "session_workflow")
     assert workflow_sample["fixture_fingerprint"]
     assert len(snapshot.fixture_fingerprints) == 6 and all(snapshot.fixture_fingerprints.values())
+    progress = [json.loads(line) for line in (tmp_path / "progress.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(progress) == 30
+    assert {item["phase"] for item in progress} == {"sample_started", "deterministic_finished", "judge_started", "judge_finished", "sample_finished"}
+    assert all(item["timeout_seconds"] == 5.0 and item["retry_count"] == 0 for item in progress)
 
 
 @pytest.mark.asyncio
@@ -211,6 +249,9 @@ async def test_ext_deterministic_failure_skips_judge_and_is_attributed(tmp_path)
     assert judge.calls == 5
     assert failed["deterministic_passed"] is False and failed["judge_verdict"] is None
     assert failed["failure_attribution"] == "assertion_failure"
+    progress = [json.loads(line) for line in (tmp_path / "progress.jsonl").read_text(encoding="utf-8").splitlines() if json.loads(line)["task_id"] == "evidence_brief"]
+    assert [item["phase"] for item in progress] == ["sample_started", "deterministic_finished", "sample_finished"]
+    assert progress[1]["deterministic_passed"] is False and progress[1]["failure_attribution"] == "assertion_failure"
 
 
 @pytest.mark.asyncio
