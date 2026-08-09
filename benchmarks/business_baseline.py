@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import tempfile
 import platform
@@ -58,6 +59,12 @@ def load_business_documents(root: Path, dataset: str) -> tuple[dict[str, Mapping
     if len(cases) != 8 or len(workflows) != 2:
         raise BusinessDatasetError("runtime_core_v2 必须恰有 8 个 Case 与 2 个 Session 工作流")
     return cases, workflows
+
+
+def _workflow_fixture_fingerprint(document: Mapping[str, object]) -> str:
+    """按冻结工作流 JSON 计算稳定 Fixture 指纹，供快照和 JSONL 交叉验证。"""
+    payload = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _business_delivery_passed(result: object, document: Mapping[str, object]) -> bool:
@@ -155,12 +162,13 @@ async def run_ext_dataset(
     for task_id in sorted(requested_ids):
         if task_id in workflows:
             doc = workflows[task_id]
+            workflow_fingerprint = _workflow_fixture_fingerprint(doc)
             spec = load_judge_spec(root, dataset, task_id)
             for index in range(warmup + repeat):
                 started = time.perf_counter()
                 with tempfile.TemporaryDirectory(prefix="dotclaw-pr8-ext-") as temporary_root:
                     result = await run_preference_aware_followup(Path(temporary_root), dependencies.llm_port)
-                sample = BenchmarkSample(dataset=dataset, case_id=task_id, attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, git_commit=git_short_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=config_hash(), eval_schema_version="1.0", passed=result.passed, failure_kind=None if result.passed else "workflow", assertions_passed=1 if result.passed else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=(time.perf_counter() - started) * 1000, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="ext", deterministic_passed=result.passed, failure_attribution=None if result.passed else "assertion_failure", provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2", workflow_version=str(doc["version"]), formal_sampling=formal_sampling)
+                sample = BenchmarkSample(dataset=dataset, case_id=task_id, attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, git_commit=git_short_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=config_hash(), eval_schema_version="1.0", passed=result.passed, failure_kind=None if result.passed else "workflow", assertions_passed=1 if result.passed else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=(time.perf_counter() - started) * 1000, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="ext", deterministic_passed=result.passed, failure_attribution=None if result.passed else "assertion_failure", fixture_fingerprint=workflow_fingerprint, provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2", workflow_version=str(doc["version"]), formal_sampling=formal_sampling)
                 if not sample.is_warmup and sample.deterministic_passed:
                     sample = await judge_deterministic_candidate(sample, result.final_output, spec, judge)
                 samples.append(sample)
@@ -258,6 +266,7 @@ async def run_fixture_dataset(root: Path, dataset: str, *, warmup: int, repeat: 
     # 工作流在临时根运行真实 Session 与 create_run_request() 路径。
     for task_id, doc in workflows.items():
         action = run_preference_aware_followup if task_id == "preference_aware_followup" else run_compressed_history_continuation
+        workflow_fingerprint = _workflow_fixture_fingerprint(doc)
         for index in range(warmup + repeat):
             with tempfile.TemporaryDirectory(prefix="dotclaw-pr8-") as temp:
                 result = await action(Path(temp))
@@ -265,7 +274,7 @@ async def run_fixture_dataset(root: Path, dataset: str, *, warmup: int, repeat: 
             if not isinstance(markers, list) or not all(isinstance(item, str) for item in markers):
                 raise BusinessDatasetError("Session 工作流必须定义 delivery_markers")
             deterministic = result.passed and all(item in result.final_output for item in markers)
-            raw_samples.append(BenchmarkSample(dataset=dataset, case_id=task_id, attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, git_commit=git_short_commit(), python_version="fixture", platform="fixture", config_hash=config_hash(), eval_schema_version="1.0", passed=deterministic, failure_kind=None if deterministic else "workflow_delivery", assertions_passed=1 if deterministic else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=0.0, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="fixture", deterministic_passed=deterministic, failure_attribution=None if deterministic else "assertion_failure", dataset_version="2", workflow_version=str(doc["version"]), formal_sampling=formal_sampling))
+            raw_samples.append(BenchmarkSample(dataset=dataset, case_id=task_id, attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, git_commit=git_short_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=config_hash(), eval_schema_version="1.0", passed=deterministic, failure_kind=None if deterministic else "workflow_delivery", assertions_passed=1 if deterministic else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=0.0, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="fixture", deterministic_passed=deterministic, failure_attribution=None if deterministic else "assertion_failure", fixture_fingerprint=workflow_fingerprint, dataset_version="2", workflow_version=str(doc["version"]), formal_sampling=formal_sampling))
     formal = [sample for sample in raw_samples if not sample.is_warmup]
     expected = 10 * repeat
     if len(formal) != expected:

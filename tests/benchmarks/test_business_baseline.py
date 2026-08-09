@@ -1,7 +1,9 @@
 """PR8 业务基线编排与工件测试。"""
 
 import json
+import platform
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -122,6 +124,11 @@ async def test_fixture_run_writes_traceable_artifacts(tmp_path) -> None:
     assert json.loads((tmp_path / "business-config.json").read_text(encoding="utf-8"))["formal_sampling"] == "false"
     assert len((tmp_path / snapshot.samples_path).read_text(encoding="utf-8").splitlines()) == 10
     assert json.loads((tmp_path / f"{snapshot.snapshot_id}.json").read_text(encoding="utf-8"))["dataset"] == "runtime_core_v2"
+    workflow_samples = [item for item in (json.loads(line) for line in (tmp_path / snapshot.samples_path).read_text(encoding="utf-8").splitlines()) if item["task_kind"] == "session_workflow"]
+    assert len(workflow_samples) == 2
+    assert all(item["fixture_fingerprint"] for item in workflow_samples)
+    assert all(item["python_version"] == sys.version.split()[0] and item["platform"] == platform.platform() for item in workflow_samples)
+    assert len(snapshot.fixture_fingerprints) == 10 and all(snapshot.fixture_fingerprints.values())
 
 
 @pytest.mark.asyncio
@@ -156,6 +163,9 @@ async def test_ext_run_uses_injected_llm_judges_once_and_writes_artifacts(tmp_pa
     assert (tmp_path / "business-config.json").is_file()
     assert json.loads((tmp_path / "business-config.json").read_text(encoding="utf-8"))["formal_sampling"] == "false"
     assert (tmp_path / "baseline" / snapshot.samples_path).is_file()
+    workflow_sample = next(item for item in samples if item["task_kind"] == "session_workflow")
+    assert workflow_sample["fixture_fingerprint"]
+    assert len(snapshot.fixture_fingerprints) == 6 and all(snapshot.fixture_fingerprints.values())
 
 
 @pytest.mark.asyncio

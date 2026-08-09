@@ -396,10 +396,16 @@ benchmarks/
 `runtime_core_v2` 冻结 8 个标准 Case 与 2 个真实 Session 工作流。开发期仅运行隔离 Fixture；正式 300 条 Fixture 和 180 条 `[EXT]` 样本须另行授权，且不得把两种通过率混合。
 
 ```powershell
-python -m benchmarks.business_baseline --dataset-root benchmarks/datasets --dataset runtime_core_v2 --mode fixture --warmup 5 --repeat 30 --output benchmarks/reports/business/<run-id> --save-baseline benchmarks/baselines/business_tasks_v2
+python -m benchmarks.business_baseline --dataset-root benchmarks/datasets --dataset runtime_core_v2 --mode fixture --warmup 5 --repeat 30 --formal-sampling --output benchmarks/reports/business/<run-id> --save-baseline benchmarks/baselines/business_tasks_v2
 ```
 
 `[EXT]` 只允许替换 LLM，工具、审批、委派和文件副作用保持 Fixture/临时目录隔离；Judge 只对已通过确定性断言的样本调用一次。
+
+经单独授权后，EXT 正式命令也必须显式标记正式采样并固定 Provider、模型和 Judge 条件：
+
+```powershell
+python -m benchmarks.business_baseline --dataset-root benchmarks/datasets --dataset runtime_core_v2 --mode ext --warmup 5 --repeat 30 --formal-sampling --provider <provider> --model <model> --judge-provider <judge-provider> --judge-model <judge-model> --output benchmarks/reports/business-ext/<run-id> --save-baseline benchmarks/baselines/business_tasks_v2_ext
+```
 
 ### 1. 生成测试数据（只需一次）
 

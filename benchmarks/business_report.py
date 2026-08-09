@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 from collections import Counter
@@ -123,6 +124,8 @@ def _validate_pr8_snapshot(snapshot: BenchmarkSnapshot, mode: str, *, expected_t
         required_environment.update({"provider", "model", "judge_provider", "judge_model", "temperature", "judge_temperature", "timeout_seconds", "retry_count"})
     if not required_environment.issubset(snapshot.environment):
         raise BusinessReportError(f"PR8 {mode} 快照缺少环境或模型配置")
+    if snapshot.environment.get("formal_sampling") != "true":
+        raise BusinessReportError(f"PR8 {mode} 快照未明确标记为正式采样")
     if set(snapshot.fixture_fingerprints) != {case.case_id for case in snapshot.cases} or any(not value for value in snapshot.fixture_fingerprints.values()):
         raise BusinessReportError(f"PR8 {mode} 快照 Fixture 指纹与任务不一致")
 
@@ -142,6 +145,47 @@ def generate_final_evidence_report(output: Path, manifest_path: Path, fixture_sn
         raise FileExistsError("最终证据报告已存在，拒绝覆盖")
     path.write_text("# PR1 至 PR8 正式证据收口\n\n" + json.dumps({"manifest_entries": len(manifest["entries"]), "fixture": fixture, "ext": ext}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def _load_snapshot_artifacts(snapshot_path: Path) -> tuple[BenchmarkSnapshot, list[BenchmarkSample]]:
+    """从落盘快照及其相对 JSONL 引用恢复 PR8 证据，并拒绝目录逃逸或损坏数据。"""
+    if not snapshot_path.is_file():
+        raise BusinessReportError(f"PR8 快照文件不存在：{snapshot_path}")
+    try:
+        raw_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        if not isinstance(raw_snapshot, dict):
+            raise TypeError("快照必须为 JSON 对象")
+        snapshot = BenchmarkSnapshot.from_dict(raw_snapshot)
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        raise BusinessReportError(f"PR8 快照无法读取：{snapshot_path}") from error
+    samples_reference = Path(snapshot.samples_path)
+    if samples_reference.is_absolute() or ".." in samples_reference.parts:
+        raise BusinessReportError("PR8 快照原始样本引用必须是快照目录内的相对路径")
+    samples_path = snapshot_path.parent / samples_reference
+    if not samples_path.is_file():
+        raise BusinessReportError(f"PR8 原始样本文件不存在：{samples_path}")
+    samples: list[BenchmarkSample] = []
+    try:
+        for line_number, line in enumerate(samples_path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                raise BusinessReportError(f"PR8 原始样本 JSONL 包含空行：{samples_path}:{line_number}")
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise TypeError("样本必须为 JSON 对象")
+            samples.append(BenchmarkSample.from_dict(payload))
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        raise BusinessReportError(f"PR8 原始样本无法读取：{samples_path}") from error
+    line_count = snapshot.samples_content_summary.get("line_count")
+    if line_count != len(samples):
+        raise BusinessReportError("PR8 快照原始样本行数与 JSONL 不一致")
+    return snapshot, samples
+
+
+def generate_final_evidence_report_from_files(output: Path, manifest_path: Path, fixture_snapshot_path: Path, ext_snapshot_path: Path) -> Path:
+    """从已归档的 PR8 快照、JSONL 与 PR1 至 PR7 清单生成最终证据报告。"""
+    fixture_snapshot, fixture_samples = _load_snapshot_artifacts(fixture_snapshot_path)
+    ext_snapshot, ext_samples = _load_snapshot_artifacts(ext_snapshot_path)
+    return generate_final_evidence_report(output, manifest_path, fixture_snapshot, ext_snapshot, fixture_samples, ext_samples)
 
 
 def _validate_final_samples(samples: Sequence[BenchmarkSample], snapshot: BenchmarkSnapshot, mode: str, *, expected_samples: int) -> None:
@@ -167,3 +211,19 @@ def render_partial_report(fixture: Mapping[str, object], ext: Mapping[str, objec
         lines.append(f"[EXT] 任务数：{ext['task_count']}，正式样本：{ext['sample_count']}，进入 Judge：{ext['entered_judge']}。")
     lines.extend(["", "本报告不代表线上用户成功率、模型通用能力或真实外部工具安全性；缺少完整正式证据时不得生成 README 或简历数字。"])
     return "\n".join(lines) + "\n"
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """提供可复跑的落盘证据收口入口，不接受内存或临时样本替代。"""
+    parser = argparse.ArgumentParser(description="PR8 正式证据收口报告")
+    parser.add_argument("--manifest", type=Path, required=True, help="PR1 至 PR7 正式证据清单")
+    parser.add_argument("--fixture-snapshot", type=Path, required=True, help="PR8 Fixture 正式快照")
+    parser.add_argument("--ext-snapshot", type=Path, required=True, help="PR8 EXT 正式快照")
+    parser.add_argument("--output", type=Path, required=True, help="最终证据报告目录")
+    args = parser.parse_args(argv)
+    generate_final_evidence_report_from_files(args.output, args.manifest, args.fixture_snapshot, args.ext_snapshot)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
