@@ -7,6 +7,9 @@ import json
 from dataclasses import dataclass
 from typing import Mapping, Protocol
 
+from dotclaw.llm.base import Message as LegacyMessage, TextDeltaKind
+from dotclaw.llm.proxy import LLMProxy
+
 
 class JudgeProtocolError(ValueError):
     """裁判响应不符合冻结协议时抛出，调用方归类为 judge_error。"""
@@ -17,6 +20,21 @@ class JudgePort(Protocol):
 
     async def judge(self, prompt: str) -> str:
         """返回严格 JSON 字符串。"""
+
+
+class LLMProxyJudge(JudgePort):
+    """复用既有 LLMProxy 的一次性裁判适配器，不落盘原始请求。"""
+
+    def __init__(self, proxy: LLMProxy, model: str) -> None:
+        self._proxy = proxy
+        self._model = model
+
+    async def judge(self, prompt: str) -> str:
+        """聚合最终回复文本；推理增量不进入裁判解析或样本。"""
+        parts: list[str] = []
+        async for chunk in self._proxy.chat([LegacyMessage(role="user", content=prompt)], model=self._model, purpose="chat", stream=True):
+            parts.extend(delta.content for delta in chunk.text_deltas if delta.kind is not TextDeltaKind.REASONING)
+        return "".join(parts)
 
 
 @dataclass(frozen=True)
