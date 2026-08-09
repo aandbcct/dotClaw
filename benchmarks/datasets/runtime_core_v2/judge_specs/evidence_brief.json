@@ -1,0 +1,1 @@
+{"task_id":"evidence_brief","version":"1","task":"基于冻结公开资料输出结论","expected_delivery":"受约束简报","required_constraints":["说明证据边界"],"allowed_facts":["事实 A","事实 B","事实 C"],"criteria":{"boundary":"说明边界","facts":"只使用允许事实"}}

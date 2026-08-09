@@ -498,6 +498,26 @@ class BenchmarkSample:
     raw_sample_path: str | None = None
     formal_sampling: bool | None = None
 
+    # ---- PR8 业务任务派生字段（旧快照缺失时均为 None） ----
+    task_category: str | None = None
+    task_kind: str | None = None
+    execution_mode: str | None = None
+    deterministic_passed: bool | None = None
+    failure_attribution: str | None = None
+    llm_call_count: int | None = None
+    tool_call_count: int | None = None
+    judge_spec_version: str | None = None
+    judge_verdict: str | None = None
+    judge_criteria: Mapping[str, str] | None = None
+    provider: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    judge_provider: str | None = None
+    judge_model: str | None = None
+    judge_prompt_hash: str | None = None
+    dataset_version: str | None = None
+    workflow_version: str | None = None
+
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
         result: dict[str, object] = {
@@ -658,6 +678,24 @@ class BenchmarkSample:
             "environment": None if self.environment is None else dict(self.environment),
             "raw_sample_path": self.raw_sample_path,
             "formal_sampling": self.formal_sampling,
+            "task_category": self.task_category,
+            "task_kind": self.task_kind,
+            "execution_mode": self.execution_mode,
+            "deterministic_passed": self.deterministic_passed,
+            "failure_attribution": self.failure_attribution,
+            "llm_call_count": self.llm_call_count,
+            "tool_call_count": self.tool_call_count,
+            "judge_spec_version": self.judge_spec_version,
+            "judge_verdict": self.judge_verdict,
+            "judge_criteria": None if self.judge_criteria is None else dict(self.judge_criteria),
+            "provider": self.provider,
+            "model": self.model,
+            "temperature": self.temperature,
+            "judge_provider": self.judge_provider,
+            "judge_model": self.judge_model,
+            "judge_prompt_hash": self.judge_prompt_hash,
+            "dataset_version": self.dataset_version,
+            "workflow_version": self.workflow_version,
         }
         return result
 
@@ -837,6 +875,24 @@ class BenchmarkSample:
             environment=_optional_string_map(data.get("environment"), f"{label}.environment"),
             raw_sample_path=_optional_str(data.get("raw_sample_path"), f"{label}.raw_sample_path"),
             formal_sampling=_optional_bool(data.get("formal_sampling"), f"{label}.formal_sampling"),
+            task_category=_optional_str(data.get("task_category"), f"{label}.task_category"),
+            task_kind=_optional_str(data.get("task_kind"), f"{label}.task_kind"),
+            execution_mode=_optional_str(data.get("execution_mode"), f"{label}.execution_mode"),
+            deterministic_passed=_optional_bool(data.get("deterministic_passed"), f"{label}.deterministic_passed"),
+            failure_attribution=_optional_str(data.get("failure_attribution"), f"{label}.failure_attribution"),
+            llm_call_count=_optional_int(data.get("llm_call_count"), f"{label}.llm_call_count"),
+            tool_call_count=_optional_int(data.get("tool_call_count"), f"{label}.tool_call_count"),
+            judge_spec_version=_optional_str(data.get("judge_spec_version"), f"{label}.judge_spec_version"),
+            judge_verdict=_optional_str(data.get("judge_verdict"), f"{label}.judge_verdict"),
+            judge_criteria=_optional_string_map(data.get("judge_criteria"), f"{label}.judge_criteria"),
+            provider=_optional_str(data.get("provider"), f"{label}.provider"),
+            model=_optional_str(data.get("model"), f"{label}.model"),
+            temperature=_optional_float(data.get("temperature"), f"{label}.temperature"),
+            judge_provider=_optional_str(data.get("judge_provider"), f"{label}.judge_provider"),
+            judge_model=_optional_str(data.get("judge_model"), f"{label}.judge_model"),
+            judge_prompt_hash=_optional_str(data.get("judge_prompt_hash"), f"{label}.judge_prompt_hash"),
+            dataset_version=_optional_str(data.get("dataset_version"), f"{label}.dataset_version"),
+            workflow_version=_optional_str(data.get("workflow_version"), f"{label}.workflow_version"),
         )
 
 

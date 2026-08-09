@@ -1,0 +1,1 @@
+{"task_id":"preference_aware_followup","version":"1","category":"session_continuity","kind":"session_workflow","fixture_source":"runtime_session","expected_delivery":"后续交付遵守已提交偏好","tags":["session","ext"]}

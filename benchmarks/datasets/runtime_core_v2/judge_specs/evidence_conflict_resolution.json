@@ -1,0 +1,1 @@
+{"task_id":"evidence_conflict_resolution","version":"1","task":"处理冲突事实","expected_delivery":"已知未知与建议","required_constraints":["不臆测"],"allowed_facts":["来源 A","来源 B","冲突点"],"criteria":{"conflict":"识别冲突","boundary":"区分未知"}}

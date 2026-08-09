@@ -1,0 +1,1 @@
+{"task_id":"delegated_research_synthesis","version":"1","task":"整合冻结委派结果","expected_delivery":"可追溯综合结论","required_constraints":["不补充外部事实"],"allowed_facts":["子结论 A","子结论 B","整合约束"],"criteria":{"synthesis":"整合准确","boundary":"边界明确"}}
