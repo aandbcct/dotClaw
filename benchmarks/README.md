@@ -401,6 +401,12 @@ python -m benchmarks.business_baseline --dataset-root benchmarks/datasets --data
 
 `[EXT]` 只允许替换 LLM，工具、审批、委派和文件副作用保持 Fixture/临时目录隔离；Judge 只对已通过确定性断言的样本调用一次。
 
+真实 Provider 首次接入、超时或裁判异常排查时，先执行一个单案例诊断。该入口固定为 0 次预热、1 次执行，不接受 `--formal-sampling` 或 `--save-baseline`；产物中的 `progress.jsonl` 用于定位候选模型、确定性断言或 Judge 的最后完成阶段，不能作为正式基线或简历证据。
+
+```powershell
+python -m benchmarks.business_baseline --dataset-root benchmarks/datasets --dataset runtime_core_v2 --mode ext-diagnostic --diagnostic-case evidence_brief --provider <provider> --model <model> --judge-provider <judge-provider> --judge-model <judge-model> --timeout-seconds 60 --retry-count 0 --output benchmarks/reports/business-ext-diagnostic/<run-id>
+```
+
 经单独授权后，EXT 正式命令也必须显式标记正式采样并固定 Provider、模型和 Judge 条件：
 
 ```powershell

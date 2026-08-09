@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import benchmarks.business_baseline as business_baseline
-from benchmarks.business_baseline import BusinessDatasetError, load_business_documents, main, run_ext_dataset, run_fixture_dataset
+from benchmarks.business_baseline import BusinessDatasetError, load_business_documents, main, run_ext_dataset, run_ext_diagnostic, run_fixture_dataset
 from dotclaw.eval.dataset import load_case
 from dotclaw.eval.environment import EvalDependencies
 from dotclaw.eval.reexecution import ReexecutionRunner
@@ -96,6 +96,18 @@ def test_ext_cli_requires_provider_and_judge_conditions(tmp_path: Path) -> None:
     """EXT CLI 缺少真实模型或 Judge 条件时必须以参数错误退出。"""
     with pytest.raises(SystemExit) as error:
         main(["--mode", "ext", "--output", str(tmp_path)])
+    assert error.value.code == 2
+
+
+def test_ext_diagnostic_cli_rejects_formal_artifact_options(tmp_path: Path) -> None:
+    """单案例诊断不得接受正式采样或基线参数，避免排障工件混入证据。"""
+    with pytest.raises(SystemExit) as error:
+        main([
+            "--mode", "ext-diagnostic", "--output", str(tmp_path),
+            "--provider", "provider", "--model", "model",
+            "--judge-provider", "provider", "--judge-model", "judge",
+            "--diagnostic-case", "evidence_brief", "--formal-sampling",
+        ])
     assert error.value.code == 2
 
 
@@ -221,6 +233,38 @@ async def test_ext_run_uses_injected_llm_judges_once_and_writes_artifacts(tmp_pa
     assert len(progress) == 30
     assert {item["phase"] for item in progress} == {"sample_started", "deterministic_finished", "judge_started", "judge_finished", "sample_finished"}
     assert all(item["timeout_seconds"] == 5.0 and item["retry_count"] == 0 for item in progress)
+
+
+@pytest.mark.asyncio
+async def test_ext_diagnostic_runs_one_case_and_writes_nonbaseline_artifacts(tmp_path: Path) -> None:
+    """单案例诊断固定一次真实链路编排，并与 EXT 正式工件明确隔离。"""
+    judge = _PassingJudge()
+    snapshot = await run_ext_diagnostic(
+        Path("benchmarks/datasets"),
+        "runtime_core_v2",
+        task_id="evidence_brief",
+        output=tmp_path,
+        dependencies=EvalDependencies(llm_port=_ExtLLM()),
+        judge=judge,
+        provider="fake-provider",
+        model="fake-model",
+        temperature=0.0,
+        judge_provider="fake-provider",
+        judge_model="fake-judge",
+        timeout_seconds=5.0,
+        retry_count=0,
+    )
+    assert snapshot.warmup == 0 and snapshot.repeat == 1
+    assert snapshot.global_summary.sample_count == 1
+    assert snapshot.environment["diagnostic"] == "true" and snapshot.environment["formal_sampling"] == "false"
+    assert snapshot.samples_path.startswith("samples/ext-diagnostic-")
+    assert judge.calls == 1
+    assert (tmp_path / snapshot.samples_path).is_file()
+    assert (tmp_path / "progress.jsonl").is_file()
+    assert "不属于正式采样" in (tmp_path / "diagnostic-summary.md").read_text(encoding="utf-8")
+    config = json.loads((tmp_path / "business-config.json").read_text(encoding="utf-8"))
+    assert config["mode"] == "ext-diagnostic" and config["diagnostic_case"] == "evidence_brief"
+    assert not list(tmp_path.glob("ext-quality.md"))
 
 
 @pytest.mark.asyncio

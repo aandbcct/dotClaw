@@ -227,7 +227,94 @@ async def run_ext_dataset(
     ext_cases: Sequence[str] | None = None,
     formal_sampling: bool = False,
 ) -> BenchmarkSnapshot:
-    """执行六个 EXT 任务：只允许真实 LLM 回退，所有副作用仍由 Case Fixture 覆盖。"""
+    """执行六个冻结 EXT 任务；正式口径与单案例诊断严格分离。"""
+    return await _run_ext_tasks(
+        root,
+        dataset,
+        warmup=warmup,
+        repeat=repeat,
+        output=output,
+        baseline=baseline,
+        dependencies=dependencies,
+        judge=judge,
+        provider=provider,
+        model=model,
+        temperature=temperature,
+        judge_provider=judge_provider,
+        judge_model=judge_model,
+        judge_temperature=judge_temperature,
+        timeout_seconds=timeout_seconds,
+        retry_count=retry_count,
+        requested_case_ids=ext_cases,
+        formal_sampling=formal_sampling,
+        diagnostic=False,
+    )
+
+
+async def run_ext_diagnostic(
+    root: Path,
+    dataset: str,
+    *,
+    task_id: str,
+    output: Path,
+    dependencies: EvalDependencies,
+    judge: JudgePort,
+    provider: str,
+    model: str,
+    temperature: float,
+    judge_provider: str,
+    judge_model: str,
+    judge_temperature: float = 0.0,
+    timeout_seconds: float = 60.0,
+    retry_count: int = 0,
+) -> BenchmarkSnapshot:
+    """执行一个真实 EXT 诊断样本；结果仅用于链路排障，不能作为正式证据。"""
+    return await _run_ext_tasks(
+        root,
+        dataset,
+        warmup=0,
+        repeat=1,
+        output=output,
+        baseline=None,
+        dependencies=dependencies,
+        judge=judge,
+        provider=provider,
+        model=model,
+        temperature=temperature,
+        judge_provider=judge_provider,
+        judge_model=judge_model,
+        judge_temperature=judge_temperature,
+        timeout_seconds=timeout_seconds,
+        retry_count=retry_count,
+        requested_case_ids=(task_id,),
+        formal_sampling=False,
+        diagnostic=True,
+    )
+
+
+async def _run_ext_tasks(
+    root: Path,
+    dataset: str,
+    *,
+    warmup: int,
+    repeat: int,
+    output: Path,
+    baseline: Path | None,
+    dependencies: EvalDependencies,
+    judge: JudgePort,
+    provider: str,
+    model: str,
+    temperature: float,
+    judge_provider: str,
+    judge_model: str,
+    judge_temperature: float = 0.0,
+    timeout_seconds: float = 60.0,
+    retry_count: int = 0,
+    requested_case_ids: Sequence[str] | None = None,
+    formal_sampling: bool = False,
+    diagnostic: bool = False,
+) -> BenchmarkSnapshot:
+    """执行指定 EXT 任务；诊断路径固定单次运行，所有副作用仍由 Fixture 覆盖。"""
     if not provider or not model or not judge_provider or not judge_model:
         raise BusinessDatasetError("EXT 必须显式记录 Provider、模型及 Judge 条件")
     if timeout_seconds <= 0 or retry_count < 0:
@@ -240,8 +327,13 @@ async def run_ext_dataset(
     ext_ids = {task_id for task_id, doc in cases.items() if "ext" in doc["tags"]} | {task_id for task_id, doc in workflows.items() if "ext" in doc["tags"]}
     if len(ext_ids) != 6:
         raise BusinessDatasetError("runtime_core_v2 必须恰有六个 EXT 任务")
-    requested_ids = frozenset(ext_cases) if ext_cases is not None else frozenset(ext_ids)
-    if requested_ids != ext_ids:
+    requested_ids = frozenset(requested_case_ids) if requested_case_ids is not None else frozenset(ext_ids)
+    if diagnostic:
+        if formal_sampling or baseline is not None or warmup != 0 or repeat != 1:
+            raise BusinessDatasetError("EXT 单案例诊断不得设置正式采样、基线、预热或重复执行")
+        if len(requested_ids) != 1 or not requested_ids.issubset(ext_ids):
+            raise BusinessDatasetError("EXT 单案例诊断必须指定一个冻结 EXT 任务")
+    elif requested_ids != ext_ids:
         raise BusinessDatasetError("EXT 任务必须精确覆盖冻结的六个任务，不能增删或替换")
     output.mkdir(parents=True, exist_ok=True)
     progress = _ExtProgressRecorder(output, timeout_seconds, retry_count)
@@ -308,11 +400,15 @@ async def run_ext_dataset(
                 raise
             samples.append(sample)
             progress.record(_ProgressPhase.SAMPLE_FINISHED, task_id, attempt, is_warmup, run_id=sample.run_id, deterministic_passed=sample.deterministic_passed, failure_attribution=sample.failure_attribution, judge_verdict=sample.judge_verdict)
-    if len([item for item in samples if not item.is_warmup]) != 6 * repeat:
-        raise BusinessDatasetError("EXT 正式样本数与 6*repeat 不一致")
+    expected_sample_count = len(requested_ids) * repeat
+    if len([item for item in samples if not item.is_warmup]) != expected_sample_count:
+        raise BusinessDatasetError("EXT 样本数与任务数及 repeat 不一致")
     snapshot_id = make_snapshot_id()
-    snapshot = build_snapshot(snapshot_id=snapshot_id, generated_at=datetime.now(timezone.utc).isoformat(), git_commit=git_short_commit(), dataset=dataset, environment={"config_hash": config_hash(), "provider": provider, "model": model, "temperature": str(temperature), "judge_provider": judge_provider, "judge_model": judge_model, "judge_temperature": str(judge_temperature), "timeout_seconds": str(timeout_seconds), "retry_count": str(retry_count), "formal_sampling": str(formal_sampling).lower()}, warmup=warmup, repeat=repeat, samples=samples, samples_path=f"samples/ext-{snapshot_id}.jsonl", samples_content_summary={"line_count": len(samples)})
-    _write_ext_artifacts(samples, snapshot, output, baseline)
+    snapshot = build_snapshot(snapshot_id=snapshot_id, generated_at=datetime.now(timezone.utc).isoformat(), git_commit=git_short_commit(), dataset=dataset, environment={"config_hash": config_hash(), "provider": provider, "model": model, "temperature": str(temperature), "judge_provider": judge_provider, "judge_model": judge_model, "judge_temperature": str(judge_temperature), "timeout_seconds": str(timeout_seconds), "retry_count": str(retry_count), "formal_sampling": str(formal_sampling).lower(), "diagnostic": str(diagnostic).lower()}, warmup=warmup, repeat=repeat, samples=samples, samples_path=f"samples/{'ext-diagnostic' if diagnostic else 'ext'}-{snapshot_id}.jsonl", samples_content_summary={"line_count": len(samples)})
+    if diagnostic:
+        _write_ext_diagnostic_artifacts(samples, snapshot, output)
+    else:
+        _write_ext_artifacts(samples, snapshot, output, baseline)
     return snapshot
 
 
@@ -363,6 +459,36 @@ def _write_ext_artifacts(samples: Sequence[BenchmarkSample], snapshot: Benchmark
         baseline_snapshot.write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _write_ext_diagnostic_artifacts(samples: Sequence[BenchmarkSample], snapshot: BenchmarkSnapshot, output: Path) -> None:
+    """写出单案例诊断工件；目录中不产生可被误用为正式基线的副本。"""
+    sample_path = output / snapshot.samples_path
+    snapshot_path = output / f"{snapshot.snapshot_id}.json"
+    targets = [sample_path, snapshot_path, output / "diagnostic-summary.md", output / "business-config.json"]
+    if any(item.exists() for item in targets):
+        raise FileExistsError("PR8 EXT 诊断工件已存在，拒绝覆盖")
+    write_jsonl(sample_path, samples)
+    snapshot_path.write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    sample = samples[0]
+    summary = {
+        "task_id": sample.case_id,
+        "deterministic_passed": sample.deterministic_passed,
+        "judge_verdict": sample.judge_verdict,
+        "failure_attribution": sample.failure_attribution,
+        "run_id": sample.run_id,
+        "progress_path": "progress.jsonl",
+    }
+    (output / "diagnostic-summary.md").write_text(
+        "# PR8 EXT 单案例诊断\n\n"
+        "本工件仅用于真实调用链排障，不属于正式采样、基线或跨 PR 证据。\n\n"
+        + json.dumps(summary, ensure_ascii=False, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+    config = dict(snapshot.environment)
+    config.update({"mode": "ext-diagnostic", "diagnostic_case": sample.case_id, "progress_path": "progress.jsonl"})
+    (output / "business-config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 async def run_fixture_dataset(root: Path, dataset: str, *, warmup: int, repeat: int, output: Path, baseline: Path | None = None, formal_sampling: bool = False) -> BenchmarkSnapshot:
     """执行固定 Fixture 任务；不触发真实模型、工具、审批或委派。"""
     cases, workflows = load_business_documents(root, dataset)
@@ -405,16 +531,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     """只提供显式 CLI；EXT 需要注入 Provider/Judge，避免默认真实 API 调用。"""
     parser = argparse.ArgumentParser(description="PR8 代表性业务任务基线")
     parser.add_argument("--dataset-root", type=Path, default=Path("benchmarks/datasets")); parser.add_argument("--dataset", default="runtime_core_v2")
-    parser.add_argument("--mode", choices=("fixture", "ext"), required=True); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--repeat", type=int, default=30); parser.add_argument("--output", type=Path, required=True); parser.add_argument("--save-baseline", type=Path); parser.add_argument("--formal-sampling", action="store_true")
-    parser.add_argument("--provider"); parser.add_argument("--model"); parser.add_argument("--temperature", type=float, default=0.0); parser.add_argument("--judge-provider"); parser.add_argument("--judge-model"); parser.add_argument("--judge-temperature", type=float, default=0.0); parser.add_argument("--timeout-seconds", type=float, default=60.0); parser.add_argument("--retry-count", type=int, default=0); parser.add_argument("--ext-cases")
+    parser.add_argument("--mode", choices=("fixture", "ext", "ext-diagnostic"), required=True); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--repeat", type=int, default=30); parser.add_argument("--output", type=Path, required=True); parser.add_argument("--save-baseline", type=Path); parser.add_argument("--formal-sampling", action="store_true")
+    parser.add_argument("--provider"); parser.add_argument("--model"); parser.add_argument("--temperature", type=float, default=0.0); parser.add_argument("--judge-provider"); parser.add_argument("--judge-model"); parser.add_argument("--judge-temperature", type=float, default=0.0); parser.add_argument("--timeout-seconds", type=float, default=60.0); parser.add_argument("--retry-count", type=int, default=0); parser.add_argument("--ext-cases"); parser.add_argument("--diagnostic-case")
     args = parser.parse_args(argv)
-    if args.mode == "ext":
+    if args.mode in {"ext", "ext-diagnostic"}:
         if not all((args.provider, args.model, args.judge_provider, args.judge_model)):
             parser.error("EXT CLI 必须提供 provider、model、judge-provider、judge-model")
         proxy = _build_llm(load_config(), Path.cwd())
         dependencies = EvalDependencies(llm_port=_TimeoutBoundLLMPort(LLMProxyAdapter(proxy), args.timeout_seconds, args.retry_count))
+        judge = LLMProxyJudge(proxy, args.judge_model, args.timeout_seconds, args.retry_count)
+        if args.mode == "ext-diagnostic":
+            if not args.diagnostic_case:
+                parser.error("EXT 单案例诊断必须提供 diagnostic-case")
+            if args.ext_cases or args.formal_sampling or args.save_baseline:
+                parser.error("EXT 单案例诊断不得设置 ext-cases、formal-sampling 或 save-baseline")
+            asyncio.run(run_ext_diagnostic(args.dataset_root, args.dataset, task_id=args.diagnostic_case, output=args.output, dependencies=dependencies, judge=judge, provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model, judge_temperature=args.judge_temperature, timeout_seconds=args.timeout_seconds, retry_count=args.retry_count))
+            return 0
         requested = tuple(item.strip() for item in args.ext_cases.split(",") if item.strip()) if args.ext_cases else None
-        asyncio.run(run_ext_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, dependencies=dependencies, judge=LLMProxyJudge(proxy, args.judge_model, args.timeout_seconds, args.retry_count), provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model, judge_temperature=args.judge_temperature, timeout_seconds=args.timeout_seconds, retry_count=args.retry_count, ext_cases=requested, formal_sampling=args.formal_sampling))
+        asyncio.run(run_ext_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, dependencies=dependencies, judge=judge, provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model, judge_temperature=args.judge_temperature, timeout_seconds=args.timeout_seconds, retry_count=args.retry_count, ext_cases=requested, formal_sampling=args.formal_sampling))
         return 0
     asyncio.run(run_fixture_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, formal_sampling=args.formal_sampling))
     return 0
