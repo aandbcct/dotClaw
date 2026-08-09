@@ -694,11 +694,17 @@ async def test_explicit_timeout_reaches_sdk_and_normal_stream_is_closed():
     assert _text_deltas(results) == [("response", "ok")]
     assert response.close_count == 1
     assert client.request_params["timeout"].connect == 60.0
+    assert client.request_params["timeout"].read == 60.0
+    assert client.request_params["timeout"].write == 60.0
+    assert client.request_params["timeout"].pool == 60.0
 
     response = _ControlledResponse([_chunk(_delta(content="ok"))])
     client = _ObservedClient(response)
     await _collect_explicit_timeout(client, 0.2)
     assert client.request_params["timeout"].connect == 0.2
+    assert client.request_params["timeout"].read == 0.2
+    assert client.request_params["timeout"].write == 0.2
+    assert client.request_params["timeout"].pool == 0.2
 
 
 async def _collect_explicit_timeout(client: OpenAICompatibleClient, timeout_seconds: float):

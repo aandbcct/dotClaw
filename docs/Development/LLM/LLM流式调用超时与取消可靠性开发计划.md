@@ -74,7 +74,7 @@
 
 ## 8. 已实现边界与开发验证
 
-- `timeout_seconds`、`retry_count` 作为兼容性可选参数扩展至 LLM 客户端（模型客户端），由 `LLMProxy`（模型调用代理）在显式传入时透传；未传入时仍使用 Provider 既有总尝试次数。显式 `retry_count` 表示额外重试次数。
+- `timeout_seconds`、`retry_count` 作为兼容性可选参数扩展至 `LLMProxyAdapter`（运行时到模型代理的适配器）、`LLMProxy`（模型调用代理）和 LLM 客户端（模型客户端）；各层在显式传入时原样透传。未传入时仍使用 Provider 既有总尝试次数；显式 `retry_count` 表示额外重试次数。
 - `OpenAICompatibleClient`（OpenAI 兼容客户端）以 60 秒的稳定默认请求预算创建 `httpx.Timeout`，连接、读取、写入与连接池共享该预算；首包和后续流空闲各使用调用预算的 50%。
 - SDK stream 在正常完成、异常、超时和协程取消时均通过 `finally` 尽力关闭；关闭异常只记录，不覆盖原始错误。
 - `LLMProxyAdapter`（运行时到模型代理的适配器）按 `run_id` 登记当前任务，`cancel(run_id)` 只取消该任务；取消会直达客户端关闭路径，不参与重试或候选降级。

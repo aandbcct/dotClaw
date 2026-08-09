@@ -32,6 +32,8 @@ class LLMProxyAdapter(LLMPort):
         context: ContextBundle,
         execution: RunExecutionView,
         output_port: LLMOutputPort | None = None,
+        timeout_seconds: float | None = None,
+        retry_count: int | None = None,
     ) -> RunMessage:
         """调用旧代理并聚合文本、工具调用与 token 统计；按语义顺序发射增量事件。
 
@@ -61,11 +63,17 @@ class LLMProxyAdapter(LLMPort):
         input_tokens: int = 0
         output_tokens: int = 0
         has_streamed_response: bool = False
+        proxy_options: dict[str, float | int] = {}
+        if timeout_seconds is not None:
+            proxy_options["timeout_seconds"] = timeout_seconds
+        if retry_count is not None:
+            proxy_options["retry_count"] = retry_count
         response: AsyncIterator[ChatChunk] = self._proxy.chat(
             messages=messages,
             tools=tools or None,
             model=execution.policy.model_id or None,
             stream=True,
+            **proxy_options,
         )
         try:
             async for chunk in response:

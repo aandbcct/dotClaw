@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind, TokenUsage, ToolCall as LegacyToolCall
+from dotclaw.llm.proxy import LLMProxy
 from dotclaw.runtime.adapters import LLMProxyAdapter
 from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, LLMOutputEvent, LLMOutputKind, ToolDefinition
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
@@ -181,3 +182,70 @@ async def test_llm_proxy_adapter_cancel_only_stops_target_run() -> None:
     proxy.release["model-x"].set()
     await second_task
     assert adapter._active_calls == {}
+
+
+class ParameterRecordingClient:
+    """记录最终客户端收到的调用条件。"""
+
+    def __init__(self) -> None:
+        self.timeout_seconds: float | None = None
+        self.retry_count: int | None = None
+
+    async def chat(
+        self,
+        messages,
+        tools=None,
+        stream=True,
+        timeout_seconds=None,
+        retry_count=None,
+    ) -> AsyncIterator[ChatChunk]:
+        self.timeout_seconds = timeout_seconds
+        self.retry_count = retry_count
+        yield ChatChunk(finish_reason="stop", usage=TokenUsage(1, 1))
+
+
+class ParameterRecordingRouter:
+    """为真实代理提供固定客户端的最小路由替身。"""
+
+    def __init__(self, client: ParameterRecordingClient) -> None:
+        self._client = client
+
+    def select(self, purpose="chat", forced_model=None):
+        return ["model-x"]
+
+    def get_provider_name(self, model_name):
+        return "provider-x"
+
+    def get_client(self, model_name):
+        return self._client
+
+    async def try_acquire(self, provider, timeout):
+        return None
+
+    def report_success(self, model_name):
+        return None
+
+    def report_failure(self, model_name):
+        return None
+
+    def _get_retry_config(self, model_name):
+        return 1
+
+    def _get_backoff_config(self, model_name):
+        return 0.01
+
+
+async def test_llm_proxy_adapter_passes_call_conditions_to_client() -> None:
+    """Adapter 调用条件必须经真实代理完整到达最终客户端。"""
+    client = ParameterRecordingClient()
+    adapter = LLMProxyAdapter(LLMProxy(ParameterRecordingRouter(client)))
+
+    await adapter.complete(
+        _make_context(),
+        _make_execution("run-conditions"),
+        timeout_seconds=0.25,
+        retry_count=2,
+    )
+
+    assert client.timeout_seconds == 0.25
+    assert client.retry_count == 2
