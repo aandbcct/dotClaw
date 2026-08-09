@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
@@ -25,12 +26,19 @@ class JudgePort(Protocol):
 class LLMProxyJudge(JudgePort):
     """复用既有 LLMProxy 的一次性裁判适配器，不落盘原始请求。"""
 
-    def __init__(self, proxy: LLMProxy, model: str) -> None:
+    def __init__(self, proxy: LLMProxy, model: str, timeout_seconds: float | None = None) -> None:
         self._proxy = proxy
         self._model = model
+        self._timeout_seconds = timeout_seconds
 
     async def judge(self, prompt: str) -> str:
         """聚合最终回复文本；推理增量不进入裁判解析或样本。"""
+        if self._timeout_seconds is not None:
+            return await asyncio.wait_for(self._collect(prompt), timeout=self._timeout_seconds)
+        return await self._collect(prompt)
+
+    async def _collect(self, prompt: str) -> str:
+        """读取一次流式响应；只保留最终文本增量。"""
         parts: list[str] = []
         async for chunk in self._proxy.chat([LegacyMessage(role="user", content=prompt)], model=self._model, purpose="chat", stream=True):
             parts.extend(delta.content for delta in chunk.text_deltas if delta.kind is not TextDeltaKind.REASONING)

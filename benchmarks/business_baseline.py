@@ -110,19 +110,43 @@ async def judge_deterministic_candidate(sample: BenchmarkSample, candidate: str,
     return replace(sample, judge_spec_version=spec.version, judge_prompt_hash=prompt_hash(spec), judge_verdict="pass", judge_criteria=verdict.criteria)
 
 
-async def run_ext_dataset(root: Path, dataset: str, *, warmup: int, repeat: int, output: Path, baseline: Path | None, dependencies: EvalDependencies, judge: JudgePort, provider: str, model: str, temperature: float, judge_provider: str, judge_model: str) -> BenchmarkSnapshot:
+async def run_ext_dataset(
+    root: Path,
+    dataset: str,
+    *,
+    warmup: int,
+    repeat: int,
+    output: Path,
+    baseline: Path | None,
+    dependencies: EvalDependencies,
+    judge: JudgePort,
+    provider: str,
+    model: str,
+    temperature: float,
+    judge_provider: str,
+    judge_model: str,
+    judge_temperature: float = 0.0,
+    timeout_seconds: float = 60.0,
+    retry_count: int = 0,
+    ext_cases: Sequence[str] | None = None,
+) -> BenchmarkSnapshot:
     """执行六个 EXT 任务：只允许真实 LLM 回退，所有副作用仍由 Case Fixture 覆盖。"""
     if not provider or not model or not judge_provider or not judge_model:
         raise BusinessDatasetError("EXT 必须显式记录 Provider、模型及 Judge 条件")
+    if timeout_seconds <= 0 or retry_count < 0:
+        raise BusinessDatasetError("EXT timeout_seconds 必须大于零，retry_count 不得为负数")
     if dependencies.llm_port is None:
         raise BusinessDatasetError("EXT 必须注入真实 LLMPort，不能回退到脚本化响应")
     cases, workflows = load_business_documents(root, dataset)
     ext_ids = {task_id for task_id, doc in cases.items() if "ext" in doc["tags"]} | {task_id for task_id, doc in workflows.items() if "ext" in doc["tags"]}
     if len(ext_ids) != 6:
         raise BusinessDatasetError("runtime_core_v2 必须恰有六个 EXT 任务")
+    requested_ids = frozenset(ext_cases) if ext_cases is not None else frozenset(ext_ids)
+    if requested_ids != ext_ids:
+        raise BusinessDatasetError("EXT 任务必须精确覆盖冻结的六个任务，不能增删或替换")
     samples: list[BenchmarkSample] = []
     runner = ReexecutionRunner(dependencies)
-    for task_id in sorted(ext_ids):
+    for task_id in sorted(requested_ids):
         if task_id in workflows:
             doc = workflows[task_id]
             spec = load_judge_spec(root, dataset, task_id)
@@ -138,7 +162,12 @@ async def run_ext_dataset(root: Path, dataset: str, *, warmup: int, repeat: int,
         doc = cases[task_id]
         source_case = load_case(root, dataset, task_id)
         # 清空脚本化 LLM 响应，使 REEXECUTION 仅在 LLM 槽位回退到注入真实端口；工具等仍由 Fixture 拦截。
-        ext_case = replace(source_case, llm_fixture=LLMFixture(source_case.llm_fixture.fixture_id, ()))
+        ext_case = replace(
+            source_case,
+            llm_fixture=LLMFixture(source_case.llm_fixture.fixture_id, ()),
+            # CLI 固定的模型必须真正进入 Runtime Policy，而非只作为样本标签记录。
+            policy_fixture=replace(source_case.policy_fixture, model_id=model),
+        )
         spec = load_judge_spec(root, dataset, task_id)
         for index in range(warmup + repeat):
             started = time.perf_counter()
@@ -152,7 +181,7 @@ async def run_ext_dataset(root: Path, dataset: str, *, warmup: int, repeat: int,
     if len([item for item in samples if not item.is_warmup]) != 6 * repeat:
         raise BusinessDatasetError("EXT 正式样本数与 6*repeat 不一致")
     snapshot_id = make_snapshot_id()
-    snapshot = build_snapshot(snapshot_id=snapshot_id, generated_at=datetime.now(timezone.utc).isoformat(), git_commit=git_short_commit(), dataset=dataset, environment={"config_hash": config_hash(), "provider": provider, "model": model, "judge_provider": judge_provider, "judge_model": judge_model}, warmup=warmup, repeat=repeat, samples=samples, samples_path=f"samples/ext-{snapshot_id}.jsonl", samples_content_summary={"line_count": len(samples)})
+    snapshot = build_snapshot(snapshot_id=snapshot_id, generated_at=datetime.now(timezone.utc).isoformat(), git_commit=git_short_commit(), dataset=dataset, environment={"config_hash": config_hash(), "provider": provider, "model": model, "temperature": str(temperature), "judge_provider": judge_provider, "judge_model": judge_model, "judge_temperature": str(judge_temperature), "timeout_seconds": str(timeout_seconds), "retry_count": str(retry_count)}, warmup=warmup, repeat=repeat, samples=samples, samples_path=f"samples/ext-{snapshot_id}.jsonl", samples_content_summary={"line_count": len(samples)})
     output.mkdir(parents=True, exist_ok=True)
     _write_ext_artifacts(samples, snapshot, output, baseline)
     return snapshot
@@ -245,7 +274,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PR8 代表性业务任务基线")
     parser.add_argument("--dataset-root", type=Path, default=Path("benchmarks/datasets")); parser.add_argument("--dataset", default="runtime_core_v2")
     parser.add_argument("--mode", choices=("fixture", "ext"), required=True); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--repeat", type=int, default=30); parser.add_argument("--output", type=Path, required=True); parser.add_argument("--save-baseline", type=Path)
-    parser.add_argument("--provider"); parser.add_argument("--model"); parser.add_argument("--temperature", type=float, default=0.0); parser.add_argument("--judge-provider"); parser.add_argument("--judge-model")
+    parser.add_argument("--provider"); parser.add_argument("--model"); parser.add_argument("--temperature", type=float, default=0.0); parser.add_argument("--judge-provider"); parser.add_argument("--judge-model"); parser.add_argument("--judge-temperature", type=float, default=0.0); parser.add_argument("--timeout-seconds", type=float, default=60.0); parser.add_argument("--retry-count", type=int, default=0); parser.add_argument("--ext-cases")
     args = parser.parse_args(argv)
     if args.mode == "ext":
         if not all((args.provider, args.model, args.judge_provider, args.judge_model)):
@@ -255,7 +284,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         from dotclaw.runtime.adapters import LLMProxyAdapter
         proxy = _build_llm(load_config(), Path.cwd())
         dependencies = EvalDependencies(llm_port=LLMProxyAdapter(proxy))
-        asyncio.run(run_ext_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, dependencies=dependencies, judge=LLMProxyJudge(proxy, args.judge_model), provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model))
+        requested = tuple(item.strip() for item in args.ext_cases.split(",") if item.strip()) if args.ext_cases else None
+        asyncio.run(run_ext_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, dependencies=dependencies, judge=LLMProxyJudge(proxy, args.judge_model, args.timeout_seconds), provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model, judge_temperature=args.judge_temperature, timeout_seconds=args.timeout_seconds, retry_count=args.retry_count, ext_cases=requested))
         return 0
     asyncio.run(run_fixture_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline))
     return 0

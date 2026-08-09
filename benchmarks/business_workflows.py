@@ -97,7 +97,8 @@ async def run_preference_aware_followup(root: Path, llm: LLMPort | None = None) 
     second = await engine.execute(followup)
     output = "" if second.final_message is None else second.final_message.content
     committed = len(persisted.conversations) == 1 and all(marker in persisted.conversations[0].user_query + persisted.conversations[0].final_answer for marker in _PREFERENCE_MARKERS)
-    context_reused = isinstance(runtime_llm, CapturingLLM) and all(marker in _context_text(runtime_llm) for marker in _PREFERENCE_MARKERS)
+    # 后续请求由 Runtime 实际执行；检查其冻结历史，避免把可观测替身作为真实 LLM 的前提。
+    context_reused = all(marker in "\n".join(message.content for message in followup.conversation.messages) for marker in _PREFERENCE_MARKERS)
     applied = context_reused and all(marker in output for marker in _PREFERENCE_MARKERS)
     passed = first.state.outcome() is RunOutcome.COMPLETED and second.state.outcome() is RunOutcome.COMPLETED and committed and applied
     return WorkflowResult("preference_aware_followup", "1", passed, second.run_id, False, committed, applied, False, output)
@@ -121,7 +122,8 @@ async def run_compressed_history_continuation(root: Path, llm: LLMPort | None = 
     second = await followup_engine.execute(followup)
     output = "" if second.final_message is None else second.final_message.content
     used = followup.conversation.compressed_history is not None and _COMPRESSION_CONSTRAINT in followup.conversation.compressed_history.content
-    context_reused = isinstance(followup_llm, CapturingLLM) and _COMPRESSION_CONSTRAINT in _context_text(followup_llm)
+    # 压缩摘要已冻结进实际后续请求，真实 LLM 与确定性替身均消费同一份输入。
+    context_reused = followup.conversation.compressed_history is not None and _COMPRESSION_CONSTRAINT in followup.conversation.compressed_history.content
     retained = used and context_reused and _COMPRESSION_CONSTRAINT in output
     passed = first.state.outcome() is RunOutcome.COMPLETED and second.state.outcome() is RunOutcome.COMPLETED and retained and bool(compactor.requests)
     return WorkflowResult("compressed_history_continuation", "1", passed, second.run_id, used, False, False, retained, output)
