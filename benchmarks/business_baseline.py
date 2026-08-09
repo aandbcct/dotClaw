@@ -22,6 +22,10 @@ from dotclaw.eval.environment import EvalDependencies
 from dotclaw.eval.models import LLMFixture
 from dotclaw.eval.reexecution import ReexecutionRunner
 from dotclaw.runtime.adapters import LLMProxyAdapter
+from dotclaw.runtime.application.dto import ContextBundle
+from dotclaw.runtime.application.execution import RunExecutionView
+from dotclaw.runtime.application.ports import LLMOutputPort, LLMPort, LLMUnavailableError
+from dotclaw.runtime.domain.facts import RunMessage
 
 from .business_judge import JudgePort, JudgeProtocolError, JudgeSpec, LLMProxyJudge, parse_verdict, prompt_hash, render_prompt
 from .business_workflows import run_compressed_history_continuation, run_preference_aware_followup
@@ -35,6 +39,33 @@ _FAILURES = {"runtime_failure", "fixture_or_trace_error", "assertion_failure", "
 
 class BusinessDatasetError(ValueError):
     """业务任务集或跨样本资格不满足冻结契约。"""
+
+
+class _TimeoutBoundLLMPort:
+    """仅为 PR8 EXT 注入单次模型调用时限，避免真实流式调用无界阻塞正式采样。"""
+
+    def __init__(self, delegate: LLMPort, timeout_seconds: float) -> None:
+        self._delegate: LLMPort = delegate
+        self._timeout_seconds: float = timeout_seconds
+
+    async def complete(
+        self,
+        context: ContextBundle,
+        execution: RunExecutionView,
+        output_port: LLMOutputPort | None = None,
+    ) -> RunMessage:
+        """在固定时限内转发模型调用；超时统一映射为可归因的外部服务不可用。"""
+        try:
+            return await asyncio.wait_for(
+                self._delegate.complete(context, execution, output_port),
+                timeout=self._timeout_seconds,
+            )
+        except TimeoutError as error:
+            raise LLMUnavailableError("业务模型调用超时") from error
+
+    async def cancel(self, run_id: str) -> None:
+        """透传 Runtime 的尽力取消请求。"""
+        await self._delegate.cancel(run_id)
 
 
 def load_business_documents(root: Path, dataset: str) -> tuple[dict[str, Mapping[str, object]], dict[str, Mapping[str, object]]]:
@@ -297,7 +328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not all((args.provider, args.model, args.judge_provider, args.judge_model)):
             parser.error("EXT CLI 必须提供 provider、model、judge-provider、judge-model")
         proxy = _build_llm(load_config(), Path.cwd())
-        dependencies = EvalDependencies(llm_port=LLMProxyAdapter(proxy))
+        dependencies = EvalDependencies(llm_port=_TimeoutBoundLLMPort(LLMProxyAdapter(proxy), args.timeout_seconds))
         requested = tuple(item.strip() for item in args.ext_cases.split(",") if item.strip()) if args.ext_cases else None
         asyncio.run(run_ext_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, dependencies=dependencies, judge=LLMProxyJudge(proxy, args.judge_model, args.timeout_seconds), provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model, judge_temperature=args.judge_temperature, timeout_seconds=args.timeout_seconds, retry_count=args.retry_count, ext_cases=requested, formal_sampling=args.formal_sampling))
         return 0

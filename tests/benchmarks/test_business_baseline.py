@@ -1,20 +1,23 @@
 """PR8 业务基线编排与工件测试。"""
 
+import asyncio
 import json
 import platform
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from benchmarks.business_baseline import BusinessDatasetError, load_business_documents, main, run_ext_dataset, run_fixture_dataset
+from benchmarks.business_baseline import BusinessDatasetError, _TimeoutBoundLLMPort, load_business_documents, main, run_ext_dataset, run_fixture_dataset
 from dotclaw.eval.dataset import load_case
 from dotclaw.eval.environment import EvalDependencies
 from dotclaw.eval.reexecution import ReexecutionRunner
 from dotclaw.runtime.application.dto import ContextBundle
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.ports import LLMOutputPort
+from dotclaw.runtime.application.ports import LLMUnavailableError
 from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 
 
@@ -94,6 +97,20 @@ def test_ext_cli_requires_provider_and_judge_conditions(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as error:
         main(["--mode", "ext", "--output", str(tmp_path)])
     assert error.value.code == 2
+
+
+@pytest.mark.asyncio
+async def test_ext_model_timeout_is_bounded_and_attributable() -> None:
+    """EXT 被测模型超时时必须在固定时限返回可归因错误，不能无界卡住正式采样。"""
+    async def complete(*_args: object) -> object:
+        await asyncio.Event().wait()
+
+    async def cancel(_run_id: str) -> None:
+        return None
+
+    port = _TimeoutBoundLLMPort(SimpleNamespace(complete=complete, cancel=cancel), 0.01)
+    with pytest.raises(LLMUnavailableError, match="调用超时"):
+        await port.complete(None, None)
 
 
 @pytest.mark.asyncio
