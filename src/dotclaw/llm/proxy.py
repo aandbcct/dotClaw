@@ -76,6 +76,8 @@ class LLMProxy:
         purpose: str = "chat",
         stream: bool = True,
         journal: "Any | None" = None,
+        timeout_seconds: float | None = None,
+        retry_count: int | None = None,
     ) -> AsyncIterator[ChatChunk]:
         """
         统一聊天接口：选路 → 迭代候选 → 调用 → 降级。
@@ -103,7 +105,11 @@ class LLMProxy:
                 client = self._router.get_client(model_name)
 
                 # 单模型内指数退避重试
-                max_retries = self._get_retry_config(model_name)
+                max_retries = (
+                    retry_count + 1 if retry_count is not None else self._get_retry_config(model_name)
+                )
+                if max_retries <= 0:
+                    raise ValueError("retry_count 必须大于等于 0")
                 base_delay = self._get_backoff_config(model_name)
 
                 try:
@@ -113,7 +119,12 @@ class LLMProxy:
                             await self._router.try_acquire(provider, timeout=0.1)
 
                             # 调用 client.chat()
-                            chat_iter = client.chat(messages, tools, stream)
+                            client_options: dict[str, float | int] = {}
+                            if timeout_seconds is not None:
+                                client_options["timeout_seconds"] = timeout_seconds
+                            if retry_count is not None:
+                                client_options["retry_count"] = retry_count
+                            chat_iter = client.chat(messages, tools, stream, **client_options)
 
                             # 可见输出边界：每次尝试重新计，避免跨重试误判
                             visible_output_started = False
@@ -144,6 +155,9 @@ class LLMProxy:
                                         input_tokens = chunk.usage.input_tokens
                                         output_tokens = chunk.usage.output_tokens
                                     yield chunk
+                            except asyncio.CancelledError:
+                                # 运行取消必须直达客户端 finally，绝不可重试或降级。
+                                raise
                             except Exception as e:
                                 if visible_output_started:
                                     # 已展示 reasoning/response：不可降级，直接向上抛出
@@ -159,6 +173,9 @@ class LLMProxy:
                             self._router.report_success(model_name)
                             return
 
+                        except asyncio.CancelledError:
+                            # 取消不计作 Provider 失败，也不进入退避或候选降级。
+                            raise
                         except NonRetryableStreamError:
                             raise
 
