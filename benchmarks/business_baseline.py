@@ -14,10 +14,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from dotclaw.bootstrap._host_components import _build_llm
+from dotclaw.config.settings import load_config
 from dotclaw.eval.dataset import load_case
 from dotclaw.eval.environment import EvalDependencies
 from dotclaw.eval.models import LLMFixture
 from dotclaw.eval.reexecution import ReexecutionRunner
+from dotclaw.runtime.adapters import LLMProxyAdapter
 
 from .business_judge import JudgePort, JudgeProtocolError, JudgeSpec, LLMProxyJudge, parse_verdict, prompt_hash, render_prompt
 from .business_workflows import run_compressed_history_continuation, run_preference_aware_followup
@@ -129,12 +132,15 @@ async def run_ext_dataset(
     timeout_seconds: float = 60.0,
     retry_count: int = 0,
     ext_cases: Sequence[str] | None = None,
+    formal_sampling: bool = False,
 ) -> BenchmarkSnapshot:
     """执行六个 EXT 任务：只允许真实 LLM 回退，所有副作用仍由 Case Fixture 覆盖。"""
     if not provider or not model or not judge_provider or not judge_model:
         raise BusinessDatasetError("EXT 必须显式记录 Provider、模型及 Judge 条件")
     if timeout_seconds <= 0 or retry_count < 0:
         raise BusinessDatasetError("EXT timeout_seconds 必须大于零，retry_count 不得为负数")
+    if formal_sampling and (warmup != 5 or repeat != 30):
+        raise BusinessDatasetError("正式 EXT 采样必须使用 warmup=5、repeat=30")
     if dependencies.llm_port is None:
         raise BusinessDatasetError("EXT 必须注入真实 LLMPort，不能回退到脚本化响应")
     cases, workflows = load_business_documents(root, dataset)
@@ -154,7 +160,7 @@ async def run_ext_dataset(
                 started = time.perf_counter()
                 with tempfile.TemporaryDirectory(prefix="dotclaw-pr8-ext-") as temporary_root:
                     result = await run_preference_aware_followup(Path(temporary_root), dependencies.llm_port)
-                sample = BenchmarkSample(dataset=dataset, case_id=task_id, attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, git_commit=git_short_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=config_hash(), eval_schema_version="1.0", passed=result.passed, failure_kind=None if result.passed else "workflow", assertions_passed=1 if result.passed else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=(time.perf_counter() - started) * 1000, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="ext", deterministic_passed=result.passed, failure_attribution=None if result.passed else "assertion_failure", provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2", workflow_version=str(doc["version"]))
+                sample = BenchmarkSample(dataset=dataset, case_id=task_id, attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, git_commit=git_short_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash=config_hash(), eval_schema_version="1.0", passed=result.passed, failure_kind=None if result.passed else "workflow", assertions_passed=1 if result.passed else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=(time.perf_counter() - started) * 1000, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="ext", deterministic_passed=result.passed, failure_attribution=None if result.passed else "assertion_failure", provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2", workflow_version=str(doc["version"]), formal_sampling=formal_sampling)
                 if not sample.is_warmup and sample.deterministic_passed:
                     sample = await judge_deterministic_candidate(sample, result.final_output, spec, judge)
                 samples.append(sample)
@@ -174,14 +180,14 @@ async def run_ext_dataset(
             result = await runner.run_case(ext_case)
             sample = _sample_from_result(result, dataset=dataset, case_id=task_id, scenario_id=task_id, fixture_fingerprint=compute_fixture_fingerprint(ext_case), attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, wall_duration_ms=(time.perf_counter() - started) * 1000, git_commit=git_short_commit(), source_commit=git_full_commit(), python_version=sys.version.split()[0], platform_name=platform.platform(), config_hash_value=config_hash())
             deterministic = sample.passed and _business_delivery_passed(result, doc)
-            sample = replace(sample, passed=deterministic, failure_kind=sample.failure_kind if sample.failure_kind is not None else (None if deterministic else "business_delivery"), task_category=str(doc["category"]), task_kind="standard_case", execution_mode="ext", deterministic_passed=deterministic, failure_attribution=_attribution(replace(sample, passed=deterministic)), llm_call_count=int(sample.run_statistics.get("llm_call_count", 0)), tool_call_count=int(sample.run_statistics.get("tool_call_count", 0)), provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2")
+            sample = replace(sample, passed=deterministic, failure_kind=sample.failure_kind if sample.failure_kind is not None else (None if deterministic else "business_delivery"), task_category=str(doc["category"]), task_kind="standard_case", execution_mode="ext", deterministic_passed=deterministic, failure_attribution=_attribution(replace(sample, passed=deterministic)), llm_call_count=int(sample.run_statistics.get("llm_call_count", 0)), tool_call_count=int(sample.run_statistics.get("tool_call_count", 0)), provider=provider, model=model, temperature=temperature, judge_provider=judge_provider, judge_model=judge_model, dataset_version="2", formal_sampling=formal_sampling)
             if not sample.is_warmup and sample.deterministic_passed:
                 sample = await judge_deterministic_candidate(sample, _candidate_output(result), spec, judge)
             samples.append(sample)
     if len([item for item in samples if not item.is_warmup]) != 6 * repeat:
         raise BusinessDatasetError("EXT 正式样本数与 6*repeat 不一致")
     snapshot_id = make_snapshot_id()
-    snapshot = build_snapshot(snapshot_id=snapshot_id, generated_at=datetime.now(timezone.utc).isoformat(), git_commit=git_short_commit(), dataset=dataset, environment={"config_hash": config_hash(), "provider": provider, "model": model, "temperature": str(temperature), "judge_provider": judge_provider, "judge_model": judge_model, "judge_temperature": str(judge_temperature), "timeout_seconds": str(timeout_seconds), "retry_count": str(retry_count)}, warmup=warmup, repeat=repeat, samples=samples, samples_path=f"samples/ext-{snapshot_id}.jsonl", samples_content_summary={"line_count": len(samples)})
+    snapshot = build_snapshot(snapshot_id=snapshot_id, generated_at=datetime.now(timezone.utc).isoformat(), git_commit=git_short_commit(), dataset=dataset, environment={"config_hash": config_hash(), "provider": provider, "model": model, "temperature": str(temperature), "judge_provider": judge_provider, "judge_model": judge_model, "judge_temperature": str(judge_temperature), "timeout_seconds": str(timeout_seconds), "retry_count": str(retry_count), "formal_sampling": str(formal_sampling).lower()}, warmup=warmup, repeat=repeat, samples=samples, samples_path=f"samples/ext-{snapshot_id}.jsonl", samples_content_summary={"line_count": len(samples)})
     output.mkdir(parents=True, exist_ok=True)
     _write_ext_artifacts(samples, snapshot, output, baseline)
     return snapshot
@@ -200,7 +206,7 @@ def _write_fixture_artifacts(samples: Sequence[BenchmarkSample], snapshot: Bench
     (output / "fixture-summary.md").write_text(render_partial_report(summary), encoding="utf-8")
     (output / "failure-attribution.md").write_text(json.dumps(summary["failure_attribution"], ensure_ascii=False, indent=2), encoding="utf-8")
     write_business_reports(output, summary)
-    (output / "business-config.json").write_text(json.dumps({"dataset": snapshot.dataset, "warmup": snapshot.warmup, "repeat": snapshot.repeat, "config_hash": snapshot.environment.get("config_hash"), "mode": "fixture"}, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "business-config.json").write_text(json.dumps({"dataset": snapshot.dataset, "warmup": snapshot.warmup, "repeat": snapshot.repeat, "config_hash": snapshot.environment.get("config_hash"), "formal_sampling": snapshot.environment.get("formal_sampling"), "mode": "fixture"}, ensure_ascii=False, indent=2), encoding="utf-8")
     if baseline is not None:
         baseline_samples, baseline_snapshot = baseline / snapshot.samples_path, baseline / f"{snapshot.snapshot_id}.json"
         if baseline_samples.exists() or baseline_snapshot.exists():
@@ -234,9 +240,11 @@ def _write_ext_artifacts(samples: Sequence[BenchmarkSample], snapshot: Benchmark
         baseline_snapshot.write_text(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-async def run_fixture_dataset(root: Path, dataset: str, *, warmup: int, repeat: int, output: Path, baseline: Path | None = None) -> BenchmarkSnapshot:
+async def run_fixture_dataset(root: Path, dataset: str, *, warmup: int, repeat: int, output: Path, baseline: Path | None = None, formal_sampling: bool = False) -> BenchmarkSnapshot:
     """执行固定 Fixture 任务；不触发真实模型、工具、审批或委派。"""
     cases, workflows = load_business_documents(root, dataset)
+    if formal_sampling and (warmup != 5 or repeat != 30):
+        raise BusinessDatasetError("正式 Fixture 采样必须使用 warmup=5、repeat=30")
     # 标准 Case 直接从 v2 加载，确保业务元数据、Fixture 与确定性断言属于同一条链路。
     raw_samples: list[BenchmarkSample] = []
     for task_id, doc in cases.items():
@@ -246,7 +254,7 @@ async def run_fixture_dataset(root: Path, dataset: str, *, warmup: int, repeat: 
             started = time.perf_counter(); evaluated = await ReexecutionRunner().run_case(case); elapsed = (time.perf_counter() - started) * 1000
             sample = _sample_from_result(evaluated, dataset=dataset, case_id=task_id, scenario_id=task_id, fixture_fingerprint=compute_fixture_fingerprint(case), attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, wall_duration_ms=elapsed, git_commit=git_short_commit(), source_commit=git_full_commit(), python_version=sys.version.split()[0], platform_name=platform.platform(), config_hash_value=config_hash())
             deterministic = sample.passed and _business_delivery_passed(evaluated, doc)
-            raw_samples.append(replace(sample, passed=deterministic, failure_kind=sample.failure_kind if sample.failure_kind is not None else (None if deterministic else "business_delivery"), task_category=str(doc["category"]), task_kind="standard_case", execution_mode="fixture", deterministic_passed=deterministic, failure_attribution=_attribution(replace(sample, passed=deterministic)), llm_call_count=int(sample.run_statistics.get("llm_call_count", 0)), tool_call_count=int(sample.run_statistics.get("tool_call_count", 0)), dataset_version="2"))
+            raw_samples.append(replace(sample, passed=deterministic, failure_kind=sample.failure_kind if sample.failure_kind is not None else (None if deterministic else "business_delivery"), task_category=str(doc["category"]), task_kind="standard_case", execution_mode="fixture", deterministic_passed=deterministic, failure_attribution=_attribution(replace(sample, passed=deterministic)), llm_call_count=int(sample.run_statistics.get("llm_call_count", 0)), tool_call_count=int(sample.run_statistics.get("tool_call_count", 0)), dataset_version="2", formal_sampling=formal_sampling))
     # 工作流在临时根运行真实 Session 与 create_run_request() 路径。
     for task_id, doc in workflows.items():
         action = run_preference_aware_followup if task_id == "preference_aware_followup" else run_compressed_history_continuation
@@ -257,13 +265,13 @@ async def run_fixture_dataset(root: Path, dataset: str, *, warmup: int, repeat: 
             if not isinstance(markers, list) or not all(isinstance(item, str) for item in markers):
                 raise BusinessDatasetError("Session 工作流必须定义 delivery_markers")
             deterministic = result.passed and all(item in result.final_output for item in markers)
-            raw_samples.append(BenchmarkSample(dataset=dataset, case_id=task_id, attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, git_commit=git_short_commit(), python_version="fixture", platform="fixture", config_hash=config_hash(), eval_schema_version="1.0", passed=deterministic, failure_kind=None if deterministic else "workflow_delivery", assertions_passed=1 if deterministic else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=0.0, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="fixture", deterministic_passed=deterministic, failure_attribution=None if deterministic else "assertion_failure", dataset_version="2", workflow_version=str(doc["version"])))
+            raw_samples.append(BenchmarkSample(dataset=dataset, case_id=task_id, attempt=index if index < warmup else index - warmup, is_warmup=index < warmup, git_commit=git_short_commit(), python_version="fixture", platform="fixture", config_hash=config_hash(), eval_schema_version="1.0", passed=deterministic, failure_kind=None if deterministic else "workflow_delivery", assertions_passed=1 if deterministic else 0, assertions_total=1, trace_available=result.run_id is not None, wall_duration_ms=0.0, run_id=result.run_id, task_category=str(doc["category"]), task_kind="session_workflow", execution_mode="fixture", deterministic_passed=deterministic, failure_attribution=None if deterministic else "assertion_failure", dataset_version="2", workflow_version=str(doc["version"]), formal_sampling=formal_sampling))
     formal = [sample for sample in raw_samples if not sample.is_warmup]
     expected = 10 * repeat
     if len(formal) != expected:
         raise BusinessDatasetError(f"正式样本数 {len(formal)} 与 10*repeat={expected} 不一致")
     snapshot_id = make_snapshot_id()
-    snapshot = build_snapshot(snapshot_id=snapshot_id, generated_at=datetime.now(timezone.utc).isoformat(), git_commit=git_short_commit(), dataset=dataset, environment={"config_hash": config_hash(), "python_version": sys.version.split()[0], "platform": platform.platform()}, warmup=warmup, repeat=repeat, samples=raw_samples, samples_path=f"samples/fixture-{snapshot_id}.jsonl", samples_content_summary={"line_count": len(raw_samples)})
+    snapshot = build_snapshot(snapshot_id=snapshot_id, generated_at=datetime.now(timezone.utc).isoformat(), git_commit=git_short_commit(), dataset=dataset, environment={"config_hash": config_hash(), "python_version": sys.version.split()[0], "platform": platform.platform(), "formal_sampling": str(formal_sampling).lower()}, warmup=warmup, repeat=repeat, samples=raw_samples, samples_path=f"samples/fixture-{snapshot_id}.jsonl", samples_content_summary={"line_count": len(raw_samples)})
     output.mkdir(parents=True, exist_ok=True)
     _write_fixture_artifacts(raw_samples, snapshot, output, baseline)
     return snapshot
@@ -273,21 +281,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     """只提供显式 CLI；EXT 需要注入 Provider/Judge，避免默认真实 API 调用。"""
     parser = argparse.ArgumentParser(description="PR8 代表性业务任务基线")
     parser.add_argument("--dataset-root", type=Path, default=Path("benchmarks/datasets")); parser.add_argument("--dataset", default="runtime_core_v2")
-    parser.add_argument("--mode", choices=("fixture", "ext"), required=True); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--repeat", type=int, default=30); parser.add_argument("--output", type=Path, required=True); parser.add_argument("--save-baseline", type=Path)
+    parser.add_argument("--mode", choices=("fixture", "ext"), required=True); parser.add_argument("--warmup", type=int, default=5); parser.add_argument("--repeat", type=int, default=30); parser.add_argument("--output", type=Path, required=True); parser.add_argument("--save-baseline", type=Path); parser.add_argument("--formal-sampling", action="store_true")
     parser.add_argument("--provider"); parser.add_argument("--model"); parser.add_argument("--temperature", type=float, default=0.0); parser.add_argument("--judge-provider"); parser.add_argument("--judge-model"); parser.add_argument("--judge-temperature", type=float, default=0.0); parser.add_argument("--timeout-seconds", type=float, default=60.0); parser.add_argument("--retry-count", type=int, default=0); parser.add_argument("--ext-cases")
     args = parser.parse_args(argv)
     if args.mode == "ext":
         if not all((args.provider, args.model, args.judge_provider, args.judge_model)):
-            raise BusinessDatasetError("EXT CLI 必须提供 provider、model、judge-provider、judge-model")
-        from dotclaw.bootstrap._host_components import _build_llm
-        from dotclaw.config.settings import load_config
-        from dotclaw.runtime.adapters import LLMProxyAdapter
+            parser.error("EXT CLI 必须提供 provider、model、judge-provider、judge-model")
         proxy = _build_llm(load_config(), Path.cwd())
         dependencies = EvalDependencies(llm_port=LLMProxyAdapter(proxy))
         requested = tuple(item.strip() for item in args.ext_cases.split(",") if item.strip()) if args.ext_cases else None
-        asyncio.run(run_ext_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, dependencies=dependencies, judge=LLMProxyJudge(proxy, args.judge_model, args.timeout_seconds), provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model, judge_temperature=args.judge_temperature, timeout_seconds=args.timeout_seconds, retry_count=args.retry_count, ext_cases=requested))
+        asyncio.run(run_ext_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, dependencies=dependencies, judge=LLMProxyJudge(proxy, args.judge_model, args.timeout_seconds), provider=args.provider, model=args.model, temperature=args.temperature, judge_provider=args.judge_provider, judge_model=args.judge_model, judge_temperature=args.judge_temperature, timeout_seconds=args.timeout_seconds, retry_count=args.retry_count, ext_cases=requested, formal_sampling=args.formal_sampling))
         return 0
-    asyncio.run(run_fixture_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline))
+    asyncio.run(run_fixture_dataset(args.dataset_root, args.dataset, warmup=args.warmup, repeat=args.repeat, output=args.output, baseline=args.save_baseline, formal_sampling=args.formal_sampling))
     return 0
 
 

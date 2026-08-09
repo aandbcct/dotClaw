@@ -1,10 +1,12 @@
 """PR8 业务基线编排与工件测试。"""
 
 import json
+import shutil
+from pathlib import Path
 
 import pytest
 
-from benchmarks.business_baseline import BusinessDatasetError, load_business_documents, run_ext_dataset, run_fixture_dataset
+from benchmarks.business_baseline import BusinessDatasetError, load_business_documents, main, run_ext_dataset, run_fixture_dataset
 from dotclaw.eval.dataset import load_case
 from dotclaw.eval.environment import EvalDependencies
 from dotclaw.eval.reexecution import ReexecutionRunner
@@ -17,8 +19,9 @@ from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind
 class _ExtLLM:
     """覆盖六个冻结 EXT 任务的 LLM 替身，工具调用仍由 Fixture 执行。"""
 
-    def __init__(self) -> None:
+    def __init__(self, fail_evidence_brief: bool = False) -> None:
         self.calls: list[str] = []
+        self._fail_evidence_brief = fail_evidence_brief
 
     async def complete(
         self,
@@ -37,7 +40,7 @@ class _ExtLLM:
         if "请按已记录偏好" in text:
             return RunMessage("ext-preference-followup", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "简洁方案：先实施，再验证。")
         if "仅支持结论 sunny" in text:
-            content = "事实简报：sunny；未知项不作推断。"
+            content = "不符合冻结资料的输出。" if self._fail_evidence_brief else "事实简报：sunny；未知项不作推断。"
         elif "版本为 v1" in text:
             content = "存在冲突；未知当前版本；建议核验权威来源。"
         elif "缺少测试报告" in text:
@@ -71,6 +74,26 @@ def test_runtime_core_v2_has_frozen_task_shape() -> None:
     assert len(cases) == 8 and len(workflows) == 2
 
 
+def test_dataset_rejects_case_with_mismatched_business_identity(tmp_path: Path) -> None:
+    """数据集加载必须拒绝业务任务 ID 与可执行 Case ID 不一致的损坏文件。"""
+    source = Path("benchmarks/datasets/runtime_core_v2")
+    target = tmp_path / "runtime_core_v2"
+    shutil.copytree(source, target)
+    path = target / "cases" / "evidence_brief.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["task_id"] = "wrong-id"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(BusinessDatasetError, match="task_id 必须与可执行 case_id 一致"):
+        load_business_documents(tmp_path, "runtime_core_v2")
+
+
+def test_ext_cli_requires_provider_and_judge_conditions(tmp_path: Path) -> None:
+    """EXT CLI 缺少真实模型或 Judge 条件时必须以参数错误退出。"""
+    with pytest.raises(SystemExit) as error:
+        main(["--mode", "ext", "--output", str(tmp_path)])
+    assert error.value.code == 2
+
+
 @pytest.mark.asyncio
 async def test_all_standard_tasks_are_independent_executable_v2_cases() -> None:
     """八项标准任务必须直接消费各自的 v2 Case，而非映射回 v1 旧 Case。"""
@@ -93,6 +116,10 @@ async def test_fixture_run_writes_traceable_artifacts(tmp_path) -> None:
     assert (tmp_path / snapshot.samples_path).is_file()
     assert (tmp_path / f"{snapshot.snapshot_id}.json").is_file()
     assert (tmp_path / "business-config.json").is_file()
+    assert (tmp_path / "fixture-summary.md").is_file()
+    assert (tmp_path / "failure-attribution.md").is_file()
+    assert (tmp_path / "baseline" / snapshot.samples_path).is_file()
+    assert json.loads((tmp_path / "business-config.json").read_text(encoding="utf-8"))["formal_sampling"] == "false"
     assert len((tmp_path / snapshot.samples_path).read_text(encoding="utf-8").splitlines()) == 10
     assert json.loads((tmp_path / f"{snapshot.snapshot_id}.json").read_text(encoding="utf-8"))["dataset"] == "runtime_core_v2"
 
@@ -127,6 +154,8 @@ async def test_ext_run_uses_injected_llm_judges_once_and_writes_artifacts(tmp_pa
     assert "fake-model" in llm.calls
     assert (tmp_path / "ext-quality.md").is_file()
     assert (tmp_path / "business-config.json").is_file()
+    assert json.loads((tmp_path / "business-config.json").read_text(encoding="utf-8"))["formal_sampling"] == "false"
+    assert (tmp_path / "baseline" / snapshot.samples_path).is_file()
 
 
 @pytest.mark.asyncio
@@ -138,4 +167,30 @@ async def test_ext_run_rejects_subset_of_frozen_tasks(tmp_path) -> None:
             output=tmp_path, baseline=None, dependencies=EvalDependencies(llm_port=_ExtLLM()), judge=_PassingJudge(),
             provider="fake-provider", model="fake-model", temperature=0.0, judge_provider="fake-provider", judge_model="fake-judge",
             ext_cases=("evidence_brief",),
+        )
+
+
+@pytest.mark.asyncio
+async def test_ext_deterministic_failure_skips_judge_and_is_attributed(tmp_path) -> None:
+    """Fixture 或业务断言失败时不得调用 Judge，且必须留下唯一失败归因。"""
+    judge = _PassingJudge()
+    snapshot = await run_ext_dataset(
+        __import__("pathlib").Path("benchmarks/datasets"), "runtime_core_v2", warmup=0, repeat=1,
+        output=tmp_path, baseline=None, dependencies=EvalDependencies(llm_port=_ExtLLM(fail_evidence_brief=True)), judge=judge,
+        provider="fake-provider", model="fake-model", temperature=0.0, judge_provider="fake-provider", judge_model="fake-judge",
+    )
+    samples = [json.loads(line) for line in (tmp_path / snapshot.samples_path).read_text(encoding="utf-8").splitlines()]
+    failed = next(item for item in samples if item["case_id"] == "evidence_brief")
+    assert judge.calls == 5
+    assert failed["deterministic_passed"] is False and failed["judge_verdict"] is None
+    assert failed["failure_attribution"] == "assertion_failure"
+
+
+@pytest.mark.asyncio
+async def test_formal_sampling_requires_frozen_5x30_parameters(tmp_path) -> None:
+    """开发烟测不能借 formal 标记伪装为正式采样。"""
+    with pytest.raises(BusinessDatasetError, match="warmup=5、repeat=30"):
+        await run_fixture_dataset(
+            __import__("pathlib").Path("benchmarks/datasets"), "runtime_core_v2", warmup=0, repeat=1,
+            output=tmp_path, formal_sampling=True,
         )

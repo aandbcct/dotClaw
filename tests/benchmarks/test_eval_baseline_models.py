@@ -90,6 +90,32 @@ def test_sample_none_optional_fields_round_trip() -> None:
     assert restored.trace_source is None
 
 
+def test_business_optional_fields_round_trip_without_downgrading_formal_status() -> None:
+    """PR8 业务、Judge 与正式采样字段必须无损往返，不能退化为旧样本默认值。"""
+    sample = make_sample(
+        task_category="workspace",
+        task_kind="standard_case",
+        execution_mode="ext",
+        deterministic_passed=True,
+        failure_attribution=None,
+        llm_call_count=2,
+        tool_call_count=1,
+        judge_spec_version="1",
+        judge_verdict="pass",
+        judge_criteria={"delivery": "pass"},
+        provider="provider-x",
+        model="model-x",
+        temperature=0.0,
+        judge_provider="provider-x",
+        judge_model="judge-x",
+        judge_prompt_hash="hash-x",
+        dataset_version="2",
+        workflow_version="1",
+        formal_sampling=True,
+    )
+    assert BenchmarkSample.from_dict(sample.to_dict()) == sample
+
+
 # --------------------------------------------------------------------------- #
 # 汇总结构：往返与严格校验
 # --------------------------------------------------------------------------- #
