@@ -83,6 +83,8 @@ class LLMClient(ABC):
         messages: list[Message],
         tools: list[ToolDefinition] | None = None,
         stream: bool = True,
+        timeout_seconds: float | None = None,
+        retry_count: int | None = None,
     ) -> AsyncIterator[ChatChunk]:
         """
         发送对话请求，返回流式 chunk 迭代器。
@@ -95,6 +97,10 @@ class LLMClient(ABC):
             可用工具列表。None 表示纯文本对话。
         stream : bool
             是否流式返回。True = AsyncIterator[ChatChunk]；False = 等待完整回复再返回。
+        timeout_seconds : float | None
+            本次请求的超时上限；None 表示由具体客户端使用默认值。
+        retry_count : int | None
+            本次调用允许的额外重试次数；客户端实现可忽略该编排参数。
 
         Yields
         ------

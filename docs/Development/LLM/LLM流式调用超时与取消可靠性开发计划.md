@@ -1,6 +1,6 @@
 # LLM 流式调用超时与取消可靠性修复计划
 
-> 状态：待开发
+> 状态：已完成（2026-08-09）
 >
 > 建议分支：从 `master` 新建独立修复分支
 > 建议 PR：`修复 LLM 流式调用超时与取消可靠性`
@@ -71,3 +71,19 @@
 - 不运行真实 LLM 业务质量实验或任何正式采样。
 - 不生成、修改或校验业务基线、JSONL、快照、报告和简历量化数据。
 - 不处理 PR8 的实验进度、失败诊断或业务结果写入；这些由 PR8 的后续变更独立验证。
+
+## 8. 已实现边界与开发验证
+
+- `timeout_seconds`、`retry_count` 作为兼容性可选参数扩展至 LLM 客户端（模型客户端），由 `LLMProxy`（模型调用代理）在显式传入时透传；未传入时仍使用 Provider 既有总尝试次数。显式 `retry_count` 表示额外重试次数。
+- `OpenAICompatibleClient`（OpenAI 兼容客户端）以 60 秒的稳定默认请求预算创建 `httpx.Timeout`，连接、读取、写入与连接池共享该预算；首包和后续流空闲各使用调用预算的 50%。
+- SDK stream 在正常完成、异常、超时和协程取消时均通过 `finally` 尽力关闭；关闭异常只记录，不覆盖原始错误。
+- `LLMProxyAdapter`（运行时到模型代理的适配器）按 `run_id` 登记当前任务，`cancel(run_id)` 只取消该任务；取消会直达客户端关闭路径，不参与重试或候选降级。
+
+开发回归命令：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\llm tests\runtime_v2 -q
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m compileall -q src
+git diff --check
+```

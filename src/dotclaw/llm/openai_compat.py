@@ -13,10 +13,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
+import logging
 from abc import abstractmethod
-from typing import AsyncIterator, Iterator
+from typing import Any, AsyncIterator, Iterator
 
+import httpx
 from openai import AsyncOpenAI
 
 from .base import (
@@ -59,6 +63,11 @@ class OpenAICompatibleClient(LLMClient):
     - native：从 delta.reasoning_content 提取 reasoning，content 归为 response；
     - tags：仅解析 content，按标签切分 reasoning 与 response。
     """
+
+    # 首包与后续流空闲共享一次调用的时间预算，避免出现无界 SSE 等待。
+    _DEFAULT_TIMEOUT_SECONDS: float = 60.0
+    _FIRST_CHUNK_TIMEOUT_RATIO: float = 0.5
+    _STREAM_IDLE_TIMEOUT_RATIO: float = 0.5
 
     def __init__(self, policy: ReasoningPolicy | None = None) -> None:
         # Policy 为不可变策略，由 ModelRouter 从 ModelReasoningConfig 转换注入；
@@ -128,7 +137,12 @@ class OpenAICompatibleClient(LLMClient):
         messages: list[Message],
         tools: list[ToolDefinition] | None = None,
         stream: bool = True,
+        timeout_seconds: float | None = None,
+        retry_count: int | None = None,
     ) -> AsyncIterator[ChatChunk]:
+        """执行一次 OpenAI 兼容调用，并确保流在全部退出路径关闭。"""
+        del retry_count  # 重试由 LLMProxy 统一编排，客户端只消费本次请求的时间预算。
+        request_timeout: float = self._resolve_timeout_seconds(timeout_seconds)
         openai_messages = self._convert_messages(messages)
 
         openai_tools = None
@@ -146,45 +160,78 @@ class OpenAICompatibleClient(LLMClient):
             ]
 
         client = self._get_client()
-        params: dict = {
+        params: dict[str, Any] = {
             "model": self._get_model_id(),
             "messages": openai_messages,
             "stream": stream,
+            # OpenAI SDK 将该请求选项下传至 httpx，四类 HTTP timeout 使用同一调用预算。
+            "timeout": httpx.Timeout(request_timeout),
         }
         if stream:
             params["stream_options"] = {"include_usage": True}
         if openai_tools:
             params["tools"] = openai_tools
 
-        response = await client.chat.completions.create(**params)
+        response = await asyncio.wait_for(
+            client.chat.completions.create(**params), timeout=request_timeout
+        )
 
         if stream:
             # 请求级状态：每次 chat() 新建，调用结束即释放，并发互不串线。
             state = _StreamParseState()
+            stream_response = response
+            response = aiter(stream_response)
             parser: ReasoningStreamParser | None = (
                 ReasoningStreamParser(self._policy)
                 if self._policy.mode is ReasoningMode.TAGS
                 else None
             )
-            async for chunk in response:
-                # 从 usage chunk 提取 token 统计（stream_options 开启时才返回）
-                if getattr(chunk, "usage", None):
-                    state.input_tokens = chunk.usage.prompt_tokens or 0
-                    state.output_tokens = chunk.usage.completion_tokens or 0
-                for sub in self._parse_stream_chunk(chunk, state, parser):
-                    yield sub
-            # 标签模式 flush 剩余缓冲（不展示协议标签）
-            if parser is not None:
-                for delta in parser.flush():
-                    yield ChatChunk(text_deltas=(delta,))
-            # 统一 yield 最终的结束包（携带 token 用量与结束原因，作为平行字段）
-            yield ChatChunk(
-                finish_reason=state.finish_reason,
-                usage=TokenUsage(
-                    input_tokens=state.input_tokens,
-                    output_tokens=state.output_tokens,
-                ),
-            )
+            try:
+                # usage-only 空包不能解除首包等待；首个可交付 ChatChunk 才算首包到达。
+                async with asyncio.timeout(
+                    request_timeout * self._FIRST_CHUNK_TIMEOUT_RATIO
+                ):
+                    while True:
+                        chunk = await anext(response)
+                        emitted = False
+                        for sub in self._parse_response_chunk(chunk, state, parser):
+                            emitted = True
+                            yield sub
+                        if emitted:
+                            break
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            anext(response),
+                            timeout=request_timeout * self._STREAM_IDLE_TIMEOUT_RATIO,
+                        )
+                    except StopAsyncIteration:
+                        break
+                    for sub in self._parse_response_chunk(chunk, state, parser):
+                        yield sub
+                # 标签模式 flush 剩余缓冲（不展示协议标签）
+                if parser is not None:
+                    for delta in parser.flush():
+                        yield ChatChunk(text_deltas=(delta,))
+                # 统一 yield 最终的结束包（携带 token 用量与结束原因，作为平行字段）
+                yield ChatChunk(
+                    finish_reason=state.finish_reason,
+                    usage=TokenUsage(
+                        input_tokens=state.input_tokens,
+                        output_tokens=state.output_tokens,
+                    ),
+                )
+            except StopAsyncIteration:
+                # 空流也是合法完成，仍返回最终用量包以保持既有统一契约。
+                yield ChatChunk(
+                    finish_reason=state.finish_reason,
+                    usage=TokenUsage(
+                        input_tokens=state.input_tokens,
+                        output_tokens=state.output_tokens,
+                    ),
+                )
+            finally:
+                await self._close_stream(stream_response)
         else:
             choice = response.choices[0]
             message = choice.message
@@ -206,6 +253,38 @@ class OpenAICompatibleClient(LLMClient):
                 finish_reason="stop",
                 usage=TokenUsage(input_tokens=in_tok, output_tokens=out_tok),
             )
+
+    def _resolve_timeout_seconds(self, timeout_seconds: float | None) -> float:
+        """校验单次调用预算；未显式传入时采用客户端稳定默认值。"""
+        if timeout_seconds is None:
+            return self._DEFAULT_TIMEOUT_SECONDS
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds 必须大于 0")
+        return timeout_seconds
+
+    def _parse_response_chunk(
+        self,
+        chunk: Any,
+        state: _StreamParseState,
+        parser: ReasoningStreamParser | None,
+    ) -> Iterator[ChatChunk]:
+        """先记录 usage，再将原始 SDK chunk 转换为业务流包。"""
+        if getattr(chunk, "usage", None):
+            state.input_tokens = chunk.usage.prompt_tokens or 0
+            state.output_tokens = chunk.usage.completion_tokens or 0
+        yield from self._parse_stream_chunk(chunk, state, parser)
+
+    async def _close_stream(self, response: Any) -> None:
+        """尽力关闭 SDK stream，关闭失败仅记录且绝不掩盖原始异常。"""
+        close = getattr(response, "close", None)
+        if close is None:
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logging.getLogger("dotclaw.llm").warning("关闭 LLM SDK stream 失败", exc_info=True)
 
     # ---- 消息格式转换 ----
 

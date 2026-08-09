@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+
+import pytest
 
 from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind, TokenUsage, ToolCall as LegacyToolCall
 from dotclaw.runtime.adapters import LLMProxyAdapter
@@ -142,3 +145,39 @@ async def test_llm_proxy_adapter_reasoning_only_keeps_message_empty() -> None:
     assert [(event.kind.value, event.content) for event in collector.events] == [
         ("reasoning_delta", "思考中"),
     ]
+
+
+class BlockingProxy:
+    """按模型名阻塞调用，用于验证按 Run 标识取消。"""
+
+    def __init__(self) -> None:
+        self.started: asyncio.Queue[str] = asyncio.Queue()
+        self.release: dict[str, asyncio.Event] = {}
+
+    async def chat(self, messages, tools, model, stream) -> AsyncIterator[ChatChunk]:
+        release = self.release.setdefault(model, asyncio.Event())
+        await self.started.put(model)
+        await release.wait()
+        yield ChatChunk(finish_reason="stop", usage=TokenUsage(1, 1))
+
+
+async def test_llm_proxy_adapter_cancel_only_stops_target_run() -> None:
+    """取消一个 Run 必须中断其在途流，不影响另一个 Run，并在退出后清理登记。"""
+    proxy = BlockingProxy()
+    adapter = LLMProxyAdapter(proxy)
+    first_execution = _make_execution("run-cancel-1")
+    second_execution = _make_execution("run-cancel-2")
+    first_task = asyncio.create_task(adapter.complete(_make_context(), first_execution))
+    second_task = asyncio.create_task(adapter.complete(_make_context(), second_execution))
+
+    await proxy.started.get()
+    await proxy.started.get()
+    await adapter.cancel("run-cancel-1")
+
+    with pytest.raises(asyncio.CancelledError):
+        await first_task
+    assert not second_task.done()
+    await adapter.cancel("run-cancel-1")
+    proxy.release["model-x"].set()
+    await second_task
+    assert adapter._active_calls == {}

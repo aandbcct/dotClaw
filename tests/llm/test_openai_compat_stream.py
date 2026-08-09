@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from dotclaw.llm.base import ChatChunk, ChatTextDelta, Message, TextDeltaKind, ToolCall
@@ -533,6 +535,46 @@ async def test_proxy_visible_output_no_fallback():
     assert router.attempted == ["only"]
 
 
+class _RetryClient:
+    """记录调用条件并在首包阶段失败的替身。"""
+
+    def __init__(self) -> None:
+        self.options: list[tuple[float | None, int | None]] = []
+
+    async def chat(self, messages, tools=None, stream=True, timeout_seconds=None, retry_count=None):
+        self.options.append((timeout_seconds, retry_count))
+        raise RuntimeError("setup failed")
+        yield ChatChunk()
+
+
+class _RetryRouter(_SpyRouter):
+    """使用单一失败客户端，验证调用级重试覆盖默认配置。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.client = _RetryClient()
+
+    def get_client(self, model_name):
+        self.attempted.append(model_name)
+        return self.client
+
+
+async def test_proxy_passes_explicit_conditions_and_uses_extra_retry_count():
+    """调用条件必须传至客户端，retry_count 表示额外重试而非总尝试次数。"""
+    router = _RetryRouter()
+    proxy = LLMProxy(router)
+
+    with pytest.raises(RuntimeError):
+        async for _ in proxy.chat(
+            [Message(role="user", content="retry")],
+            timeout_seconds=0.25,
+            retry_count=2,
+        ):
+            pass
+
+    assert router.client.options == [(0.25, 2), (0.25, 2), (0.25, 2)]
+
+
 # ============================================================
 # 4. 非流式分支（stream=False）也必须按推理模式分离
 # ============================================================
@@ -569,3 +611,155 @@ async def test_native_mode_non_stream_reasoning_content():
     )
     results = await _collect_non_stream(client)
     assert _text_deltas(results) == [("reasoning", "我在思考"), ("response", "答案")]
+
+
+# ============================================================
+# 5. 请求超时与 SDK stream 释放
+# ============================================================
+
+class _ControlledResponse:
+    """可控制下一项到达时间且记录关闭次数的 SDK stream 替身。"""
+
+    def __init__(
+        self,
+        chunks,
+        wait_after_chunks: bool = False,
+        close_error: bool = False,
+        iteration_error: Exception | None = None,
+    ):
+        self._chunks = iter(chunks)
+        self._wait_after_chunks = wait_after_chunks
+        self._close_error = close_error
+        self._iteration_error = iteration_error
+        self._release = asyncio.Event()
+        self.close_count = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._chunks)
+        except StopIteration:
+            if self._wait_after_chunks:
+                await self._release.wait()
+            if self._iteration_error is not None:
+                raise self._iteration_error
+            raise StopAsyncIteration
+
+    async def close(self) -> None:
+        self.close_count += 1
+        if self._close_error:
+            raise RuntimeError("close failed")
+
+
+class _ObservedClient(OpenAICompatibleClient):
+    """记录 OpenAI 请求参数并返回可控 SDK stream 的测试客户端。"""
+
+    def __init__(self, response: _ControlledResponse):
+        super().__init__()
+        self.response = response
+        self.request_params = {}
+
+    def _get_api_key(self) -> str:
+        return "test"
+
+    def _get_base_url(self) -> str:
+        return "https://test/v1"
+
+    def _get_model_id(self) -> str:
+        return "test-model"
+
+    def _get_client(self):
+        owner = self
+
+        class F:
+            class chat:
+                class completions:
+                    @staticmethod
+                    async def create(**kwargs):
+                        owner.request_params = kwargs
+                        return owner.response
+
+        return F()
+
+
+async def test_explicit_timeout_reaches_sdk_and_normal_stream_is_closed():
+    """显式时间预算应传给 SDK 请求，并在正常结束后关闭流。"""
+    response = _ControlledResponse([_chunk(_delta(content="ok"))])
+    client = _ObservedClient(response)
+
+    results = await _collect(client)
+
+    assert _text_deltas(results) == [("response", "ok")]
+    assert response.close_count == 1
+    assert client.request_params["timeout"].connect == 60.0
+
+    response = _ControlledResponse([_chunk(_delta(content="ok"))])
+    client = _ObservedClient(response)
+    await _collect_explicit_timeout(client, 0.2)
+    assert client.request_params["timeout"].connect == 0.2
+
+
+async def _collect_explicit_timeout(client: OpenAICompatibleClient, timeout_seconds: float):
+    """消费指定调用预算下的完整测试流。"""
+    return [
+        chunk
+        async for chunk in client.chat(
+            [Message(role="user", content="hi")], timeout_seconds=timeout_seconds
+        )
+    ]
+
+
+async def test_first_chunk_timeout_closes_stream():
+    """首个有效包超时必须结束等待并关闭 SDK stream。"""
+    response = _ControlledResponse([], wait_after_chunks=True)
+    client = _ObservedClient(response)
+
+    with pytest.raises(TimeoutError):
+        await _collect_explicit_timeout(client, 0.02)
+
+    assert response.close_count == 1
+
+
+async def test_stream_idle_timeout_closes_stream():
+    """首包后 SSE 空闲超时也必须关闭 SDK stream。"""
+    response = _ControlledResponse([_chunk(_delta(content="first"))], wait_after_chunks=True)
+    client = _ObservedClient(response)
+    iterator = client.chat([Message(role="user", content="hi")], timeout_seconds=0.02)
+
+    first = await anext(iterator)
+    assert _text_deltas([first]) == [("response", "first")]
+    with pytest.raises(TimeoutError):
+        await anext(iterator)
+
+    assert response.close_count == 1
+
+
+async def test_cancelling_stream_closes_sdk_response():
+    """协程取消应经过 finally 关闭 SDK stream，而不是留下挂起连接。"""
+    response = _ControlledResponse([], wait_after_chunks=True)
+    client = _ObservedClient(response)
+    task = asyncio.create_task(_collect_explicit_timeout(client, 1.0))
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert response.close_count == 1
+
+
+async def test_stream_close_failure_does_not_mask_iteration_error():
+    """关闭失败只能记录，流迭代原始异常必须仍由调用方接收。"""
+    response = _ControlledResponse(
+        [_chunk(_delta(content="first"))],
+        close_error=True,
+        iteration_error=ValueError("stream broke"),
+    )
+    client = _ObservedClient(response)
+
+    with pytest.raises(ValueError, match="stream broke"):
+        await _collect_explicit_timeout(client, 0.2)
+
+    assert response.close_count == 1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 
@@ -23,6 +24,8 @@ class LLMProxyAdapter(LLMPort):
     def __init__(self, proxy: LLMProxy) -> None:
         """绑定既有 LLM 代理；输出端口改为每次 complete 的运行级参数。"""
         self._proxy: LLMProxy = proxy
+        self._active_calls: dict[str, asyncio.Task[object]] = {}
+        """按 Run 标识登记的在途 complete 任务，仅用于精准取消。"""
 
     async def complete(
         self,
@@ -35,6 +38,10 @@ class LLMProxyAdapter(LLMPort):
         顺序映射每个 ``ChatTextDelta``：reasoning 仅 emit 不聚合，response 既 emit
         又聚合进最终消息；工具、finish、usage 保持既有 Runtime 语义。
         """
+        current_task: asyncio.Task[object] | None = asyncio.current_task()
+        if current_task is None:
+            raise RuntimeError("LLMProxyAdapter.complete 必须在 asyncio 任务中调用")
+        self._active_calls[execution.run_id] = current_task
         messages: list[LegacyMessage] = [
             LegacyMessage(
                 role=message.role.value,
@@ -92,8 +99,14 @@ class LLMProxyAdapter(LLMPort):
                 if chunk.finish_reason is not None and chunk.usage is not None:
                     input_tokens = chunk.usage.input_tokens
                     output_tokens = chunk.usage.output_tokens
+        except asyncio.CancelledError:
+            # 保留取消语义给 Runtime；Proxy/客户端 finally 会关闭对应 HTTP 流。
+            raise
         except Exception as error:
             raise LLMUnavailableError("业务模型服务不可用") from error
+        finally:
+            if self._active_calls.get(execution.run_id) is current_task:
+                self._active_calls.pop(execution.run_id, None)
         return RunMessage(
             message_id=f"llm-{execution.run_id}",
             sequence=0,
@@ -109,7 +122,10 @@ class LLMProxyAdapter(LLMPort):
         )
 
     async def cancel(self, run_id: str) -> None:
-        """旧 LLMProxy 未公开取消句柄；保留尽力取消协议入口。"""
+        """仅取消目标 Run 的在途模型调用；重复或未知取消安全返回。"""
+        task: asyncio.Task[object] | None = self._active_calls.get(run_id)
+        if task is not None:
+            task.cancel()
 
 
 def _tool_call_from_legacy(call: LegacyToolCall) -> ToolCall:
