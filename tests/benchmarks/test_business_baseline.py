@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import benchmarks.business_baseline as business_baseline
-from benchmarks.business_baseline import BusinessDatasetError, load_business_documents, main, run_ext_dataset, run_ext_diagnostic, run_fixture_dataset
+from benchmarks.business_baseline import BusinessDatasetError, load_business_documents, load_judge_spec, main, run_ext_dataset, run_ext_diagnostic, run_fixture_dataset
 from dotclaw.eval.dataset import load_case
 from dotclaw.eval.environment import EvalDependencies
 from dotclaw.eval.reexecution import ReexecutionRunner
@@ -90,6 +90,22 @@ def test_dataset_rejects_case_with_mismatched_business_identity(tmp_path: Path) 
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(BusinessDatasetError, match="task_id 必须与可执行 case_id 一致"):
         load_business_documents(tmp_path, "runtime_core_v2")
+
+
+def test_evidence_brief_judge_spec_matches_frozen_case_facts() -> None:
+    """事实简报的 Judge 规范必须与 Case 的冻结资料和交付标记同口径。"""
+    root = Path("benchmarks/datasets")
+    case = json.loads((root / "runtime_core_v2/cases/evidence_brief.json").read_text(encoding="utf-8"))
+    spec = load_judge_spec(root, "runtime_core_v2", "evidence_brief")
+    context = case["context_fixtures"][0]["messages"][0]["content"]
+    allowed = "\n".join(spec.allowed_facts)
+    constraints = "\n".join(spec.required_constraints)
+    assert spec.version == "2"
+    assert all(token in context for token in ("资料 A", "sunny", "未知", "不得推断"))
+    assert all(token in allowed for token in ("资料 A", "sunny", "未知", "不得推断"))
+    assert all(marker in spec.expected_delivery or marker in constraints for marker in case["delivery_markers"])
+    assert "未知且不作推断" in spec.criteria["boundary"]
+    assert "不引入其他事实" in spec.criteria["facts"]
 
 
 def test_ext_cli_requires_provider_and_judge_conditions(tmp_path: Path) -> None:
