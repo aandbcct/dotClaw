@@ -319,6 +319,13 @@ class FixtureDelegationPort:
             return self._fixtures[self._cursor :]
         return tuple(item for item in self._fixtures if item.fixture_id not in self._consumed)
 
+    def submitted_fixture(self, child_run_id: str) -> DelegationFixture:
+        """返回已受理子 Run 的冻结事实，供隔离仓储建立父子关联。"""
+        fixture = self._submitted.get(child_run_id)
+        if fixture is None:
+            raise FixtureConfigurationError(f"子运行 {child_run_id} 未经过 fixture 受理")
+        return fixture
+
     async def submit(self, request: DelegationRequest) -> DelegationSubmission:
         """按模式匹配委派 Fixture 并返回冻结受理信息。"""
         fixture: DelegationFixture = (

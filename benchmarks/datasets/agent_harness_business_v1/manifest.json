@@ -1,0 +1,14 @@
+{
+  "dataset_id": "agent_harness_business_v1",
+  "version": "1",
+  "formal_repeat": 3,
+  "preflight_per_condition": 1,
+  "families": [
+    {"family": "evidence_research", "baseline": "single_pass_research", "instance_file": "evidence_research.json"},
+    {"family": "workspace_engineering", "baseline": "single_agent_workspace", "instance_file": "workspace_engineering.json"},
+    {"family": "tool_approval_workflow", "baseline": "direct_tool_without_resume", "instance_file": "tool_approval_workflow.json"},
+    {"family": "long_context_continuity", "baseline": "recent_window_only", "instance_file": "long_context_continuity.json"},
+    {"family": "multi_agent", "baseline": "single_agent_no_delegation", "instance_file": "multi_agent.json"},
+    {"family": "mixed_complex", "baseline": "primary_capability_removed", "instance_file": "mixed_complex.json"}
+  ]
+}

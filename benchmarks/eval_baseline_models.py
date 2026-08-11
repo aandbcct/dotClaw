@@ -250,6 +250,15 @@ def _optional_string_map(value: object, label: str) -> Mapping[str, str] | None:
     return {key: _require_str(item, f"{label}.{key}") for key, item in mapping.items()}
 
 
+def _optional_string_tuple(value: object, label: str) -> tuple[str, ...] | None:
+    """读取可选字符串序列；业务能力标签保持不可变。"""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise BenchmarkSchemaError(f"{label} 必须是非空字符串数组或 null")
+    return tuple(value)
+
+
 def _optional_int(value: object, label: str) -> int | None:
     """读取可选整数字段；缺失时为 None，存在时校验类型（布尔不算整数）。"""
     if value is None:
@@ -518,6 +527,16 @@ class BenchmarkSample:
     dataset_version: str | None = None
     workflow_version: str | None = None
 
+    # ---- PR8 Agent Harness 业务效果字段（旧业务样本缺失时均为 None） ----
+    task_family: str | None = None
+    instance_id: str | None = None
+    difficulty: str | None = None
+    execution_condition: str | None = None
+    baseline_for: str | None = None
+    capability_tags: tuple[str, ...] | None = None
+    task_success: bool | None = None
+    judge_criterion_dimensions: Mapping[str, str] | None = None
+
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
         result: dict[str, object] = {
@@ -696,6 +715,14 @@ class BenchmarkSample:
             "judge_prompt_hash": self.judge_prompt_hash,
             "dataset_version": self.dataset_version,
             "workflow_version": self.workflow_version,
+            "task_family": self.task_family,
+            "instance_id": self.instance_id,
+            "difficulty": self.difficulty,
+            "execution_condition": self.execution_condition,
+            "baseline_for": self.baseline_for,
+            "capability_tags": None if self.capability_tags is None else list(self.capability_tags),
+            "task_success": self.task_success,
+            "judge_criterion_dimensions": None if self.judge_criterion_dimensions is None else dict(self.judge_criterion_dimensions),
         }
         return result
 
@@ -893,6 +920,14 @@ class BenchmarkSample:
             judge_prompt_hash=_optional_str(data.get("judge_prompt_hash"), f"{label}.judge_prompt_hash"),
             dataset_version=_optional_str(data.get("dataset_version"), f"{label}.dataset_version"),
             workflow_version=_optional_str(data.get("workflow_version"), f"{label}.workflow_version"),
+            task_family=_optional_str(data.get("task_family"), f"{label}.task_family"),
+            instance_id=_optional_str(data.get("instance_id"), f"{label}.instance_id"),
+            difficulty=_optional_str(data.get("difficulty"), f"{label}.difficulty"),
+            execution_condition=_optional_str(data.get("execution_condition"), f"{label}.execution_condition"),
+            baseline_for=_optional_str(data.get("baseline_for"), f"{label}.baseline_for"),
+            capability_tags=_optional_string_tuple(data.get("capability_tags"), f"{label}.capability_tags"),
+            task_success=_optional_bool(data.get("task_success"), f"{label}.task_success"),
+            judge_criterion_dimensions=_optional_string_map(data.get("judge_criterion_dimensions"), f"{label}.judge_criterion_dimensions"),
         )
 
 
