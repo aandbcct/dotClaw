@@ -429,13 +429,22 @@ class FixtureContextPort:
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """返回下一次冻结的上下文；超出记录即判定为额外调用。"""
         if self._cursor >= len(self._fixtures):
-            raise FixtureConfigurationError(
-                f"第 {self._cursor + 1} 次上下文构建没有对应 fixture（共 {len(self._fixtures)} 条）"
+            if not self._fixtures or not self._fixtures[-1].repeat_last:
+                raise FixtureConfigurationError(
+                    f"第 {self._cursor + 1} 次上下文构建没有对应 fixture（共 {len(self._fixtures)} 条）"
+                )
+            fixture = self._fixtures[-1]
+        else:
+            fixture = self._fixtures[self._cursor]
+            self._cursor += 1
+        messages = fixture.messages
+        if fixture.include_run_messages:
+            frozen_ids = {message.message_id for message in fixture.messages}
+            messages = fixture.messages + tuple(
+                message for message in execution.run_messages if message.message_id not in frozen_ids
             )
-        fixture: ContextFixture = self._fixtures[self._cursor]
-        self._cursor += 1
         return ContextBundle(
-            messages=fixture.messages,
+            messages=messages,
             tools=fixture.tools,
             metadata=ContextMetadata(estimated_tokens=fixture.estimated_tokens),
         )

@@ -115,6 +115,10 @@ def _build_case(instance: HarnessTaskInstance, condition: ExecutionCondition, mo
         "constraints": instance.required_constraints,
         "execution_condition": condition.value,
         "available_operations": [{"name": item.name, "arguments": item.arguments} for item in actions],
+        "operation_protocol": (
+            "每个 available_operations 条目最多调用一次；收到对应工具或委派结果后视为已完成，"
+            "不得重复调用；全部必要操作完成后必须直接给出最终用户交付。"
+        ),
     }
     system_message = RunMessage(
         message_id=f"system-{instance.instance_id}",
@@ -124,16 +128,15 @@ def _build_case(instance: HarnessTaskInstance, condition: ExecutionCondition, mo
         content=json.dumps(prompt_payload, ensure_ascii=False, sort_keys=True),
     )
     tools = tuple(_tool_definition(item) for item in actions)
-    terminal_without_followup = any(not item.approved or item.failed for item in actions)
-    context_count = len(actions) if terminal_without_followup else len(actions) + 1
-    contexts = tuple(
+    contexts = (
         ContextFixture(
-            fixture_id=f"context-{instance.instance_id}-{condition.value}-{index}",
+            fixture_id=f"context-{instance.instance_id}-{condition.value}",
             messages=(system_message,),
             tools=tools,
             estimated_tokens=max(1, len(system_message.content) // 4),
-        )
-        for index in range(context_count)
+            include_run_messages=True,
+            repeat_last=True,
+        ),
     )
     tool_fixtures = tuple(_tool_fixture(instance, index, item) for index, item in enumerate(actions) if item.name != "delegate")
     approval_fixtures = tuple(

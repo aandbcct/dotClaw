@@ -19,6 +19,7 @@ class _PlanFollowingLLM:
 
     def __init__(self) -> None:
         self._step_by_run: dict[str, int] = {}
+        self.seen_roles: list[tuple[MessageRole, ...]] = []
 
     async def complete(
         self,
@@ -28,6 +29,7 @@ class _PlanFollowingLLM:
     ) -> RunMessage:
         """从 system 数据读取动作，不接触外部依赖。"""
         del output_port
+        self.seen_roles.append(tuple(message.role for message in context.messages))
         payload = json.loads(context.messages[0].content)
         step = self._step_by_run.get(execution.run_id, 0)
         actions = payload["available_operations"]
@@ -55,7 +57,8 @@ async def test_evidence_full_executes_all_source_tools() -> None:
     """研究 Full 条件必须真实经过 Runtime 工具循环并消费全部来源。"""
     dataset = load_harness_dataset(Path("benchmarks/datasets"))
     instance = next(item for item in dataset.instances if item.instance_id == "evidence-01-vendor-decision")
-    executor = EvalHarnessTaskExecutor(EvalDependencies(llm_port=_PlanFollowingLLM()))
+    llm = _PlanFollowingLLM()
+    executor = EvalHarnessTaskExecutor(EvalDependencies(llm_port=llm))
 
     result = await executor.execute(instance, ExecutionCondition.FULL, attempt=0, preflight=False)
 
@@ -64,6 +67,7 @@ async def test_evidence_full_executes_all_source_tools() -> None:
     assert result.tool_call_count == 3
     assert "research_sources_consumed" in result.observed_checks
     assert result.candidate
+    assert any(MessageRole.TOOL in roles for roles in llm.seen_roles[1:])
 
 
 def test_candidate_prompt_does_not_expose_expected_delivery_or_tool_outputs() -> None:
@@ -78,6 +82,7 @@ def test_candidate_prompt_does_not_expose_expected_delivery_or_tool_outputs() ->
     assert "planned_actions" not in payload
     assert payload["facts"] == []
     assert len(payload["available_operations"]) == len(instance.allowed_facts)
+    assert "不得重复调用" in payload["operation_protocol"]
     baseline = _build_case(instance, ExecutionCondition.SINGLE_PASS_RESEARCH, "model")
     assert case.policy_fixture.max_iterations == baseline.policy_fixture.max_iterations
 

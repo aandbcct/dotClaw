@@ -124,6 +124,16 @@ def _require_bool(data: Mapping[str, JSONValue], key: str, label: str) -> bool:
     return value
 
 
+def _optional_bool(data: Mapping[str, JSONValue], key: str, label: str, default: bool = False) -> bool:
+    """读取可缺省布尔字段，并保持旧 Case 的兼容默认值。"""
+    value: JSONValue | None = data.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise EvalCaseValidationError(f"{label}.{key} 必须是布尔值")
+    return value
+
+
 def _require_list(data: Mapping[str, JSONValue], key: str, label: str) -> Sequence[JSONValue]:
     """读取可缺省的数组字段。"""
     value: JSONValue | None = data.get(key)
@@ -288,6 +298,8 @@ class ContextFixture:
     messages: tuple[RunMessage, ...] = ()
     tools: tuple[ToolDefinition, ...] = ()
     estimated_tokens: int = 1
+    include_run_messages: bool = False
+    repeat_last: bool = False
 
     def __post_init__(self) -> None:
         """校验 Fixture 标识非空。"""
@@ -301,6 +313,8 @@ class ContextFixture:
             "messages": [message.to_dict() for message in self.messages],
             "tools": [tool.to_dict() for tool in self.tools],
             "estimated_tokens": self.estimated_tokens,
+            "include_run_messages": self.include_run_messages,
+            "repeat_last": self.repeat_last,
         }
 
     @classmethod
@@ -322,6 +336,8 @@ class ContextFixture:
                 for index, item in enumerate(_require_list(data, "tools", label))
             ),
             estimated_tokens=_require_int(data, "estimated_tokens", label, default=1),
+            include_run_messages=_optional_bool(data, "include_run_messages", label),
+            repeat_last=_optional_bool(data, "repeat_last", label),
         )
 
 
