@@ -60,8 +60,8 @@ providers:
 models:
   qwen3.7-max:
     provider: qwen
-    model_id: qwen3.7-max-2026-05-20
-    context_window: 131072
+    model_id: qwen3.7-max-2026-05-17
+    context_window: 991000
     tokenizer_encoding: cl100k_base
     capabilities: [chat, function_calling]
     status: active
