@@ -34,6 +34,12 @@ SUITE_NAME: str = "runtime_core"
 SUITE_CONCURRENCY: str = "reliability_concurrency"
 """PR3 实验族标识：并发隔离与调度收益套件。"""
 
+SUITE_RECOVERY: str = "reliability_recovery_v1"
+"""PR4 实验族标识：操作节点故障注入与冷重建恢复套件。"""
+
+SUITE_DELEGATION: str = "reliability_delegation_v1"
+"""PR7 实验族标识：单进程父子 Run 委派可靠性套件。"""
+
 SCENARIO_TOOL_SUCCESS: str = "tool_success"
 """PR2 统一业务场景标识：单工具成功（工具调用 → 固定输出 → 最终回答）。"""
 
@@ -68,6 +74,35 @@ class ConcurrencyScenario(StrEnum):
 
     CANCEL_NON_BLOCKING = "cancel_non_blocking"
     """取消不阻塞：长 Run 持锁期间取消，验证送达/生效时延与锁释放。"""
+
+
+class RecoveryFaultScenario(StrEnum):
+    """PR4 固定恢复故障场景标识。"""
+
+    LLM_BEFORE_SEND_FAILURE = "llm_before_send_failure"
+    LLM_RESPONSE_UNKNOWN = "llm_response_unknown"
+    TOOL_BEFORE_EFFECT = "tool_before_effect"
+    TOOL_AFTER_EFFECT = "tool_after_effect"
+    APPROVAL_COLD_REBUILD = "approval_cold_rebuild"
+    SUCCESS_COMMIT = "success_commit"
+    DELEGATION_COLD_REBUILD_BOUNDARY = "delegation_cold_rebuild_boundary"
+
+
+class ExternalEffectStatus(StrEnum):
+    """记录型外部副作用的可观察结论，不表达跨崩溃 exactly-once 承诺。"""
+
+    NOT_OCCURRED = "not_occurred"
+    ONCE = "once"
+    DUPLICATE_OBSERVED = "duplicate_observed"
+    UNKNOWN = "unknown"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class CapabilityStatus(StrEnum):
+    """场景是否属于正式恢复能力；边界审计不得计入成功率。"""
+
+    FORMAL = "formal"
+    BOUNDARY = "boundary"
 
 
 def compute_fixture_fingerprint(case) -> str:
@@ -207,6 +242,14 @@ def _optional_json_map(value: object, label: str) -> Mapping[str, object] | None
     return _require_json_map(value, label)
 
 
+def _optional_string_map(value: object, label: str) -> Mapping[str, str] | None:
+    """读取可空字符串映射；Slot 哈希不得混入数值或嵌套正文。"""
+    if value is None:
+        return None
+    mapping: Mapping[str, object] = _require_json_map(value, label)
+    return {key: _require_str(item, f"{label}.{key}") for key, item in mapping.items()}
+
+
 def _optional_int(value: object, label: str) -> int | None:
     """读取可选整数字段；缺失时为 None，存在时校验类型（布尔不算整数）。"""
     if value is None:
@@ -338,6 +381,123 @@ class BenchmarkSample:
     evidence_summary: Mapping[str, object] | None = None
     """运行事实引用与内容摘要（不保存 Prompt、密钥或完整输出正文）。"""
 
+    # ---- PR4 操作节点恢复观察字段（旧样本缺失时均为 None） ----
+    fault_scenario: RecoveryFaultScenario | None = None
+    fault_point: str | None = None
+    fault_mechanism: str | None = None
+    restart_kind: str | None = None
+    rebuild_count: int | None = None
+    checkpoint_action_before: str | None = None
+    checkpoint_action_resumed: str | None = None
+    same_run_id: bool | None = None
+    same_context_version: bool | None = None
+    control_recovery_pass: bool | None = None
+    tool_result_count: int | None = None
+    state_transition_count: int | None = None
+    completed_event_count: int | None = None
+    conversation_projection_count: int | None = None
+    checkpoint_cleaned: bool | None = None
+    success_intent_cleaned: bool | None = None
+    internal_facts_pass: bool | None = None
+    llm_request_sent_count: int | None = None
+    tool_effect_count: int | None = None
+    external_duplicate_count: int | None = None
+    external_effect_status: ExternalEffectStatus | None = None
+    fault_to_restart_ms: float | None = None
+    restart_to_terminal_ms: float | None = None
+    recovery_wall_duration_ms: float | None = None
+    capability_status: CapabilityStatus | None = None
+    capability_reason: str | None = None
+
+    # ---- PR5 Capability 安全链观察字段（旧样本缺失时均为 None） ----
+    matrix_case_id: str | None = None
+    expected_decision: str | None = None
+    actual_decision: str | None = None
+    actual_error_code: str | None = None
+    decision_pass: bool | None = None
+    validation_entered: int | None = None
+    broker_entered: int | None = None
+    policy_entered: int | None = None
+    approval_entered: int | None = None
+    handler_entered: int | None = None
+    resource_kind: str | None = None
+    policy_profile: str | None = None
+    matched_rule: str | None = None
+    resolved_path_match: bool | None = None
+    network_service: str | None = None
+    network_host: str | None = None
+    mcp_server: str | None = None
+    journal_summary_redacted: bool | None = None
+    approval_summary_redacted: bool | None = None
+    sensitive_leak_count: int | None = None
+    agent_id: str | None = None
+    agent_rule_source: str | None = None
+    agent_policy_isolated: bool | None = None
+    measurement_mode: str | None = None
+    pre_handler_duration_ms: float | None = None
+
+    # ---- PR6 ContextVersion / 历史压缩观察字段（旧样本缺失时均为 None） ----
+    content_hash: str | None = None
+    tool_schema_hash: str | None = None
+    normalized_slot_hashes: Mapping[str, str] | None = None
+    slot_order_match: bool | None = None
+    message_sequence_match: bool | None = None
+    replay_mode: str | None = None
+    context_version_count_delta: int | None = None
+    context_drift_count: int | None = None
+    provider_reload_count: int | None = None
+    provider_load_count: int | None = None
+    cache_hit_count: int | None = None
+    recovery_stage_duration_ms: float | None = None
+    tokens_before: int | None = None
+    tokens_after: int | None = None
+    token_reduction_ratio: float | None = None
+    budget_passed: bool | None = None
+    retained_conversation_count: int | None = None
+    covered_through_id: str | None = None
+    compression_duration_ms: float | None = None
+    tool_pair_break_count: int | None = None
+    session_projection_count: int | None = None
+    session_pollution_count: int | None = None
+    run_outcome: str | None = None
+    owner_case_id: str | None = None
+    global_leak_count: int | None = None
+    agent_leak_count: int | None = None
+    session_leak_count: int | None = None
+    run_leak_count: int | None = None
+    conversation_count_delta: int | None = None
+    run_message_count_delta: int | None = None
+    run_event_count_delta: int | None = None
+
+    # ---- PR7 委派链路与正式证据观察字段（旧样本缺失时均为 None） ----
+    parent_run_id: str | None = None
+    child_run_id: str | None = None
+    task_id: str | None = None
+    parent_session_id: str | None = None
+    child_session_id: str | None = None
+    target_agent_id: str | None = None
+    chain_request_id: str | None = None
+    child_outcome: str | None = None
+    parent_outcome: str | None = None
+    delegation_submit_count: int | None = None
+    result_backfill_count: int | None = None
+    delegation_submitted_event_count: int | None = None
+    delegation_completed_event_count: int | None = None
+    cross_chain_message_count: int | None = None
+    cross_chain_context_count: int | None = None
+    cross_chain_tool_count: int | None = None
+    cross_chain_stream_count: int | None = None
+    misdelivery_count: int | None = None
+    parent_cancel_effect_ms: float | None = None
+    child_cancel_effect_ms: float | None = None
+    followup_started: bool | None = None
+    suspend_to_backfill_ms: float | None = None
+    parent_end_to_end_ms: float | None = None
+    fixture_version: str | None = None
+    environment: Mapping[str, str] | None = None
+    raw_sample_path: str | None = None
+    formal_sampling: bool | None = None
+
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
         result: dict[str, object] = {
@@ -389,6 +549,115 @@ class BenchmarkSample:
             "lock_released": self.lock_released,
             "followup_completed": self.followup_completed,
             "evidence_summary": None if self.evidence_summary is None else dict(self.evidence_summary),
+            "fault_scenario": None if self.fault_scenario is None else self.fault_scenario.value,
+            "fault_point": self.fault_point,
+            "fault_mechanism": self.fault_mechanism,
+            "restart_kind": self.restart_kind,
+            "rebuild_count": self.rebuild_count,
+            "checkpoint_action_before": self.checkpoint_action_before,
+            "checkpoint_action_resumed": self.checkpoint_action_resumed,
+            "same_run_id": self.same_run_id,
+            "same_context_version": self.same_context_version,
+            "control_recovery_pass": self.control_recovery_pass,
+            "tool_result_count": self.tool_result_count,
+            "state_transition_count": self.state_transition_count,
+            "completed_event_count": self.completed_event_count,
+            "conversation_projection_count": self.conversation_projection_count,
+            "checkpoint_cleaned": self.checkpoint_cleaned,
+            "success_intent_cleaned": self.success_intent_cleaned,
+            "internal_facts_pass": self.internal_facts_pass,
+            "llm_request_sent_count": self.llm_request_sent_count,
+            "tool_effect_count": self.tool_effect_count,
+            "external_duplicate_count": self.external_duplicate_count,
+            "external_effect_status": None if self.external_effect_status is None else self.external_effect_status.value,
+            "fault_to_restart_ms": self.fault_to_restart_ms,
+            "restart_to_terminal_ms": self.restart_to_terminal_ms,
+            "recovery_wall_duration_ms": self.recovery_wall_duration_ms,
+            "capability_status": None if self.capability_status is None else self.capability_status.value,
+            "capability_reason": self.capability_reason,
+            "matrix_case_id": self.matrix_case_id,
+            "expected_decision": self.expected_decision,
+            "actual_decision": self.actual_decision,
+            "actual_error_code": self.actual_error_code,
+            "decision_pass": self.decision_pass,
+            "validation_entered": self.validation_entered,
+            "broker_entered": self.broker_entered,
+            "policy_entered": self.policy_entered,
+            "approval_entered": self.approval_entered,
+            "handler_entered": self.handler_entered,
+            "resource_kind": self.resource_kind,
+            "policy_profile": self.policy_profile,
+            "matched_rule": self.matched_rule,
+            "resolved_path_match": self.resolved_path_match,
+            "network_service": self.network_service,
+            "network_host": self.network_host,
+            "mcp_server": self.mcp_server,
+            "journal_summary_redacted": self.journal_summary_redacted,
+            "approval_summary_redacted": self.approval_summary_redacted,
+            "sensitive_leak_count": self.sensitive_leak_count,
+            "agent_id": self.agent_id,
+            "agent_rule_source": self.agent_rule_source,
+            "agent_policy_isolated": self.agent_policy_isolated,
+            "measurement_mode": self.measurement_mode,
+            "pre_handler_duration_ms": self.pre_handler_duration_ms,
+            "content_hash": self.content_hash,
+            "tool_schema_hash": self.tool_schema_hash,
+            "normalized_slot_hashes": None if self.normalized_slot_hashes is None else dict(self.normalized_slot_hashes),
+            "slot_order_match": self.slot_order_match,
+            "message_sequence_match": self.message_sequence_match,
+            "replay_mode": self.replay_mode,
+            "context_version_count_delta": self.context_version_count_delta,
+            "context_drift_count": self.context_drift_count,
+            "provider_reload_count": self.provider_reload_count,
+            "provider_load_count": self.provider_load_count,
+            "cache_hit_count": self.cache_hit_count,
+            "recovery_stage_duration_ms": self.recovery_stage_duration_ms,
+            "tokens_before": self.tokens_before,
+            "tokens_after": self.tokens_after,
+            "token_reduction_ratio": self.token_reduction_ratio,
+            "budget_passed": self.budget_passed,
+            "retained_conversation_count": self.retained_conversation_count,
+            "covered_through_id": self.covered_through_id,
+            "compression_duration_ms": self.compression_duration_ms,
+            "tool_pair_break_count": self.tool_pair_break_count,
+            "session_projection_count": self.session_projection_count,
+            "session_pollution_count": self.session_pollution_count,
+            "run_outcome": self.run_outcome,
+            "owner_case_id": self.owner_case_id,
+            "global_leak_count": self.global_leak_count,
+            "agent_leak_count": self.agent_leak_count,
+            "session_leak_count": self.session_leak_count,
+            "run_leak_count": self.run_leak_count,
+            "conversation_count_delta": self.conversation_count_delta,
+            "run_message_count_delta": self.run_message_count_delta,
+            "run_event_count_delta": self.run_event_count_delta,
+            "parent_run_id": self.parent_run_id,
+            "child_run_id": self.child_run_id,
+            "task_id": self.task_id,
+            "parent_session_id": self.parent_session_id,
+            "child_session_id": self.child_session_id,
+            "target_agent_id": self.target_agent_id,
+            "chain_request_id": self.chain_request_id,
+            "child_outcome": self.child_outcome,
+            "parent_outcome": self.parent_outcome,
+            "delegation_submit_count": self.delegation_submit_count,
+            "result_backfill_count": self.result_backfill_count,
+            "delegation_submitted_event_count": self.delegation_submitted_event_count,
+            "delegation_completed_event_count": self.delegation_completed_event_count,
+            "cross_chain_message_count": self.cross_chain_message_count,
+            "cross_chain_context_count": self.cross_chain_context_count,
+            "cross_chain_tool_count": self.cross_chain_tool_count,
+            "cross_chain_stream_count": self.cross_chain_stream_count,
+            "misdelivery_count": self.misdelivery_count,
+            "parent_cancel_effect_ms": self.parent_cancel_effect_ms,
+            "child_cancel_effect_ms": self.child_cancel_effect_ms,
+            "followup_started": self.followup_started,
+            "suspend_to_backfill_ms": self.suspend_to_backfill_ms,
+            "parent_end_to_end_ms": self.parent_end_to_end_ms,
+            "fixture_version": self.fixture_version,
+            "environment": None if self.environment is None else dict(self.environment),
+            "raw_sample_path": self.raw_sample_path,
+            "formal_sampling": self.formal_sampling,
         }
         return result
 
@@ -459,6 +728,115 @@ class BenchmarkSample:
             lock_released=_optional_bool(data.get("lock_released"), f"{label}.lock_released"),
             followup_completed=_optional_bool(data.get("followup_completed"), f"{label}.followup_completed"),
             evidence_summary=_optional_json_map(data.get("evidence_summary"), f"{label}.evidence_summary"),
+            fault_scenario=_optional_enum(RecoveryFaultScenario, data.get("fault_scenario"), f"{label}.fault_scenario", None),
+            fault_point=_optional_str(data.get("fault_point"), f"{label}.fault_point"),
+            fault_mechanism=_optional_str(data.get("fault_mechanism"), f"{label}.fault_mechanism"),
+            restart_kind=_optional_str(data.get("restart_kind"), f"{label}.restart_kind"),
+            rebuild_count=_optional_int(data.get("rebuild_count"), f"{label}.rebuild_count"),
+            checkpoint_action_before=_optional_str(data.get("checkpoint_action_before"), f"{label}.checkpoint_action_before"),
+            checkpoint_action_resumed=_optional_str(data.get("checkpoint_action_resumed"), f"{label}.checkpoint_action_resumed"),
+            same_run_id=_optional_bool(data.get("same_run_id"), f"{label}.same_run_id"),
+            same_context_version=_optional_bool(data.get("same_context_version"), f"{label}.same_context_version"),
+            control_recovery_pass=_optional_bool(data.get("control_recovery_pass"), f"{label}.control_recovery_pass"),
+            tool_result_count=_optional_int(data.get("tool_result_count"), f"{label}.tool_result_count"),
+            state_transition_count=_optional_int(data.get("state_transition_count"), f"{label}.state_transition_count"),
+            completed_event_count=_optional_int(data.get("completed_event_count"), f"{label}.completed_event_count"),
+            conversation_projection_count=_optional_int(data.get("conversation_projection_count"), f"{label}.conversation_projection_count"),
+            checkpoint_cleaned=_optional_bool(data.get("checkpoint_cleaned"), f"{label}.checkpoint_cleaned"),
+            success_intent_cleaned=_optional_bool(data.get("success_intent_cleaned"), f"{label}.success_intent_cleaned"),
+            internal_facts_pass=_optional_bool(data.get("internal_facts_pass"), f"{label}.internal_facts_pass"),
+            llm_request_sent_count=_optional_int(data.get("llm_request_sent_count"), f"{label}.llm_request_sent_count"),
+            tool_effect_count=_optional_int(data.get("tool_effect_count"), f"{label}.tool_effect_count"),
+            external_duplicate_count=_optional_int(data.get("external_duplicate_count"), f"{label}.external_duplicate_count"),
+            external_effect_status=_optional_enum(ExternalEffectStatus, data.get("external_effect_status"), f"{label}.external_effect_status", None),
+            fault_to_restart_ms=_optional_float(data.get("fault_to_restart_ms"), f"{label}.fault_to_restart_ms"),
+            restart_to_terminal_ms=_optional_float(data.get("restart_to_terminal_ms"), f"{label}.restart_to_terminal_ms"),
+            recovery_wall_duration_ms=_optional_float(data.get("recovery_wall_duration_ms"), f"{label}.recovery_wall_duration_ms"),
+            capability_status=_optional_enum(CapabilityStatus, data.get("capability_status"), f"{label}.capability_status", None),
+            capability_reason=_optional_str(data.get("capability_reason"), f"{label}.capability_reason"),
+            matrix_case_id=_optional_str(data.get("matrix_case_id"), f"{label}.matrix_case_id"),
+            expected_decision=_optional_str(data.get("expected_decision"), f"{label}.expected_decision"),
+            actual_decision=_optional_str(data.get("actual_decision"), f"{label}.actual_decision"),
+            actual_error_code=_optional_str(data.get("actual_error_code"), f"{label}.actual_error_code"),
+            decision_pass=_optional_bool(data.get("decision_pass"), f"{label}.decision_pass"),
+            validation_entered=_optional_int(data.get("validation_entered"), f"{label}.validation_entered"),
+            broker_entered=_optional_int(data.get("broker_entered"), f"{label}.broker_entered"),
+            policy_entered=_optional_int(data.get("policy_entered"), f"{label}.policy_entered"),
+            approval_entered=_optional_int(data.get("approval_entered"), f"{label}.approval_entered"),
+            handler_entered=_optional_int(data.get("handler_entered"), f"{label}.handler_entered"),
+            resource_kind=_optional_str(data.get("resource_kind"), f"{label}.resource_kind"),
+            policy_profile=_optional_str(data.get("policy_profile"), f"{label}.policy_profile"),
+            matched_rule=_optional_str(data.get("matched_rule"), f"{label}.matched_rule"),
+            resolved_path_match=_optional_bool(data.get("resolved_path_match"), f"{label}.resolved_path_match"),
+            network_service=_optional_str(data.get("network_service"), f"{label}.network_service"),
+            network_host=_optional_str(data.get("network_host"), f"{label}.network_host"),
+            mcp_server=_optional_str(data.get("mcp_server"), f"{label}.mcp_server"),
+            journal_summary_redacted=_optional_bool(data.get("journal_summary_redacted"), f"{label}.journal_summary_redacted"),
+            approval_summary_redacted=_optional_bool(data.get("approval_summary_redacted"), f"{label}.approval_summary_redacted"),
+            sensitive_leak_count=_optional_int(data.get("sensitive_leak_count"), f"{label}.sensitive_leak_count"),
+            agent_id=_optional_str(data.get("agent_id"), f"{label}.agent_id"),
+            agent_rule_source=_optional_str(data.get("agent_rule_source"), f"{label}.agent_rule_source"),
+            agent_policy_isolated=_optional_bool(data.get("agent_policy_isolated"), f"{label}.agent_policy_isolated"),
+            measurement_mode=_optional_str(data.get("measurement_mode"), f"{label}.measurement_mode"),
+            pre_handler_duration_ms=_optional_float(data.get("pre_handler_duration_ms"), f"{label}.pre_handler_duration_ms"),
+            content_hash=_optional_str(data.get("content_hash"), f"{label}.content_hash"),
+            tool_schema_hash=_optional_str(data.get("tool_schema_hash"), f"{label}.tool_schema_hash"),
+            normalized_slot_hashes=_optional_string_map(data.get("normalized_slot_hashes"), f"{label}.normalized_slot_hashes"),
+            slot_order_match=_optional_bool(data.get("slot_order_match"), f"{label}.slot_order_match"),
+            message_sequence_match=_optional_bool(data.get("message_sequence_match"), f"{label}.message_sequence_match"),
+            replay_mode=_optional_str(data.get("replay_mode"), f"{label}.replay_mode"),
+            context_version_count_delta=_optional_int(data.get("context_version_count_delta"), f"{label}.context_version_count_delta"),
+            context_drift_count=_optional_int(data.get("context_drift_count"), f"{label}.context_drift_count"),
+            provider_reload_count=_optional_int(data.get("provider_reload_count"), f"{label}.provider_reload_count"),
+            provider_load_count=_optional_int(data.get("provider_load_count"), f"{label}.provider_load_count"),
+            cache_hit_count=_optional_int(data.get("cache_hit_count"), f"{label}.cache_hit_count"),
+            recovery_stage_duration_ms=_optional_float(data.get("recovery_stage_duration_ms"), f"{label}.recovery_stage_duration_ms"),
+            tokens_before=_optional_int(data.get("tokens_before"), f"{label}.tokens_before"),
+            tokens_after=_optional_int(data.get("tokens_after"), f"{label}.tokens_after"),
+            token_reduction_ratio=_optional_float(data.get("token_reduction_ratio"), f"{label}.token_reduction_ratio"),
+            budget_passed=_optional_bool(data.get("budget_passed"), f"{label}.budget_passed"),
+            retained_conversation_count=_optional_int(data.get("retained_conversation_count"), f"{label}.retained_conversation_count"),
+            covered_through_id=_optional_str(data.get("covered_through_id"), f"{label}.covered_through_id"),
+            compression_duration_ms=_optional_float(data.get("compression_duration_ms"), f"{label}.compression_duration_ms"),
+            tool_pair_break_count=_optional_int(data.get("tool_pair_break_count"), f"{label}.tool_pair_break_count"),
+            session_projection_count=_optional_int(data.get("session_projection_count"), f"{label}.session_projection_count"),
+            session_pollution_count=_optional_int(data.get("session_pollution_count"), f"{label}.session_pollution_count"),
+            run_outcome=_optional_str(data.get("run_outcome"), f"{label}.run_outcome"),
+            owner_case_id=_optional_str(data.get("owner_case_id"), f"{label}.owner_case_id"),
+            global_leak_count=_optional_int(data.get("global_leak_count"), f"{label}.global_leak_count"),
+            agent_leak_count=_optional_int(data.get("agent_leak_count"), f"{label}.agent_leak_count"),
+            session_leak_count=_optional_int(data.get("session_leak_count"), f"{label}.session_leak_count"),
+            run_leak_count=_optional_int(data.get("run_leak_count"), f"{label}.run_leak_count"),
+            conversation_count_delta=_optional_int(data.get("conversation_count_delta"), f"{label}.conversation_count_delta"),
+            run_message_count_delta=_optional_int(data.get("run_message_count_delta"), f"{label}.run_message_count_delta"),
+            run_event_count_delta=_optional_int(data.get("run_event_count_delta"), f"{label}.run_event_count_delta"),
+            parent_run_id=_optional_str(data.get("parent_run_id"), f"{label}.parent_run_id"),
+            child_run_id=_optional_str(data.get("child_run_id"), f"{label}.child_run_id"),
+            task_id=_optional_str(data.get("task_id"), f"{label}.task_id"),
+            parent_session_id=_optional_str(data.get("parent_session_id"), f"{label}.parent_session_id"),
+            child_session_id=_optional_str(data.get("child_session_id"), f"{label}.child_session_id"),
+            target_agent_id=_optional_str(data.get("target_agent_id"), f"{label}.target_agent_id"),
+            chain_request_id=_optional_str(data.get("chain_request_id"), f"{label}.chain_request_id"),
+            child_outcome=_optional_str(data.get("child_outcome"), f"{label}.child_outcome"),
+            parent_outcome=_optional_str(data.get("parent_outcome"), f"{label}.parent_outcome"),
+            delegation_submit_count=_optional_int(data.get("delegation_submit_count"), f"{label}.delegation_submit_count"),
+            result_backfill_count=_optional_int(data.get("result_backfill_count"), f"{label}.result_backfill_count"),
+            delegation_submitted_event_count=_optional_int(data.get("delegation_submitted_event_count"), f"{label}.delegation_submitted_event_count"),
+            delegation_completed_event_count=_optional_int(data.get("delegation_completed_event_count"), f"{label}.delegation_completed_event_count"),
+            cross_chain_message_count=_optional_int(data.get("cross_chain_message_count"), f"{label}.cross_chain_message_count"),
+            cross_chain_context_count=_optional_int(data.get("cross_chain_context_count"), f"{label}.cross_chain_context_count"),
+            cross_chain_tool_count=_optional_int(data.get("cross_chain_tool_count"), f"{label}.cross_chain_tool_count"),
+            cross_chain_stream_count=_optional_int(data.get("cross_chain_stream_count"), f"{label}.cross_chain_stream_count"),
+            misdelivery_count=_optional_int(data.get("misdelivery_count"), f"{label}.misdelivery_count"),
+            parent_cancel_effect_ms=_optional_float(data.get("parent_cancel_effect_ms"), f"{label}.parent_cancel_effect_ms"),
+            child_cancel_effect_ms=_optional_float(data.get("child_cancel_effect_ms"), f"{label}.child_cancel_effect_ms"),
+            followup_started=_optional_bool(data.get("followup_started"), f"{label}.followup_started"),
+            suspend_to_backfill_ms=_optional_float(data.get("suspend_to_backfill_ms"), f"{label}.suspend_to_backfill_ms"),
+            parent_end_to_end_ms=_optional_float(data.get("parent_end_to_end_ms"), f"{label}.parent_end_to_end_ms"),
+            fixture_version=_optional_str(data.get("fixture_version"), f"{label}.fixture_version"),
+            environment=_optional_string_map(data.get("environment"), f"{label}.environment"),
+            raw_sample_path=_optional_str(data.get("raw_sample_path"), f"{label}.raw_sample_path"),
+            formal_sampling=_optional_bool(data.get("formal_sampling"), f"{label}.formal_sampling"),
         )
 
 

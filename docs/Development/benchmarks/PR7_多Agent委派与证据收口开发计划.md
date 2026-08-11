@@ -1,18 +1,18 @@
-# dotClaw Benchmark PR7：多 Agent 委派与证据收口开发计划
+# dotClaw Benchmark PR7：多 Agent 委派与工程证据开发计划
 
-> 状态：已确认的开发基线。本文定义 PR7 的唯一范围；只量化当前单进程委派的父子 Run 语义和证据交付，不扩展跨进程等待恢复、远程 Agent、嵌套/并行委派或真实 API 压测。
+> 状态：已确认的开发基线。本文定义 PR7 的唯一范围；只量化当前单进程委派的父子 Run 语义，并交付可被后续总收口消费的工程证据，不扩展跨进程等待恢复、远程 Agent、嵌套/并行委派或真实 API 压测。
 
 ## 1. PR 定位
 
 ### 1.1 唯一目标
 
-量化当前多 Agent 委派的父子 Run 隔离、结果回灌、失败/取消传播与多父 Run 并发下的链路一致性，并将 PR1 至 PR6 的正式快照收口为可追溯的测试报告、README 与简历候选表述。
+量化当前多 Agent 委派的父子 Run 隔离、结果回灌、失败/取消传播与多父 Run 并发下的链路一致性；为 PR1 至 PR7 的已完成正式快照生成可追溯的证据清单和分层覆盖率报告。PR7 只发布自身的专项结论与复现入口，不发布全项目最终规模、最终 README 汇总或简历终稿；后者由 PR8 在代表性业务任务集完成后统一收口。
 
 ### 1.2 当前问题
 
 - 当前 RuntimeDelegationAdapter（运行时委派适配器）会为目标 Agent 建立独立 Session 与子 Run；父 Run 在提交成功后进入委派挂起，`resume_delegation(child_run_id)` 回取结果并继续父 Run。现有 Runtime 测试覆盖若干单点路径，但没有统一的重复执行、时延、串扰和重复回灌数据。
 - 取消服务会向已登记的子 Run 传播取消，但父取消、子终态和后续同父/同 Session 行为尚未以完整实验表和原始记录量化。
-- PR1 至 PR6 的正式样本、快照和场景结论需要统一的证据筛选、覆盖率报告和对外表述规则；否则不能区分调试结果与可用于 README、报告或简历的结果。
+- PR1 至 PR6 的正式样本、快照和场景结论需要统一的证据资格校验与覆盖率报告；否则不能区分调试结果与可被 PR8 最终收口消费的正式证据。
 
 ### 1.3 完成后的链路
 
@@ -23,9 +23,10 @@
     → 委派正确性/时延/串扰指标
     → BenchmarkSample（单次采样记录）JSONL + Delegation 快照/报告
 
-PR1 至 PR6 正式快照 + pytest-cov 原始结果
+PR1 至 PR7 正式快照 + pytest-cov 原始结果
     → 证据清单与分层覆盖率
-    → README/测试报告/简历候选结论
+    → PR7 委派专项报告与局部 README 复现入口
+    → PR8 代表性业务任务集、最终 README 汇总与简历候选表述
 ```
 
 ## 2. PR 边界
@@ -35,7 +36,7 @@ PR1 至 PR6 正式快照 + pytest-cov 原始结果
 1. 以完整有限结果表验证子 Run 完成、失败、取消、放弃时的父 Run 挂起、单次结果回灌、Task/事件语义与最终状态。
 2. 验证父 Run 主动取消向子 Run 的传播、子 Run 收口后的锁/执行权释放及同一父 Session 后续请求可继续执行。
 3. 以多个父 Session 并发重复执行，量化父/子 Run、Task、Broker 消息、结果回灌和流式输出的链路归属、重复/遗漏/串扰数及挂起至回灌时延。
-4. 为 PR1 至 PR7 正式快照建立证据清单、报告生成与 README/简历候选表述规则；加入 `pytest-cov` 并报告真实总体和分层覆盖率。
+4. 为 PR1 至 PR7 正式快照建立证据清单、报告生成与资格校验规则；加入 `pytest-cov` 并报告真实总体和分层覆盖率。全项目规模、最终 README 汇总和简历候选表述由 PR8 消费该清单后生成。
 
 ### 2.2 明确不包含
 
@@ -45,6 +46,7 @@ PR1 至 PR6 正式快照 + pytest-cov 原始结果
 - 不以真实 LLM/API、真实网络或供应商时延证明 Runtime 委派效率；如确需此类问题，使用独立 `[EXT]` Dataset/快照/报告；
 - 不把 pytest 覆盖率设为准入阈值，也不以覆盖率替代并发、恢复、安全和委派的正确性结论；
 - 不将开发期 quick run、缺少原始 JSONL 的旧结果或未固定环境的结果写入 README 或简历。
+- 不在 PR7 汇总或发布全项目代表性业务任务覆盖、总体业务通过率、真实 LLM 输出质量或最终简历数据；这些属于 PR8 的唯一职责。
 
 ## 3. 模块结构
 
@@ -88,9 +90,9 @@ benchmarks/reports/delegation/<run-id>/
 ```text
 benchmarks/eval_baseline_models.py   # 扩展统一记录的委派链路、回灌、取消和证据字段
 benchmarks/eval_baseline_stats.py    # 复用统一聚合与正式样本资格校验
-benchmarks/README.md                 # 增加 PR7 命令、指标、边界和结果写入规则
+benchmarks/README.md                 # 增加 PR7 命令、专项指标、边界和局部结果写入规则
 pyproject.toml                       # 增加 pytest-cov 开发依赖和覆盖率报告配置
-README.md                            # 只在正式快照产生后写入实际量化结果与复现入口
+README.md                            # 只在正式快照产生后写入 PR7 委派专项结果与复现入口；全项目汇总由 PR8 更新
 tests/benchmarks/test_eval_baseline_models.py
 tests/benchmarks/test_eval_baseline_stats.py
 ```
@@ -98,7 +100,7 @@ tests/benchmarks/test_eval_baseline_stats.py
 ### 3.3 不新增或修改的内容
 
 - 不新建平行样本、快照、报告格式；PR7 使用 PR1 的 `BenchmarkSample`（单次采样记录）与 `BenchmarkSnapshot`（汇总基线快照）；
-- 不在 `src/dotclaw/runtime/`、`src/dotclaw/orchestration/` 或 `src/dotclaw/tools/` 注入 Benchmark 标识、计时、覆盖率或测试开关；
+- 不在 `src/dotclaw/runtime/`、`src/dotclaw/orchestration/` 或 `src/dotclaw/tools/` 注入 Benchmark 标识、计时、覆盖率或测试开关；唯一例外是 PR7 共享并发委派暴露的 Windows 原子替换短暂读锁：`RunRepositoryAdapter` 仅对 `run.json` 读取的 `PermissionError` 作有限退避重试。该修复不改变委派业务语义；重试耗尽仍失败，JSON 损坏、路径或领域数据错误立即抛出，并由仓储级测试覆盖；
 - 不将报告生成器变成生产分析服务，也不自动改写 README 的数字。
 
 ## 4. 场景与接口设计
@@ -114,15 +116,16 @@ python -m benchmarks.delegation_reliability \
   --output benchmarks/reports/delegation/<run-id> \
   --save-baseline benchmarks/baselines/reliability_delegation_v1
 
-pytest --cov=src/dotclaw --cov-report=json --cov-report=term-missing
+pytest --cov=src/dotclaw --cov-branch --cov-report=json --cov-report=term-missing
 python -m benchmarks.evidence_report \
   --snapshots benchmarks/baselines \
+  --snapshot benchmarks/baselines/reliability_delegation_v1/<snapshot-id>.json \
   --coverage coverage.json \
   --output benchmarks/reports/evidence/<run-id>
 ```
 
 - 所有场景使用独立临时存储根与固定 Fixture；父/子 Agent、Session、Run、Task、工具、取消时机和 Fake LLM/Tool 延迟写入 `delegation-config.json` 与单次记录。
-- 结果终态表为确定性有限 Case，每行执行一次；父取消和多父并发隔离各预热 5 次、正式重复 50 次。正式 README/简历使用的性能型样本遵循各场景的固定预热/正式次数，不得与正确率样本混合。
+- 结果终态表为确定性有限 Case，每行执行一次；父取消和多父并发隔离各预热 5 次、正式重复 50 次。PR7 专项 README 结果使用的性能型样本遵循各场景的固定预热/正式次数，不得与正确率样本混合；全项目 README 和简历汇总留待 PR8。
 - 计时范围、环境、Git 提交、Dataset/Fixture 版本、配置哈希和原始 JSONL 必须同时写入快照，缺失任一项的结果只能标记为诊断。
 
 ### 4.2 子终态与结果回灌有限表
@@ -168,11 +171,11 @@ python -m benchmarks.evidence_report \
 
 ### 4.5 证据收口与覆盖率
 
-`evidence_report.py` 只接收已完成正式采样的 PR1 至 PR7 快照与 `coverage.json`，生成不可混淆的证据清单：
+`evidence_report.py` 只接收已完成正式采样的 PR1 至 PR7 快照与 `coverage.json`，生成可被 PR8 消费、不可混淆的证据清单：
 
 - 每个结论对应 Git 提交、机器/环境、Dataset/Fixture、配置哈希、预热/正式样本数、原始 JSONL、快照与报告路径；
 - 仅按真实源文件路径汇总总体覆盖率，以及 Runtime、Tool、Context、Orchestration、LLM 五个目录的行/分支覆盖率；未命中目录显式报告“不适用/未覆盖”，不填零或猜测；
-- 只有具备完整证据链且结果来自正式样本的指标，才生成 README 表格行和简历候选句；没有实际数字时保留结论模板而不写百分比；
+- 只有具备完整证据链且结果来自正式样本的指标，才标记为可进入 PR8 最终 README 表格和简历候选句；PR7 不生成全项目表格行、总体规模或简历候选句；
 - 报告将“正确性”、“本地 Fixture 编排效率”、“固定语料/安全链成本”和“[EXT] 真实 API”分区，禁止跨区混合聚合或归因。
 
 ## 5. 数据模型与统计口径
@@ -198,7 +201,7 @@ PR7 继续使用 `BenchmarkSample` 和 `BenchmarkSnapshot`，二者是 Benchmark
 - “单次回灌”仅指当前 Runtime 内部的结果消息、状态推进、事件与 Conversation 事实不重复，不等同于子 Agent 所有外部副作用 exactly-once；
 - 取消生效时间受固定 Fixture、调度和本机负载影响；只报告测量条件下的分布，不承诺实时 SLA；
 - 覆盖率衡量被测试的代码行/分支，不证明场景完整、没有竞态或业务效果；
-- README 和简历只能引用实际正式快照中的数字，且必须携带适用场景与能力边界。
+- PR7 的 README 只能引用自身正式委派快照中的数字，且必须携带适用场景与能力边界；跨 PR 的最终 README 与简历只能由 PR8 引用具备完整证据链的指标。
 
 ## 7. 必要的现有代码修改
 
@@ -219,7 +222,7 @@ PR7 继续使用 `BenchmarkSample` 和 `BenchmarkSnapshot`，二者是 Benchmark
 
 - 目标 Agent 不存在、子 Run 标识未知/不匹配、子终态已回灌、重复恢复、父已终态或取消时，明确拒绝或按既有幂等语义处理；
 - 子失败、取消、放弃不污染无关链路，也不被错误统计为完成；
-- 样本缺少 Git 提交、环境、固定 Fixture、原始 JSONL、正式采样标识或快照引用时，拒绝进入 README/简历候选输出；
+- 样本缺少 Git 提交、环境、固定 Fixture、原始 JSONL、正式采样标识或快照引用时，拒绝进入证据清单与后续 PR8 收口；
 - 覆盖率 JSON 缺失、目录重叠、源文件无法映射或报告版本不匹配时明确失败。
 
 ### 8.3 数据损坏
@@ -245,7 +248,7 @@ PR7 不把历史 Git 委派实现纳入同口径性能比较。它验证 PR1 至
 3. 实现父取消传播与后续请求释放实验，记录送达/生效时延并完成 50 次采样。
 4. 实现 8 父 Session 并发工作负载与链路归属断言，完成 50 轮隔离与回灌时延采样。
 5. 加入 `pytest-cov`，实现快照/覆盖率证据清单和报告，拒绝不完整或非正式证据。
-6. 执行正式采样；仅将实际结果、复现命令和边界写入 `benchmarks/README.md`、README 和简历候选报告。
+6. 执行正式采样；将 PR7 委派专项的实际结果、复现命令和边界写入 `benchmarks/README.md` 与 README，并输出供 PR8 消费的证据清单；不生成全项目简历候选报告。
 
 ## 10. PR 验收标准
 
@@ -254,9 +257,9 @@ PR7 不把历史 Git 委派实现纳入同口径性能比较。它验证 PR1 至
 3. 8 父 Session 并发 × 50 轮中，父/子/Task/Broker/Context/工具/流式输出跨链路泄漏、错误投递、重复创建、重复回灌和遗漏完成均可统计；
 4. 委派时延以固定 Fixture 下的 P50/P95 报告，且不外推为真实模型或网络性能；
 5. `pytest-cov` 报告总体及 Runtime、Tool、Context、Orchestration、LLM 的真实行/分支覆盖率，未设置虚假阈值；
-6. 每一条 README/简历候选结论都能追溯到固定提交、环境、Dataset/Fixture、配置、正式样本、JSONL、快照和报告；
+6. 每一条 PR7 专项 README 结论及进入证据清单的指标，都能追溯到固定提交、环境、Dataset/Fixture、配置、正式样本、JSONL、快照和报告；
 7. 未宣称跨进程恢复、远程/嵌套委派、外部副作用 exactly-once、真实 API 性能或覆盖率即可靠性；
-8. Runtime、Task、Broker、取消、Context 与生产持久化语义未因 Benchmark 改写。
+8. Runtime、Task、Broker、取消、Context 与生产持久化语义未因 Benchmark 改写；唯一允许的 Runtime 例外是 3.3 所述的 `run.json` 短暂 Windows 锁读取重试，且其仓储级测试已通过。
 
 ## 11. 最终交付结果
 
@@ -266,7 +269,7 @@ PR7 完成后，可在正式快照已产生的前提下写出以下类型结论�
 在 X 条确定性委派终态路径中，父子关联、单次结果回灌与状态语义均为 X/X；重复、遗漏和错误投递为 0。
 在 8 个并发父 Session、50 轮固定 Fixture 委派中，跨链路消息、上下文、工具结果和流式输出串扰为 0；父挂起至结果回灌 P95 为 Y ms。
 在 50 次父取消实验中，取消传播遗漏为 0，子 Run 收口后同 Session 后续请求可继续执行。
-Reliability & Benchmark Suite 覆盖 X 个正式场景、Y 次正式采样；总体及 Runtime/Tool/Context/Orchestration/LLM 覆盖率见可追溯测试报告。
+PR1 至 PR7 的正式证据资格、覆盖率与引用路径见可追溯证据清单；代表性业务任务覆盖、全项目规模与最终简历表述由 PR8 统一生成。
 ```
 
-所有 X/Y 必须以实际正式快照替换。简历只保留与当前职位相关、能由证据清单复现的两到三条，且注明固定 Fixture/单进程等适用边界；无正式数据时不使用百分比或零错误表述。
+所有 X/Y 必须以实际正式快照替换。PR7 只保留与委派相关、能由自身正式快照复现的局部结论，且注明固定 Fixture/单进程等适用边界；无正式数据时不使用百分比或零错误表述。PR8 再从证据清单中选择全项目简历亮点。

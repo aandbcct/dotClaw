@@ -1,0 +1,176 @@
+{
+  "schema_version": "2.0",
+  "snapshot_id": "20260808T090742Z_78ac0d3",
+  "generated_at": "2026-08-08T09:07:42.805328+00:00",
+  "git_commit": "78ac0d3",
+  "dataset": "reliability_delegation_v1",
+  "environment": {
+    "python_version": "3.13.5",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "config_hash": "88a7c4e6ecf801ea",
+    "eval_schema_version": "runtime-v4"
+  },
+  "warmup": 49,
+  "repeat": 454,
+  "cases": [
+    {
+      "case_id": "completed",
+      "sample_count": 1,
+      "passed_count": 0,
+      "failed_count": 1,
+      "success_rate": 0.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 1,
+        "p50_ms": 202.5778999995964,
+        "p95_ms": 202.5778999995964,
+        "p99_ms": 202.5778999995964,
+        "max_ms": 202.5778999995964
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 1,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "failed",
+      "sample_count": 1,
+      "passed_count": 0,
+      "failed_count": 1,
+      "success_rate": 0.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 1,
+        "p50_ms": 153.59739999985322,
+        "p95_ms": 153.59739999985322,
+        "p99_ms": 153.59739999985322,
+        "max_ms": 153.59739999985322
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 1,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "cancelled",
+      "sample_count": 1,
+      "passed_count": 0,
+      "failed_count": 1,
+      "success_rate": 0.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 1,
+        "p50_ms": 174.20970000239322,
+        "p95_ms": 174.20970000239322,
+        "p99_ms": 174.20970000239322,
+        "max_ms": 174.20970000239322
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 1,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "abandoned",
+      "sample_count": 1,
+      "passed_count": 0,
+      "failed_count": 1,
+      "success_rate": 0.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 1,
+        "p50_ms": 193.16299999991315,
+        "p95_ms": 193.16299999991315,
+        "p99_ms": 193.16299999991315,
+        "max_ms": 193.16299999991315
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 1,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "parent_cancellation",
+      "sample_count": 50,
+      "passed_count": 50,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 50,
+        "p50_ms": 9.849649999523535,
+        "p95_ms": 11.319579998962581,
+        "p99_ms": 13.026788000279337,
+        "max_ms": 13.418200000160141
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 50,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "concurrent_isolation",
+      "sample_count": 400,
+      "passed_count": 400,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 400,
+        "p50_ms": 514.0986499991413,
+        "p95_ms": 579.1994999999588,
+        "p99_ms": 729.6055000006163,
+        "max_ms": 729.6055000006163
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 0,
+      "tool_call_count_total": 0,
+      "trace_available_count": 400,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    }
+  ],
+  "global_summary": {
+    "sample_count": 454,
+    "passed_count": 450,
+    "failed_count": 4,
+    "success_rate": 0.9911894273127754,
+    "failure_kinds": {},
+    "wall_duration_ms": {
+      "sample_count": 454,
+      "p50_ms": 508.3267000009073,
+      "p95_ms": 579.1994999999588,
+      "p99_ms": 729.6055000006163,
+      "max_ms": 729.6055000006163
+    },
+    "llm_call_count_total": 0,
+    "tool_call_count_total": 0,
+    "trace_available_count": 454,
+    "trace_missing_count": 0
+  },
+  "samples_path": "samples/20260808T090742Z_78ac0d3.formal.jsonl",
+  "execution_source": "current_eval",
+  "scenario_id": "reliability_delegation_v1",
+  "fixture_fingerprints": {
+    "completed": "delegation-fixture-v1",
+    "failed": "delegation-fixture-v1",
+    "cancelled": "delegation-fixture-v1",
+    "abandoned": "delegation-fixture-v1",
+    "parent_cancellation": "delegation-fixture-v1",
+    "concurrent_isolation": "delegation-fixture-v1"
+  },
+  "samples_content_summary": {
+    "line_count": 454,
+    "byte_count": 2135861
+  }
+}

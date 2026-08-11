@@ -226,6 +226,123 @@ python -m benchmarks.concurrency_reliability \
   （含 warmup 诊断记录）；样本带 `execution_source` / `source_commit` /
   `scenario_id` / `evidence_kind` / `fixture_fingerprint` 来源元数据。
 
+## PR4：操作节点故障注入与恢复
+
+PR4 使用隔离存储根、记录型 LLM（大语言模型替身）和工具替身，在故障后销毁旧服务对象并从同一根目录冷重建。它分别报告控制状态、内部持久化事实和外部副作用；后两者不得互相改写结论。
+
+```powershell
+python -m benchmarks.recovery_reliability `
+  --warmup 5 --repeat 30 `
+  --process-warmup 5 --process-repeat 50 `
+  --output benchmarks/reports/recovery/<run-id> `
+  --save-baseline benchmarks/baselines/reliability_recovery_v1
+```
+
+- `llm_response_unknown` 只说明控制恢复是否正确；外部 LLM 请求可能重复，绝不表示 exactly-once。
+- `tool_after_effect` 会记录可观察重复副作用，但 ToolResult（工具结果）、完成事件和 Conversation（会话投影）重复属于内部事实失败。
+- 成功提交的六个边界逐点报告；工具前 checkpoint（检查点）另有子进程强制退出验证。
+- 委派等待冷重建是当前能力边界，不进入恢复成功率；PR4 不证明跨版本、分布式或真实 API 的 exactly-once。
+- 工件按统一布局写出 `<snapshot-id>.json` 和 `samples/<snapshot-id>.jsonl`；保存基线时二者会一并复制。
+
+### 正式基线结果（20260807T092016Z_eb67d30）
+
+本基线在提交 `eb67d30`、Python 3.13.5、Windows 11 上执行。快照只统计
+`capability_status=FORMAL` 的非 warmup 样本；委派冷重建能力边界仅保留在原始
+JSONL 和能力边界报告，不进入恢复成功率。
+
+| 正式范围 | 控制状态恢复 | 内部事实一致性 | 恢复耗时 P50 / P95 |
+|---|---:|---:|---:|
+| LLM 前失败 | 30 / 30 | 30 / 30 | 51.95 / 62.03 ms |
+| LLM 响应未知 | 30 / 30 | 30 / 30 | 57.91 / 93.55 ms |
+| 工具副作用前中断 | 30 / 30 | 30 / 30 | 70.62 / 80.94 ms |
+| 工具副作用后中断 | 30 / 30 | 30 / 30 | 69.85 / 105.18 ms |
+| 审批冷重建 | 30 / 30 | 30 / 30 | 76.22 / 109.41 ms |
+| 成功提交 6 个边界 | 180 / 180 | 180 / 180 | 9.40–14.97 / 10.66–18.73 ms |
+| 工具前子进程强退 | 50 / 50 | 50 / 50 | 66.15 / 79.14 ms |
+
+- 正式快照共 **380 / 380** 通过；对应 JSON、JSONL 和报告引用见
+  `benchmarks/baselines/reliability_recovery_v1/20260807T092016Z_eb67d30.md`。
+- 工具副作用后中断在记录型替身中观测到 **30 / 30** 重复；LLM 响应未知为
+  **30 / 30** 未知结果。因此上述结论不承诺外部调用 exactly-once。
+
+
+## PR5：Capability 安全链实验
+
+PR5 使用 Git 跟踪的完整有限安全决策矩阵，验证现有工具链的参数校验、资源解析、策略收敛、审批、Handler 屏障、Agent 策略隔离、路径回填与摘要脱敏；所有 Handler 均为无副作用记录型替身，不执行真实文件、进程、网络或 MCP 调用。
+
+```powershell
+python -m benchmarks.capability_reliability `
+  --suite reliability_capability_v1 `
+  --matrix benchmarks/datasets/reliability_capability_v1/matrix.json `
+  --performance-warmup 5 --performance-repeat 50 `
+  --output benchmarks/reports/capability/<run-id> `
+  --save-baseline benchmarks/baselines/reliability_capability_v1
+```
+
+- 矩阵每个适用 Case 只执行一次；Windows 联接点无法由当前用户建立时记录为环境跳过，不计为安全通过；
+- `security-matrix.md` 报告适用/通过/失败/跳过、三类阻断分支的 Handler 进入次数和测试敏感标记泄露数；路径对齐不表示已解决 TOCTOU；
+- `security-chain-overhead.md` 只比较相同 Handler、已验证参数和执行上下文下的直接 Handler 与完整链抵达 Handler entry 的 P50/P95；预热不进入统计；
+- 进程结论仅为 `process.exec` 档案级策略，不表达命令文本内容级治理。
+
+### 正式基线（20260807T113238Z_96940b5）
+
+- 环境：Windows、Python 3.13.5；矩阵 SHA-256 配置摘要为 `7e10f439fc1204ce`，原始 JSONL 与快照位于 `benchmarks/baselines/reliability_capability_v1/`；
+- 安全正确性：27 个适用 Case **27/27** 策略判定符合预期；参数校验失败、Policy deny 与未获审批调用进入 Handler 的次数均为 **0**；敏感测试标记泄露为 **0**；Windows Junction 逃逸用例实际执行；
+- 前置开销：同一已验证输入与记录型 Handler 下，直接 Handler P50/P95 为 **0.0026 / 0.0048 ms**；完整安全链 P50/P95 为 **2.0568 / 2.5199 ms**；安全链额外 P50/P95 为 **2.0542 / 2.5151 ms**（warmup=5、每种模式 50 个正式样本）；
+- 边界：结果仅代表本机、无副作用替身和固定有限矩阵；不证明命令内容级治理、TOCTOU 防护、真实外部 Tool 安全性或真实网络/API 性能。
+
+## PR6：ContextVersion 与 Session 历史压缩
+
+PR6 以固定 Slot、固定历史语料和记录型外部 Provider 验证已实现的版本化上下文回放、
+Session 历史压缩预算与 GLOBAL/AGENT/SESSION/RUN 内容隔离。强制重建只在 Benchmark
+对照控制中存在，不会修改生产 `ContextProvider`（上下文提供者）或 Runtime（运行时）。
+
+```powershell
+python -m benchmarks.context_reliability `
+  --suite reliability_context_v1 `
+  --compression-tokenizer cl100k_base `
+  --recovery-warmup 5 --recovery-repeat 30 `
+  --performance-warmup 5 --performance-repeat 30 `
+  --output benchmarks/reports/context/<run-id> `
+  --save-baseline benchmarks/baselines/reliability_context_v1
+```
+
+工件包括 JSONL、`context-config.json` 与 `consistency.md`、`recovery-replay.md`、
+`compression.md`、`owner-isolation.md`。Token/预算仅针对固定语料与 tokenizer，
+不评估摘要质量或真实模型效果；冷恢复不代表普通新 Run 忽略外部最新数据。
+
+### 正式基线（20260807T212132Z，提交 7796ddd）
+
+基线快照与 350 行原始 JSONL（其中 15 行 warmup、335 条正式样本）已提交到
+`benchmarks/baselines/reliability_context_v1/`。正式配置为冷恢复与回放各预热 5、
+正式 30 次，压缩边界每种终态 30 次。
+
+- 冷恢复：30 次正式样本的上下文漂移、外部 Provider 重载与重复 ContextVersion
+  均为 0；恢复时只新增 1 条预期 Conversation 与 1 条最终 RunMessage；
+- 快照复用对照：复用/强制重建各 30 次，恢复 P95 为 **67.92 / 111.28 ms**；
+  快照复用相对 Benchmark 强制重建降低 **38.96%**，外部 Provider 加载为 **0 / 30**；
+- Session 历史压缩：120 组同构开启/关闭对照中，预算通过率从 **0% 升至 100%**；
+  输入为 75 tokens 时压缩到 53–59 tokens（平均降低 **27.3%**），工具边界错误为 0；
+- Owner 隔离：GLOBAL、AGENT、SESSION、RUN 四层场景均通过，泄漏计数均为 0。
+
+复现本正式基线的命令如下；`--output` 应使用新的非提交报告目录，
+`--save-baseline` 仅在审核后写入新的 Git 基线快照。
+
+```powershell
+python -m benchmarks.context_reliability `
+  --suite reliability_context_v1 `
+  --compression-tokenizer cl100k_base `
+  --recovery-warmup 5 --recovery-repeat 30 `
+  --performance-warmup 5 --performance-repeat 30 `
+  --boundary-warmup 0 --boundary-repeat 30 `
+  --output benchmarks/reports/context/<new-run-id> `
+  --save-baseline benchmarks/baselines/reliability_context_v1
+```
+
+这些结论仅代表本机 Windows/Python 3.13、固定 `cl100k_base` tokenizer、
+确定性 LLM/摘要替身、固定 Slot 与固定历史语料下的 Runtime 编排；不代表真实模型
+回答质量、真实 API 成本、网络/MCP 性能或普通新 Run 对外部最新内容的处理语义。
+
 ## 目录结构
 
 ```
@@ -239,6 +356,11 @@ benchmarks/
 ├── concurrency_workloads.py      # PR3 固定工作负载与受控延迟替身
 ├── concurrency_assertions.py     # PR3 顺序/归属/隔离/取消断言
 ├── concurrency_stats.py          # PR3 吞吐/排队/端到端时延与对照聚合
+├── context_reliability.py         # PR6 ContextVersion 实验 CLI 与工件写出
+├── context_workloads.py           # PR6 固定 Slot / 语料 / Owner 场景
+├── context_assertions.py          # PR6 结构、边界与可比性断言
+├── context_controls.py            # PR6 仅 Benchmark 的强制重建对照
+├── context_stats.py               # PR6 token、错误数与时延聚合
 ├── historical_baseline.py    # PR2 历史审计 / 运行 / 对照 CLI
 ├── historical_audit.py       # PR2 六道审计门与审计报告
 ├── historical_legacy_agent_v1.py   # PR2 旧 Agent v1（AgentLoop）单场景适配
@@ -264,6 +386,7 @@ benchmarks/
     ├── v1.0/                  # 旧微基准基线
     ├── runtime_core_v1/       # PR1/PR2 Eval 基线（当前 + 历史快照 + samples/）
     └── reliability_concurrency_v1/  # PR3 并发基线（JSON + samples/）
+    └── reliability_capability_v1/   # PR5 安全矩阵（JSON + samples/）
 ```
 
 ## 快速开始
@@ -402,3 +525,16 @@ python -m benchmarks.runner --baseline benchmarks/baselines/<baseline_file>.json
 - 当前默认模型 qwen3.7-max 是推理模型，TTFT 偏高（~6s）。建议用 fast 模型（如 deepseek-v4-flash ~0.8s）来测框架流式链路
 - Windows 上 `time.time()` 精度 ~15ms，sub-ms 操作可能显示 0（不影响趋势）
 - 报告中的 `[EXT]` 标记表示包含外部依赖延迟（网络/API），与框架内部延迟含义不同
+# PR7：多 Agent 委派可靠性
+
+PR7 使用固定 Fixture 的单进程父子 Run 委派实验，原始 JSONL、快照和报告必须同时存在，才可作为专项结论或由 PR8 消费。正式采样完成后运行：
+
+```powershell
+python -m benchmarks.delegation_reliability --suite reliability_delegation_v1 --outcome-warmup 1 --outcome-repeat 1 --cancellation-warmup 5 --cancellation-repeat 50 --concurrent-parents 8 --concurrent-warmup 5 --concurrent-repeat 50 --output benchmarks/reports/delegation/<run-id> --save-baseline benchmarks/baselines/reliability_delegation_v1
+pytest --cov=src/dotclaw --cov-branch --cov-report=json --cov-report=term-missing
+python -m benchmarks.evidence_report --snapshots benchmarks/baselines --snapshot benchmarks/baselines/reliability_delegation_v1/<snapshot-id>.json --coverage coverage.json --output benchmarks/reports/evidence/<run-id>
+```
+
+该实验只描述本机、单进程、单层委派和固定 Fixture 下的编排行为；不证明真实 API 时延、跨进程恢复、远程委派或外部副作用 exactly-once。未产生正式快照时，本文件不写入百分比或零错误结论。
+
+正式快照 `20260808T091347Z_d379070`（Windows 11、Python 3.13.5、`delegation-fixture-v1`）包含 49 条预热与 454 条正式样本：四种子终态为 4/4 通过；50 次父取消为 50/50 通过，取消送达/父生效/子生效 P95 分别为 11.72/12.94/14.23 ms；8 个父 Session × 50 轮共 400 条并发链路为 400/400 通过，消息、上下文、工具、流输出串扰及错误投递均为 0，挂起至回灌 P95 为 428.69 ms、父端到端 P95 为 604.38 ms。该数据仅描述固定 Fixture 下的本地编排，不可外推为真实模型或业务性能。
