@@ -444,9 +444,27 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
-### 2. 配置模型密钥
+### 2. 创建本地配置
 
-当前默认模型是 Qwen。在项目根目录创建 `.env`：
+首次克隆后，从仓库模板创建本地配置：
+
+```bash
+cp .env.example .env
+cp config.example.yaml config.yaml
+cp model_router_config.example.yaml model_router_config.yaml
+```
+
+PowerShell：
+
+```powershell
+Copy-Item .env.example .env
+Copy-Item config.example.yaml config.yaml
+Copy-Item model_router_config.example.yaml model_router_config.yaml
+```
+
+`.env`、`config.yaml` 和 `model_router_config.yaml` 都是本地文件，已被 Git 忽略；需要共享默认配置时，只修改对应的 `*.example` 模板。
+
+当前模板默认模型是 Qwen。在项目根目录的 `.env` 中填写：
 
 ```dotenv
 QWEN_API_KEY=your_api_key
@@ -460,7 +478,7 @@ TAVILY_API_KEY=your_tavily_api_key
 
 系统环境变量优先于项目根 `.env`。
 
-使用其他 Provider 时，同步修改：
+使用其他 Provider 时，修改本地文件：
 
 ```text
 model_router_config.yaml
@@ -531,7 +549,7 @@ dotclaw --eval-ci <dataset>
 
 ### `config.yaml`
 
-应用级配置：
+从 `config.example.yaml` 复制得到的本地应用配置：
 
 ```text
 Agent 默认值
@@ -544,7 +562,7 @@ Debug
 
 ### `model_router_config.yaml`
 
-模型路由配置：
+从 `model_router_config.example.yaml` 复制得到的本地模型路由配置：
 
 ```text
 Provider
@@ -571,7 +589,7 @@ max_loop_steps
 
 ### `.env`
 
-本地 Secret 和环境变量。不要提交真实密钥。
+从 `.env.example` 复制得到的本地 Secret 和环境变量。不要提交真实密钥；模板只能保留占位值。
 
 ---
 
@@ -702,8 +720,11 @@ dotClaw/
 ├── docs/wiki/
 ├── skills/
 ├── tests/
-├── config.yaml
-├── model_router_config.yaml
+├── .env.example
+├── config.example.yaml
+├── model_router_config.example.yaml
+├── config.yaml                 # 本地文件，Git 忽略
+├── model_router_config.yaml    # 本地文件，Git 忽略
 └── pyproject.toml
 ```
 

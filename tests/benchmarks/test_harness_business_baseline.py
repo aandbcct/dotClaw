@@ -1,10 +1,17 @@
 """PR8 Agent Harness CLI 参数与装配边界测试。"""
 
 from pathlib import Path
+from shutil import copyfile
 
 import pytest
 
 import benchmarks.harness_business_baseline as baseline
+
+
+def _example_project(tmp_path: Path) -> Path:
+    """把受 Git 跟踪的路由模板投影为一次隔离的本地配置。"""
+    copyfile(Path("model_router_config.example.yaml"), tmp_path / "model_router_config.yaml")
+    return tmp_path
 
 
 def test_cli_requires_explicit_candidate_and_judge_conditions(tmp_path: Path) -> None:
@@ -39,15 +46,15 @@ def test_cli_rejects_diagnostic_repeat_other_than_one(tmp_path: Path) -> None:
     assert error.value.code == 2
 
 
-def test_fixed_model_proxy_rejects_provider_label_mismatch() -> None:
+def test_fixed_model_proxy_rejects_provider_label_mismatch(tmp_path: Path) -> None:
     """CLI 记录的 Provider 必须与模型路由的真实归属一致。"""
     with pytest.raises(ValueError, match="与声明"):
-        baseline._build_fixed_model_proxy("openai", "qwen3.7-max", Path.cwd())
+        baseline._build_fixed_model_proxy("openai", "qwen3.7-max", _example_project(tmp_path))
 
 
-def test_fixed_model_proxy_has_no_fallback_candidates() -> None:
+def test_fixed_model_proxy_has_no_fallback_candidates(tmp_path: Path) -> None:
     """固定模型路由只能返回被测模型，禁止故障时切换其他候选。"""
-    proxy = baseline._build_fixed_model_proxy("qwen", "qwen3.7-max", Path.cwd())
+    proxy = baseline._build_fixed_model_proxy("qwen", "qwen3.7-max", _example_project(tmp_path))
 
     assert proxy.available_models == ["qwen3.7-max"]
 

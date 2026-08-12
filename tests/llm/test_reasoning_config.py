@@ -43,10 +43,11 @@ def test_legacy_model_without_reasoning_defaults_to_none() -> None:
     assert config.models["m1"].reasoning.mode == "none"
 
 
-def test_actual_router_config_qwen_native_others_none() -> None:
-    """真实 model_router_config.yaml：qwen3.7-max 为 native，其他模型为 none。"""
-    config = load_router_config()
+def test_example_router_config_qwen_native_others_none() -> None:
+    """仓库路由模板应声明 Qwen 原生推理配置，并保留其他模型默认行为。"""
+    config = load_router_config("model_router_config.example.yaml")
     assert config.models["qwen3.7-max"].reasoning.mode == "native"
+    assert config.models["qwen3.7-plus"].reasoning.mode == "native"
     # 未显式写 reasoning 的模型回退为 none
     assert config.models["deepseek-v4-flash"].reasoning.mode == "none"
     assert config.models["gpt-4o-mini"].reasoning.mode == "none"
