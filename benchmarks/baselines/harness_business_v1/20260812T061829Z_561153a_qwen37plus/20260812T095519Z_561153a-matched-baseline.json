@@ -1,0 +1,1503 @@
+{
+  "schema_version": "2.0",
+  "snapshot_id": "20260812T095519Z_561153a-matched-baseline",
+  "generated_at": "2026-08-12T09:55:20.253199+00:00",
+  "git_commit": "561153a",
+  "dataset": "agent_harness_business_v1",
+  "environment": {
+    "config_hash": "3d8c8698855dacbb",
+    "provider": "qwen",
+    "model": "qwen3.7-plus",
+    "temperature": "provider_default",
+    "judge_provider": "qwen",
+    "judge_model": "qwen3.7-plus",
+    "formal_sampling": "true",
+    "dataset_content_hash": "d9ff26ed60700a4d9595e46fd622bfa7c2befd6dd1804ce7548df2683c71aa8a",
+    "preflight_per_condition": "1",
+    "timeout_seconds": "300.0",
+    "retry_count": "1",
+    "workflow_version": "2",
+    "execution_profile": "matched_baseline"
+  },
+  "warmup": 0,
+  "repeat": 3,
+  "cases": [
+    {
+      "case_id": "evidence-01-vendor-decision",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 9889.672600002086,
+        "p95_ms": 10525.266819999524,
+        "p99_ms": 10581.764083999296,
+        "max_ms": 10595.88839999924
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-02-release-readiness",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 7855.540799999289,
+        "p95_ms": 10276.68948000064,
+        "p99_ms": 10491.902696000761,
+        "max_ms": 10545.706000000791
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-03-conflicting-capacity",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 21520.296700000472,
+        "p95_ms": 30836.58136000122,
+        "p99_ms": 31664.695552001285,
+        "max_ms": 31871.724100001302
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-04-policy-version",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14487.243799998396,
+        "p95_ms": 14866.703599999892,
+        "p99_ms": 14900.433360000025,
+        "max_ms": 14908.865800000058
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-05-incident-cause",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 11052.947600001062,
+        "p95_ms": 11486.079979998976,
+        "p99_ms": 11524.580635998791,
+        "max_ms": 11534.205799998745
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-06-market-shortlist",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 10314.605100000335,
+        "p95_ms": 10526.971890000277,
+        "p99_ms": 10545.848938000272,
+        "max_ms": 10550.56820000027
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-07-security-advisory",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14648.563999999169,
+        "p95_ms": 15303.331820001404,
+        "p99_ms": 15361.533404001602,
+        "max_ms": 15376.083800001652
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-08-metric-definition",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 20871.313600000576,
+        "p95_ms": 43635.042129999776,
+        "p99_ms": 45658.48466599971,
+        "max_ms": 46164.345299999695
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-09-contract-decision",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 20676.652199999808,
+        "p95_ms": 22393.40417999956,
+        "p99_ms": 22546.00435599954,
+        "max_ms": 22584.154399999534
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-10-experiment-verdict",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14502.268399999593,
+        "p95_ms": 14685.364130001835,
+        "p99_ms": 14701.639306002035,
+        "max_ms": 14705.708100002084
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-01-config-diagnosis",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 12273.843099999795,
+        "p95_ms": 13105.757290001202,
+        "p99_ms": 13179.705218001327,
+        "max_ms": 13198.192200001358
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-02-doc-link-fix",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14556.357900000876,
+        "p95_ms": 15020.76429000008,
+        "p99_ms": 15062.044858000008,
+        "max_ms": 15072.36499999999
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-03-test-regression",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 11915.954999996757,
+        "p95_ms": 13872.52430999797,
+        "p99_ms": 14046.441581998079,
+        "max_ms": 14089.920899998106
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 6,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-04-schema-migration",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 52895.72609999959,
+        "p95_ms": 54210.025349998614,
+        "p99_ms": 54326.85194999853,
+        "max_ms": 54356.058599998505
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-05-cli-validation",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion": 2,
+        "assertion_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 9098.39920000013,
+        "p95_ms": 24391.492690000447,
+        "p99_ms": 25750.87877800048,
+        "max_ms": 26090.725300000486
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 5,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-06-cancel-propagation",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion": 1,
+        "assertion_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 21231.093200000032,
+        "p95_ms": 22887.196070000937,
+        "p99_ms": 23034.405214001017,
+        "max_ms": 23071.207500001037
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 4,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-07-report-denominator",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 18417.893599998933,
+        "p95_ms": 21736.456670003095,
+        "p99_ms": 22031.44005400347,
+        "max_ms": 22105.185900003562
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-08-race-fix",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 7814.484700000321,
+        "p95_ms": 8741.19481000198,
+        "p99_ms": 8823.569042002127,
+        "max_ms": 8844.162600002164
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 6,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-09-security-path",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 2,
+        "assertion": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 27720.434700000624,
+        "p95_ms": 39253.601699998035,
+        "p99_ms": 40278.772099997805,
+        "max_ms": 40535.06469999775
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 4,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-10-cross-module-fix",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 20405.055600000196,
+        "p95_ms": 31104.390330000388,
+        "p99_ms": 32055.442306000405,
+        "max_ms": 32293.20530000041
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-01-log-export",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "fixture_configuration": 2,
+        "assertion_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 9395.344100001239,
+        "p95_ms": 13218.190580000371,
+        "p99_ms": 13557.999156000296,
+        "max_ms": 13642.951300000277
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 4,
+      "tool_call_count_total": 1,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-02-rejected-delete",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 12366.770200002065,
+        "p95_ms": 14166.630879998775,
+        "p99_ms": 14326.618495998482,
+        "max_ms": 14366.615399998409
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-03-database-backup",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 16733.693800000765,
+        "p95_ms": 17604.798850002044,
+        "p99_ms": 17682.230410002157,
+        "max_ms": 17701.588300002186
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-04-partial-approval",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 9280.769400000281,
+        "p95_ms": 9340.071389999503,
+        "p99_ms": 9345.342677999433,
+        "max_ms": 9346.660499999416
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-05-expired-approval",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 11555.874900001072,
+        "p95_ms": 11864.580659999774,
+        "p99_ms": 11892.021171999659,
+        "max_ms": 11898.88129999963
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-06-tool-choice",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15275.429400000576,
+        "p95_ms": 17511.299039997903,
+        "p99_ms": 17710.043007997665,
+        "max_ms": 17759.728999997606
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-07-tool-failure",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 17835.43649999774,
+        "p95_ms": 18838.010040000518,
+        "p99_ms": 18927.127688000764,
+        "max_ms": 18949.407100000826
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-08-resume-isolation",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15185.88770000133,
+        "p95_ms": 17145.900679998158,
+        "p99_ms": 17320.124055997876,
+        "max_ms": 17363.679899997805
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-09-argument-change",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 8828.350199997658,
+        "p95_ms": 10017.606239997622,
+        "p99_ms": 10123.317887997619,
+        "max_ms": 10149.745799997618
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-10-scope-conflict",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 9298.074099999212,
+        "p95_ms": 12227.378260001931,
+        "p99_ms": 12487.760852002175,
+        "max_ms": 12552.856500002235
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-01-language-preference",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 12257.467899999028,
+        "p95_ms": 13234.408719998828,
+        "p99_ms": 13321.24790399881,
+        "max_ms": 13342.957699998806
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-02-project-constraint",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 17608.053799998743,
+        "p95_ms": 21933.47278999972,
+        "p99_ms": 22317.95447799981,
+        "max_ms": 22414.074899999832
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-03-corrected-name",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 13961.193399998592,
+        "p95_ms": 15656.049190001067,
+        "p99_ms": 15806.703038001287,
+        "max_ms": 15844.366500001343
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-04-deferred-decision",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 12811.169299999165,
+        "p95_ms": 24661.62023000033,
+        "p99_ms": 25714.99364600044,
+        "max_ms": 25978.337000000465
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-05-summary-boundary",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 17498.37149999803,
+        "p95_ms": 26914.864499999745,
+        "p99_ms": 27751.8860999999,
+        "max_ms": 27961.14149999994
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-06-multiple-preferences",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14304.73239999992,
+        "p95_ms": 15047.279109999363,
+        "p99_ms": 15113.283261999313,
+        "max_ms": 15129.7842999993
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-07-constraint-revocation",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14926.81839999932,
+        "p95_ms": 19797.642340001767,
+        "p99_ms": 20230.604468001984,
+        "max_ms": 20338.84500000204
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-08-compression-conflict",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14688.955699999497,
+        "p95_ms": 23764.515920000118,
+        "p99_ms": 24571.232384000177,
+        "max_ms": 24772.91150000019
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-09-long-tool-history",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 27561.15030000001,
+        "p95_ms": 32709.0443699999,
+        "p99_ms": 33166.63495399989,
+        "max_ms": 33281.03259999989
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-10-cross-session-owner",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 17409.58409999803,
+        "p95_ms": 20191.24353000006,
+        "p99_ms": 20438.502146000246,
+        "max_ms": 20500.31680000029
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-01-two-source-review",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 12366.723399998591,
+        "p95_ms": 12613.970499999414,
+        "p99_ms": 12635.948019999487,
+        "max_ms": 12641.442399999505
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-02-ranked-actions",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14924.485899999127,
+        "p95_ms": 29237.46687999919,
+        "p99_ms": 30509.731855999198,
+        "max_ms": 30827.7980999992
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-03-conflicting-reviews",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 19049.05940000026,
+        "p95_ms": 19515.605809999033,
+        "p99_ms": 19557.076601998924,
+        "max_ms": 19567.444299998897
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-04-overlap-dedup",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 21717.353000000003,
+        "p95_ms": 26223.77260999856,
+        "p99_ms": 26624.34324199843,
+        "max_ms": 26724.4858999984
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-05-partial-child-failure",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 16909.509100001742,
+        "p95_ms": 19906.054780001432,
+        "p99_ms": 20172.414396001404,
+        "max_ms": 20239.004300001397
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-06-owner-routing",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 21994.27949999881,
+        "p95_ms": 35229.762209998444,
+        "p99_ms": 36406.24956199841,
+        "max_ms": 36700.3713999984
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-07-evidence-boundary",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 16035.972800000309,
+        "p95_ms": 16052.410760001658,
+        "p99_ms": 16053.871912001778,
+        "max_ms": 16054.237200001808
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-08-cancel-propagation",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 22412.691199999244,
+        "p95_ms": 22931.78276000108,
+        "p99_ms": 22977.92423200124,
+        "max_ms": 22989.459600001283
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-09-chain-isolation",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 18109.529199999088,
+        "p95_ms": 20518.6827700003,
+        "p99_ms": 20732.829754000413,
+        "max_ms": 20786.36650000044
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-10-priority-synthesis",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15342.470699997648,
+        "p95_ms": 16540.7020799983,
+        "p99_ms": 16647.211535998358,
+        "max_ms": 16673.838899998373
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-01-context-tool",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 8093.210999999428,
+        "p95_ms": 9017.876850000539,
+        "p99_ms": 9100.069370000638,
+        "max_ms": 9120.617500000662
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-02-delegate-summary",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_error": 1,
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 8846.521800001938,
+        "p95_ms": 11907.879180002417,
+        "p99_ms": 12179.999836002462,
+        "max_ms": 12248.030000002473
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-03-approval-workspace",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 21194.429999999556,
+        "p95_ms": 21508.26800999712,
+        "p99_ms": 21536.1647219969,
+        "max_ms": 21543.138899996848
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-04-long-context-approval",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 10598.316200001136,
+        "p95_ms": 10886.808770002608,
+        "p99_ms": 10912.452554002739,
+        "max_ms": 10918.863500002772
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-05-research-delegation",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 24570.42250000086,
+        "p95_ms": 29253.666820001672,
+        "p99_ms": 29669.955204001744,
+        "max_ms": 29774.027300001762
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-06-compressed-workspace",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 13836.960600001476,
+        "p95_ms": 14822.987190001368,
+        "p99_ms": 14910.633998001358,
+        "max_ms": 14932.545700001356
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-07-tool-delegation",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 25991.251100000227,
+        "p95_ms": 28731.211370001256,
+        "p99_ms": 28974.763394001347,
+        "max_ms": 29035.65140000137
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-08-cancelled-composite",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 12229.664099999354,
+        "p95_ms": 17308.174829998825,
+        "p99_ms": 17759.598005998778,
+        "max_ms": 17872.453799998766
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-09-security-research-change",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 20134.91620000059,
+        "p95_ms": 23305.070709999563,
+        "p99_ms": 23586.862221999472,
+        "max_ms": 23657.31009999945
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-10-full-incident",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 29635.968300000968,
+        "p95_ms": 30231.520080000337,
+        "p99_ms": 30284.45801600028,
+        "max_ms": 30297.692500000267
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    }
+  ],
+  "global_summary": {
+    "sample_count": 180,
+    "passed_count": 28,
+    "failed_count": 152,
+    "success_rate": 0.15555555555555556,
+    "failure_kinds": {
+      "judge_quality_failure": 61,
+      "assertion_failure": 78,
+      "assertion": 10,
+      "fixture_configuration": 2,
+      "judge_error": 1
+    },
+    "wall_duration_ms": {
+      "sample_count": 180,
+      "p50_ms": 14925.652149999223,
+      "p95_ms": 30324.197780000206,
+      "p99_ms": 47577.93526799973,
+      "max_ms": 54356.058599998505
+    },
+    "llm_call_count_total": 223,
+    "tool_call_count_total": 53,
+    "trace_available_count": 180,
+    "trace_missing_count": 0
+  },
+  "samples_path": "samples/matched-baseline-20260812T095519Z_561153a.jsonl",
+  "execution_source": "current_eval",
+  "scenario_id": "matched_baseline",
+  "fixture_fingerprints": {
+    "evidence-01-vendor-decision": "c174299341573327",
+    "evidence-02-release-readiness": "7a0dd46cf0f2f7af",
+    "evidence-03-conflicting-capacity": "2abf2080b00d7b01",
+    "evidence-04-policy-version": "06ea91e5b2fdb79f",
+    "evidence-05-incident-cause": "31fac4a9285ca3a1",
+    "evidence-06-market-shortlist": "a51995a007fbcb69",
+    "evidence-07-security-advisory": "5907c4d345bd1f7b",
+    "evidence-08-metric-definition": "1502b76419b23756",
+    "evidence-09-contract-decision": "d1d02ebdc32879d5",
+    "evidence-10-experiment-verdict": "71d4b978959c5932",
+    "workspace-01-config-diagnosis": "9ad27eaa8569c561",
+    "workspace-02-doc-link-fix": "d549d8399a4623fe",
+    "workspace-03-test-regression": "6d0ea22db5139a12",
+    "workspace-04-schema-migration": "7397b1351ccc3270",
+    "workspace-05-cli-validation": "e9de424bf8dc1c95",
+    "workspace-06-cancel-propagation": "94707b6c0a6208ed",
+    "workspace-07-report-denominator": "350bf702c4a4bbb0",
+    "workspace-08-race-fix": "45486803d5803924",
+    "workspace-09-security-path": "d58f5e1bb2db6b0f",
+    "workspace-10-cross-module-fix": "ec66b285dd7d6601",
+    "approval-01-log-export": "6604ea704d6fdc7a",
+    "approval-02-rejected-delete": "a5756c4bc02888f6",
+    "approval-03-database-backup": "bdebfda565a6d534",
+    "approval-04-partial-approval": "b713ba135e1ba81f",
+    "approval-05-expired-approval": "bca9d3d7ea61cf81",
+    "approval-06-tool-choice": "99713dbf6df2d99e",
+    "approval-07-tool-failure": "55ecb8a5b73eb10e",
+    "approval-08-resume-isolation": "7413727d5d556884",
+    "approval-09-argument-change": "cca3d5ce3ba158d1",
+    "approval-10-scope-conflict": "e7403c8debf9d21c",
+    "context-01-language-preference": "e80b5062a5353fa2",
+    "context-02-project-constraint": "5c0db904c5075063",
+    "context-03-corrected-name": "d12a23ff1e817465",
+    "context-04-deferred-decision": "e52afba263520ba2",
+    "context-05-summary-boundary": "f38103574ce2a32f",
+    "context-06-multiple-preferences": "523827c68466ef0f",
+    "context-07-constraint-revocation": "74c8a70bed257074",
+    "context-08-compression-conflict": "ffcac68c62151d49",
+    "context-09-long-tool-history": "c72d5ecb7ffb1618",
+    "context-10-cross-session-owner": "7617e687839e0805",
+    "multi-01-two-source-review": "033434617b7a0eed",
+    "multi-02-ranked-actions": "f1ed27a5c786c2d0",
+    "multi-03-conflicting-reviews": "54579acabbfc179e",
+    "multi-04-overlap-dedup": "7a1502e882ef72d6",
+    "multi-05-partial-child-failure": "27d5d10a888a0e59",
+    "multi-06-owner-routing": "06f822076e3bbab5",
+    "multi-07-evidence-boundary": "c7571ea8157bb92a",
+    "multi-08-cancel-propagation": "6984077a6a5cb8d4",
+    "multi-09-chain-isolation": "39fd97cc1456aaa2",
+    "multi-10-priority-synthesis": "6af6af1a5c861af0",
+    "mixed-01-context-tool": "fdfd2078a232e225",
+    "mixed-02-delegate-summary": "6d829ca18c54d992",
+    "mixed-03-approval-workspace": "b22cb61c05c829e2",
+    "mixed-04-long-context-approval": "d06d3b291bf4c02f",
+    "mixed-05-research-delegation": "1e1e1278f5f6bcd9",
+    "mixed-06-compressed-workspace": "46e97df454eca78c",
+    "mixed-07-tool-delegation": "a1efe0c92a1d8adb",
+    "mixed-08-cancelled-composite": "2dd37dc5ce764db0",
+    "mixed-09-security-research-change": "1d81186c55b0be5a",
+    "mixed-10-full-incident": "29c1855ee38d7d03"
+  },
+  "samples_content_summary": {
+    "line_count": 180,
+    "byte_count": 1222481,
+    "sha256": "0ae81a5a5066ed61e4040e98285b25ab18b4eac3012abcfe50520ac2bc8a0aa5"
+  }
+}

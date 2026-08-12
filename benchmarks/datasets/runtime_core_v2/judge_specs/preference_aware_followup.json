@@ -1,0 +1,1 @@
+{"task_id":"preference_aware_followup","version":"1","task":"按已知偏好交付","expected_delivery":"遵守偏好的后续答案","required_constraints":["遵守偏好"],"allowed_facts":["偏好","首轮提交","后续请求"],"criteria":{"preference":"偏好被遵守","delivery":"交付可用"}}

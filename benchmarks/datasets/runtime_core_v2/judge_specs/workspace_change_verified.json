@@ -1,0 +1,1 @@
+{"task_id":"workspace_change_verified","version":"1","task":"说明受控工作区变更","expected_delivery":"已验证交付","required_constraints":["说明验证"],"allowed_facts":["审批","变更","验证"],"criteria":{"delivery":"交付完整","verification":"验证明确"}}

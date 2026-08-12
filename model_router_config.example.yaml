@@ -1,24 +1,20 @@
 # ============================================
-# dotClaw 模型路由配置（Phase 2 新增）
+# dotClaw 模型路由配置模板
+# 复制为 model_router_config.yaml 后按本地环境修改；该本地文件不提交。
 # ============================================
-# 此文件存在时，LLMProxy 使用多供应商路由模式。
-# 若文件不存在，自动从 config.yaml 的 llm.clients 降级为 P1 行为。
 
-# Level 1: 全局默认
 defaults:
   provider: qwen
-  model: qwen3.7-max
+  model: qwen3.7-plus
   parameters:
     temperature: 0.7
     max_tokens: 4096
   fallback_enabled: true
 
-# Level 2: 供应商配置
 providers:
   qwen:
     api_key: ${QWEN_API_KEY}
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-#    base_url: https://invalid-host-99999.example.com/v1
     rate_limit:
       requests_per_minute: 0
     circuit_breaker:
@@ -41,7 +37,7 @@ providers:
       max_attempts: 2
   gemini:
     api_key: ${GEMINI_API_KEY}
-    base_url:
+    base_url: null
     circuit_breaker:
       failure_threshold: 5
       cooldown_seconds: 30
@@ -56,29 +52,30 @@ providers:
       cooldown_seconds: 30
       half_open_max: 1
 
-# Level 3: 模型配置
 models:
   qwen3.7-max:
     provider: qwen
-    model_id: qwen3.7-max-2026-05-20
-    context_window: 131072
+    model_id: qwen3.7-max-preview
+    context_window: 991000
     tokenizer_encoding: cl100k_base
     capabilities: [chat, function_calling]
     status: active
-    # 双通道输出：原生 reasoning_content 字段（开发计划阶段二）
     reasoning:
       mode: native
-#  qwen-turbo:
-#    provider: qwen
-#    model_id: qwen-turbo
-#    context_window: 1000000
-#    capabilities: [chat, function_calling]
-#    status: active
+  qwen3.7-plus:
+    provider: qwen
+    model_id: qwen3.7-plus-2026-05-26
+    context_window: 991000
+    tokenizer_encoding: cl100k_base
+    capabilities: [chat, function_calling]
+    status: active
+    reasoning:
+      mode: native
   text-embedding-v4:
     provider: qwen
     model_id: text-embedding-v4
     context_window: 33000
-    capabilities: [ embedding ]
+    capabilities: [embedding]
     status: active
   deepseek-v4-flash:
     provider: deepseek
@@ -96,15 +93,14 @@ models:
     provider: gemini
     model_id: gemini-3.5-flash
     context_window: 128000
-    capabilities: [ chat, function_calling ]
+    capabilities: [chat, function_calling]
     status: disable
 
-# Level 4: 用途路由
 purposes:
   chat:
     description: "日常对话"
     priority:
-      - model: qwen3.7-max
+      - model: qwen3.7-plus
         priority: 1
       - model: deepseek-v4-flash
         priority: 2

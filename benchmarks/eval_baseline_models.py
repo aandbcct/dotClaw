@@ -1,7 +1,8 @@
 """Eval 基线数据模型：BenchmarkSample（单次采样记录）与 BenchmarkSnapshot（汇总快照）。
 
 本模块只定义可序列化的派生测试记录，不承担执行、统计或写盘逻辑。两类模型都复用
-Runtime / Eval 既有事实的只读视图，不新增持久化容器，也不内联正文或敏感内容：
+Runtime / Eval 既有事实的只读视图，不新增持久化容器。PR8 Agent Harness 样本可内联
+经过凭证脱敏和长度限制的候选交付与 Judge 理由，专用于人工校准；其他套件仍不内联正文：
 
 - ``BenchmarkSample`` 是单次实验结果的派生记录，按 JSONL 逐条追加，warmup 与
   正式采样均写出并以 ``is_warmup`` 区分；
@@ -248,6 +249,15 @@ def _optional_string_map(value: object, label: str) -> Mapping[str, str] | None:
         return None
     mapping: Mapping[str, object] = _require_json_map(value, label)
     return {key: _require_str(item, f"{label}.{key}") for key, item in mapping.items()}
+
+
+def _optional_string_tuple(value: object, label: str) -> tuple[str, ...] | None:
+    """读取可选字符串序列；业务能力标签保持不可变。"""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise BenchmarkSchemaError(f"{label} 必须是非空字符串数组或 null")
+    return tuple(value)
 
 
 def _optional_int(value: object, label: str) -> int | None:
@@ -498,6 +508,42 @@ class BenchmarkSample:
     raw_sample_path: str | None = None
     formal_sampling: bool | None = None
 
+    # ---- PR8 业务任务派生字段（旧快照缺失时均为 None） ----
+    task_category: str | None = None
+    task_kind: str | None = None
+    execution_mode: str | None = None
+    deterministic_passed: bool | None = None
+    failure_attribution: str | None = None
+    llm_call_count: int | None = None
+    tool_call_count: int | None = None
+    judge_spec_version: str | None = None
+    judge_verdict: str | None = None
+    judge_criteria: Mapping[str, str] | None = None
+    provider: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    judge_provider: str | None = None
+    judge_model: str | None = None
+    judge_prompt_hash: str | None = None
+    candidate_delivery_redacted: str | None = None
+    """供人工校准 Judge 的脱敏候选交付；旧样本缺失时为 None。"""
+    judge_reason_redacted: str | None = None
+    """供人工复核的脱敏 Judge 理由；未进入 Judge 时为 None。"""
+    review_redaction_applied: bool | None = None
+    """候选交付或 Judge 理由是否发生凭证脱敏或长度截断。"""
+    dataset_version: str | None = None
+    workflow_version: str | None = None
+
+    # ---- PR8 Agent Harness 业务效果字段（旧业务样本缺失时均为 None） ----
+    task_family: str | None = None
+    instance_id: str | None = None
+    difficulty: str | None = None
+    execution_condition: str | None = None
+    baseline_for: str | None = None
+    capability_tags: tuple[str, ...] | None = None
+    task_success: bool | None = None
+    judge_criterion_dimensions: Mapping[str, str] | None = None
+
     def to_dict(self) -> dict[str, object]:
         """序列化为 JSON 兼容字典；并发字段为 None 时写入 null。"""
         result: dict[str, object] = {
@@ -658,6 +704,35 @@ class BenchmarkSample:
             "environment": None if self.environment is None else dict(self.environment),
             "raw_sample_path": self.raw_sample_path,
             "formal_sampling": self.formal_sampling,
+            "task_category": self.task_category,
+            "task_kind": self.task_kind,
+            "execution_mode": self.execution_mode,
+            "deterministic_passed": self.deterministic_passed,
+            "failure_attribution": self.failure_attribution,
+            "llm_call_count": self.llm_call_count,
+            "tool_call_count": self.tool_call_count,
+            "judge_spec_version": self.judge_spec_version,
+            "judge_verdict": self.judge_verdict,
+            "judge_criteria": None if self.judge_criteria is None else dict(self.judge_criteria),
+            "provider": self.provider,
+            "model": self.model,
+            "temperature": self.temperature,
+            "judge_provider": self.judge_provider,
+            "judge_model": self.judge_model,
+            "judge_prompt_hash": self.judge_prompt_hash,
+            "candidate_delivery_redacted": self.candidate_delivery_redacted,
+            "judge_reason_redacted": self.judge_reason_redacted,
+            "review_redaction_applied": self.review_redaction_applied,
+            "dataset_version": self.dataset_version,
+            "workflow_version": self.workflow_version,
+            "task_family": self.task_family,
+            "instance_id": self.instance_id,
+            "difficulty": self.difficulty,
+            "execution_condition": self.execution_condition,
+            "baseline_for": self.baseline_for,
+            "capability_tags": None if self.capability_tags is None else list(self.capability_tags),
+            "task_success": self.task_success,
+            "judge_criterion_dimensions": None if self.judge_criterion_dimensions is None else dict(self.judge_criterion_dimensions),
         }
         return result
 
@@ -837,6 +912,35 @@ class BenchmarkSample:
             environment=_optional_string_map(data.get("environment"), f"{label}.environment"),
             raw_sample_path=_optional_str(data.get("raw_sample_path"), f"{label}.raw_sample_path"),
             formal_sampling=_optional_bool(data.get("formal_sampling"), f"{label}.formal_sampling"),
+            task_category=_optional_str(data.get("task_category"), f"{label}.task_category"),
+            task_kind=_optional_str(data.get("task_kind"), f"{label}.task_kind"),
+            execution_mode=_optional_str(data.get("execution_mode"), f"{label}.execution_mode"),
+            deterministic_passed=_optional_bool(data.get("deterministic_passed"), f"{label}.deterministic_passed"),
+            failure_attribution=_optional_str(data.get("failure_attribution"), f"{label}.failure_attribution"),
+            llm_call_count=_optional_int(data.get("llm_call_count"), f"{label}.llm_call_count"),
+            tool_call_count=_optional_int(data.get("tool_call_count"), f"{label}.tool_call_count"),
+            judge_spec_version=_optional_str(data.get("judge_spec_version"), f"{label}.judge_spec_version"),
+            judge_verdict=_optional_str(data.get("judge_verdict"), f"{label}.judge_verdict"),
+            judge_criteria=_optional_string_map(data.get("judge_criteria"), f"{label}.judge_criteria"),
+            provider=_optional_str(data.get("provider"), f"{label}.provider"),
+            model=_optional_str(data.get("model"), f"{label}.model"),
+            temperature=_optional_float(data.get("temperature"), f"{label}.temperature"),
+            judge_provider=_optional_str(data.get("judge_provider"), f"{label}.judge_provider"),
+            judge_model=_optional_str(data.get("judge_model"), f"{label}.judge_model"),
+            judge_prompt_hash=_optional_str(data.get("judge_prompt_hash"), f"{label}.judge_prompt_hash"),
+            candidate_delivery_redacted=_optional_str(data.get("candidate_delivery_redacted"), f"{label}.candidate_delivery_redacted"),
+            judge_reason_redacted=_optional_str(data.get("judge_reason_redacted"), f"{label}.judge_reason_redacted"),
+            review_redaction_applied=_optional_bool(data.get("review_redaction_applied"), f"{label}.review_redaction_applied"),
+            dataset_version=_optional_str(data.get("dataset_version"), f"{label}.dataset_version"),
+            workflow_version=_optional_str(data.get("workflow_version"), f"{label}.workflow_version"),
+            task_family=_optional_str(data.get("task_family"), f"{label}.task_family"),
+            instance_id=_optional_str(data.get("instance_id"), f"{label}.instance_id"),
+            difficulty=_optional_str(data.get("difficulty"), f"{label}.difficulty"),
+            execution_condition=_optional_str(data.get("execution_condition"), f"{label}.execution_condition"),
+            baseline_for=_optional_str(data.get("baseline_for"), f"{label}.baseline_for"),
+            capability_tags=_optional_string_tuple(data.get("capability_tags"), f"{label}.capability_tags"),
+            task_success=_optional_bool(data.get("task_success"), f"{label}.task_success"),
+            judge_criterion_dimensions=_optional_string_map(data.get("judge_criterion_dimensions"), f"{label}.judge_criterion_dimensions"),
         )
 
 

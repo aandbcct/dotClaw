@@ -4,12 +4,15 @@ __pycache__/
 *$py.class
 
 # Virtual environments
-.env
 .venv
 venv/
 env/
 .workbuddy
-.env
+
+# Local configuration (copy from the tracked *.example templates)
+/.env
+/config.yaml
+/model_router_config.yaml
 
 # IDE
 .vscode/

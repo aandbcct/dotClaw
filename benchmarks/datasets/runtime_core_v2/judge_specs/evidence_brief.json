@@ -1,0 +1,19 @@
+{
+  "task_id": "evidence_brief",
+  "version": "2",
+  "task": "基于冻结资料输出事实简报",
+  "expected_delivery": "明确资料 A 仅支持结论 sunny；其余信息未知且不作推断。",
+  "required_constraints": [
+    "说明证据边界：资料 A 仅支持 sunny；其余信息未知且不作推断。"
+  ],
+  "allowed_facts": [
+    "资料 A 是本任务的冻结资料来源。",
+    "资料 A 仅支持结论 sunny。",
+    "除 sunny 外的信息均为未知。",
+    "未知项不得推断。"
+  ],
+  "criteria": {
+    "boundary": "明确资料 A 的证据范围，并说明其余信息未知且不作推断。",
+    "facts": "仅陈述资料 A 支持 sunny、其余信息未知及不得推断，不引入其他事实。"
+  }
+}

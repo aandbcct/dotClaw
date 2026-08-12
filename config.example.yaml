@@ -1,0 +1,90 @@
+# ============================================
+# dotClaw 本地主配置模板
+# 复制为 config.yaml 后按本地环境修改；config.yaml 不提交。
+# ============================================
+
+llm:
+  default_model: qwen3.7-max
+  clients:
+    qwen3.7-max:
+      provider: qwen
+      api_key: ${QWEN_API_KEY}
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen3.7-max
+    qwen-turbo:
+      provider: qwen
+      api_key: ${QWEN_API_KEY}
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen-turbo
+  fallbacks:
+    - qwen-turbo
+  retry:
+    max_retries: 3
+    base_delay: 1.0
+  stream: true
+
+agent:
+  system_prompt: |
+    你是一个有用、诚实、友好、说话干脆的 AI 助手。
+    你可以调用工具来帮助用户完成任务。
+    当需要执行危险操作时会请求确认。
+    专注于当前会话，历史会话信息仅用作本次会话的参考，严禁在本次会话中提到与本次会话无关的内容
+  max_context_tokens: 8000
+  keep_recent_messages: 10
+  truncated_continue: true
+
+tools:
+  builtin_enabled: true
+  mcp_enabled: true
+  skill_enabled: true
+  approval_commands:
+    - builtin.process.execute
+  disabled_tools: []
+  exec_timeout: 60
+  network:
+    tavily:
+      enabled: false
+    open_meteo:
+      enabled: true
+  policy:
+    workspace_root: .
+    rules:
+      workspace.read: allow
+      workspace.write: ask
+      process.exec: ask
+      mcp.connect: ask
+      mcp.call: ask
+    denied_paths:
+      - ".env"
+      - ".git/**"
+      - "**/*.key"
+    allowed_mcp_servers: ["github"]
+  mcp_global:
+    startup_timeout: 4.0
+    tool_timeout: 60.0
+    restart_on_crash: true
+    max_restart_attempts: 3
+  mcp_servers: []
+
+skills:
+  directory: ./skills
+
+memory:
+  long_term_file: ./data/memory/MEMORY.md
+
+session:
+  directory: ./data/sessions
+
+scheduler:
+  enabled: true
+
+debug:
+  level: INFO
+  log_file: ./data/dotclaw.log
+
+journal:
+  trace_dir: ./data/sessions
+  snapshot_dir: ./data/snapshots
+  console: true
+  trace: true
+  snapshot: true

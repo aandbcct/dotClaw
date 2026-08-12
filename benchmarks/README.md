@@ -361,11 +361,17 @@ benchmarks/
 ├── context_assertions.py          # PR6 结构、边界与可比性断言
 ├── context_controls.py            # PR6 仅 Benchmark 的强制重建对照
 ├── context_stats.py               # PR6 token、错误数与时延聚合
+├── harness_business_baseline.py   # PR8 Harness 业务效果 CLI
+├── harness_business_dataset.py    # PR8 六任务族 Dataset 加载与资格校验
+├── harness_business_runner.py     # PR8 Full/匹配 Baseline 配对执行
+├── harness_business_report.py     # PR8 业务成功率、质量与提升统计
+├── harness_eval_executor.py       # PR8 真实 Runtime + 隔离副作用执行器
 ├── historical_baseline.py    # PR2 历史审计 / 运行 / 对照 CLI
 ├── historical_audit.py       # PR2 六道审计门与审计报告
 ├── historical_legacy_agent_v1.py   # PR2 旧 Agent v1（AgentLoop）单场景适配
 ├── historical_compare.py     # PR2 可比性检查与对照报告纯函数
 ├── datasets/runtime_core_v1/cases/   # PR1 Git 跟踪的四个 Eval Case JSON
+├── datasets/agent_harness_business_v1/ # PR8 6 族 × 10 实例业务任务集
 ├── cases/             # 6 个旧微基准评测用例
 │   ├── init_perf.py       # 初始化性能
 │   ├── tool_dispatch.py   # 工具调度延迟
@@ -390,6 +396,28 @@ benchmarks/
 ```
 
 ## 快速开始
+
+## PR8：Agent Harness 业务效果 Benchmark
+
+`agent_harness_business_v1` 冻结 Evidence / Research、Workspace Engineering、Tool / Approval Workflow、Long-context Continuity、Multi-Agent、Mixed Complex 六个任务族，每族 10 个不同实例，共 60 个任务；难度分布固定为 Easy 12、Medium 30、Hard 18。正式实验对每个实例重复 3 次，并对同一实例、同一重复序号分别运行 Full dotClaw 与该任务族唯一匹配的简化 Baseline，共 180 + 180 条计分样本。每种实际执行条件另有一次不计分 Preflight。
+
+确定性断言负责 Runtime 终态、工具调用、审批、文件修改、验证和委派事实；LLM-as-Judge 只评价通过确定性门禁后的最终交付，并按 Groundedness、约束遵守、完整性和可执行性等原子判据判定。报告输出端到端任务成功率、Full 相对匹配 Baseline 的百分点提升及实例聚类 Bootstrap 95% 区间、质量指标、任务族/难度分层、P50/P95、LLM/Tool 调用次数与失败归因。
+
+普通完成态 Multi-Agent/Mixed 委派由 Benchmark Harness 经生产父子 Run 路径确定性完成全部冻结子任务，再把结果回灌给候选模型综合；候选模型不负责重复选择多个同名委派工具。PR8 JSONL 还保存经过凭证脱敏和长度限制的候选交付、Judge reason 与脱敏标记，供人工抽样校准事实越界判据，未脱敏原文不得进入正式工件。
+
+首次接入 Provider 时只运行单实例开发诊断。诊断固定 `repeat=1`，不能携带 `--formal-sampling`，也不会生成正式业务效果报告：
+
+```powershell
+python -m benchmarks.harness_business_baseline --dataset-root benchmarks/datasets --dataset agent_harness_business_v1 --diagnostic-instance evidence-01-vendor-decision --repeat 1 --provider <provider> --model <model> --judge-provider <judge-provider> --judge-model <judge-model> --timeout-seconds 60 --retry-count 0 --output benchmarks/reports/harness-business-diagnostic/<run-id>
+```
+
+只有获得单独正式采样授权后，才运行完整固定矩阵：
+
+```powershell
+python -m benchmarks.harness_business_baseline --dataset-root benchmarks/datasets --dataset agent_harness_business_v1 --repeat 3 --formal-sampling --provider <provider> --model <model> --judge-provider <judge-provider> --judge-model <judge-model> --timeout-seconds 60 --retry-count 0 --output benchmarks/reports/harness-business/<run-id>
+```
+
+输出目录必须为空；候选/Judge 模型、配置哈希、数据集内容哈希、Full 与 Baseline JSONL 和快照必须共同留存。候选与 Judge 各使用只含声明模型的冻结路由，禁止故障降级到其他模型；当前 Provider 传输端没有请求级 temperature 透传，CLI 因此不接受该参数，样本记录 `null`（Provider 默认），不能伪写未实际下发的温度。`runtime_core_v2` 及旧 `benchmarks.business_baseline` 保留为历史兼容入口，其“少量任务高重复”结果不能与本数据集拼接，也不能作为 Harness Value 结论。当前仓库只完成开发期实现与替身验证，尚未产生新的正式 LLM 样本，因此不得填写业务成功率 X、提升 Y 或约束违反率 Z。
 
 ### 1. 生成测试数据（只需一次）
 

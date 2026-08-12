@@ -17,11 +17,38 @@ from dotclaw.runtime.domain.state import Ended, RunOutcome
 from helpers import (
     build_case,
     context_fixture,
+    delegation_fixture,
     make_llm_fixture,
     llm_response,
     tool_call,
     tool_fixture,
 )
+
+
+@pytest.mark.asyncio
+async def test_environment_resumes_fixture_delegation_to_terminal() -> None:
+    """声明委派 Fixture 时，隔离环境必须经公开恢复入口回灌子结果。"""
+    delegate = tool_call(
+        "delegate-1",
+        "delegate",
+        {"target_agent_id": "agent-review", "title": "审阅", "objective": "检查冻结材料"},
+    )
+    case = build_case(
+        context_fixtures=(context_fixture("ctx-delegate-1"), context_fixture("ctx-delegate-2")),
+        llm_fixture=make_llm_fixture(
+            "llm-delegate",
+            (llm_response("delegate-request", tool_calls=(delegate,)), llm_response("delegate-final", "已整合子任务结果")),
+        ),
+        delegation_fixtures=(
+            delegation_fixture("delegation-1", "agent-review", "child-1", outcome=RunOutcome.COMPLETED, output="子任务结果"),
+        ),
+    )
+
+    outcome = await EvalEnvironment(case).run()
+    outcome.assert_fully_consumed()
+
+    assert outcome.state.outcome() is RunOutcome.COMPLETED
+    assert any(message.kind is RunMessageKind.DELEGATION_RESULT for message in outcome.messages)
 
 
 # --------------------------------------------------------------------------- #

@@ -44,7 +44,7 @@ from ..runtime.application.ports import (
 )
 from ..runtime.domain.events import RunEvent
 from ..runtime.domain.facts import AgentRun, RunCheckpoint, RunMessage
-from ..runtime.domain.state import AgentRunState
+from ..runtime.domain.state import AgentRunState, Ended
 from .fixtures import (
     FixtureApprovalRepository,
     FixtureConfigurationError,
@@ -534,15 +534,28 @@ class EvalEnvironment:
         """
         request: RunRequest = self._build_request()
         result: RunResult = await self.engine.execute(request, output_port=output_port)
-        resolved: set[str] = set()
-        while self._is_approval_suspended(result) and self.case.approval_fixtures:
-            approval_id: str = result.approval_id  # type: ignore[assignment]
-            if approval_id in resolved:
-                # 同一审批被重复要求：可能引擎恢复后仍未消费该审批，避免死循环或重复消费 Fixture。
-                break
-            approved: bool = self.fixture_approval.next_decision(approval_id)
-            resolved.add(approval_id)
-            result = await self.engine.resolve_approval(approval_id, approved, output_port)
+        resolved_approvals: set[str] = set()
+        resolved_delegations: set[str] = set()
+        while True:
+            if self._is_approval_suspended(result) and self.case.approval_fixtures:
+                approval_id: str = result.approval_id  # type: ignore[assignment]
+                if approval_id in resolved_approvals:
+                    # 同一审批被重复要求时停止，避免重复消费 Fixture 或形成恢复死循环。
+                    break
+                approved: bool = self.fixture_approval.next_decision(approval_id)
+                resolved_approvals.add(approval_id)
+                result = await self.engine.resolve_approval(approval_id, approved, output_port)
+                continue
+            if self._is_delegation_suspended(result) and self.case.delegation_fixtures:
+                child_run_id: str = result.child_run_id  # type: ignore[assignment]
+                if child_run_id in resolved_delegations:
+                    # 同一子 Run 重复挂起说明 Fixture 或状态异常，停止自动恢复。
+                    break
+                await self._materialize_fixture_child(result.run_id, child_run_id)
+                resolved_delegations.add(child_run_id)
+                result = await self.engine.resume_delegation(child_run_id, output_port)
+                continue
+            break
         run: AgentRun | None = await self.run_repository.load_run(request.session_id, result.run_id)
         messages: tuple[RunMessage, ...] = await self.run_repository.load_messages(
             request.session_id, result.run_id
@@ -569,6 +582,39 @@ class EvalEnvironment:
         if result.approval_id is None:
             return False
         return result.state.is_waiting_approval()
+
+    @staticmethod
+    def _is_delegation_suspended(result: RunResult) -> bool:
+        """判断执行结果是否等待 Fixture 子 Run 回灌。"""
+        if result.child_run_id is None:
+            return False
+        return result.state.is_waiting_delegation()
+
+    async def _materialize_fixture_child(self, parent_run_id: str, child_run_id: str) -> None:
+        """在隔离仓储创建最小子 Run 事实，使恢复入口走真实父子关联校验。"""
+        if await self.run_repository.find_run(child_run_id) is not None:
+            return
+        if self.fixture_delegation is None:
+            raise FixtureConfigurationError("等待委派恢复但未装配 Delegation Fixture")
+        fixture = self.fixture_delegation.submitted_fixture(child_run_id)
+        if fixture.outcome is None:
+            return
+        parent = await self.run_repository.find_run(parent_run_id)
+        if parent is None:
+            raise FixtureConfigurationError("委派父 Run 不存在")
+        child = AgentRun(
+            run_id=child_run_id,
+            session_id=fixture.target_session_id or f"session-{fixture.target_agent_id}",
+            agent_id=fixture.target_agent_id,
+            state=AgentRunState(mode=Ended(fixture.outcome)),
+            started_at="eval-fixture",
+            ended_at="eval-fixture",
+            policy=parent.policy,
+            input_message_id=f"input-{child_run_id}",
+            parent_run_id=parent.run_id,
+            root_run_id=parent.root_run_id or parent.run_id,
+        )
+        await self.run_repository.create_run(child)
 
     def _build_request(self) -> RunRequest:
         """由 Case 的会话与输入消息构造执行请求。"""

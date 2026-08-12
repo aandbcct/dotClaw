@@ -1,0 +1,9 @@
+{
+  "task_id":"long_term_memory_guided_task","version":"1","category":"memory_constraint","kind":"standard_case","expected_delivery":"依据冻结长期偏好给出包含验证步骤的简洁方案","delivery_markers":["简洁","验证"],
+  "case_id":"long_term_memory_guided_task","schema_version":"1.0","name":"长期记忆约束：依据冻结偏好形成方案","agent_id":"agent-business",
+  "input":{"id":"memory-u1","role":"user","content":"依据长期偏好给出方案","created_at":"2026-01-01T00:00:00Z"},"conversation_fixture":{"session_id":"business-memory","messages":[],"version":0},
+  "policy_fixture":{"agent_id":"agent-business","identity_version":"v1","model_id":"mock-model","max_iterations":2,"policy_data":{"context_window":100000,"tokenizer_encoding":"cl100k_base"}},
+  "context_fixtures":[{"fixture_id":"memory-context","messages":[{"id":"memory-profile","sequence":1,"kind":"llm_response","role":"system","content":"冻结长期偏好：方案必须简洁并保留验证步骤。","tool_call_id":null,"name":null,"tool_calls":[],"metadata":{}}],"tools":[],"estimated_tokens":1}],
+  "llm_fixture":{"fixture_id":"memory-llm","responses":[{"message_id":"memory-final","content":"简洁方案：先实施，再运行验证步骤。","tool_calls":[]}]},"tool_fixtures":[],"approval_fixtures":[],"delegation_fixtures":[],
+  "expectations":[{"kind":"run_status","target":"outcome","expected":"completed","options":{}},{"kind":"output_assertion","target":"text","expected":"简洁","options":{"mode":"contains"}},{"kind":"output_assertion","target":"text","expected":"验证","options":{"mode":"contains"}}],"tags":["business","memory"],"source_trace":null,"execution_mode":"playback","allow_partial_trace":false
+}

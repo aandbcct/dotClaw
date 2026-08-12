@@ -1,0 +1,51 @@
+[
+  {
+    "instance_id": "evidence-01-vendor-decision",
+    "execution_condition": "full",
+    "runtime_reached": true,
+    "trace_available": true,
+    "recorded_at": "2026-08-12T06:18:44.684992+00:00"
+  },
+  {
+    "instance_id": "evidence-01-vendor-decision",
+    "execution_condition": "single_pass_research",
+    "runtime_reached": true,
+    "trace_available": true,
+    "recorded_at": "2026-08-12T06:18:53.224544+00:00"
+  },
+  {
+    "instance_id": "workspace-01-config-diagnosis",
+    "execution_condition": "single_agent_workspace",
+    "runtime_reached": true,
+    "trace_available": true,
+    "recorded_at": "2026-08-12T06:19:05.118453+00:00"
+  },
+  {
+    "instance_id": "approval-01-log-export",
+    "execution_condition": "direct_tool_without_resume",
+    "runtime_reached": true,
+    "trace_available": true,
+    "recorded_at": "2026-08-12T06:19:19.926191+00:00"
+  },
+  {
+    "instance_id": "context-01-language-preference",
+    "execution_condition": "recent_window_only",
+    "runtime_reached": true,
+    "trace_available": true,
+    "recorded_at": "2026-08-12T06:19:27.924063+00:00"
+  },
+  {
+    "instance_id": "multi-01-two-source-review",
+    "execution_condition": "single_agent_no_delegation",
+    "runtime_reached": true,
+    "trace_available": true,
+    "recorded_at": "2026-08-12T06:19:42.227695+00:00"
+  },
+  {
+    "instance_id": "mixed-01-context-tool",
+    "execution_condition": "primary_capability_removed",
+    "runtime_reached": true,
+    "trace_available": true,
+    "recorded_at": "2026-08-12T06:19:57.501918+00:00"
+  }
+]

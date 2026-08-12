@@ -1,0 +1,1 @@
+{"task_id":"workspace_diagnosis","version":"1","task":"诊断冻结工作区","expected_delivery":"问题和行动项","required_constraints":["结构化输出"],"allowed_facts":["目录","材料","症状"],"criteria":{"issues":"问题准确","actions":"行动可执行"}}

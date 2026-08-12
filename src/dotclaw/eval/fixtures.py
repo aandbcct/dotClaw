@@ -319,6 +319,13 @@ class FixtureDelegationPort:
             return self._fixtures[self._cursor :]
         return tuple(item for item in self._fixtures if item.fixture_id not in self._consumed)
 
+    def submitted_fixture(self, child_run_id: str) -> DelegationFixture:
+        """返回已受理子 Run 的冻结事实，供隔离仓储建立父子关联。"""
+        fixture = self._submitted.get(child_run_id)
+        if fixture is None:
+            raise FixtureConfigurationError(f"子运行 {child_run_id} 未经过 fixture 受理")
+        return fixture
+
     async def submit(self, request: DelegationRequest) -> DelegationSubmission:
         """按模式匹配委派 Fixture 并返回冻结受理信息。"""
         fixture: DelegationFixture = (
@@ -422,13 +429,22 @@ class FixtureContextPort:
     async def build(self, request: RunRequest, execution: RunExecutionView) -> ContextBundle:
         """返回下一次冻结的上下文；超出记录即判定为额外调用。"""
         if self._cursor >= len(self._fixtures):
-            raise FixtureConfigurationError(
-                f"第 {self._cursor + 1} 次上下文构建没有对应 fixture（共 {len(self._fixtures)} 条）"
+            if not self._fixtures or not self._fixtures[-1].repeat_last:
+                raise FixtureConfigurationError(
+                    f"第 {self._cursor + 1} 次上下文构建没有对应 fixture（共 {len(self._fixtures)} 条）"
+                )
+            fixture = self._fixtures[-1]
+        else:
+            fixture = self._fixtures[self._cursor]
+            self._cursor += 1
+        messages = fixture.messages
+        if fixture.include_run_messages:
+            frozen_ids = {message.message_id for message in fixture.messages}
+            messages = fixture.messages + tuple(
+                message for message in execution.run_messages if message.message_id not in frozen_ids
             )
-        fixture: ContextFixture = self._fixtures[self._cursor]
-        self._cursor += 1
         return ContextBundle(
-            messages=fixture.messages,
+            messages=messages,
             tools=fixture.tools,
             metadata=ContextMetadata(estimated_tokens=fixture.estimated_tokens),
         )

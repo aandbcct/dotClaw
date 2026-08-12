@@ -1,0 +1,1 @@
+{"task_id":"compressed_history_continuation","version":"1","category":"session_continuity","kind":"session_workflow","fixture_source":"runtime_session","expected_delivery":"压缩后继续遵守关键历史约束","tags":["session","compression"],"delivery_markers":["关键约束：先验证"]}

@@ -1,0 +1,1458 @@
+{
+  "schema_version": "2.0",
+  "snapshot_id": "20260812T095519Z_561153a-full",
+  "generated_at": "2026-08-12T09:55:20.054740+00:00",
+  "git_commit": "561153a",
+  "dataset": "agent_harness_business_v1",
+  "environment": {
+    "config_hash": "3d8c8698855dacbb",
+    "provider": "qwen",
+    "model": "qwen3.7-plus",
+    "temperature": "provider_default",
+    "judge_provider": "qwen",
+    "judge_model": "qwen3.7-plus",
+    "formal_sampling": "true",
+    "dataset_content_hash": "d9ff26ed60700a4d9595e46fd622bfa7c2befd6dd1804ce7548df2683c71aa8a",
+    "preflight_per_condition": "1",
+    "timeout_seconds": "300.0",
+    "retry_count": "1",
+    "workflow_version": "2",
+    "execution_profile": "full"
+  },
+  "warmup": 0,
+  "repeat": 3,
+  "cases": [
+    {
+      "case_id": "evidence-01-vendor-decision",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 13455.525700002909,
+        "p95_ms": 15423.024610001085,
+        "p99_ms": 15597.913402000922,
+        "max_ms": 15641.635600000882
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-02-release-readiness",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 13890.045099997224,
+        "p95_ms": 13992.811599999186,
+        "p99_ms": 14001.94639999936,
+        "max_ms": 14004.230099999404
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-03-conflicting-capacity",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 20953.8993999995,
+        "p95_ms": 21256.20409000003,
+        "p99_ms": 21283.075618000075,
+        "max_ms": 21289.793500000087
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-04-policy-version",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 12941.085099999327,
+        "p95_ms": 13722.542950000206,
+        "p99_ms": 13792.005870000285,
+        "max_ms": 13809.371600000304
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-05-incident-cause",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 20521.62660000249,
+        "p95_ms": 21234.596339999553,
+        "p99_ms": 21297.97142799929,
+        "max_ms": 21313.815199999226
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-06-market-shortlist",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15418.81839999769,
+        "p95_ms": 16862.492110001767,
+        "p99_ms": 16990.81866200213,
+        "max_ms": 17022.90030000222
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-07-security-advisory",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14326.911300002394,
+        "p95_ms": 15513.934800002244,
+        "p99_ms": 15619.44800000223,
+        "max_ms": 15645.826300002227
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-08-metric-definition",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 24173.200799999904,
+        "p95_ms": 26429.161230002137,
+        "p99_ms": 26629.691046002335,
+        "max_ms": 26679.823500002385
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-09-contract-decision",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 23445.074700000987,
+        "p95_ms": 23824.06281000258,
+        "p99_ms": 23857.75064200272,
+        "max_ms": 23866.172600002756
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "evidence-10-experiment-verdict",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 20605.753600000753,
+        "p95_ms": 22037.36002000187,
+        "p99_ms": 22164.61392400197,
+        "max_ms": 22196.427400001994
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-01-config-diagnosis",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 12335.78540000235,
+        "p95_ms": 13405.954429999474,
+        "p99_ms": 13501.080565999218,
+        "max_ms": 13524.862099999154
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-02-doc-link-fix",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15413.596700000198,
+        "p95_ms": 15961.639369999466,
+        "p99_ms": 16010.3542739994,
+        "max_ms": 16022.532999999385
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 12,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-03-test-regression",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "fixture_configuration": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 17749.324699998397,
+        "p95_ms": 19659.76738999998,
+        "p99_ms": 19829.58451800012,
+        "max_ms": 19872.038800000155
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 10,
+      "tool_call_count_total": 8,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-04-schema-migration",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "fixture_configuration": 1,
+        "assertion": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 16106.631099999504,
+        "p95_ms": 35785.806550000416,
+        "p99_ms": 37535.0665900005,
+        "max_ms": 37972.38160000052
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 11,
+      "tool_call_count_total": 10,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-05-cli-validation",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 20752.863000001526,
+        "p95_ms": 22987.287779998223,
+        "p99_ms": 23185.90331599793,
+        "max_ms": 23235.557199997857
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 12,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-06-cancel-propagation",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 1,
+        "judge_error": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 19708.404000000883,
+        "p95_ms": 20438.034360001984,
+        "p99_ms": 20502.890392002082,
+        "max_ms": 20519.104400002107
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 12,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-07-report-denominator",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 23693.35950000095,
+        "p95_ms": 24901.847279999856,
+        "p99_ms": 25009.26841599976,
+        "max_ms": 25036.123699999735
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 12,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-08-race-fix",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "fixture_configuration": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 7572.92939999752,
+        "p95_ms": 13081.162319998837,
+        "p99_ms": 13570.783023998956,
+        "max_ms": 13693.188199998986
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 7,
+      "tool_call_count_total": 7,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-09-security-path",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "fixture_configuration": 2,
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 12877.472800002579,
+        "p95_ms": 19981.301409999647,
+        "p99_ms": 20612.75284199939,
+        "max_ms": 20770.615699999325
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 9,
+      "tool_call_count_total": 8,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "workspace-10-cross-module-fix",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 2,
+        "fixture_configuration": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 18630.468400002428,
+        "p95_ms": 24448.363239998067,
+        "p99_ms": 24965.509447997683,
+        "max_ms": 25094.795999997586
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 11,
+      "tool_call_count_total": 8,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-01-log-export",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "fixture_configuration": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 8446.103800000856,
+        "p95_ms": 10953.197709998129,
+        "p99_ms": 11176.050501997888,
+        "max_ms": 11231.763699997828
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-02-rejected-delete",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "fixture_configuration": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 7281.236700000591,
+        "p95_ms": 10128.057299999271,
+        "p99_ms": 10381.108019999156,
+        "max_ms": 10444.370699999126
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-03-database-backup",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 26837.24860000075,
+        "p95_ms": 28192.65156999827,
+        "p99_ms": 28313.13183399805,
+        "max_ms": 28343.251899997995
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 12,
+      "tool_call_count_total": 12,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-04-partial-approval",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 8857.334200001787,
+        "p95_ms": 9286.564809999618,
+        "p99_ms": 9324.718641999425,
+        "max_ms": 9334.257099999377
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 6,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-05-expired-approval",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 9352.48539999884,
+        "p95_ms": 11103.81708999921,
+        "p99_ms": 11259.491017999244,
+        "max_ms": 11298.409499999252
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-06-tool-choice",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 2,
+        "judge_error": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14412.67340000195,
+        "p95_ms": 14978.984899998977,
+        "p99_ms": 15029.323699998713,
+        "max_ms": 15041.908399998647
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-07-tool-failure",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "missing_final_delivery": 1,
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 8638.472999999067,
+        "p95_ms": 9462.364320000052,
+        "p99_ms": 9535.599104000139,
+        "max_ms": 9553.907800000161
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 9,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-08-resume-isolation",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 17717.99109999847,
+        "p95_ms": 25007.341749999974,
+        "p99_ms": 25655.28403000011,
+        "max_ms": 25817.269600000145
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 6,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-09-argument-change",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15326.207400001294,
+        "p95_ms": 16044.381119999889,
+        "p99_ms": 16108.218783999764,
+        "max_ms": 16124.178199999733
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "approval-10-scope-conflict",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 9958.388200000627,
+        "p95_ms": 13286.306590001186,
+        "p99_ms": 13582.121558001236,
+        "max_ms": 13656.075300001248
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-01-language-preference",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 9226.110499999777,
+        "p95_ms": 9742.41574999869,
+        "p99_ms": 9788.309549998594,
+        "max_ms": 9799.78299999857
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-02-project-constraint",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 13652.341299999534,
+        "p95_ms": 14094.858609999937,
+        "p99_ms": 14134.193481999973,
+        "max_ms": 14144.027199999982
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-03-corrected-name",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 6196.380499997758,
+        "p95_ms": 8154.247249996843,
+        "p99_ms": 8328.279849996761,
+        "max_ms": 8371.78799999674
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-04-deferred-decision",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15626.307100003032,
+        "p95_ms": 26618.53153000156,
+        "p99_ms": 27595.618146001434,
+        "max_ms": 27839.8898000014
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-05-summary-boundary",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 26520.136600000114,
+        "p95_ms": 28225.025229997846,
+        "p99_ms": 28376.570885997644,
+        "max_ms": 28414.457299997594
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-06-multiple-preferences",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 22433.94719999924,
+        "p95_ms": 23489.80749000075,
+        "p99_ms": 23583.661738000883,
+        "max_ms": 23607.125300000916
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-07-constraint-revocation",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 17611.081200000626,
+        "p95_ms": 19829.106450000472,
+        "p99_ms": 20026.26425000046,
+        "max_ms": 20075.553700000455
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-08-compression-conflict",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 18198.178800001187,
+        "p95_ms": 21111.02601000202,
+        "p99_ms": 21369.9457620021,
+        "max_ms": 21434.675700002117
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-09-long-tool-history",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15821.49720000234,
+        "p95_ms": 18570.810629999687,
+        "p99_ms": 18815.19404599945,
+        "max_ms": 18876.289899999392
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 3,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "context-10-cross-session-owner",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 37691.61779999922,
+        "p95_ms": 38522.673660000146,
+        "p99_ms": 38596.54529200023,
+        "max_ms": 38615.01320000025
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-01-two-source-review",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 16612.10569999821,
+        "p95_ms": 16838.417809999737,
+        "p99_ms": 16858.534441999873,
+        "max_ms": 16863.563599999907
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-02-ranked-actions",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15567.943499998364,
+        "p95_ms": 17101.910880001014,
+        "p99_ms": 17238.26353600125,
+        "max_ms": 17272.35170000131
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-03-conflicting-reviews",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 17706.995900000038,
+        "p95_ms": 21303.43388000037,
+        "p99_ms": 21623.117256000405,
+        "max_ms": 21703.038100000413
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-04-overlap-dedup",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 26292.7271999979,
+        "p95_ms": 26419.208249999792,
+        "p99_ms": 26430.45100999996,
+        "max_ms": 26433.261700000003
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-05-partial-child-failure",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14803.552199999103,
+        "p95_ms": 15401.500409999062,
+        "p99_ms": 15454.651361999058,
+        "max_ms": 15467.939099999057
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-06-owner-routing",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15529.48920000199,
+        "p95_ms": 20853.80126999807,
+        "p99_ms": 21327.073453997727,
+        "max_ms": 21445.39149999764
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-07-evidence-boundary",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 10686.156400002801,
+        "p95_ms": 17409.122920001028,
+        "p99_ms": 18006.71994400087,
+        "max_ms": 18156.11920000083
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-08-cancel-propagation",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 16873.30479999946,
+        "p95_ms": 17547.07567000114,
+        "p99_ms": 17606.96641400129,
+        "max_ms": 17621.939100001327
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-09-chain-isolation",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 26978.40229999929,
+        "p95_ms": 28262.24105000001,
+        "p99_ms": 28376.360050000076,
+        "max_ms": 28404.88980000009
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "multi-10-priority-synthesis",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 16478.265500001726,
+        "p95_ms": 16741.818889999922,
+        "p99_ms": 16765.245857999762,
+        "max_ms": 16771.102599999722
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-01-context-tool",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 17884.733000002598,
+        "p95_ms": 19887.89818999794,
+        "p99_ms": 20065.957317997527,
+        "max_ms": 20110.472099997423
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 9,
+      "tool_call_count_total": 6,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-02-delegate-summary",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 9776.929999999993,
+        "p95_ms": 9961.876309998115,
+        "p99_ms": 9978.315981997948,
+        "max_ms": 9982.425899997907
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-03-approval-workspace",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 25033.589599999686,
+        "p95_ms": 26675.72339000144,
+        "p99_ms": 26821.690838001596,
+        "max_ms": 26858.182700001635
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 12,
+      "tool_call_count_total": 12,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-04-long-context-approval",
+      "sample_count": 3,
+      "passed_count": 3,
+      "failed_count": 0,
+      "success_rate": 1.0,
+      "failure_kinds": {},
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 15641.544600002817,
+        "p95_ms": 17821.05093000173,
+        "p99_ms": 18014.784826001633,
+        "max_ms": 18063.21830000161
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 6,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-05-research-delegation",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "judge_quality_failure": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 24092.65040000173,
+        "p95_ms": 26769.25184000138,
+        "p99_ms": 27007.17196800135,
+        "max_ms": 27066.65200000134
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-06-compressed-workspace",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "assertion": 3
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 7664.357800000289,
+        "p95_ms": 7963.747839999633,
+        "p99_ms": 7990.360287999574,
+        "max_ms": 7997.01339999956
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 6,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-07-tool-delegation",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 23508.097600002657,
+        "p95_ms": 26818.41243999952,
+        "p99_ms": 27112.66264799924,
+        "max_ms": 27186.22519999917
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 6,
+      "tool_call_count_total": 6,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-08-cancelled-composite",
+      "sample_count": 3,
+      "passed_count": 2,
+      "failed_count": 1,
+      "success_rate": 0.6666666666666666,
+      "failure_kinds": {
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 14008.972399999038,
+        "p95_ms": 14314.582340002016,
+        "p99_ms": 14341.747668002281,
+        "max_ms": 14348.539000002347
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 3,
+      "tool_call_count_total": 0,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-09-security-research-change",
+      "sample_count": 3,
+      "passed_count": 1,
+      "failed_count": 2,
+      "success_rate": 0.3333333333333333,
+      "failure_kinds": {
+        "judge_quality_failure": 2
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 41205.99080000102,
+        "p95_ms": 47383.11200000062,
+        "p99_ms": 47932.189440000584,
+        "max_ms": 48069.458800000575
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 15,
+      "tool_call_count_total": 21,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    },
+    {
+      "case_id": "mixed-10-full-incident",
+      "sample_count": 3,
+      "passed_count": 0,
+      "failed_count": 3,
+      "success_rate": 0.0,
+      "failure_kinds": {
+        "trace_reconstruction": 2,
+        "judge_quality_failure": 1
+      },
+      "wall_duration_ms": {
+        "sample_count": 3,
+        "p50_ms": 25855.682600002183,
+        "p95_ms": 30167.165809998914,
+        "p99_ms": 30550.408761998624,
+        "max_ms": 30646.21949999855
+      },
+      "trace_metrics_ms": {},
+      "llm_call_count_total": 7,
+      "tool_call_count_total": 11,
+      "trace_available_count": 3,
+      "trace_missing_count": 0,
+      "failed_tool_count_total": 0
+    }
+  ],
+  "global_summary": {
+    "sample_count": 180,
+    "passed_count": 104,
+    "failed_count": 76,
+    "success_rate": 0.5777777777777777,
+    "failure_kinds": {
+      "judge_quality_failure": 53,
+      "fixture_configuration": 14,
+      "assertion": 4,
+      "judge_error": 2,
+      "missing_final_delivery": 1,
+      "trace_reconstruction": 2
+    },
+    "wall_duration_ms": {
+      "sample_count": 180,
+      "p50_ms": 16115.404649999618,
+      "p95_ms": 28346.3337949981,
+      "p99_ms": 39159.11849600043,
+      "max_ms": 48069.458800000575
+    },
+    "llm_call_count_total": 358,
+    "tool_call_count_total": 289,
+    "trace_available_count": 180,
+    "trace_missing_count": 0
+  },
+  "samples_path": "samples/full-20260812T095519Z_561153a.jsonl",
+  "execution_source": "current_eval",
+  "scenario_id": "full",
+  "fixture_fingerprints": {
+    "evidence-01-vendor-decision": "c174299341573327",
+    "evidence-02-release-readiness": "7a0dd46cf0f2f7af",
+    "evidence-03-conflicting-capacity": "2abf2080b00d7b01",
+    "evidence-04-policy-version": "06ea91e5b2fdb79f",
+    "evidence-05-incident-cause": "31fac4a9285ca3a1",
+    "evidence-06-market-shortlist": "a51995a007fbcb69",
+    "evidence-07-security-advisory": "5907c4d345bd1f7b",
+    "evidence-08-metric-definition": "1502b76419b23756",
+    "evidence-09-contract-decision": "d1d02ebdc32879d5",
+    "evidence-10-experiment-verdict": "71d4b978959c5932",
+    "workspace-01-config-diagnosis": "9ad27eaa8569c561",
+    "workspace-02-doc-link-fix": "d549d8399a4623fe",
+    "workspace-03-test-regression": "6d0ea22db5139a12",
+    "workspace-04-schema-migration": "7397b1351ccc3270",
+    "workspace-05-cli-validation": "e9de424bf8dc1c95",
+    "workspace-06-cancel-propagation": "94707b6c0a6208ed",
+    "workspace-07-report-denominator": "350bf702c4a4bbb0",
+    "workspace-08-race-fix": "45486803d5803924",
+    "workspace-09-security-path": "d58f5e1bb2db6b0f",
+    "workspace-10-cross-module-fix": "ec66b285dd7d6601",
+    "approval-01-log-export": "6604ea704d6fdc7a",
+    "approval-02-rejected-delete": "a5756c4bc02888f6",
+    "approval-03-database-backup": "bdebfda565a6d534",
+    "approval-04-partial-approval": "b713ba135e1ba81f",
+    "approval-05-expired-approval": "bca9d3d7ea61cf81",
+    "approval-06-tool-choice": "99713dbf6df2d99e",
+    "approval-07-tool-failure": "55ecb8a5b73eb10e",
+    "approval-08-resume-isolation": "7413727d5d556884",
+    "approval-09-argument-change": "cca3d5ce3ba158d1",
+    "approval-10-scope-conflict": "e7403c8debf9d21c",
+    "context-01-language-preference": "e80b5062a5353fa2",
+    "context-02-project-constraint": "5c0db904c5075063",
+    "context-03-corrected-name": "d12a23ff1e817465",
+    "context-04-deferred-decision": "e52afba263520ba2",
+    "context-05-summary-boundary": "f38103574ce2a32f",
+    "context-06-multiple-preferences": "523827c68466ef0f",
+    "context-07-constraint-revocation": "74c8a70bed257074",
+    "context-08-compression-conflict": "ffcac68c62151d49",
+    "context-09-long-tool-history": "c72d5ecb7ffb1618",
+    "context-10-cross-session-owner": "7617e687839e0805",
+    "multi-01-two-source-review": "033434617b7a0eed",
+    "multi-02-ranked-actions": "f1ed27a5c786c2d0",
+    "multi-03-conflicting-reviews": "54579acabbfc179e",
+    "multi-04-overlap-dedup": "7a1502e882ef72d6",
+    "multi-05-partial-child-failure": "27d5d10a888a0e59",
+    "multi-06-owner-routing": "06f822076e3bbab5",
+    "multi-07-evidence-boundary": "c7571ea8157bb92a",
+    "multi-08-cancel-propagation": "6984077a6a5cb8d4",
+    "multi-09-chain-isolation": "39fd97cc1456aaa2",
+    "multi-10-priority-synthesis": "6af6af1a5c861af0",
+    "mixed-01-context-tool": "fdfd2078a232e225",
+    "mixed-02-delegate-summary": "6d829ca18c54d992",
+    "mixed-03-approval-workspace": "b22cb61c05c829e2",
+    "mixed-04-long-context-approval": "d06d3b291bf4c02f",
+    "mixed-05-research-delegation": "1e1e1278f5f6bcd9",
+    "mixed-06-compressed-workspace": "46e97df454eca78c",
+    "mixed-07-tool-delegation": "a1efe0c92a1d8adb",
+    "mixed-08-cancelled-composite": "2dd37dc5ce764db0",
+    "mixed-09-security-research-change": "1d81186c55b0be5a",
+    "mixed-10-full-incident": "29c1855ee38d7d03"
+  },
+  "samples_content_summary": {
+    "line_count": 180,
+    "byte_count": 1232700,
+    "sha256": "5be126d4ddba14f4bef48454b3d32e61c8a59d311fec65469bd107e11129d1ab"
+  }
+}

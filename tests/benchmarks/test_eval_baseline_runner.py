@@ -329,11 +329,16 @@ def test_make_snapshot_id_format() -> None:
     assert snapshot_id.split("_")[1] == git_short_commit()
 
 
-def test_config_hash_is_stable_hex() -> None:
-    """配置哈希是稳定摘要；缺失配置时返回 unknown。"""
-    digest = config_hash("config.yaml", "model_router_config.yaml")
+def test_config_hash_is_stable_hex(tmp_path: Path) -> None:
+    """运行时配置文件的哈希应稳定；模板只用于构造隔离的本地配置。"""
+    config_path = tmp_path / "config.yaml"
+    router_path = tmp_path / "model_router_config.yaml"
+    shutil.copyfile("config.example.yaml", config_path)
+    shutil.copyfile("model_router_config.example.yaml", router_path)
+
+    digest = config_hash(str(config_path), str(router_path))
     assert len(digest) == 16
-    assert digest == config_hash("config.yaml", "model_router_config.yaml")
+    assert digest == config_hash(str(config_path), str(router_path))
 
 
 # --------------------------------------------------------------------------- #

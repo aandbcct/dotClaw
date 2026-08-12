@@ -1,0 +1,109 @@
+{
+  "schema_version": "1.0",
+  "baseline_id": "pr8-qwen37plus-workflow-v2",
+  "evidence_status": "formal",
+  "source_run_id": "20260812T061829Z-561153a-qwen37plus",
+  "frozen_at": "2026-08-12T20:17:46.2317292+08:00",
+  "source_commit": "561153a",
+  "dataset": {
+    "name": "agent_harness_business_v1",
+    "version": "1",
+    "content_hash": "d9ff26ed60700a4d9595e46fd622bfa7c2befd6dd1804ce7548df2683c71aa8a",
+    "instance_count": 60
+  },
+  "conditions": {
+    "candidate_provider": "qwen",
+    "candidate_model": "qwen3.7-plus",
+    "judge_provider": "qwen",
+    "judge_model": "qwen3.7-plus",
+    "temperature": "provider_default",
+    "timeout_seconds": 300.0,
+    "retry_count": 1,
+    "config_hash": "3d8c8698855dacbb",
+    "workflow_version": "2"
+  },
+  "sampling": {
+    "formal_sampling": true,
+    "repeat_per_instance": 3,
+    "attempt_indexes": [
+      0,
+      1,
+      2
+    ],
+    "full_samples": 180,
+    "matched_baseline_samples": 180,
+    "total_samples": 360
+  },
+  "metrics": {
+    "full_task_successes": 104,
+    "full_task_success_rate": 0.5777777777777777,
+    "matched_baseline_task_successes": 28,
+    "matched_baseline_task_success_rate": 0.15555555555555556,
+    "harness_lift_percentage_points": 42.222222222222214,
+    "cluster_bootstrap_95_percentage_points": [
+      31.666666666666664,
+      53.333333333333336
+    ],
+    "full_constraint_violation_rate": 0.050955414012738856,
+    "full_fact_overreach_rate": 0.2611464968152866
+  },
+  "qualification": "formal",
+  "artifacts": [
+    {
+      "path": "20260812T095519Z_561153a-full.json",
+      "role": "full_snapshot",
+      "byte_count": 44559,
+      "sha256": "7f9186e8761211221f37bb7e7ba39ef18344388a2ed20ad039e70de7d61672d3"
+    },
+    {
+      "path": "20260812T095519Z_561153a-matched-baseline.json",
+      "role": "matched_baseline_snapshot",
+      "byte_count": 45409,
+      "sha256": "fba387bc7fc7c5dc7a5254c845bd49323774ad8452eeeeb2c03db6ef88e86e78"
+    },
+    {
+      "path": "business-config.json",
+      "role": "sanitized_run_config",
+      "byte_count": 519,
+      "sha256": "3a914f6da00e5d9c7bc3a86f31db1f93b12a1201b8e7c2feb3a6075675f8e5bf"
+    },
+    {
+      "path": "preflight.json",
+      "role": "preflight_evidence",
+      "byte_count": 1601,
+      "sha256": "9edcec06f3e928c4bbd080009307ea55a0f3712d0941c6a12bb054ecbe684f7a"
+    },
+    {
+      "path": "harness-business-summary.json",
+      "role": "machine_readable_report",
+      "byte_count": 25279,
+      "sha256": "ffab45be4d7415dbab10ccca25094f94d8544d1876200556d5d016d9d480ba43"
+    },
+    {
+      "path": "harness-business-summary.md",
+      "role": "human_readable_report",
+      "byte_count": 25479,
+      "sha256": "bd8c022b63b9364c9362c27934340309e4cb143147ddd7d0f4ab765c4cdb0aba"
+    },
+    {
+      "path": "samples/full-20260812T095519Z_561153a.jsonl",
+      "role": "full_samples",
+      "line_count": 180,
+      "byte_count": 1232700,
+      "sha256": "5be126d4ddba14f4bef48454b3d32e61c8a59d311fec65469bd107e11129d1ab"
+    },
+    {
+      "path": "samples/matched-baseline-20260812T095519Z_561153a.jsonl",
+      "role": "matched_baseline_samples",
+      "line_count": 180,
+      "byte_count": 1222481,
+      "sha256": "0ae81a5a5066ed61e4040e98285b25ab18b4eac3012abcfe50520ac2bc8a0aa5"
+    }
+  ],
+  "excluded_runtime_artifacts": [
+    "launch.json",
+    "stdout.log",
+    "stderr.log",
+    "process_ids"
+  ]
+}

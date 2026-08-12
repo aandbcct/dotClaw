@@ -1,0 +1,17 @@
+{
+  "config_hash": "3d8c8698855dacbb",
+  "provider": "qwen",
+  "model": "qwen3.7-plus",
+  "temperature": "provider_default",
+  "judge_provider": "qwen",
+  "judge_model": "qwen3.7-plus",
+  "formal_sampling": "true",
+  "dataset_content_hash": "d9ff26ed60700a4d9595e46fd622bfa7c2befd6dd1804ce7548df2683c71aa8a",
+  "preflight_per_condition": "1",
+  "timeout_seconds": "300.0",
+  "retry_count": "1",
+  "workflow_version": "2",
+  "dataset": "agent_harness_business_v1",
+  "repeat": 3,
+  "instance_count": 60
+}
