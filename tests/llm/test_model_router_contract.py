@@ -17,13 +17,15 @@ import pytest
 
 
 from dotclaw.llm.base import ChatChunk, ChatTextDelta, Message, TextDeltaKind, ToolCall
-from dotclaw.llm.openai_compat import OpenAICompatibleClient
+from dotclaw.llm.drivers.openai_chat_completions import (
+    OpenAIChatCompletionsClient,
+)
 from dotclaw.llm.rate_limiter import RateLimiter, RateLimitConfig, RateLimitTimeout
 from dotclaw.llm.circuit_breaker import CircuitBreaker, BreakerConfig
 from dotclaw.llm.model_router import ModelRouter
 from dotclaw.llm.proxy import LLMProxy, CallSetupError, NonRetryableStreamError
 from dotclaw.config.settings import (
-    RouterConfig, DefaultsConfig, ProviderConfig, ProviderRetryConfig,
+    RouterConfig, DefaultsConfig, LLMDriver, ProviderConfig, ProviderRetryConfig,
     ModelConfig, PurposeConfig, PurposePriority,
 )
 
@@ -53,6 +55,7 @@ def _make_minimal_router_config(
         ),
         providers=providers or {
             "qwen": ProviderConfig(
+                driver=LLMDriver.OPENAI_CHAT_COMPLETIONS,
                 api_key="test-key",
                 base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
                 retry=ProviderRetryConfig(max_attempts=1, backoff_factor=0.01),
@@ -82,7 +85,7 @@ def _make_router(config: RouterConfig) -> ModelRouter:
 
 
 # ============================================================
-# 场景 1：OpenAICompatibleClient 等价性
+# 场景 1：OpenAI Chat Completions 协议客户端等价性
 # ============================================================
 
 class _MockAPIResponse:
@@ -93,7 +96,7 @@ class _MockAPIResponse:
         except StopIteration: raise StopAsyncIteration
 
 
-class _TestClient(OpenAICompatibleClient):
+class _TestClient(OpenAIChatCompletionsClient):
     def __init__(self, mock_chunks):
         super().__init__()
         self._mock_chunks = mock_chunks
@@ -130,7 +133,7 @@ def _chunk(content="", tc=None, finish=None):
 
 
 async def test_1_equivalence():
-    print("\n=== 场景 1：OpenAICompatibleClient 等价性 ===")
+    print("\n=== 场景 1：OpenAI Chat Completions 协议客户端等价性 ===")
     chunks = [
         _chunk(content="你好"),
         _chunk(content="，"),
@@ -246,8 +249,16 @@ async def test_4_forced_model():
     config = _make_minimal_router_config(
         defaults={"provider": "qwen", "model": "qwen3.7-max"},
         providers={
-            "qwen": ProviderConfig(api_key="k", base_url="http://qwen"),
-            "deepseek": ProviderConfig(api_key="k", base_url="http://ds"),
+            "qwen": ProviderConfig(
+                driver=LLMDriver.OPENAI_CHAT_COMPLETIONS,
+                api_key="k",
+                base_url="http://qwen",
+            ),
+            "deepseek": ProviderConfig(
+                driver=LLMDriver.OPENAI_CHAT_COMPLETIONS,
+                api_key="k",
+                base_url="http://ds",
+            ),
         },
         models={
             "qwen3.7-max": ModelConfig(provider="qwen", model_id="qwen3.7-max"),

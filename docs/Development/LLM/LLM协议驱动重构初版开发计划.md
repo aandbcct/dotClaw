@@ -1,8 +1,8 @@
 # LLM 协议驱动重构初版开发计划
 
-> 状态：讨论初版（2026-08-12）
+> 状态：初版已实现并通过回归（2026-08-13）
 >
-> 文档定位：记录当前已确认的本次开发边界，作为后续详细设计讨论的唯一方案基线。本文件不是最终技术设计，开发前按讨论结果原地修订。
+> 文档定位：记录本次已确认的开发边界、实施路径和验收结果，作为后续协议扩展讨论的方案基线。
 
 ## 1. PR 定位
 
@@ -385,3 +385,13 @@ model
 ```
 
 本 PR 完成后仍不存在：Responses API 客户端、reasoning item 模型、response id 持久化、供应商服务端 conversation、OpenAI 托管工具或原生 Anthropic/Gemini 协议。未来只有在 Runtime、Tool 和持久化边界经过独立设计后，才重新评估 Responses API 迁移。
+
+## 13. 实施验收记录（2026-08-13）
+
+- `tests/llm`：81 passed。
+- Runtime LLM 适配与上下文压缩定向回归：6 passed。
+- 全量测试：1186 passed。
+- `python -m compileall -q src tests`：通过。
+- `git diff --check`：通过。
+- 旧供应商客户端、Provider 注册表、自动发现、旧兼容客户端路径和未知 provider → Qwen 回退均已删除；生产与测试代码零引用。
+- 未执行真实供应商请求或 Benchmark 正式采样；jojocode Base URL、API Key 和 reasoning 业务配置仍由使用者按实际服务配置。

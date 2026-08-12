@@ -13,6 +13,7 @@ defaults:
 
 providers:
   qwen:
+    driver: openai_chat_completions
     api_key: ${QWEN_API_KEY}
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     rate_limit:
@@ -25,6 +26,7 @@ providers:
       max_attempts: 3
       backoff_factor: 2.0
   deepseek:
+    driver: openai_chat_completions
     api_key: ${DEEPSEEK_API_KEY}
     base_url: https://api.deepseek.com
     rate_limit:
@@ -35,14 +37,8 @@ providers:
       half_open_max: 1
     retry:
       max_attempts: 2
-  gemini:
-    api_key: ${GEMINI_API_KEY}
-    base_url: null
-    circuit_breaker:
-      failure_threshold: 5
-      cooldown_seconds: 30
-      half_open_max: 1
   openai:
+    driver: openai_chat_completions
     api_key: ${OPENAI_API_KEY}
     base_url: https://api.openai.com/v1
     rate_limit:
@@ -89,13 +85,6 @@ models:
     context_window: 128000
     capabilities: [chat, function_calling]
     status: active
-  gemini-3.5-flash:
-    provider: gemini
-    model_id: gemini-3.5-flash
-    context_window: 128000
-    capabilities: [chat, function_calling]
-    status: disable
-
 purposes:
   chat:
     description: "日常对话"

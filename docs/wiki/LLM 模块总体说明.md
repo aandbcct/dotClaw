@@ -27,8 +27,8 @@ ContextBundle
 → LLMProxy
 → ModelRouter
 → RateLimiter / CircuitBreaker
-→ Provider Registry
-→ OpenAICompatibleClient
+→ driver 显式构造表
+→ OpenAIChatCompletionsClient
 → ChatChunk
 → reasoning 输出 + response/ToolCall 聚合
 ```
@@ -114,9 +114,9 @@ flowchart TB
     Compactor["LLMContextCompactor"]
     Memory["MemoryManager / Flush / Dream"]
 
-    Registry["Provider Registry"]
-    Client["OpenAICompatibleClient"]
-    Concrete["Qwen / DeepSeek / OpenAI Clients"]
+    Registry["Driver Factory / Capabilities"]
+    Client["OpenAIChatCompletionsClient"]
+    Concrete["Provider Config"]
     SDK["AsyncOpenAI / Provider API"]
 
     Host --> Config
@@ -244,7 +244,7 @@ flowchart TB
         Breaker["CircuitBreaker"]
         Proxy["LLMProxy"]
         Reasoning["ReasoningPolicy / Parser"]
-        Provider["Provider Registry<br/>OpenAICompatibleClient"]
+        Provider["Driver Factory<br/>OpenAIChatCompletionsClient"]
     end
 
     subgraph ConfigLayer["B. 配置契约（src/dotclaw/config）"]
@@ -298,7 +298,7 @@ flowchart TB
 | LLM 核心 | CircuitBreaker | LLM | Provider 级状态机 |
 | LLM 核心 | LLMProxy | LLM | 重试、退避、候选切换和流保护 |
 | LLM 核心 | Reasoning Policy / Parser | LLM | 文本语义分流 |
-| LLM 核心 | Provider Registry / Compat Client | LLM | 实现发现、协议转换和解析 |
+| LLM 核心 | Driver Factory / Protocol Client | LLM | 协议构造、能力校验、转换和解析 |
 | 配置契约 | Router/Provider/Model/Purpose | Config | 描述候选、供应商和 reasoning |
 | 外部适配器 | LLMProxyAdapter | Runtime | DTO 转换、输出和最终消息 |
 | 外部适配器 | LLMContextCompactor | Runtime | 非流式历史压缩 |
@@ -649,8 +649,8 @@ fallback(open)
 ```text
 查 ModelConfig
 → 查 ProviderConfig
-→ Provider Registry
-→ 实例化具体 Client
+→ 解析 effective driver
+→ 实例化协议 Client
 → 按 model_name 缓存
 ```
 
@@ -658,7 +658,7 @@ fallback(open)
 
 **`_instantiate_client`**
 
-**职责与用途：**从 Provider Registry 取得 Client 类，注入：
+**职责与用途：**根据 `model.driver or provider.driver` 从显式 driver 构造表取得协议 Client，并注入：
 
 ```text
 api_key
@@ -667,7 +667,7 @@ model_id
 ReasoningPolicy
 ```
 
-如果 Provider 未注册，当前回退到 `QwenClient`，而不是配置失败。
+Router 构造时会验证默认模型、purpose 引用、active 模型的 provider、driver 注册状态及能力集合；未知引用或未注册 driver 会直接启动失败。
 
 **Provider 状态门面**
 
@@ -947,32 +947,27 @@ EXPLICIT_RESPONSE
 
 ---
 
-### 4.8 Provider 注册表
+### 4.8 Driver 显式注册
 
-#### 4.8.1 Provider Registry
+#### 4.8.1 Driver Factory 与能力表
 
-**职责与用途：**装饰器将 provider_name 映射到 LLMClient 类。
+**职责与用途：**`llm/drivers/__init__.py` 将 `LLMDriver` 显式映射到 LLMClient 构造函数和能力集合。
 
-重复名称当前直接覆盖，没有冲突错误。
+当前只注册 `openai_chat_completions`，能力为 chat、function_calling 和 embedding。
 
-**`get_provider`**
+**`create_driver_client`**
 
-**职责与用途：**首次 Registry 为空时触发自动发现，然后按名称查询。
+**职责与用途：**按已解析的枚举值构造协议 Client；未注册值直接抛出配置错误。
 
-**`_discover`**
+**`get_driver_capabilities`**
 
-**职责与用途：**遍历 providers 目录下所有 Python 模块并导入，触发注册装饰器。
+**职责与用途：**返回协议实现声明的能力集合，供 Router 在启动阶段与 active 模型能力交叉校验。
 
-特点：
-
-- 单个模块导入失败记录 warning；
-- `_auto_discovered` 在导入前设置为 True；
-- 失败模块不会在后续自动重试；
-- 若 Registry 在调用前已非空，`get_provider()` 不会触发完整发现。
+两张表都是代码内显式事实，不扫描文件、不按 provider 名称猜测，也不提供默认回退。
 
 ---
 
-### 4.9 `OpenAICompatibleClient`
+### 4.9 `OpenAIChatCompletionsClient`
 
 #### 4.9.1 `_StreamParseState`
 
@@ -987,7 +982,7 @@ output_tokens
 
 每次 chat 新建，避免缓存 Client 的并发调用共享工具参数或 reasoning Parser。
 
-#### 4.9.2 `OpenAICompatibleClient`
+#### 4.9.2 `OpenAIChatCompletionsClient`
 
 **职责与用途：**统一 OpenAI-compatible Provider 的：
 
@@ -1000,7 +995,7 @@ output_tokens
 - Token Usage；
 - Embedding 分批。
 
-具体 Provider 只提供 API Key、Base URL、Model ID 和 AsyncOpenAI Client。
+ProviderConfig 提供 API Key、Base URL 与运维策略，ModelConfig 提供 Model ID；协议客户端不再按供应商名称派生空壳子类。
 
 **`_convert_messages`**
 
@@ -1092,25 +1087,11 @@ ModelRouter 缓存的是 Client 包装器，底层 AsyncOpenAI 当前没有跨�
 
 ---
 
-### 4.10 具体 Provider
+### 4.10 Provider 与 driver 分工
 
-#### 4.10.1 `QwenClient`
+`ProviderConfig` 管理供应商身份、API Key、Base URL、限流、重试与熔断；`LLMDriver` 声明通信协议。qwen、deepseek、openai、jojocode 当前均配置为 `openai_chat_completions`，复用同一个协议客户端。
 
-**职责与用途：**注册名 `qwen`，使用 OpenAI-compatible 基类，仅保存 api_key、base_url 和 model。
-
-#### 4.10.2 `DeepSeekClient`
-
-**职责与用途：**注册名 `deepseek`，复用相同协议基类。Reasoning 行为由模型配置而不是 Client 类硬编码。
-
-#### 4.10.3 `OpenAIClient`
-
-**职责与用途：**注册名 `openai`，复用相同协议基类。
-
-#### 4.10.4 未注册 Provider 回退
-
-**职责与用途：**ModelRouter 对未知 provider 当前回退到 QwenClient。
-
-由于 QwenClient 本质也是 OpenAI-compatible 包装器，该回退可能对部分兼容端点工作，但会把配置错误延迟到请求阶段，并缺少明确 Provider 能力验证。
+driver 构造表和能力表均为显式映射。新增兼容供应商只需增加 provider 配置；只有引入新协议时才新增 driver 实现。旧 Provider 注册表、自动发现与供应商空壳客户端已删除。
 
 ---
 
@@ -1530,7 +1511,7 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     participant SDK as Provider SSE
-    participant Client as OpenAICompatibleClient
+    participant Client as OpenAIChatCompletionsClient
     participant State as _StreamParseState
     participant Proxy as LLMProxy
     participant Adapter as Runtime Adapter
@@ -1615,7 +1596,7 @@ flowchart TD
     Proxy --> Select["Router.select(embedding, model?)"]
     Select --> First["取 candidates[0]"]
     First --> Client["Router.get_client"]
-    Client --> Batch["OpenAICompatibleClient.embed"]
+    Client --> Batch["OpenAIChatCompletionsClient.embed"]
     Batch --> API["每批 16 条 Embeddings API"]
     API --> Vectors["vectors"]
     Vectors --> Memory
@@ -1672,31 +1653,26 @@ stateDiagram-v2
 - 全部正常候选消失时 Router 仍会尝试一个 OPEN Provider。
 - 状态修改没有锁，不是跨线程/多协程严格原子状态机。
 
-### 5.15 Provider 自动发现
+### 5.15 Driver 解析与启动校验
 
 ```mermaid
 flowchart TD
-    Router["get_client(model)"] --> Get["get_provider(name)"]
-    Get --> Empty{"Registry 为空?"}
-    Empty -->|是| Discover["_discover"]
-    Discover --> Files["遍历 providers/*.py"]
-    Files --> Import["import module"]
-    Import --> Decorator["@register"]
-    Decorator --> Registry["provider → Client class"]
-    Empty -->|否| Lookup["直接查询"]
-    Registry --> Lookup
-    Lookup --> Found{"找到?"}
-    Found -->|是| Instantiate["实例化"]
-    Found -->|否| Qwen["回退 QwenClient"]
+    Load["load_router_config"] --> Parse["解析 provider/model driver"]
+    Parse --> Validate["ModelRouter._validate_config"]
+    Validate --> Refs["校验 defaults / purpose / provider"]
+    Refs --> Caps["校验 driver 注册与 capabilities"]
+    Caps --> Client["get_client(model)"]
+    Client --> Effective["model.driver or provider.driver"]
+    Effective --> Factory["显式 driver factory"]
+    Factory --> Instantiate["实例化协议 Client"]
 ```
 
 **结论：**
 
-- 发现发生在首次 Client 创建，而不是 Host 启动时主动验证。
-- 单模块导入失败只 warning，Registry 可能部分可用。
-- 未注册 Provider 不会立即失败，而会进入 Qwen-compatible 回退。
-- Provider 注册重复会覆盖。
-- Provider 能力和 ModelConfig.capabilities 当前未交叉校验。
+- YAML 中 provider.driver 必填，model.driver 可选覆盖。
+- 未知 driver 在配置加载时失败，未注册 driver 在 Router 构造时失败。
+- active 模型的 provider 引用和 capabilities 在 Router 构造时交叉校验。
+- 不存在未知 provider 到 Qwen 的兼容回退。
 
 ---
 
@@ -1732,7 +1708,7 @@ BreakerConfig
 BreakerState
 ```
 
-OpenAICompatibleClient 和 Provider Registry 未从顶层 `__init__` 导出。
+OpenAIChatCompletionsClient 和 driver 构造函数未从顶层 `__init__` 导出。
 
 ### 6.2 Chat 请求契约
 
@@ -1888,7 +1864,7 @@ ChatTextDelta(RESPONSE)
 ModelRouter
 → 缓存 LLMClient per model
 
-OpenAICompatibleClient
+OpenAIChatCompletionsClient
 → 每次 chat/embed 创建 AsyncOpenAI
 ```
 
@@ -1916,14 +1892,14 @@ OpenAICompatibleClient
 13. HALF_OPEN 并发限制当前未接入，不能声称 half_open_max 已生效。
 14. forced_model 是优先提示，不是绝对强制。
 15. exact forced model 不在 purpose 链时当前可能被忽略。
-16. defaults.model 回退必须存在于 models 才能成功创建 Client；当前未提前验证。
+16. defaults.model 必须存在且 active，并与 defaults.provider 一致；Router 构造时提前验证。
 17. Runtime Chat 使用 stream=True；非流式 ToolCall 契约当前不完整。
 18. Context Compactor 不应携带 Tool。
 19. Compactor/Memory 摘要只应使用 response；当前实现尚未满足。
 20. Embedding 当前不具备 Chat 等价的限流、重试和降级。
-21. RouterConfig 的 circuit_breaker YAML 当前未贯通。
-22. Provider Registry 自动发现失败不是可靠事实源。
-23. 未注册 Provider 当前会回退 QwenClient，不能视为已验证兼容。
+21. RouterConfig 的 circuit_breaker YAML 必须完整贯通到启动组装。
+22. driver 构造表和能力表必须显式注册，禁止运行时自动发现。
+23. 未注册 driver 或未知 provider 必须在启动阶段失败，禁止兼容回退。
 24. Message 不保存 Provider reasoning state。
 25. LLMProxyAdapter.cancel 当前不终止底层请求。
 26. Runtime 输出端口异常不应被误判为 Provider 不可用；当前尚未分离。
@@ -1943,12 +1919,12 @@ OpenAICompatibleClient
 | 修改模型候选顺序 | `model_router.py::_build_candidates` | rate/breaker/forced model | priority 稳定，状态过滤可解释 |
 | 修改 forced model | `_prioritize_forced` | AgentPolicyResolver | 明确“强制”还是“优先” |
 | 修改默认回退 | `ModelRouter.select` | DefaultsConfig、Config 校验 | 默认模型必须已配置且可调用 |
-| 新增 Provider | `llm/providers/*.py` + `@register` | Config、Reasoning、Embedding | 不依赖 Runtime，定义能力边界 |
-| 修改 Provider 发现 | `providers/__init__.py` | 启动验证、日志 | 失败和重复不可静默 |
-| 修改 OpenAI 请求 | `openai_compat.py::chat` | Provider 兼容、工具、reasoning | 流式/非流式语义一致 |
+| 新增兼容 Provider | `model_router_config.yaml` 的 provider 配置 | Config、限流、熔断 | 必须显式选择已注册 driver |
+| 新增协议 Driver | `llm/drivers/__init__.py` + 协议实现 | Config、能力校验、测试 | 构造和能力映射必须同步注册 |
+| 修改 OpenAI 请求 | `drivers/openai_chat_completions.py::chat` | Provider 兼容、工具、reasoning | 流式/非流式语义一致 |
 | 修改 Message 转换 | `_convert_messages` | reasoning passthrough、ToolCall | role 和关联 ID 不丢失 |
 | 修改 ToolCall 解析 | `_parse_stream_chunk` | Runtime Adapter、Tool | 按 index 组装，finish 边界明确 |
-| 完善非流式 ToolCall | `OpenAICompatibleClient.chat` 非流分支 | Compactor、未来调用者 | 与流式标准 Chunk 一致 |
+| 完善非流式 ToolCall | `OpenAIChatCompletionsClient.chat` 非流分支 | Compactor、未来调用者 | 与流式标准 Chunk 一致 |
 | 修改 native reasoning | `_extract_text_deltas` | ModelReasoningConfig、Runtime Output | reasoning 不混入 response |
 | 修改 tags reasoning | `ReasoningStreamParser` | 配置校验、测试 | 跨 Chunk 标签不丢失 |
 | 修改标签配置 | `_parse_reasoning_config` | ReasoningPolicy | 检查四标签冲突 |
@@ -1966,7 +1942,7 @@ OpenAICompatibleClient
 | 修改 Memory Flush | `memory/flush.py` | LLM Proxy、JSON parser | reasoning 不污染 JSON |
 | 修改 Embedding 路由配置 | `model_router_config.yaml` | Memory Config、Model capabilities | 使用 embedding 模型 |
 | 修改 Router Loader | `config/settings.py::load_router_config` | Bootstrap、Policy | 完整映射所有 Provider 字段 |
-| 修改 Client 生命周期 | OpenAICompatibleClient / Host | AsyncOpenAI、shutdown | 不泄漏连接池 |
+| 修改 Client 生命周期 | OpenAIChatCompletionsClient / Host | AsyncOpenAI、shutdown | 不泄漏连接池 |
 | 接入 Journal | LLMProxy + Bootstrap/Runtime | Observability | 不影响调用成功语义 |
 | 排查模型未按 Identity 选择 | Policy model → purpose priority → forced model | RouterConfig | exact model 必须在候选链或定义强制语义 |
 | 排查无 Token Usage | Provider stream_options → final Chunk → Adapter | SDK 兼容 | 0 不应伪装精确值 |
@@ -2075,15 +2051,15 @@ OpenAICompatibleClient
 
 **代价与边界：**非流式分支容易与流式能力不一致，当前 ToolCall 和 finish_reason 已出现差异。
 
-#### 8.2.9 Unknown Provider 兼容回退
+#### 8.2.9 Provider 与协议 Driver 分离
 
-**问题与选择：**部分供应商提供 OpenAI-compatible Endpoint。当前未注册 Provider 会使用 QwenClient 作为兼容 Wrapper。
+**问题与选择：**多数供应商提供兼容端点。当前通过 provider.driver 显式选择协议实现，兼容供应商复用 `OpenAIChatCompletionsClient`。
 
-**未选择：**未知名称立即失败、每个兼容 Provider 都写空壳 Client。
+**未选择：**每个兼容 Provider 都写空壳 Client，或对未知 provider 猜测协议。
 
-**收益：**兼容端点可能无需新增代码。
+**收益：**兼容端点无需新增代码，同时保留供应商级限流、重试和熔断边界。
 
-**代价与边界：**配置拼写错误和真实不兼容被延迟到请求期，Provider 能力不可验证。
+**代价与边界：**配置必须显式填写 driver；声明兼容但端点实际不兼容仍会在请求期由协议错误暴露。
 
 #### 8.2.10 同一 Proxy 复用到辅助能力
 
@@ -2193,21 +2169,17 @@ Proxy 对所有用途和 Provider 固定 timeout=0.1。高配额短突发场景�
 
 Router.get_client 在 Proxy 单候选 try/except 之前执行。模型未配置、Provider 未配置或 Client 构造失败会终止整个 Chat，而不是尝试后续候选。
 
-#### L15. Provider 自动发现不完整且不可重试
+#### L15. Driver 注册需要同步维护两张显式表
 
-`_auto_discovered` 在导入前设为 True；单模块导入失败后不再自动重试。
+新增协议实现时必须同时登记构造函数和能力集合；Router 启动校验会阻断漏注册，但当前尚未用单一描述对象消除两表同步成本。
 
-若 Registry 已因手工导入存在一个 Provider，get_provider 不触发全目录发现。
+#### L16. 协议兼容性仍依赖配置事实
 
-#### L16. Provider 注册冲突和未知回退过于宽松
-
-重复注册直接覆盖；未知 Provider 回退 QwenClient。
-
-系统没有启动期 ProviderLoadReport 或模型→Client 能力校验。
+系统能够验证 driver 名称和声明能力，但不能在不发起真实请求的情况下证明第三方 Base URL 完全兼容所选协议。
 
 #### L17. 底层 AsyncOpenAI 每次调用创建且不关闭
 
-ModelRouter 缓存 Wrapper Client，但 Qwen/DeepSeek/OpenAI Client 每次 `_get_client()` 都创建 AsyncOpenAI。
+ModelRouter 缓存协议 Wrapper Client，但 `OpenAIChatCompletionsClient` 每次 `_get_client()` 都创建 AsyncOpenAI。
 
 没有跨调用连接池复用，也没有 Host shutdown 生命周期。
 
@@ -2316,9 +2288,9 @@ Runtime Adapter 固定 stream=True；Compactor/Flush 显式 stream=False。旧 C
 | E6 | L7 | 提取通用 `execute_candidates(operation)`，Chat 与 Embed 共用限流、重试、Breaker 和 fallback | Proxy、LLMClient、Memory |
 | E7 | L9、L10、L11 | 为 Breaker 增加原子 probe lease；明确 OPEN 是否允许 emergency fallback，并按 logical call/错误类别计数 | CircuitBreaker、Router、Proxy |
 | E8 | L12、L13 | RateLimiter 使用条件循环或 semaphore/token bucket，按 deadline 等待；timeout 进入配置 | RateLimiter、ProviderConfig |
-| E9 | L15、L16 | Host 启动时显式 discover/validate，返回 ProviderLoadReport；重复和未知 Provider 默认失败 | Provider Registry、Bootstrap |
+| E9 | L15、L16 | 将 driver 构造与能力元数据合并为单一显式描述，并保留启动校验 | Drivers、Config、Bootstrap |
 | E10 | L17 | Provider Client 持有可复用 AsyncOpenAI，并实现 async close；Host 统一逆序关闭 | Providers、Bootstrap |
-| E11 | L18 | 流式和非流式共用同一标准化解析，补齐 ToolCall、finish_reason 和 usage 测试 | OpenAICompatibleClient |
+| E11 | L18 | 流式和非流式共用同一标准化解析，补齐 ToolCall、finish_reason 和 usage 测试 | OpenAIChatCompletionsClient |
 | E12 | L19、L20 | 增加 ProviderMessageState/ReasoningPassthrough Hook，仅保存协议必需状态而非默认持久化全文 | Base DTO、Provider、Runtime Context |
 | E13 | L21 | 校验四标签全局唯一、非空和前缀冲突，或构建确定性 tokenizer | Config、Reasoning Parser |
 | E14 | L22 | 辅助消费者只聚合 RESPONSE；reasoning 可丢弃或进入受控观测字段 | Compactor、Memory Flush/Dream |
@@ -2345,15 +2317,12 @@ src/dotclaw/llm/
 ├── rate_limiter.py
 ├── circuit_breaker.py
 ├── reasoning.py
-├── openai_compat.py
-└── providers/
+└── drivers/
     ├── __init__.py
-    ├── qwen.py
-    ├── deepseek.py
-    └── openai.py
+    └── openai_chat_completions.py
 ```
 
-上表列出本次扫描确认的 LLM 文件和具体 Provider 实现。Provider Registry 会自动导入目录内其他 Python 模块，因此实际新增 Provider 应以仓库当前目录为准。
+上表列出 LLM 核心文件和当前协议实现。供应商配置与协议实现分离；新增兼容供应商不新增 Python Client。
 
 ### 9.2 LLM 核心文件
 
@@ -2366,11 +2335,8 @@ src/dotclaw/llm/
 | `llm/rate_limiter.py` | 限流 | Provider 令牌桶 |
 | `llm/circuit_breaker.py` | 熔断 | CLOSED/OPEN/HALF_OPEN |
 | `llm/reasoning.py` | Reasoning | Policy 和标签流解析 |
-| `llm/openai_compat.py` | 协议适配 | OpenAI 消息、SSE、ToolCall、Embedding |
-| `llm/providers/__init__.py` | Provider 注册 | 注册表和自动发现 |
-| `llm/providers/qwen.py` | Provider | Qwen OpenAI-compatible Client |
-| `llm/providers/deepseek.py` | Provider | DeepSeek OpenAI-compatible Client |
-| `llm/providers/openai.py` | Provider | OpenAI Client |
+| `llm/drivers/__init__.py` | Driver 注册 | 显式构造表和能力表 |
+| `llm/drivers/openai_chat_completions.py` | 协议适配 | OpenAI 消息、SSE、ToolCall、Embedding |
 
 ### 9.3 Config 接入
 
@@ -2447,4 +2413,3 @@ src/dotclaw/channel/runtime_llm_output.py
 ```
 
 该 Adapter 消费 Runtime `LLMOutputEvent`，按 run_id 展示“思考/回答”分区。它不直接依赖 LLM Provider Client。
-

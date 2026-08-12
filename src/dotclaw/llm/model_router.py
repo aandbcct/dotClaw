@@ -13,13 +13,13 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
+from ..config.settings import LLMDriver, ModelConfig, ProviderConfig, RouterConfig
 from .base import LLMClient
+from .circuit_breaker import CircuitBreaker
+from .drivers import create_driver_client, get_driver_capabilities
+from .rate_limiter import RateLimiter, RateLimitTimeout
 from .reasoning import ReasoningPolicy
-
-if TYPE_CHECKING:
-    from ..config.settings import RouterConfig
 
 logger = logging.getLogger("dotclaw.llm.router")
 
@@ -36,10 +36,11 @@ class ModelRouter:
 
     def __init__(
         self,
-        config: "RouterConfig",
-        rate_limiter: "RateLimiter",            # noqa: F821
-        circuit_breaker: "CircuitBreaker",      # noqa: F821
+        config: RouterConfig,
+        rate_limiter: RateLimiter,
+        circuit_breaker: CircuitBreaker,
     ):
+        self._validate_config(config)
         self._config = config
         self._client_cache: dict[str, LLMClient] = {}
         self._rate_limiter = rate_limiter
@@ -99,7 +100,6 @@ class ModelRouter:
         Agent 通过 Router 的门面调用，不直接触及 RateLimiter。
         超时抛 RateLimitTimeout → Proxy 视为降级信号。
         """
-        from .rate_limiter import RateLimitTimeout
         try:
             await self._rate_limiter.acquire(provider, timeout=timeout)
         except RateLimitTimeout:
@@ -248,25 +248,72 @@ class ModelRouter:
     # 内部: 客户端实例化
     # ============================================================
 
-    def _instantiate_client(self, provider_cfg, model_cfg) -> LLMClient:
-        """根据 provider 创建客户端实例（使用注册表 + 回调函数）。"""
-        from .providers import get_provider
-
-        api_key = provider_cfg.api_key
-        base_url = provider_cfg.base_url
-        model_id = model_cfg.model_id
-        provider_name = model_cfg.provider
-
-        client_cls = get_provider(provider_name)
-        if client_cls is None:
-            # 回退：未知 provider → 使用 QwenClient 作为兼容默认
-            from .providers.qwen import QwenClient
-            logger.warning("未知 provider '%s'，回退到 QwenClient", provider_name)
-            client_cls = QwenClient
-
-        return client_cls(
-            api_key=api_key,
-            base_url=base_url,
-            model=model_id,
+    def _instantiate_client(
+        self,
+        provider_cfg: ProviderConfig,
+        model_cfg: ModelConfig,
+    ) -> LLMClient:
+        """根据模型的有效 driver 创建协议客户端。"""
+        driver = self._effective_driver(provider_cfg, model_cfg)
+        return create_driver_client(
+            driver,
+            api_key=provider_cfg.api_key,
+            base_url=provider_cfg.base_url,
+            model=model_cfg.model_id,
             policy=ReasoningPolicy.from_config(model_cfg.reasoning),
         )
+
+    @staticmethod
+    def _effective_driver(
+        provider_cfg: ProviderConfig,
+        model_cfg: ModelConfig,
+    ) -> LLMDriver:
+        """模型级配置优先，否则使用 provider 默认协议。"""
+        return model_cfg.driver or provider_cfg.driver
+
+    @classmethod
+    def _validate_config(cls, config: RouterConfig) -> None:
+        """在 Router 可被调用前验证全部静态引用和 driver 能力。"""
+        if not config.models:
+            raise ValueError("models 至少需要配置一个模型")
+
+        default_model = config.models.get(config.defaults.model)
+        if default_model is None:
+            raise ValueError(
+                f"defaults.model 引用未知模型: {config.defaults.model!r}"
+            )
+        if default_model.status != "active":
+            raise ValueError(
+                f"defaults.model 必须引用 active 模型: {config.defaults.model!r}"
+            )
+        if default_model.provider != config.defaults.provider:
+            raise ValueError(
+                "defaults.provider 与 defaults.model 的 provider 不一致: "
+                f"{config.defaults.provider!r} != {default_model.provider!r}"
+            )
+
+        for purpose_name, purpose_cfg in config.purposes.items():
+            for index, priority in enumerate(purpose_cfg.priority):
+                if priority.model not in config.models:
+                    raise ValueError(
+                        f"purposes.{purpose_name}.priority[{index}] 引用未知模型: "
+                        f"{priority.model!r}"
+                    )
+
+        for model_name, model_cfg in config.models.items():
+            if model_cfg.status != "active":
+                continue
+            provider_cfg = config.providers.get(model_cfg.provider)
+            if provider_cfg is None:
+                raise ValueError(
+                    f"models.{model_name}.provider 引用未知 provider: "
+                    f"{model_cfg.provider!r}"
+                )
+            driver = cls._effective_driver(provider_cfg, model_cfg)
+            supported = get_driver_capabilities(driver)
+            unsupported = sorted(set(model_cfg.capabilities) - supported)
+            if unsupported:
+                raise ValueError(
+                    f"models.{model_name} 的 driver {driver.value!r} 不支持能力: "
+                    f"{', '.join(unsupported)}"
+                )

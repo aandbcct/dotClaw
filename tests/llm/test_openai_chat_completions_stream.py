@@ -15,7 +15,9 @@ import asyncio
 import pytest
 
 from dotclaw.llm.base import ChatChunk, ChatTextDelta, Message, TextDeltaKind, ToolCall
-from dotclaw.llm.openai_compat import OpenAICompatibleClient
+from dotclaw.llm.drivers.openai_chat_completions import (
+    OpenAIChatCompletionsClient,
+)
 from dotclaw.llm.proxy import LLMProxy, CallSetupError, NonRetryableStreamError
 from dotclaw.llm.reasoning import ReasoningMode, ReasoningPolicy
 
@@ -61,7 +63,7 @@ class _FailAfterFirstResponse:
         raise RuntimeError("stream broke")
 
 
-class _FakeClient(OpenAICompatibleClient):
+class _FakeClient(OpenAIChatCompletionsClient):
     """可注入 mock chunk 列表与推理策略的测试客户端（单次 chat 用一份 chunk）。"""
 
     def __init__(self, mock_chunks, policy: ReasoningPolicy | None = None):
@@ -107,7 +109,7 @@ class _NonStreamResponse:
         self.usage = _usage(in_tok, out_tok)
 
 
-class _FakeNonStreamClient(OpenAICompatibleClient):
+class _FakeNonStreamClient(OpenAIChatCompletionsClient):
     """注入非流式 ChatCompletion 响应的测试客户端（stream=False 调用）。"""
 
     def __init__(self, content: str, reasoning_content: str = "", in_tok: int = 0, out_tok: int = 0,
@@ -135,7 +137,7 @@ class _FakeNonStreamClient(OpenAICompatibleClient):
         return F()
 
 
-class _SeqClient(OpenAICompatibleClient):
+class _SeqClient(OpenAIChatCompletionsClient):
     """每次 chat() 调用按顺序消费一份异步响应（用于交错/异常隔离测试）。"""
 
     def __init__(self, responses, policy: ReasoningPolicy | None = None):
@@ -653,7 +655,7 @@ class _ControlledResponse:
             raise RuntimeError("close failed")
 
 
-class _ObservedClient(OpenAICompatibleClient):
+class _ObservedClient(OpenAIChatCompletionsClient):
     """记录 OpenAI 请求参数并返回可控 SDK stream 的测试客户端。"""
 
     def __init__(self, response: _ControlledResponse):
@@ -707,7 +709,10 @@ async def test_explicit_timeout_reaches_sdk_and_normal_stream_is_closed():
     assert client.request_params["timeout"].pool == 0.2
 
 
-async def _collect_explicit_timeout(client: OpenAICompatibleClient, timeout_seconds: float):
+async def _collect_explicit_timeout(
+    client: OpenAIChatCompletionsClient,
+    timeout_seconds: float,
+):
     """消费指定调用预算下的完整测试流。"""
     return [
         chunk

@@ -1,14 +1,12 @@
-"""OpenAI 兼容客户端基类
+"""OpenAI Chat Completions 兼容协议客户端。
 
 封装 OpenAI 兼容 API 的通用逻辑：
 - 消息格式转换（含 tool_calls 序列化）
 - 流式 chunk 解析 + tool_calls 参数累积（按推理模式分离 reasoning / response）
 - 请求级流式状态（每次 chat() 局部创建，并发调用互不串线）
 
-子类只需覆写三个钩子方法：
-- _get_api_key() → str
-- _get_base_url() → str
-- _get_model_id() → str
+供应商身份与协议实现分离：Qwen、DeepSeek、OpenAI、jojocode 等服务
+只要兼容该协议，就直接复用此客户端并注入各自连接参数。
 """
 
 from __future__ import annotations
@@ -17,13 +15,12 @@ import asyncio
 import inspect
 import json
 import logging
-from abc import abstractmethod
 from typing import Any, AsyncIterator, Iterator
 
 import httpx
 from openai import AsyncOpenAI
 
-from .base import (
+from ..base import (
     ChatChunk,
     ChatTextDelta,
     LLMClient,
@@ -33,7 +30,7 @@ from .base import (
     ToolCall,
     ToolDefinition,
 )
-from .reasoning import ReasoningMode, ReasoningPolicy, ReasoningStreamParser
+from ..reasoning import ReasoningMode, ReasoningPolicy, ReasoningStreamParser
 
 
 class _StreamParseState:
@@ -51,12 +48,12 @@ class _StreamParseState:
         self.output_tokens: int = 0
 
 
-class OpenAICompatibleClient(LLMClient):
+class OpenAIChatCompletionsClient(LLMClient):
     """
-    OpenAI 兼容客户端基类。
+    OpenAI Chat Completions 兼容协议客户端。
 
-    所有继承 OpenAI API 格式的供应商（Qwen、DeepSeek、OpenAI 等）
-    共享此实现，仅覆写 provider 特定的钩子。
+    所有兼容 Chat Completions 与 Embeddings API 的供应商共享此实现，
+    客户端不根据供应商名称猜测协议，也不读取路由配置。
 
     推理模式由注入的不可变 ReasoningPolicy 决定：
     - none：content 原样归为 response；
@@ -69,33 +66,35 @@ class OpenAICompatibleClient(LLMClient):
     _FIRST_CHUNK_TIMEOUT_RATIO: float = 0.5
     _STREAM_IDLE_TIMEOUT_RATIO: float = 0.5
 
-    def __init__(self, policy: ReasoningPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: ReasoningPolicy | None = None,
+        *,
+        api_key: str = "",
+        base_url: str = "https://api.openai.com/v1",
+        model: str = "",
+    ) -> None:
         # Policy 为不可变策略，由 ModelRouter 从 ModelReasoningConfig 转换注入；
         # Client 仅保存策略，不保存任何请求级流状态（请求级状态在 chat() 内局部创建）。
         self._policy = policy or ReasoningPolicy()
+        self._api_key = api_key
+        self._base_url = base_url
+        self._model = model
 
-    # ---- 子类必须覆写的钩子 ----
-
-    @abstractmethod
     def _get_api_key(self) -> str:
-        """返回该 provider 的 API key"""
-        ...
+        """返回当前供应商实例的 API Key。"""
+        return self._api_key
 
-    @abstractmethod
     def _get_base_url(self) -> str:
-        """返回该 provider 的 base URL"""
-        ...
+        """返回当前供应商实例的 Base URL。"""
+        return self._base_url
 
-    @abstractmethod
     def _get_model_id(self) -> str:
-        """返回当前实例绑定的 model 名称"""
-        ...
-
-    # ---- 子类可选覆写的钩子 ----
+        """返回当前实例绑定的模型标识。"""
+        return self._model
 
     def _get_client(self) -> AsyncOpenAI:
-        """创建 AsyncOpenAI 实例（子类可覆写以注入 custom headers）"""
-        assert False, "subclass must implement _get_client"
+        """创建 SDK 客户端；测试替身可覆写此方法注入受控响应。"""
         return AsyncOpenAI(
             api_key=self._get_api_key(),
             base_url=self._get_base_url(),
