@@ -91,6 +91,8 @@ AND 所有 required Judge criterion == pass
 
 确定性断言负责 Runtime 终态、工具选择与参数、审批、文件变化、验证命令、委派及可追溯副作用。Judge 只评价最终交付文本，不重新判断运行事实。
 
+Multi-Agent 与包含委派的 Mixed Complex 普通完成态任务由 Benchmark 外围 Harness 确定性创建全部冻结子任务，复用生产父/子 Run、结果等待与回灌路径；候选模型只消费已完成子结果并负责综合交付，不再承担连续选择多个同名 `delegate` 工具的编排职责。取消、部分失败与链路隔离仍使用对应专项生产工作负载。
+
 每条 Judge 判据包含稳定 ID、原子描述、质量维度和是否必需。质量维度固定为：
 
 - `groundedness`
@@ -101,6 +103,8 @@ AND 所有 required Judge criterion == pass
 Dataset 加载器为每个实例追加统一必需判据 `unsupported_claim_absent`，专门判断候选是否引入允许事实之外的事实性断言；事实越界率只由该判据计算，不把一般事实遗漏误算为越界。
 
 Judge 返回仍为严格 JSON。未知判据、缺字段、额外文本或非法 verdict 继续归因 `judge_error`。
+
+为校准 `unsupported_claim_absent`，每条 PR8 样本同时保存经过统一凭证模式脱敏和长度限制的候选交付、Judge reason 及是否发生脱敏的标记。原始未脱敏文本不得写入 Benchmark JSONL；这些复核字段只用于人工审计，不作为第二份评分真相。
 
 ## 7. 报告与证据
 

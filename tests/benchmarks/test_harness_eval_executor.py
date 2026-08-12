@@ -45,7 +45,8 @@ class _PlanFollowingLLM:
                 tool_calls=(ToolCall(f"tool-{step}", action["name"], action["arguments"]),),
             )
         observed = tuple(message.content for message in context.messages if message.content and message is not context.messages[0])
-        content = "；".join((*payload["facts"], *observed, *payload["constraints"]))
+        delegated = tuple(item["content"] for item in payload["delegation_results"])
+        content = "；".join((*payload["facts"], *delegated, *observed, *payload["constraints"]))
         return RunMessage(f"final-{execution.run_id}", 1, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, content)
 
     async def cancel(self, run_id: str) -> None:
@@ -89,7 +90,7 @@ def test_candidate_prompt_does_not_expose_expected_delivery_or_tool_outputs() ->
 
 @pytest.mark.asyncio
 async def test_multi_agent_full_resumes_two_fixture_delegations() -> None:
-    """多 Agent Full 条件必须产生两个委派 Span 并由父 Run 消费结果。"""
+    """多 Agent Full 条件必须由 Harness 完成两次生产委派并回灌候选综合。"""
     dataset = load_harness_dataset(Path("benchmarks/datasets"))
     instance = next(item for item in dataset.instances if item.instance_id == "multi-01-two-source-review")
     executor = EvalHarnessTaskExecutor(EvalDependencies(llm_port=_PlanFollowingLLM()))
@@ -100,7 +101,54 @@ async def test_multi_agent_full_resumes_two_fixture_delegations() -> None:
     assert result.deterministic_passed
     assert "two_delegations_completed" in result.observed_checks
     assert "parent_consumed_results" in result.observed_checks
+    assert result.llm_call_count == 1
+    assert result.evidence_summary
+    assert result.evidence_summary["delegation_submit_count"] == 2
+    assert result.evidence_summary["result_backfill_count"] == 2
     assert result.candidate
+
+
+@pytest.mark.asyncio
+async def test_multi_agent_owner_routing_uses_frozen_targets() -> None:
+    """专长路由必须由 Harness 按冻结目标执行，而不是依赖模型选择目标。"""
+    dataset = load_harness_dataset(Path("benchmarks/datasets"))
+    instance = next(item for item in dataset.instances if item.instance_id == "multi-06-owner-routing")
+    executor = EvalHarnessTaskExecutor(EvalDependencies(llm_port=_PlanFollowingLLM()))
+
+    result = await executor.execute(instance, ExecutionCondition.FULL, attempt=0, preflight=False)
+
+    assert "three_delegations_completed" in result.observed_checks
+    assert "delegation_targets_matched" in result.observed_checks
+    assert result.evidence_summary
+    assert set(result.evidence_summary["target_agent_ids"]) == {"agent-db", "agent-security", "agent-ui"}
+
+
+@pytest.mark.asyncio
+async def test_all_regular_delegation_cases_are_harness_orchestrated() -> None:
+    """所有普通完成态委派实例都必须完成冻结子任务并把结果交给候选综合。"""
+    dataset = load_harness_dataset(Path("benchmarks/datasets"))
+    specialized = {
+        "multi-05-partial-child-failure",
+        "multi-08-cancel-propagation",
+        "multi-09-chain-isolation",
+        "mixed-08-cancelled-composite",
+    }
+    instances = tuple(
+        instance
+        for instance in dataset.instances
+        if "delegation" in instance.capability_tags and instance.instance_id not in specialized
+    )
+    executor = EvalHarnessTaskExecutor(EvalDependencies(llm_port=_PlanFollowingLLM()))
+
+    for instance in instances:
+        result = await executor.execute(instance, ExecutionCondition.FULL, attempt=0, preflight=False)
+        expected_count = 3 if "three_delegations_completed" in instance.deterministic_checks or instance.instance_id == "multi-06-owner-routing" else 2
+
+        assert result.evidence_summary, instance.instance_id
+        assert result.evidence_summary["delegation_submit_count"] == expected_count, instance.instance_id
+        assert result.evidence_summary["result_backfill_count"] == expected_count, instance.instance_id
+        assert result.evidence_summary["parent_consumed_results"] is True, instance.instance_id
+        assert result.candidate, instance.instance_id
 
 
 @pytest.mark.asyncio

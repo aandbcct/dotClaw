@@ -1,7 +1,8 @@
 """Eval 基线数据模型：BenchmarkSample（单次采样记录）与 BenchmarkSnapshot（汇总快照）。
 
 本模块只定义可序列化的派生测试记录，不承担执行、统计或写盘逻辑。两类模型都复用
-Runtime / Eval 既有事实的只读视图，不新增持久化容器，也不内联正文或敏感内容：
+Runtime / Eval 既有事实的只读视图，不新增持久化容器。PR8 Agent Harness 样本可内联
+经过凭证脱敏和长度限制的候选交付与 Judge 理由，专用于人工校准；其他套件仍不内联正文：
 
 - ``BenchmarkSample`` 是单次实验结果的派生记录，按 JSONL 逐条追加，warmup 与
   正式采样均写出并以 ``is_warmup`` 区分；
@@ -524,6 +525,12 @@ class BenchmarkSample:
     judge_provider: str | None = None
     judge_model: str | None = None
     judge_prompt_hash: str | None = None
+    candidate_delivery_redacted: str | None = None
+    """供人工校准 Judge 的脱敏候选交付；旧样本缺失时为 None。"""
+    judge_reason_redacted: str | None = None
+    """供人工复核的脱敏 Judge 理由；未进入 Judge 时为 None。"""
+    review_redaction_applied: bool | None = None
+    """候选交付或 Judge 理由是否发生凭证脱敏或长度截断。"""
     dataset_version: str | None = None
     workflow_version: str | None = None
 
@@ -713,6 +720,9 @@ class BenchmarkSample:
             "judge_provider": self.judge_provider,
             "judge_model": self.judge_model,
             "judge_prompt_hash": self.judge_prompt_hash,
+            "candidate_delivery_redacted": self.candidate_delivery_redacted,
+            "judge_reason_redacted": self.judge_reason_redacted,
+            "review_redaction_applied": self.review_redaction_applied,
             "dataset_version": self.dataset_version,
             "workflow_version": self.workflow_version,
             "task_family": self.task_family,
@@ -918,6 +928,9 @@ class BenchmarkSample:
             judge_provider=_optional_str(data.get("judge_provider"), f"{label}.judge_provider"),
             judge_model=_optional_str(data.get("judge_model"), f"{label}.judge_model"),
             judge_prompt_hash=_optional_str(data.get("judge_prompt_hash"), f"{label}.judge_prompt_hash"),
+            candidate_delivery_redacted=_optional_str(data.get("candidate_delivery_redacted"), f"{label}.candidate_delivery_redacted"),
+            judge_reason_redacted=_optional_str(data.get("judge_reason_redacted"), f"{label}.judge_reason_redacted"),
+            review_redaction_applied=_optional_bool(data.get("review_redaction_applied"), f"{label}.review_redaction_applied"),
             dataset_version=_optional_str(data.get("dataset_version"), f"{label}.dataset_version"),
             workflow_version=_optional_str(data.get("workflow_version"), f"{label}.workflow_version"),
             task_family=_optional_str(data.get("task_family"), f"{label}.task_family"),

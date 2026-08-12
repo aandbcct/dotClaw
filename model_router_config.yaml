@@ -60,7 +60,7 @@ providers:
 models:
   qwen3.7-max:
     provider: qwen
-    model_id: qwen3.7-max-2026-05-17
+    model_id: qwen3.7-max-preview
     context_window: 991000
     tokenizer_encoding: cl100k_base
     capabilities: [chat, function_calling]

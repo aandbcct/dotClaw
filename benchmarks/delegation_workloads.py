@@ -141,6 +141,60 @@ class _DelegatingLLM(LLMPort):
         self.child_release.set()
 
 
+@dataclass(frozen=True)
+class DelegatedTaskFixture:
+    """Harness 确定性委派的一条冻结子任务。"""
+
+    target_agent_id: str
+    title: str
+    objective: str
+    output: str
+
+
+class _HarnessDelegatingLLM(LLMPort):
+    """只负责驱动生产委派状态机的确定性 Harness 替身。"""
+
+    def __init__(self, tasks: tuple[DelegatedTaskFixture, ...], delay_ms: int) -> None:
+        self._tasks = tasks
+        self._delay_seconds = delay_ms / 1000.0
+        self._next_task_by_parent: dict[str, int] = {}
+        self._output_by_target = {task.target_agent_id: task.output for task in tasks}
+
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
+        """父 Run 顺序提交全部冻结子任务，子 Run 返回对应冻结结果。"""
+        await asyncio.sleep(self._delay_seconds)
+        if execution.policy.agent_id == "parent-agent":
+            index = self._next_task_by_parent.get(execution.run_id, 0)
+            if index < len(self._tasks):
+                task = self._tasks[index]
+                self._next_task_by_parent[execution.run_id] = index + 1
+                return RunMessage(
+                    f"delegate-{index}",
+                    1,
+                    RunMessageKind.LLM_RESPONSE,
+                    MessageRole.ASSISTANT,
+                    "",
+                    tool_calls=(ToolCall(
+                        f"call-delegate-{index}",
+                        "delegate",
+                        {
+                            "target_agent_id": task.target_agent_id,
+                            "title": task.title,
+                            "objective": task.objective,
+                        },
+                    ),),
+                )
+            content = "harness delegation completed"
+        else:
+            content = self._output_by_target[execution.policy.agent_id]
+        if output_port is not None:
+            await output_port.emit(LLMOutputEvent(execution.session_id, execution.run_id, LLMOutputKind.RESPONSE_DELTA, content))
+        return RunMessage("answer", 1, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, content)
+
+    async def cancel(self, run_id: str) -> None:
+        """冻结完成态委派不持有远程资源。"""
+
+
 class _NoTools(ToolPort):
     """无工具端口（delegate 必须经过 DelegationPort）。"""
 
@@ -256,6 +310,87 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
 async def run_completed_chain(root: Path, config: DelegationWorkloadConfig, request_id: str) -> Mapping[str, object]:
     """完成态快捷入口（保留给单链路和并发工作负载）。"""
     return await run_child_outcome(root, config, request_id, ChildOutcome.COMPLETED)
+
+
+async def run_harness_delegations(
+    root: Path,
+    config: DelegationWorkloadConfig,
+    request_id: str,
+    tasks: tuple[DelegatedTaskFixture, ...],
+) -> Mapping[str, object]:
+    """由 Harness 驱动单个父 Run 完成全部子任务并验证结果回灌。"""
+    if not tasks:
+        raise ValueError("Harness 委派任务不能为空")
+    if len({task.target_agent_id for task in tasks}) != len(tasks):
+        raise ValueError("Harness 冻结子任务必须使用唯一目标 Agent，避免结果映射歧义")
+    repository = RunRepositoryAdapter(root)
+    registry = AgentRegistry()
+    for target_agent_id in dict.fromkeys(task.target_agent_id for task in tasks):
+        registry.register(AgentIdentity(agent_id=target_agent_id, agent_name=f"Benchmark {target_agent_id}", model="fixture-model"))
+    dispatcher = AgentDispatcher(TaskMessageBroker())
+    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher)
+    context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
+    engine = RuntimeEngine(
+        repository,
+        CheckpointRepositoryAdapter(root),
+        context,
+        _HarnessDelegatingLLM(tasks, config.fake_delay_ms),
+        tools,
+        _FixedPolicy(),
+        ApprovalService(ApprovalRepositoryAdapter(root)),
+        CancellationService(),
+        delegation_port=adapter,
+        token_counter=_AlwaysWithinBudgetCounter(),
+        history_compactor=_UnexpectedHistoryCompactor(),
+    )
+    coordinator = SessionRunCoordinator(engine)
+    adapter.bind_coordinator(coordinator)
+    session_id = f"parent-{request_id}"
+    request = RunRequest(
+        session_id,
+        f"lease-{request_id}",
+        "parent-agent",
+        ConversationMessage("input", MessageRole.USER, request_id, ""),
+        ConversationSnapshot(session_id, (), 0),
+    )
+    started = time.perf_counter()
+    current = await coordinator.submit(request, output)
+    parent_run_id = current.run_id
+    child_run_ids: list[str] = []
+    child_outcomes: list[str] = []
+    while current.child_run_id is not None:
+        child_run_id = current.child_run_id
+        child_run_ids.append(child_run_id)
+        await adapter.result(child_run_id)
+        child_run = await _wait_for_terminal(repository, child_run_id)
+        child_outcomes.append(child_run.state.outcome().value)
+        current = await coordinator.resume_delegation(child_run_id)
+    ended = time.perf_counter()
+    parent_events = await repository.load_events(session_id, parent_run_id)
+    parent_messages = await repository.load_messages(session_id, parent_run_id)
+    result_messages = [message for message in parent_messages if message.kind is RunMessageKind.DELEGATION_RESULT]
+    result_contents = tuple(message.content for message in result_messages)
+    expected_contents = tuple(task.output for task in tasks)
+    result_mismatch_count = abs(len(result_contents) - len(expected_contents)) + sum(
+        actual != expected
+        for actual, expected in zip(result_contents, expected_contents)
+    )
+    submitted_count = sum(event.event_type.value == "delegation_submitted" for event in parent_events)
+    completed_count = sum(event.event_type.value == "delegation_completed" for event in parent_events)
+    return {
+        "parent_run_id": parent_run_id,
+        "child_run_ids": tuple(child_run_ids),
+        "child_outcomes": tuple(child_outcomes),
+        "target_agent_ids": tuple(task.target_agent_id for task in tasks),
+        "delegation_submit_count": submitted_count,
+        "delegation_completed_event_count": completed_count,
+        "result_backfill_count": len(result_messages),
+        "result_contents": result_contents,
+        "parent_outcome": current.state.outcome().value,
+        "parent_consumed_results": result_mismatch_count == 0,
+        "misdelivery_count": result_mismatch_count,
+        "parent_end_to_end_ms": (ended - started) * 1000.0,
+    }
 
 
 async def run_concurrent_completed(root: Path, config: DelegationWorkloadConfig, attempt: int) -> tuple[Mapping[str, object], ...]:

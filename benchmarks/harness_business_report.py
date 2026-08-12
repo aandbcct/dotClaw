@@ -41,6 +41,7 @@ def summarize_harness_business(
         "formal_sampling": all(sample.formal_sampling is True for sample in formal),
         "git_commit": formal[0].git_commit,
         "config_hash": formal[0].config_hash,
+        "workflow_version": formal[0].workflow_version or "1",
         "candidate_condition": {
             "provider": formal[0].provider,
             "model": formal[0].model,
@@ -111,10 +112,13 @@ def _validate_samples(dataset: HarnessDataset, samples: Sequence[BenchmarkSample
     candidate_models = {(sample.provider, sample.model, sample.temperature) for sample in samples}
     judge_models = {(sample.judge_provider, sample.judge_model) for sample in samples}
     formal_flags = {sample.formal_sampling for sample in samples}
+    workflow_versions = {sample.workflow_version or "1" for sample in samples}
     if len(commits) != 1 or len(configs) != 1 or len(candidate_models) != 1 or len(judge_models) != 1:
         raise HarnessBusinessReportError("正式样本混入不同提交、配置、候选模型或 Judge 条件")
     if len(formal_flags) != 1:
         raise HarnessBusinessReportError("样本混入不同 formal_sampling 资格")
+    if len(workflow_versions) != 1:
+        raise HarnessBusinessReportError("样本混入不同 Harness workflow 版本")
     seen: set[tuple[str, int, str]] = set()
     for sample in samples:
         if any(getattr(sample, field) is None for field in required_fields):
@@ -131,7 +135,11 @@ def _validate_samples(dataset: HarnessDataset, samples: Sequence[BenchmarkSample
             raise HarnessBusinessReportError("样本任务族或难度与 Dataset 不一致")
         if sample.baseline_for != baseline or sample.execution_condition not in {"full", baseline}:
             raise HarnessBusinessReportError("样本执行条件不是实例对应的 Full 或匹配 Baseline")
-        expected_fingerprint = hashlib.sha256(f"{dataset.content_hash}:{instance.instance_id}".encode("utf-8")).hexdigest()[:16]
+        workflow_version = sample.workflow_version or "1"
+        fingerprint_source = f"{dataset.content_hash}:{instance.instance_id}"
+        if workflow_version != "1":
+            fingerprint_source += f":{workflow_version}"
+        expected_fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()[:16]
         judge_spec = JudgeSpec.from_harness_instance(instance)
         if sample.fixture_fingerprint != expected_fingerprint:
             raise HarnessBusinessReportError("样本 Dataset 内容指纹与当前版本不一致")
@@ -144,6 +152,13 @@ def _validate_samples(dataset: HarnessDataset, samples: Sequence[BenchmarkSample
             raise HarnessBusinessReportError("样本 Task Success 与确定性门禁/Judge 结果不一致")
         if sample.deterministic_passed is False and sample.judge_verdict is not None:
             raise HarnessBusinessReportError("确定性门禁失败的样本不得进入 Judge")
+        if workflow_version == "2":
+            if sample.review_redaction_applied is None:
+                raise HarnessBusinessReportError("workflow v2 样本缺少复核脱敏标记")
+            if sample.judge_verdict is not None and (
+                sample.candidate_delivery_redacted is None or sample.judge_reason_redacted is None
+            ):
+                raise HarnessBusinessReportError("workflow v2 Judge 样本缺少脱敏候选交付或理由")
         if not 0 <= sample.attempt < dataset.formal_repeat:
             raise HarnessBusinessReportError("样本 attempt 超出正式重复范围")
         key = (instance.instance_id, sample.attempt, sample.execution_condition or "")

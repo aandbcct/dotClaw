@@ -41,6 +41,40 @@ class _Judge:
         return json.dumps({"verdict": "pass", "criteria": criteria, "reason": "开发替身"}, ensure_ascii=False)
 
 
+class _SensitiveReviewJudge(_Judge):
+    """返回含凭证模式理由的脱敏验证 Judge 替身。"""
+
+    async def judge(self, prompt: str) -> str:
+        """保持协议有效，同时在理由中放入应被脱敏的 Bearer Token。"""
+        self.calls += 1
+        payload = json.loads(prompt.split("\n", 1)[1])
+        criteria = {item["id"]: "pass" for item in payload["criteria"]}
+        return json.dumps(
+            {"verdict": "pass", "criteria": criteria, "reason": "复核凭证 Bearer abcdefghijklmnop"},
+            ensure_ascii=False,
+        )
+
+
+class _SensitiveDeliveryExecutor(_Executor):
+    """返回包含敏感赋值模式的候选交付替身。"""
+
+    async def execute(self, instance, condition, *, attempt: int, preflight: bool) -> HarnessExecutionResult:
+        """Preflight 沿用普通候选，正式样本用于验证持久化脱敏。"""
+        result = await super().execute(instance, condition, attempt=attempt, preflight=preflight)
+        if preflight:
+            return result
+        return HarnessExecutionResult(
+            result.candidate + "；api_key=super-secret-value",
+            result.deterministic_passed,
+            result.observed_checks,
+            result.run_id,
+            result.trace_available,
+            result.wall_duration_ms,
+            result.llm_call_count,
+            result.tool_call_count,
+        )
+
+
 class _FailedPreflightExecutor(_Executor):
     """模拟某个正式执行条件无法生成 Trace 的执行替身。"""
 
@@ -99,6 +133,41 @@ async def test_full_matrix_writes_paired_snapshots_and_report(tmp_path: Path) ->
     first_sample = json.loads((tmp_path / full.samples_path).read_text(encoding="utf-8").splitlines()[0])
     assert first_sample["evidence_summary"]["deterministic_missing"] == []
     assert first_sample["evidence_summary"]["deterministic_required"]
+    assert first_sample["candidate_delivery_redacted"]
+    assert first_sample["judge_reason_redacted"] == "开发替身"
+    assert first_sample["review_redaction_applied"] is False
+    assert first_sample["workflow_version"] == "2"
+    assert full.environment["workflow_version"] == "2"
+
+
+@pytest.mark.asyncio
+async def test_review_text_is_persisted_only_after_redaction(tmp_path: Path) -> None:
+    """候选交付和 Judge 理由必须脱敏后写入 JSONL，禁止凭证原文落盘。"""
+    dataset = load_harness_dataset(Path("benchmarks/datasets"))
+    instance = dataset.instances[0]
+
+    full, _ = await run_harness_business_matrix(
+        dataset,
+        _SensitiveDeliveryExecutor(),
+        _SensitiveReviewJudge(),
+        output=tmp_path,
+        provider="provider",
+        model="model",
+        temperature=0.0,
+        judge_provider="provider",
+        judge_model="judge",
+        formal_sampling=False,
+        repeat=1,
+        instance_ids=(instance.instance_id,),
+    )
+    payload = (tmp_path / full.samples_path).read_text(encoding="utf-8")
+    sample = json.loads(payload)
+
+    assert "super-secret-value" not in payload
+    assert "abcdefghijklmnop" not in payload
+    assert sample["candidate_delivery_redacted"].endswith("api_key=[redacted]")
+    assert sample["judge_reason_redacted"].endswith("[redacted]")
+    assert sample["review_redaction_applied"] is True
 
 
 @pytest.mark.asyncio

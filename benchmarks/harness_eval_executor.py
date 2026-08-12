@@ -29,7 +29,15 @@ from dotclaw.trace.models import SpanKind, TraceSpanStatus
 
 from .harness_business_dataset import ExecutionCondition, HarnessTaskInstance, TaskFamily
 from .harness_business_runner import HarnessExecutionResult
-from .delegation_workloads import ChildOutcome, DelegationWorkloadConfig, run_child_outcome, run_concurrent_completed, run_parent_cancellation
+from .delegation_workloads import (
+    ChildOutcome,
+    DelegatedTaskFixture,
+    DelegationWorkloadConfig,
+    run_child_outcome,
+    run_concurrent_completed,
+    run_harness_delegations,
+    run_parent_cancellation,
+)
 
 
 _MAX_ITERATIONS = 12
@@ -67,8 +75,9 @@ class EvalHarnessTaskExecutor:
     ) -> HarnessExecutionResult:
         """构造同实例对应执行条件，运行并从 Trace 提取确定性观察。"""
         del preflight
-        case = _build_case(instance, condition, self._model)
         started = time.perf_counter()
+        harness_checks, harness_evidence, delegated_results = await _harness_delegation_evidence(instance, condition, attempt)
+        case = _build_case(instance, condition, self._model, delegated_results=delegated_results)
         result = await self._runner.run_case(case)
         wall_duration_ms = (time.perf_counter() - started) * 1000.0
         trace = result.trace
@@ -87,7 +96,9 @@ class EvalHarnessTaskExecutor:
             )
         observed = _observed_checks(instance, condition, trace)
         specialized_checks, evidence_summary = await _specialized_runtime_evidence(instance, condition, attempt)
+        observed.update(harness_checks)
         observed.update(specialized_checks)
+        combined_evidence = harness_evidence if harness_evidence is not None else evidence_summary
         return HarnessExecutionResult(
             candidate=final_assistant_content(trace) or "",
             deterministic_passed=result.failure_kind is None,
@@ -99,14 +110,20 @@ class EvalHarnessTaskExecutor:
             tool_call_count=len(tool_spans(trace)),
             failure_kind=None if result.failure_kind is None else result.failure_kind.value,
             failure_attribution=None if result.failure_kind is None else "assertion_failure",
-            evidence_summary=evidence_summary,
+            evidence_summary=combined_evidence,
         )
 
 
-def _build_case(instance: HarnessTaskInstance, condition: ExecutionCondition, model: str) -> EvalCase:
+def _build_case(
+    instance: HarnessTaskInstance,
+    condition: ExecutionCondition,
+    model: str,
+    *,
+    delegated_results: tuple[Mapping[str, str], ...] = (),
+) -> EvalCase:
     """把业务实例投影为隔离 EvalCase；Baseline 只移除其声明能力。"""
     actions = _planned_actions(instance, condition)
-    facts = _visible_facts(instance, condition, actions)
+    facts = () if delegated_results else _visible_facts(instance, condition, actions)
     prompt_payload = {
         "instance_id": instance.instance_id,
         "user_task": instance.user_task,
@@ -114,6 +131,7 @@ def _build_case(instance: HarnessTaskInstance, condition: ExecutionCondition, mo
         "distractors": instance.distractors,
         "constraints": instance.required_constraints,
         "execution_condition": condition.value,
+        "delegation_results": list(delegated_results),
         "available_operations": [{"name": item.name, "arguments": item.arguments} for item in actions],
         "operation_protocol": (
             "每个 available_operations 条目最多调用一次；收到对应工具或委派结果后视为已完成，"
@@ -239,9 +257,10 @@ def _planned_actions(instance: HarnessTaskInstance, condition: ExecutionConditio
             actions.append(_PlannedAction("run_verification", {"instance_id": instance.instance_id}, "验证通过"))
         return tuple(actions)
     if instance.family is TaskFamily.MULTI_AGENT:
-        return _delegation_actions(instance)
+        # Full Harness 已在候选综合前完成生产委派与结果回灌。
+        return ()
     if instance.family is TaskFamily.MIXED_COMPLEX:
-        actions = list(_delegation_actions(instance) if "delegation" in instance.capability_tags else ())
+        actions: list[_PlannedAction] = []
         if "read_only_tool_called" in instance.deterministic_checks:
             actions.append(_PlannedAction("inspect_status", {"instance_id": instance.instance_id}, "；".join(instance.allowed_facts)))
         if "sources_consumed" in instance.deterministic_checks:
@@ -275,7 +294,7 @@ def _visible_facts(
 
 
 def _delegation_actions(instance: HarnessTaskInstance) -> tuple[_PlannedAction, ...]:
-    """根据冻结检查数量生成两到三个顺序委派动作。"""
+    """根据冻结检查数量生成两到三个 Harness 委派动作。"""
     count = 3 if instance.instance_id == "multi-06-owner-routing" or any("three_" in item for item in instance.deterministic_checks) else 2
     targets = ("agent-db", "agent-security", "agent-ui") if instance.instance_id == "multi-06-owner-routing" else tuple(
         f"agent-review-{index + 1}" for index in range(count)
@@ -288,6 +307,60 @@ def _delegation_actions(instance: HarnessTaskInstance) -> tuple[_PlannedAction, 
         )
         for index in range(min(count, len(instance.allowed_facts)))
     )
+
+
+async def _harness_delegation_evidence(
+    instance: HarnessTaskInstance,
+    condition: ExecutionCondition,
+    attempt: int,
+) -> tuple[set[str], Mapping[str, object] | None, tuple[Mapping[str, str], ...]]:
+    """在候选综合前确定性完成普通 Full 委派，并返回持久化证据与子结果。"""
+    specialized = {
+        "multi-05-partial-child-failure",
+        "multi-08-cancel-propagation",
+        "multi-09-chain-isolation",
+        "mixed-08-cancelled-composite",
+    }
+    if (
+        condition is not ExecutionCondition.FULL
+        or "delegation" not in instance.capability_tags
+        or instance.instance_id in specialized
+    ):
+        return set(), None, ()
+    actions = _delegation_actions(instance)
+    tasks = tuple(
+        DelegatedTaskFixture(
+            target_agent_id=str(action.arguments["target_agent_id"]),
+            title=str(action.arguments["title"]),
+            objective=str(action.arguments["objective"]),
+            output=action.output,
+        )
+        for action in actions
+    )
+    config = DelegationWorkloadConfig(fake_delay_ms=0, concurrent_parents=2)
+    with tempfile.TemporaryDirectory(prefix=f"dotclaw-{instance.instance_id}-harness-") as directory:
+        facts = await run_harness_delegations(
+            Path(directory),
+            config,
+            f"{instance.instance_id}-{attempt}",
+            tasks,
+        )
+    completed_count = sum(outcome == "completed" for outcome in facts["child_outcomes"])
+    checks: set[str] = set()
+    if completed_count >= 2:
+        checks.add("two_delegations_completed")
+    if completed_count >= 3:
+        checks.add("three_delegations_completed")
+    if bool(facts["parent_consumed_results"]):
+        checks.add("parent_consumed_results")
+    if set(facts["target_agent_ids"]) == {"agent-db", "agent-security", "agent-ui"}:
+        checks.add("delegation_targets_matched")
+    result_contents = tuple(str(content) for content in facts["result_contents"])
+    results = tuple(
+        {"target_agent_id": task.target_agent_id, "content": content}
+        for task, content in zip(tasks, result_contents, strict=True)
+    )
+    return checks, facts, results
 
 
 def _tool_definition(action: _PlannedAction) -> ToolDefinition:

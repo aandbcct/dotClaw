@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Protocol, Sequence
 
-from .business_judge import JudgePort, JudgeProtocolError, JudgeSpec, parse_verdict, prompt_hash, render_prompt
+from .business_judge import JudgePort, JudgeProtocolError, JudgeSpec, parse_verdict, prompt_hash, redact_review_text, render_prompt
 from .eval_baseline import config_hash, git_short_commit, make_snapshot_id, write_jsonl
 from .eval_baseline_models import BenchmarkSample, BenchmarkSnapshot
 from .eval_baseline_stats import build_snapshot
@@ -23,6 +23,9 @@ from .harness_business_report import summarize_harness_business, write_harness_b
 
 class HarnessBusinessRunError(ValueError):
     """执行矩阵、确定性观察或正式资格不满足冻结契约。"""
+
+
+_HARNESS_WORKFLOW_VERSION = "2"
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,7 @@ async def run_harness_business_matrix(
         "preflight_per_condition": str(dataset.preflight_per_condition),
         "timeout_seconds": "unspecified" if timeout_seconds is None else str(timeout_seconds),
         "retry_count": "unspecified" if retry_count is None else str(retry_count),
+        "workflow_version": _HARNESS_WORKFLOW_VERSION,
     }
     full_snapshot = _snapshot(dataset, full_samples, f"{snapshot_id}-full", full_path, repeat, environment, "full", _samples_content_summary(output / full_path))
     baseline_snapshot = _snapshot(dataset, baseline_samples, f"{snapshot_id}-matched-baseline", baseline_path, repeat, environment, "matched_baseline", _samples_content_summary(output / baseline_path))
@@ -210,6 +214,10 @@ async def _run_sample(
     spec = JudgeSpec.from_harness_instance(instance)
     judge_verdict: str | None = None
     judge_criteria: dict[str, str] | None = None
+    judge_reason = ""
+    candidate_redacted, candidate_redaction_applied = redact_review_text(execution.candidate)
+    judge_reason_redacted = ""
+    judge_reason_redaction_applied = False
     failure_attribution = execution.failure_attribution
     if deterministic:
         if not execution.candidate:
@@ -220,15 +228,21 @@ async def _run_sample(
                 verdict = parse_verdict(await judge.judge(render_prompt(spec, execution.candidate)), spec)
                 judge_verdict = verdict.verdict
                 judge_criteria = dict(verdict.criteria)
+                judge_reason = verdict.reason
+                judge_reason_redacted, judge_reason_redaction_applied = redact_review_text(judge_reason)
                 if verdict.verdict == "fail":
                     failure_attribution = "judge_quality_failure"
-            except (JudgeProtocolError, TimeoutError):
+            except (JudgeProtocolError, TimeoutError) as error:
                 judge_verdict = "error"
+                error_reason = str(error) or type(error).__name__
+                judge_reason_redacted, judge_reason_redaction_applied = redact_review_text(error_reason)
                 failure_attribution = "judge_error"
     elif failure_attribution is None:
         failure_attribution = "assertion_failure"
     task_success = deterministic and judge_verdict == "pass"
-    fixture_fingerprint = hashlib.sha256(f"{dataset.content_hash}:{instance.instance_id}".encode("utf-8")).hexdigest()[:16]
+    fixture_fingerprint = hashlib.sha256(
+        f"{dataset.content_hash}:{instance.instance_id}:{_HARNESS_WORKFLOW_VERSION}".encode("utf-8")
+    ).hexdigest()[:16]
     evidence_summary: dict[str, object] = {
         "deterministic_required": sorted(required_checks),
         "deterministic_observed": sorted(required_checks & set(execution.observed_checks)),
@@ -268,7 +282,11 @@ async def _run_sample(
         judge_provider=judge_provider,
         judge_model=judge_model,
         judge_prompt_hash=prompt_hash(spec),
+        candidate_delivery_redacted=candidate_redacted or None,
+        judge_reason_redacted=judge_reason_redacted or None,
+        review_redaction_applied=candidate_redaction_applied or judge_reason_redaction_applied,
         dataset_version=dataset.version,
+        workflow_version=_HARNESS_WORKFLOW_VERSION,
         formal_sampling=formal_sampling,
         task_family=instance.family.value,
         instance_id=instance.instance_id,

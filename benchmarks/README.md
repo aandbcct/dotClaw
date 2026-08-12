@@ -403,6 +403,8 @@ benchmarks/
 
 确定性断言负责 Runtime 终态、工具调用、审批、文件修改、验证和委派事实；LLM-as-Judge 只评价通过确定性门禁后的最终交付，并按 Groundedness、约束遵守、完整性和可执行性等原子判据判定。报告输出端到端任务成功率、Full 相对匹配 Baseline 的百分点提升及实例聚类 Bootstrap 95% 区间、质量指标、任务族/难度分层、P50/P95、LLM/Tool 调用次数与失败归因。
 
+普通完成态 Multi-Agent/Mixed 委派由 Benchmark Harness 经生产父子 Run 路径确定性完成全部冻结子任务，再把结果回灌给候选模型综合；候选模型不负责重复选择多个同名委派工具。PR8 JSONL 还保存经过凭证脱敏和长度限制的候选交付、Judge reason 与脱敏标记，供人工抽样校准事实越界判据，未脱敏原文不得进入正式工件。
+
 首次接入 Provider 时只运行单实例开发诊断。诊断固定 `repeat=1`，不能携带 `--formal-sampling`，也不会生成正式业务效果报告：
 
 ```powershell

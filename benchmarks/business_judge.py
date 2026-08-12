@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol
 
 from dotclaw.llm.base import Message as LegacyMessage, TextDeltaKind
 from dotclaw.llm.proxy import LLMProxy
+from dotclaw.trace.redaction import CREDENTIAL_PATTERNS, REDACTED_MARKER
 
 from .harness_business_dataset import HarnessTaskInstance
 
@@ -134,6 +136,32 @@ class JudgeVerdict:
     verdict: str
     criteria: Mapping[str, str]
     reason: str
+
+
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)\b(api[_-]?key|token|password|authorization|cookie|secret)\b(\s*[:=]\s*)([^\r\n,;]+)"
+)
+_MAX_REVIEW_TEXT_LENGTH = 12_000
+
+
+def redact_review_text(text: str) -> tuple[str, bool]:
+    """脱敏并限制人工复核文本长度，返回正文与是否发生处理。"""
+    result = text
+    changed = False
+    for pattern in CREDENTIAL_PATTERNS:
+        replaced, count = pattern.subn(REDACTED_MARKER, result)
+        if count:
+            result = replaced
+            changed = True
+    result, assignment_count = _SENSITIVE_ASSIGNMENT.subn(
+        lambda match: f"{match.group(1)}{match.group(2)}{REDACTED_MARKER}",
+        result,
+    )
+    changed = changed or assignment_count > 0
+    if len(result) > _MAX_REVIEW_TEXT_LENGTH:
+        result = result[:_MAX_REVIEW_TEXT_LENGTH] + "\n[truncated]"
+        changed = True
+    return result, changed
 
 
 def render_prompt(spec: JudgeSpec, candidate: str) -> str:
