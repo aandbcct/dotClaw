@@ -46,7 +46,7 @@ class AgentIdentity:
     "" 表示回退到 config.agent.system_prompt。"""
 
     model: str = ""
-    """默认模型。"" 表示回退到 config.llm.default_model。"""
+    """默认模型。"" 表示回退到调用方提供的 Router 默认模型。"""
 
     max_loop_steps: int = 10
     """ReAct 循环最大迭代次数。"""
@@ -102,7 +102,7 @@ class AgentIdentity:
         Identity.model 为空时回退到传入的 default_model。
 
         Args:
-            default_model: 全局默认模型名（通常来自 config.llm.default_model）
+            default_model: 全局默认模型名（Router 配置存在时来自 defaults.model）
 
         Returns:
             最终模型名

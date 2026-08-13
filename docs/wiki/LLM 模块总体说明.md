@@ -631,12 +631,13 @@ fallback(open)
 
 1. forced_model 精确匹配当前 purpose 候选；
 2. forced_model 精确匹配当前 purpose 的 OPEN 候选；
-3. forced_model 匹配 Provider 名，则将该 Provider 的 active 模型放前；
-4. 不匹配则保持 purpose 顺序。
+3. forced_model 精确匹配全局 active 模型时，将其加入候选首位；
+4. forced_model 匹配 Provider 名，则将该 Provider 的 active 模型放前；
+5. 不匹配则保持 purpose 顺序。
 
 限制：
 
-- 精确模型若已配置但不在该 purpose.priority 中，不会从全局 models 自动加入；
+- 精确模型只要已配置且 active，即使不在 purpose.priority 中也会加入首位；
 - Provider 匹配会扩大到全局 active 模型；
 - forced OPEN 模型仍允许立即尝试。
 
@@ -988,6 +989,7 @@ output_tokens
 
 - Message 转换；
 - Tool Schema 转换；
+- 内部工具名与协议合法函数名的请求级双向映射；
 - Chat 请求；
 - SSE 解析；
 - ToolCall 累积；
@@ -1000,6 +1002,8 @@ ProviderConfig 提供 API Key、Base URL 与运维策略，ModelConfig 提供 Mo
 **`_convert_messages`**
 
 **职责与用途：**转换 role、content、name、tool_call_id 和 tool_calls。
+
+内部工具名允许使用点号命名空间；发送前转换为满足 `[a-zA-Z0-9_-]{1,64}` 的稳定协议名称，历史 ToolCall 和 Tool 结果使用同一映射。模型返回工具调用后再恢复内部规范名称，因此 Tool/Runtime 无需感知供应商命名限制。
 
 当前不发送：
 
@@ -1059,7 +1063,7 @@ function.name
 function.arguments
 ```
 
-finish_reason 出现时一次性输出所有 name 非空的 ToolCall。
+finish_reason 出现时一次性输出所有 name 非空的 ToolCall，并将协议工具名恢复为内部规范名称。
 
 #### 4.9.4 非流式 Chat
 
@@ -1397,7 +1401,9 @@ flowchart TD
     Exact -->|是| Front["移到首位"]
     Exact -->|否| OpenExact{"在 purpose OPEN fallback?"}
     OpenExact -->|是| OpenFront["置于首位并允许尝试"]
-    OpenExact -->|否| Provider{"匹配 Provider 名?"}
+    OpenExact -->|否| GlobalExact{"匹配全局 active model?"}
+    GlobalExact -->|是| GlobalFront["加入候选首位"]
+    GlobalExact -->|否| Provider{"匹配 Provider 名?"}
     Provider -->|是| ProviderModels["将 Provider active models 提前"]
     Provider -->|否| Ignore["保持 purpose 顺序"]
 ```
@@ -1405,7 +1411,7 @@ flowchart TD
 **结论：**
 
 - Identity.model 不是绝对强制，只是候选优先提示。
-- 精确模型若不在当前 purpose.priority 中会被忽略。
+- 精确模型不在当前 purpose.priority 中时仍会从全局 active models 加入首位。
 - Provider 名匹配可以扩大到该 Provider 的全局 active 模型。
 - forced OPEN 模型不受熔断排序保护。
 - 不匹配只记录 warning，不使调用失败。
@@ -1891,7 +1897,7 @@ OpenAIChatCompletionsClient
 12. OPEN Provider 仍可能作为最后兜底；不能把 Breaker 描述为绝对禁止。
 13. HALF_OPEN 并发限制当前未接入，不能声称 half_open_max 已生效。
 14. forced_model 是优先提示，不是绝对强制。
-15. exact forced model 不在 purpose 链时当前可能被忽略。
+15. exact forced model 只要已配置且 active，即使不在 purpose 链也必须加入首位。
 16. defaults.model 必须存在且 active，并与 defaults.provider 一致；Router 构造时提前验证。
 17. Runtime Chat 使用 stream=True；非流式 ToolCall 契约当前不完整。
 18. Context Compactor 不应携带 Tool。
@@ -2102,11 +2108,11 @@ ModelConfig.capabilities 当前不参与：
 
 错误模型可能进入不支持的用途。
 
-#### L5. Exact forced model 可能被静默忽略
+#### L5. Exact forced model 忽略问题已修复
 
-Runtime 将 Identity.model 作为 forced_model，但精确模型若不在 purpose.priority 中，Router 不会从全局 models 加入，只记录 warning 并使用原候选。
+Runtime 将 Identity.model 作为 forced_model；Router 现在会从全局 models 接纳已配置且 active 的精确模型并放到候选首位。
 
-“Agent 指定模型”与“实际使用模型”可能不一致。
+未知或 disabled 模型仍不会加入候选，并保留明确 warning。
 
 #### L6. 空候选回退绕过状态过滤
 
@@ -2283,7 +2289,7 @@ Runtime Adapter 固定 stream=True；Compactor/Flush 显式 stream=False。旧 C
 | E1 | L1、L2 | Bootstrap 只构造一次完整 RouterConfig，同时注入 LLM Router 和 Runtime Policy；补齐 circuit_breaker 映射 | Config、Bootstrap、Runtime Policy |
 | E2 | L3 | 定义 RequestOptions，将 defaults.parameters 和 fallback_enabled 明确接入或删除未消费配置 | Config、Proxy、Provider |
 | E3 | L4、L8 | 统一 `LLMUsage`，Router 按 capabilities 校验 chat/tool/embedding/reasoning | Base、Config、Router、测试 |
-| E4 | L5 | 明确 forced_model 语义：精确模型已配置且 active 时加入候选，或改名 preferred_model | Router、Agent Policy |
+| E4 | L5 | **已完成**：精确模型已配置且 active 时加入候选首位 | Router、Agent Policy |
 | E5 | L6、L14 | Router 启动期验证 defaults/purpose/model/provider；Client 构造失败转换为候选级 SetupError | Router、Bootstrap、Proxy |
 | E6 | L7 | 提取通用 `execute_candidates(operation)`，Chat 与 Embed 共用限流、重试、Breaker 和 fallback | Proxy、LLMClient、Memory |
 | E7 | L9、L10、L11 | 为 Breaker 增加原子 probe lease；明确 OPEN 是否允许 emergency fallback，并按 logical call/错误类别计数 | CircuitBreaker、Router、Proxy |

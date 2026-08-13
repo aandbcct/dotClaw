@@ -50,6 +50,11 @@ class ModelRouter:
     # 公共 API
     # ============================================================
 
+    @property
+    def default_model(self) -> str:
+        """返回 Router 配置声明的唯一默认模型。"""
+        return self._config.defaults.model
+
     def select(
         self,
         purpose: str = "chat",
@@ -219,6 +224,12 @@ class ModelRouter:
         if forced_model in fallback:
             # forced model 在熔断中，仍然放在第一位（允许尝试）
             fallback.remove(forced_model)
+            return [forced_model] + candidates + fallback
+
+        # 精确模型允许位于 purpose 链之外；Identity 或 Router 默认模型是明确选择，
+        # 只要已配置且 active，就应提升到首位而不是误报“不匹配”。
+        forced_config = self._config.models.get(forced_model)
+        if forced_config is not None and forced_config.status == "active":
             return [forced_model] + candidates + fallback
 
         # 2. 匹配 provider name → 将该 provider 的所有模型提到前面

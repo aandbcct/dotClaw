@@ -14,15 +14,32 @@ import asyncio
 
 import pytest
 
-from dotclaw.llm.base import ChatChunk, ChatTextDelta, Message, TextDeltaKind, ToolCall
+from dotclaw.llm.base import (
+    ChatChunk,
+    ChatTextDelta,
+    Message,
+    TextDeltaKind,
+    ToolCall,
+    ToolDefinition,
+)
 from dotclaw.llm.drivers.openai_chat_completions import (
     OpenAIChatCompletionsClient,
 )
-from dotclaw.llm.proxy import LLMProxy, CallSetupError, NonRetryableStreamError
+from dotclaw.llm.proxy import (
+    LLMProxy,
+    CallSetupError,
+    NonRetryableStreamError,
+    _format_exception,
+)
 from dotclaw.llm.reasoning import ReasoningMode, ReasoningPolicy
 
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_empty_exception_message_keeps_exception_type() -> None:
+    """TimeoutError 等空文本异常必须在日志中保留类型。"""
+    assert _format_exception(TimeoutError()) == "TimeoutError"
 
 
 # ============================================================
@@ -69,6 +86,7 @@ class _FakeClient(OpenAIChatCompletionsClient):
     def __init__(self, mock_chunks, policy: ReasoningPolicy | None = None):
         super().__init__(policy)
         self._mock_chunks = mock_chunks
+        self.calls: list[dict] = []
 
     def _get_api_key(self) -> str:
         return "test"
@@ -85,6 +103,7 @@ class _FakeClient(OpenAIChatCompletionsClient):
                 class completions:
                     @staticmethod
                     async def create(**kw):
+                        self.calls.append(kw)
                         return _MockAPIResponse(self._mock_chunks)
 
         return F()
@@ -360,6 +379,75 @@ async def test_cross_chunk_tool_args_concatenated():
     assert tcs[0].name == "get_t"
     # 参数跨 chunk 拼接后应为合法 JSON
     assert tcs[0].arguments == '{"city":"北京"}'
+
+
+async def test_protocol_tool_name_is_reversible() -> None:
+    """带点号的内部工具名在线路上合法化，返回 Runtime 前恢复原名。"""
+    canonical_name = "builtin.files.read_text"
+    client = _FakeClient([])
+    wire_name = client._to_wire_tool_name(canonical_name)
+    client._mock_chunks = [
+        _chunk(
+            _delta(
+                tc=[
+                    {
+                        "i": 0,
+                        "id": "c1",
+                        "n": wire_name,
+                        "a": '{"path":"README.md"}',
+                    }
+                ]
+            ),
+            finish="tool_calls",
+        )
+    ]
+    tool = ToolDefinition(
+        name=canonical_name,
+        description="读取文本文件",
+        parameters={"type": "object", "properties": {}},
+    )
+
+    results = [
+        chunk
+        async for chunk in client.chat(
+            [Message(role="user", content="读取 README")],
+            tools=[tool],
+            stream=True,
+        )
+    ]
+
+    sent_name = client.calls[0]["tools"][0]["function"]["name"]
+    returned_calls = [call for chunk in results for call in chunk.tool_calls]
+    assert sent_name == wire_name
+    assert len(sent_name) <= 64
+    assert "." not in sent_name
+    assert returned_calls[0].name == canonical_name
+
+
+async def test_historical_tool_call_uses_same_wire_name() -> None:
+    """后续轮次的历史工具调用与工具结果沿用相同协议名称。"""
+    canonical_name = "builtin.files.read_text"
+    client = _FakeClient([_chunk(_delta(content="完成"), finish="stop")])
+    messages = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall("c1", canonical_name, '{"path":"README.md"}')],
+        ),
+        Message(
+            role="tool",
+            content="内容",
+            name=canonical_name,
+            tool_call_id="c1",
+        ),
+    ]
+
+    await _collect(client, messages)
+
+    sent_messages = client.calls[0]["messages"]
+    wire_name = client._to_wire_tool_name(canonical_name)
+    assert sent_messages[0]["tool_calls"][0]["function"]["name"] == wire_name
+    assert sent_messages[1]["name"] == wire_name
 
 
 # ============================================================

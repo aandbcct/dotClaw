@@ -272,6 +272,10 @@ async def test_4_forced_model():
     c1 = router.select(purpose="chat", forced_model="qwen3.7-max")
     assert c1[0] == "qwen3.7-max"
 
+    # 精确模型不在 purpose 链中时，仍应按明确选择提升到第一位。
+    outside_purpose = router.select(purpose="chat", forced_model="deepseek-v3")
+    assert outside_purpose[0] == "deepseek-v3"
+
     # provider 匹配：该 provider 的所有模型排在最前面
     c2 = router.select(purpose="chat", forced_model="deepseek")
     assert c2[0] == "deepseek-v3"  # deepseek provider 下唯一的 active model

@@ -19,6 +19,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger("dotclaw.llm")
 
 
+def _format_exception(error: BaseException) -> str:
+    """格式化异常；无文本异常必须保留类型，避免产生空白日志。"""
+    detail = str(error).strip()
+    return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+
+
 # ============================================================
 # 异常类
 # ============================================================
@@ -66,6 +72,11 @@ class LLMProxy:
     def available_models(self) -> list[str]:
         """返回当前可用的模型列表（经过限流+熔断过滤）。"""
         return self._router.select("chat")
+
+    @property
+    def default_model(self) -> str:
+        """返回 ModelRouter 的配置默认模型。"""
+        return self._router.default_model
 
     # todo 目前chat方法应该是llm调用总入口，但方法内部写死了chat()，不能进行emb或其他功能，需要解耦
     async def chat(
@@ -205,16 +216,23 @@ class LLMProxy:
                                 delay = base_delay * (2 ** attempt)
                                 logger.warning(
                                     "模型 %s 调用失败 (attempt %d/%d): %s，%.1fs 后重试...",
-                                    model_name, attempt + 1, max_retries, e, delay,
+                                    model_name,
+                                    attempt + 1,
+                                    max_retries,
+                                    _format_exception(e),
+                                    delay,
                                 )
                                 await asyncio.sleep(delay)
                             else:
                                 logger.error(
                                     "模型 %s 全部 %d 次重试失败: %s",
-                                    model_name, max_retries, e,
+                                    model_name,
+                                    max_retries,
+                                    _format_exception(e),
                                 )
                                 raise CallSetupError(
-                                    f"模型 {model_name} 调用失败（{max_retries} 次重试后）: {e}"
+                                    f"模型 {model_name} 调用失败（{max_retries} 次重试后）: "
+                                    f"{_format_exception(e)}"
                                 ) from e
 
                 except CallSetupError:
@@ -224,7 +242,8 @@ class LLMProxy:
 
             # 全部候选失败
             raise RuntimeError(
-                f"所有候选模型 ({', '.join(candidates)}) 均调用失败。最后错误: {last_error}"
+                f"所有候选模型 ({', '.join(candidates)}) 均调用失败。最后错误: "
+                f"{_format_exception(last_error) if last_error else 'unknown'}"
             )
 
         finally:

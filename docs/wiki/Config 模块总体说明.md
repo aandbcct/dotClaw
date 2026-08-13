@@ -249,7 +249,7 @@ flowchart TD
 - Router 文件存在时，两条路径分别解析同一文件，得到两个独立对象。
 - Router 文件缺失时，LLMProxy 使用 Legacy 转换结果，而 AgentPolicyResolver 直接加载缺失文件并得到空 RouterConfig。
 - 这可能使实际模型选路与 Context Window、Tokenizer、Compaction Model 等运行策略来自不同配置事实。
-- `config.llm.default_model` 仍参与 Identity 模型回退，因此主 Config 也没有完全退出 LLM 决策。
+- Router 文件存在时，Identity 模型回退以 `RouterConfig.defaults.model` 为权威；`config.llm.default_model` 只保留给 Router 文件缺失时的 Legacy 转换。
 
 ### 2.4 启动配置消费图
 
@@ -921,8 +921,10 @@ Identity system_prompt
 → 非空优先，否则 config.agent.system_prompt
 
 Identity model
-→ 非空优先，否则 config.llm.default_model
+→ 非空优先，否则 RouterConfig.defaults.model
 ```
+
+仅当 Router 配置不存在、系统走 Legacy 转换时，才回退 `config.llm.default_model`。
 
 它没有进入 Config 全局单例，也没有配置版本或统一诊断。
 
@@ -2260,4 +2262,3 @@ Config reload 只影响新 Run
 Secret 不出现在 repr/日志
 仓库两份 YAML 通过 validate
 ```
-

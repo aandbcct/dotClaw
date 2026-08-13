@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
+import re
 from typing import Any, AsyncIterator, Iterator
 
 import httpx
@@ -31,6 +33,9 @@ from ..base import (
     ToolDefinition,
 )
 from ..reasoning import ReasoningMode, ReasoningPolicy, ReasoningStreamParser
+
+
+_OPENAI_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 class _StreamParseState:
@@ -142,7 +147,11 @@ class OpenAIChatCompletionsClient(LLMClient):
         """执行一次 OpenAI 兼容调用，并确保流在全部退出路径关闭。"""
         del retry_count  # 重试由 LLMProxy 统一编排，客户端只消费本次请求的时间预算。
         request_timeout: float = self._resolve_timeout_seconds(timeout_seconds)
-        openai_messages = self._convert_messages(messages)
+        tool_name_to_wire, wire_to_tool_name = self._build_tool_name_maps(
+            messages,
+            tools,
+        )
+        openai_messages = self._convert_messages(messages, tool_name_to_wire)
 
         openai_tools = None
         if tools:
@@ -150,7 +159,7 @@ class OpenAIChatCompletionsClient(LLMClient):
                 {
                     "type": "function",
                     "function": {
-                        "name": t.name,
+                        "name": tool_name_to_wire[t.name],
                         "description": t.description,
                         "parameters": t.parameters,
                     },
@@ -193,7 +202,12 @@ class OpenAIChatCompletionsClient(LLMClient):
                     while True:
                         chunk = await anext(response)
                         emitted = False
-                        for sub in self._parse_response_chunk(chunk, state, parser):
+                        for sub in self._parse_response_chunk(
+                            chunk,
+                            state,
+                            parser,
+                            wire_to_tool_name,
+                        ):
                             emitted = True
                             yield sub
                         if emitted:
@@ -206,7 +220,12 @@ class OpenAIChatCompletionsClient(LLMClient):
                         )
                     except StopAsyncIteration:
                         break
-                    for sub in self._parse_response_chunk(chunk, state, parser):
+                    for sub in self._parse_response_chunk(
+                        chunk,
+                        state,
+                        parser,
+                        wire_to_tool_name,
+                    ):
                         yield sub
                 # 标签模式 flush 剩余缓冲（不展示协议标签）
                 if parser is not None:
@@ -266,12 +285,18 @@ class OpenAIChatCompletionsClient(LLMClient):
         chunk: Any,
         state: _StreamParseState,
         parser: ReasoningStreamParser | None,
+        wire_to_tool_name: dict[str, str],
     ) -> Iterator[ChatChunk]:
         """先记录 usage，再将原始 SDK chunk 转换为业务流包。"""
         if getattr(chunk, "usage", None):
             state.input_tokens = chunk.usage.prompt_tokens or 0
             state.output_tokens = chunk.usage.completion_tokens or 0
-        yield from self._parse_stream_chunk(chunk, state, parser)
+        yield from self._parse_stream_chunk(
+            chunk,
+            state,
+            parser,
+            wire_to_tool_name,
+        )
 
     async def _close_stream(self, response: Any) -> None:
         """尽力关闭 SDK stream，关闭失败仅记录且绝不掩盖原始异常。"""
@@ -287,13 +312,17 @@ class OpenAIChatCompletionsClient(LLMClient):
 
     # ---- 消息格式转换 ----
 
-    def _convert_messages(self, messages: list[Message]) -> list[dict]:
+    def _convert_messages(
+        self,
+        messages: list[Message],
+        tool_name_to_wire: dict[str, str],
+    ) -> list[dict]:
         """将 dotClaw Message 转换为 OpenAI 格式"""
         result = []
         for msg in messages:
             m: dict = {"role": msg.role, "content": msg.content}
             if msg.name:
-                m["name"] = msg.name
+                m["name"] = tool_name_to_wire.get(msg.name, msg.name)
             if msg.tool_call_id:
                 m["tool_call_id"] = msg.tool_call_id
             if msg.tool_calls:
@@ -302,7 +331,7 @@ class OpenAIChatCompletionsClient(LLMClient):
                         "id": tc.id,
                         "type": "function",
                         "function": {
-                            "name": tc.name,
+                            "name": tool_name_to_wire.get(tc.name, tc.name),
                             "arguments": tc.arguments,
                         },
                     }
@@ -318,6 +347,7 @@ class OpenAIChatCompletionsClient(LLMClient):
         chunk,
         state: _StreamParseState,
         parser: ReasoningStreamParser | None,
+        wire_to_tool_name: dict[str, str],
     ) -> Iterator[ChatChunk]:
         """解析 OpenAI SSE chunk，按推理模式分离 reasoning/response 并累积工具调用。
 
@@ -361,12 +391,54 @@ class OpenAIChatCompletionsClient(LLMClient):
         # 工具调用在结束包一次性写出（多个完成的工具调用一次写入，不逐条）
         if finish_detected:
             completed = [
-                ToolCall(id=p["id"], name=p["name"], arguments=p["arguments"])
+                ToolCall(
+                    id=p["id"],
+                    name=wire_to_tool_name.get(p["name"], p["name"]),
+                    arguments=p["arguments"],
+                )
                 for p in state.pending_tool_calls.values()
                 if p["name"]
             ]
             if completed:
                 yield ChatChunk(tool_calls=tuple(completed))
+
+    def _build_tool_name_maps(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """构造请求局部的规范工具名与协议工具名双向映射。"""
+        canonical_names: list[str] = [tool.name for tool in tools or ()]
+        for message in messages:
+            if message.name:
+                canonical_names.append(message.name)
+            canonical_names.extend(
+                tool_call.name for tool_call in message.tool_calls or ()
+            )
+
+        canonical_to_wire: dict[str, str] = {}
+        wire_to_canonical: dict[str, str] = {}
+        for canonical_name in canonical_names:
+            if canonical_name in canonical_to_wire:
+                continue
+            wire_name = self._to_wire_tool_name(canonical_name)
+            existing = wire_to_canonical.get(wire_name)
+            if existing is not None and existing != canonical_name:
+                raise ValueError(
+                    f"工具名映射冲突: {existing!r} 与 {canonical_name!r}"
+                )
+            canonical_to_wire[canonical_name] = wire_name
+            wire_to_canonical[wire_name] = canonical_name
+        return canonical_to_wire, wire_to_canonical
+
+    @staticmethod
+    def _to_wire_tool_name(canonical_name: str) -> str:
+        """将内部工具名转换为满足 OpenAI 函数名约束的稳定名称。"""
+        if _OPENAI_TOOL_NAME_PATTERN.fullmatch(canonical_name):
+            return canonical_name
+        readable = re.sub(r"[^a-zA-Z0-9_-]", "_", canonical_name)[:44]
+        digest = hashlib.sha256(canonical_name.encode("utf-8")).hexdigest()[:16]
+        return f"dc_{readable}_{digest}"
 
     def _extract_text_deltas(
         self,

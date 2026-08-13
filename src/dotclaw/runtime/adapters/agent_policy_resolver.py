@@ -53,10 +53,14 @@ class AgentPolicyResolver(RunPolicyPort):
             for definition in self._allowed_definitions(identity)
         )
         identity_version: str = _identity_version(identity)
-        model_name: str = identity.resolve_model(self._config.llm.default_model)
+        default_model: str = resolve_default_model(
+            self._router_config,
+            self._config.llm.default_model,
+        )
+        model_name: str = identity.resolve_model(default_model)
         context_window, tokenizer_encoding = self._model_budget_settings(model_name)
         compaction_model, compaction_tokenizer = resolve_compaction_settings(
-            model_name, self._router_config, self._config.llm.default_model
+            model_name, self._router_config, default_model
         )
         return AgentPolicySnapshot(
             agent_id=identity.agent_id,
@@ -134,3 +138,13 @@ def resolve_compaction_settings(
     if model is None:
         return model_name, ""
     return model.model_id, model.tokenizer_encoding
+
+
+def resolve_default_model(
+    router_config: RouterConfig | None,
+    legacy_default_model: str,
+) -> str:
+    """以 Router 默认模型为权威，仅在无 Router 配置时兼容旧主配置。"""
+    if router_config is not None:
+        return router_config.defaults.model
+    return legacy_default_model

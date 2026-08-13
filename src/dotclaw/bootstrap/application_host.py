@@ -191,6 +191,13 @@ class ApplicationHost:
         return self._config
 
     @property
+    def default_model(self) -> str:
+        """返回模型路由配置中的唯一默认模型。"""
+        if self._llm_proxy is None:
+            raise RuntimeError("ApplicationHost 尚未初始化")
+        return self._llm_proxy.default_model
+
+    @property
     def session_interaction(self) -> SessionInteractionService:
         """返回按 Session 路由的交互入口。"""
         if self._session_interaction is None:
