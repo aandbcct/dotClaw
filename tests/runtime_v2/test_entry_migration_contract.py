@@ -52,6 +52,14 @@ class ChannelCollector(Channel):
         """本测试不触发交互式审批。"""
         return ""
 
+    async def select_model(
+        self,
+        current_model: str,
+        available_models: tuple[str, ...],
+    ) -> str | None:
+        """本测试不触发模型选择。"""
+        return None
+
 
 async def test_submit_writes_conversation_through_coordinator_and_projector(tmp_path: Path) -> None:
     """普通消息经 Service 直接提交 Coordinator/Engine，Agent 本身不直接写 Session。"""

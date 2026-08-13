@@ -528,7 +528,7 @@ dotclaw --hide-thinking
 | `/cancel <run_id>` | 取消指定 Run |
 | `/retry <run_id>` | 按 `Checkpoint.action` 恢复未结束 Run |
 | `/abandon <run_id>` | 显式放弃未结束 Run |
-| `/model` | 查看当前模型 |
+| `/model` | 查看 chat active 模型并切换当前 Session 的模型 |
 | `/eval list\|show\|review\|confirm\|run ...` | 管理评测 Draft / Dataset，或运行 Playback、Re-execution |
 | `/help` | 查看帮助 |
 | `/quit` | 退出 |

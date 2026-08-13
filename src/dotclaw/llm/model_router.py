@@ -56,14 +56,26 @@ class ModelRouter:
 
     def preferred_model(self, purpose: str = "chat") -> str:
         """返回指定用途静态优先级最高的 active 模型。"""
+        models = self.models_for_purpose(purpose)
+        if models:
+            return models[0]
+        raise ValueError(f"用途 {purpose!r} 没有 active 模型")
+
+    def models_for_purpose(self, purpose: str = "chat") -> tuple[str, ...]:
+        """返回指定用途按优先级排序的全部静态 active 模型。"""
         purpose_cfg = self._config.purposes.get(purpose)
         if purpose_cfg is None:
             raise ValueError(f"未配置用途: {purpose}")
+        models: list[str] = []
         for item in sorted(purpose_cfg.priority, key=lambda value: value.priority):
             model_cfg = self._config.models.get(item.model)
-            if model_cfg is not None and model_cfg.status == "active":
-                return item.model
-        raise ValueError(f"用途 {purpose!r} 没有 active 模型")
+            if (
+                model_cfg is not None
+                and model_cfg.status == "active"
+                and item.model not in models
+            ):
+                models.append(item.model)
+        return tuple(models)
 
     def select(
         self,
@@ -76,7 +88,7 @@ class ModelRouter:
         过滤顺序：
         1. 静态: 按 purpose.priority 排序，过滤 status != "active"
         2. 限流: rate_limiter.check(provider) == False → 跳过
-        3. 熔断: circuit_breaker.is_open(provider) → 降到最后（兜底）
+        3. 熔断: circuit_breaker.is_open(provider) → 跳过
         4. HALF_OPEN provider → 保留（允许探测）
         5. 全部不可用 → 返回空候选，由调用层快速失败
 

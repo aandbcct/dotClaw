@@ -48,6 +48,9 @@ class _FakeLLM:
     def preferred_model(self, purpose: str = "chat") -> str:
         return "preferred-model"
 
+    def models_for_purpose(self, purpose: str = "chat") -> tuple[str, ...]:
+        return ("preferred-model", "fallback-model")
+
 
 class _FakeMCP:
     def __init__(self) -> None:

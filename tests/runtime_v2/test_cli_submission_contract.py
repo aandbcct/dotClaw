@@ -22,6 +22,8 @@ def test_cli_uses_service_entry_and_returns_run_result() -> None:
     assert "has_streamed_response" in source
     assert "await channel.stream(\"\\n\")" in source
     assert "current_session.model" in source
+    assert "channel.select_model(" in source
+    assert "service.switch_model(" in source
     assert "host.default_model" not in source
     # 不得重新引入运行时 Agent 门面。
     assert "agent.process(" not in source

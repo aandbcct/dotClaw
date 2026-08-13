@@ -983,6 +983,8 @@ default_agent_id?
 RunRepositoryAdapter?
 ApprovalRepositoryAdapter?
 ContextPort?
+preferred_model
+chat_models
 ```
 
 类注释称允许依赖 SessionManager、AgentRegistry 和 Coordinator，但 Session 删除能力还直接依赖具体 Runtime Repository Adapter 和 ContextPort。
@@ -990,7 +992,7 @@ ContextPort?
 它不负责：
 
 - 创建 LLM、Tool 或 Runtime；
-- 保存当前 Session；
+- 在 CLI 之外保存“当前 Session”指针；
 - 解析 CLI 命令；
 - 询问用户是否审批；
 - 渲染 Markdown；
@@ -1025,13 +1027,17 @@ ContextPort?
 → 否则失败
 ```
 
-创建时不构造 Agent Runtime 实例。
+创建时不构造 Agent Runtime 实例，并把 `preferred_model` 持久化为初始模型绑定。
 
 #### 4.6.5 `get_identity`
 
 **职责与用途：**该只读方法为 Banner 和 `/model` 提供当前 Session 对应 Identity。它复用与提交相同的严格校验，不改变 Session。
 
-#### 4.6.6 `submit`
+#### 4.6.6 `chat_models` 与 `switch_model`
+
+**职责与用途：**`chat_models` 暴露 Host 启动时冻结的 chat active 模型目录；`switch_model()` 校验用户选择、更新 `Session.model` 并通过 SessionManager 持久化。非法模型明确失败且不修改绑定，相同模型不重复写盘。切换只影响后续新 Run，已有 Run 继续使用自身冻结的 Policy 模型。
+
+#### 4.6.7 `submit`
 
 **职责与用途：**普通提交将 Session 与用户输入转换为延迟 `RunRequest` Factory，再交给 `SessionRunCoordinator.submit_prepared()`。
 
@@ -1048,7 +1054,7 @@ ContextPort?
 
 `output_port` 是本次 Run 的可选运行级参数，不在 Service 构造期绑定。
 
-#### 4.6.7 控制操作
+#### 4.6.8 控制操作
 
 **职责与用途：**Service 将结构化控制操作透传给 Coordinator：
 
@@ -1061,7 +1067,7 @@ ContextPort?
 
 Service 不接收自然语言审批结论，也不查找“当前 Run”进行猜测。
 
-#### 4.6.8 `delete_session`
+#### 4.6.9 `delete_session`
 
 **职责与用途：**Session 删除是应用级协调流程，不是单个 JSON 文件删除。
 
@@ -1081,7 +1087,7 @@ Service 不接收自然语言审批结论，也不查找“当前 Run”进行�
 
 `SessionManager.delete()` 使用 `shutil.rmtree()` 完成递归删除；这是完整目录删除，但不是跨文件系统意义上的原子事务。
 
-#### 4.6.9 `format_run_result`
+#### 4.6.10 `format_run_result`
 
 **职责与用途：**该函数将结构化 RunResult 转为入口可展示的非流式文本。
 
@@ -1212,12 +1218,12 @@ Banner 不参与 Runtime Policy 冻结。
 
 #### 4.7.8 诊断命令
 
-**职责与用途：**`/tools`、`/mcp`、`/skills` 和 `/model` 读取 Host 暴露的诊断资源，不修改 Runtime 状态。
+**职责与用途：**`/tools`、`/mcp` 和 `/skills` 读取 Host 暴露的诊断资源；`/model` 通过应用服务修改当前 Session 的持久化模型绑定。
 
 - `/tools` 查看当前 Tool Registry 定义；
 - `/mcp` 查看 Server 状态；
 - `/skills` 查看 SkillMeta；
-- `/model` 查看当前 Session Identity 解析的模型；
+- `/model` 展示当前模型和 chat active 模型，经 Channel 读取一次名称；合法输入持久化切换，非法输入提示后退出选择界面；
 - `/dream` 直接调用可选 DeepDream 服务。
 
 `/dream` 是 CLI 对可选服务的直接调用，不经过 Runtime AgentRun。
@@ -1246,7 +1252,7 @@ response_delta  → “回答”
 
 #### 4.7.10 `CLIChannel`
 
-**职责与用途：**CLIChannel 实现通用 Channel 的 receive/send/stream/ask_user/Markdown 输出。
+**职责与用途：**CLIChannel 实现通用 Channel 的 receive/send/stream/ask_user/select_model/Markdown 输出。
 
 模型增量使用：
 
@@ -1255,6 +1261,8 @@ console.print(chunk, end="", markup=False)
 ```
 
 避免模型输出中的 Rich 标记被解释。审批询问使用同步 `input()` 的 executor 包装。
+
+`select_model()` 展示当前模型和可选模型，读取一次名称。空输入表示取消；不在给定目录中的输入由 Channel 提示错误并返回 None，CLI 不进入持久化调用。
 
 ---
 

@@ -167,7 +167,16 @@ async def _run_cli(show_reasoning: bool = True) -> None:
                     elif cmd == "/skills":
                         _cmd_skills(channel, host.skill_registry)
                     elif cmd == "/model":
-                        channel.print_info(f"当前模型: {current_session.model}")
+                        selected_model = await channel.select_model(
+                            current_session.model,
+                            service.chat_models,
+                        )
+                        if selected_model is not None:
+                            current_session = await service.switch_model(
+                                current_session,
+                                selected_model,
+                            )
+                            channel.print_info(f"已切换模型: {current_session.model}")
                     elif cmd == "/trace":
                         await _cmd_trace(channel, host.trace_service, args)
                     elif cmd == "/eval":
@@ -207,7 +216,7 @@ dotClaw 命令:
   /cancel <run_id>  取消指定运行
   /retry <run_id>   重试中断运行
   /abandon <run_id> 放弃中断运行
-  /model           查看当前模型
+  /model           查看并切换当前 Session 的模型
   /trace <run_id>  查看指定运行的追踪摘要
   /eval            评测草案：create/list/show/review/confirm/run <dataset> ...
   /help            显示帮助

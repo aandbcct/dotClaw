@@ -819,6 +819,10 @@ HALF_OPEN --失败--> OPEN
 
 **职责与用途：**返回当前 `chat` purpose 的 Router 候选。结果受限流、熔断和配置状态影响，不是完整模型配置列表。
 
+**`models_for_purpose`**
+
+**职责与用途：**返回指定 purpose 中按 priority 排序、去重且 `status=active` 的静态模型目录，不读取瞬时限流或熔断状态。新 Session 初始化和 `/model` 选择使用该目录；实际调用仍通过 `select()` 应用实时健康过滤。
+
 #### 4.6.4 `chat`
 
 **职责与用途：**完整流程：

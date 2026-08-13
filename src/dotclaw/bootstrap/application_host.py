@@ -100,7 +100,10 @@ class ApplicationHost:
         # ── 关键组件 ──
         self._llm_proxy = _build_llm(config, root)
         self._session_manager = SessionManager(config.session.directory)
-        preferred_model = self._llm_proxy.preferred_model("chat")
+        chat_models = self._llm_proxy.models_for_purpose("chat")
+        if not chat_models:
+            raise RuntimeError("chat 用途没有 active 模型")
+        preferred_model = chat_models[0]
         migrated_sessions = await self._session_manager.bind_missing_models(preferred_model)
         if migrated_sessions:
             logger.info("已为 %d 个旧 Session 补齐模型绑定: %s", migrated_sessions, preferred_model)
@@ -165,6 +168,7 @@ class ApplicationHost:
             approval_repository=self._runtime_services.approval_repository,
             context_port=self._context_port,
             preferred_model=preferred_model,
+            chat_models=chat_models,
         )
         # ── 评测 Draft 服务（PR5：TraceToEvalCaseDraft 与目录 Dataset）──
         # 兼容测试以 SimpleNamespace 注入配置的场景：缺省回退到默认 Dataset 目录。
@@ -202,6 +206,13 @@ class ApplicationHost:
         if self._llm_proxy is None:
             raise RuntimeError("ApplicationHost 尚未初始化")
         return self._llm_proxy.preferred_model("chat")
+
+    @property
+    def chat_models(self) -> tuple[str, ...]:
+        """返回 chat 用途按优先级排序的全部静态 active 模型。"""
+        if self._llm_proxy is None:
+            raise RuntimeError("ApplicationHost 尚未初始化")
+        return self._llm_proxy.models_for_purpose("chat")
 
     @property
     def session_interaction(self) -> SessionInteractionService:

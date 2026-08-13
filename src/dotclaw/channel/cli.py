@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
-from typing import AsyncIterator
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -55,6 +53,25 @@ class CLIChannel(Channel):
         """向用户提问"""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: input(prompt))
+
+    async def select_model(
+        self,
+        current_model: str,
+        available_models: tuple[str, ...],
+    ) -> str | None:
+        """展示当前模型和 chat active 模型，并读取一次切换选择。"""
+        console.print(f"当前模型: {current_model}")
+        console.print("可用模型:")
+        for model in available_models:
+            marker = " [当前]" if model == current_model else ""
+            console.print(f"  - {model}{marker}")
+        selected = (await self.ask_user("请输入要切换的模型名称: ")).strip()
+        if not selected:
+            return None
+        if selected not in available_models:
+            self.print_error(f"模型不存在或未启用: {selected}")
+            return None
+        return selected
 
     async def print_markdown(self, md: str) -> None:
         """渲染 Markdown"""

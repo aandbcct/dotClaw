@@ -176,6 +176,39 @@ async def test_2_priority():
     print(f"  ✅ 候选列表: {router.select('chat')}")
 
 
+async def test_static_models_for_purpose_include_active_models_only() -> None:
+    """Session 模型目录应只受静态配置影响，不受临时熔断影响。"""
+    config = _make_minimal_router_config(
+        models={
+            "primary": ModelConfig(provider="qwen", model_id="primary"),
+            "disabled": ModelConfig(
+                provider="qwen",
+                model_id="disabled",
+                status="disabled",
+            ),
+            "fallback": ModelConfig(provider="qwen", model_id="fallback"),
+        },
+        priorities=[
+            PurposePriority(model="fallback", priority=3),
+            PurposePriority(model="disabled", priority=1),
+            PurposePriority(model="primary", priority=2),
+            PurposePriority(model="primary", priority=4),
+        ],
+    )
+    breaker = CircuitBreaker(
+        {"qwen": BreakerConfig(failure_threshold=1, cooldown_seconds=60)}
+    )
+    router = ModelRouter(config, RateLimiter({}), breaker)
+
+    assert router.models_for_purpose("chat") == ("primary", "fallback")
+    assert router.preferred_model("chat") == "primary"
+
+    breaker.on_failure("qwen")
+
+    assert router.select("chat") == []
+    assert router.models_for_purpose("chat") == ("primary", "fallback")
+
+
 # ============================================================
 # 场景 3：Proxy 降级链（实际 API）
 # ============================================================

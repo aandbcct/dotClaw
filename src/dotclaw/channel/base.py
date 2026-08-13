@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
 
 
 class Channel(ABC):
@@ -27,6 +26,15 @@ class Channel(ABC):
     @abstractmethod
     async def ask_user(self, prompt: str) -> str:
         """向用户提问（用于审批等）"""
+        ...
+
+    @abstractmethod
+    async def select_model(
+        self,
+        current_model: str,
+        available_models: tuple[str, ...],
+    ) -> str | None:
+        """展示模型列表并返回用户选择；取消或非法输入返回 None。"""
         ...
 
     def print_error(self, message: str) -> None:

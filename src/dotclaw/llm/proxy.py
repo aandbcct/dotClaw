@@ -77,6 +77,10 @@ class LLMProxy:
         """返回用途优先级最高的静态 active 模型。"""
         return self._router.preferred_model(purpose)
 
+    def models_for_purpose(self, purpose: str = "chat") -> tuple[str, ...]:
+        """返回用途下按优先级排序的全部静态 active 模型。"""
+        return self._router.models_for_purpose(purpose)
+
     # todo 目前chat方法应该是llm调用总入口，但方法内部写死了chat()，不能进行emb或其他功能，需要解耦
     async def chat(
         self,

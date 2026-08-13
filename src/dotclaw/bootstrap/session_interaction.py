@@ -49,6 +49,7 @@ class SessionInteractionService:
         approval_repository: ApprovalRepositoryAdapter | None = None,
         context_port: ContextPort | None = None,
         preferred_model: str = "",
+        chat_models: tuple[str, ...] = (),
     ) -> None:
         """绑定路由所需的会话管理与身份目录。
 
@@ -64,6 +65,9 @@ class SessionInteractionService:
         self._approval_repository: ApprovalRepositoryAdapter | None = approval_repository
         self._context_port: ContextPort | None = context_port
         self._preferred_model: str = preferred_model
+        self._chat_models: tuple[str, ...] = chat_models or (
+            (preferred_model,) if preferred_model else ()
+        )
 
     # ── 创建 ──
 
@@ -106,6 +110,27 @@ class SessionInteractionService:
         不创建任何运行时 Agent 对象；提交路由仍以 ``session.agent_id`` 为权威。
         """
         return self._require_identity(session)
+
+    @property
+    def chat_models(self) -> tuple[str, ...]:
+        """返回可供 Session 绑定的全部 chat active 模型。"""
+        return self._chat_models
+
+    async def switch_model(self, session: Session | str, model: str) -> Session:
+        """校验并持久化 Session 的模型绑定，仅影响后续新 Run。"""
+        if model not in self._chat_models:
+            raise ValueError(f"模型不存在或未启用: {model}")
+        if isinstance(session, str):
+            loaded = await self._session_manager.load(session)
+            if loaded is None:
+                raise ValueError(f"Session 不存在: {session}")
+            session = loaded
+        self._require_identity(session)
+        if session.model == model:
+            return session
+        session.model = model
+        await self._session_manager.save(session)
+        return session
 
     # ── 提交与控制 ──
 
