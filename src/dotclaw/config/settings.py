@@ -165,7 +165,6 @@ class LLMClientConfig:
 
 @dataclass
 class LLMConfig:
-    default_model: str = "qwen-plus"
     clients: dict[str, LLMClientConfig] = field(default_factory=dict)
     fallbacks: list[str] = field(default_factory=list)
     retry_max_retries: int = 3
@@ -470,9 +469,7 @@ class PurposeConfig:
 
 @dataclass
 class DefaultsConfig:
-    """全局默认"""
-    provider: str = "qwen"
-    model: str = "qwen-plus"
+    """跨模型共享的默认调用参数。"""
     parameters: dict = field(default_factory=dict)
     fallback_enabled: bool = True
 
@@ -571,8 +568,6 @@ def load_router_config(path: str | Path | None = None) -> RouterConfig:
     # defaults
     defaults_raw = raw.get("defaults", {})
     defaults = DefaultsConfig(
-        provider=defaults_raw.get("provider", "qwen"),
-        model=defaults_raw.get("model", "qwen-plus"),
         parameters=defaults_raw.get("parameters", {}),
         fallback_enabled=defaults_raw.get("fallback_enabled", True),
     )
@@ -639,8 +634,6 @@ def _build_router_config_from_legacy(llm_config: LLMConfig) -> RouterConfig:
     从旧 config.yaml 的 llm.clients 格式自动构建 RouterConfig。
 
     规则：
-    - defaults.provider 从第一个 client 的 provider 推断
-    - defaults.model = llm_config.default_model
     - providers: 每个 client 的 provider 生成一个 ProviderConfig
     - models: 每个 client 映射为一个 ModelConfig
     - purposes.chat.priority: 按 clients 顺序排列，权重平均分配
@@ -650,13 +643,7 @@ def _build_router_config_from_legacy(llm_config: LLMConfig) -> RouterConfig:
     if not clients:
         return RouterConfig()
 
-    # 推断 provider
-    first_client = next(iter(clients.values()))
-    inferred_provider = first_client.provider if first_client.provider else "qwen"
-
     defaults = DefaultsConfig(
-        provider=inferred_provider,
-        model=llm_config.default_model,
         parameters={"temperature": 0.7, "max_tokens": 4096},
         fallback_enabled=True,
     )
@@ -723,7 +710,6 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         clients[name] = LLMClientConfig(**cfg)
 
     llm = LLMConfig(
-        default_model=llm_raw.get("default_model", "qwen-plus"),
         clients=clients,
         fallbacks=llm_raw.get("fallbacks", []),
         retry_max_retries=llm_raw.get("retry", {}).get("max_retries", 3),

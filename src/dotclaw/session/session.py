@@ -311,6 +311,19 @@ class SessionManager:
         sessions.sort(key=lambda s: s.updated_at, reverse=True)
         return sessions
 
+    async def bind_missing_models(self, model: str) -> int:
+        """为旧 Session 一次性补齐模型绑定，并返回迁移数量。"""
+        if not model or not model.strip():
+            raise ValueError("迁移 Session 模型必须指定非空模型名")
+        migrated = 0
+        for session in await self.list_all():
+            if session.model:
+                continue
+            session.model = model
+            await self.save(session)
+            migrated += 1
+        return migrated
+
     async def delete(self, session_id: str) -> bool:
         """删除完整 Session 存储目录（session.json + agent_runs + 消息/事件/checkpoint）。
 

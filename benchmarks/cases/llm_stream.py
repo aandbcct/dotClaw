@@ -34,7 +34,7 @@ async def run(
     config = load_config(str(root / "config.yaml"))
     llm = _build_llm(config, root)
 
-    print(f"  Model:   {config.llm.default_model} ({_get_provider_name(llm)})")
+    print(f"  Model:   {llm.preferred_model('chat')} ({_get_provider_name(llm)})")
     print(f"  Prompt:  \"{_BENCH_PROMPT}\"")
     print(f"  Warmup:  {warmup} | Repeat: {repeat}")
     print()

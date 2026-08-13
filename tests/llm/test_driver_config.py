@@ -41,7 +41,7 @@ def _minimal_router_config(
     """构造可在启动阶段完整校验的最小配置。"""
     model_name = "jojo-test"
     return RouterConfig(
-        defaults=DefaultsConfig(provider=provider_name, model=model_name),
+        defaults=DefaultsConfig(),
         providers={
             provider_name: ProviderConfig(
                 driver=LLMDriver.OPENAI_CHAT_COMPLETIONS,
@@ -133,7 +133,6 @@ def test_jojocode_uses_openai_chat_completions_driver() -> None:
 
 def test_unknown_provider_fails_during_router_startup() -> None:
     config = _minimal_router_config(model_provider="jojocode-typo")
-    config.defaults.provider = "jojocode-typo"
 
     with pytest.raises(
         ValueError,

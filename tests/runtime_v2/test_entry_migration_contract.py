@@ -57,7 +57,7 @@ async def test_submit_writes_conversation_through_coordinator_and_projector(tmp_
     """普通消息经 Service 直接提交 Coordinator/Engine，Agent 本身不直接写 Session。"""
     config = Config()
     config.session.directory = str(tmp_path)
-    identity = AgentIdentity(agent_id="agent-1", agent_name="测试 Agent", model="qwen3.7-max")
+    identity = AgentIdentity(agent_id="agent-1", agent_name="测试 Agent")
     session_manager = SessionManager(tmp_path)
     channel: ChannelCollector = ChannelCollector()
     services = build_runtime_services(
@@ -70,6 +70,7 @@ async def test_submit_writes_conversation_through_coordinator_and_projector(tmp_
         skill_registry=None,
         memory_manager=None,
         agent_registry=AgentRegistry(),
+        preferred_model="qwen3.7-max",
     )
     registry = AgentRegistry()
     registry.register(identity)
@@ -78,7 +79,7 @@ async def test_submit_writes_conversation_through_coordinator_and_projector(tmp_
         agent_registry=registry,
         coordinator=services.coordinator,
     )
-    session = await session_manager.create(agent_id=identity.agent_id)
+    session = await session_manager.create(agent_id=identity.agent_id, model="qwen3.7-max")
 
     result = await service.submit(session, "你好", output_port=ChannelLLMOutputAdapter(channel))
     projected = await session_manager.load(session.id)

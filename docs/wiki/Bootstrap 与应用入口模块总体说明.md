@@ -2236,7 +2236,7 @@ LLMProxy 构建只创建 Router、Limiter 和 Breaker，不验证：
 
 - API Key；
 - Provider 网络；
-- 默认模型可用性；
+- chat 首选模型与 Session 绑定可用性；
 - tokenizer 配置与模型一致性。
 
 因此关键组件“构建成功”与“首个业务请求可成功”仍有距离。该选择避免启动时产生外部调用，但需要明确能力边界。
@@ -2315,7 +2315,7 @@ Runtime Repositories
 | E16 | B16 | 在 Config 加载后配置日志，使用 project_root 解析 `debug.log_file`，避免 import-time Handler | main、Config、Logging |
 | E17 | B17、B18 | 产生结构化 StartupReport/RecoveryReport，区分 DISABLED、READY、DEGRADED、FAILED 与恢复数量 | Bootstrap、CLI/API、Observability |
 | E18 | B19 | 清理阶段号和 Runtime v2 文案；版本号只用于持久化格式或发布版本 | 全仓注释、Wiki、测试标记 |
-| E19 | B20 | 提供可选 `--health-check` 或诊断命令，验证默认模型、Router 元数据、Tokenizer 和外部服务，不强制普通启动调用 | Bootstrap、LLM、CLI；增加启动延迟与外部成本 |
+| E19 | B20 | 提供可选 `--health-check` 或诊断命令，验证 chat 首选模型、Router 元数据、Tokenizer 和外部服务，不强制普通启动调用 | Bootstrap、LLM、CLI；增加启动延迟与外部成本 |
 | E20 | B21 | 明确选择是否接入 Scheduler/Journal：接入则创建应用 Service、生命周期和诊断；不接入则移除或标记未消费配置 | Bootstrap、Scheduler、Journal、Config、Channel |
 | E21 | B22 | 在 `load_router_config()` 中完整映射 circuit_breaker，并增加 YAML→ProviderConfig→BreakerConfig 的配置测试 | Config、LLM、Bootstrap |
 | E22 | B23 | 由 Host 一次性解析所有绝对路径；SessionManager 只接收已解析的 Session 根，RuntimeFactory 复用同一对象或值 | Bootstrap、Session、Runtime Repositories、测试 |

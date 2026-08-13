@@ -88,7 +88,7 @@ def _build_fixed_model_proxy(provider: str, model: str, project_root: Path) -> L
     if provider_config is None:
         raise ValueError(f"Provider {provider!r} 未在路由配置中声明")
     narrowed = RouterConfig(
-        defaults=DefaultsConfig(provider=provider, model=model, parameters=dict(source.defaults.parameters), fallback_enabled=False),
+        defaults=DefaultsConfig(parameters=dict(source.defaults.parameters), fallback_enabled=False),
         providers={provider: provider_config},
         models={model: replace(model_config)},
         purposes={"chat": PurposeConfig(description="PR8 固定模型", priority=[PurposePriority(model=model, priority=1)])},

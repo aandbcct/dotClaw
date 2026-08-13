@@ -45,7 +45,8 @@ class _FakeCoordinator:
 
 
 class _FakeLLM:
-    pass
+    def preferred_model(self, purpose: str = "chat") -> str:
+        return "preferred-model"
 
 
 class _FakeMCP:
@@ -92,7 +93,7 @@ def _fake_config(session_dir: str) -> types.SimpleNamespace:
     skills = types.SimpleNamespace(enabled=False, directory=[], skip_prefix=[])
     session = types.SimpleNamespace(directory=session_dir)
     memory = None
-    llm = types.SimpleNamespace(default_model="x")
+    llm = types.SimpleNamespace()
     return types.SimpleNamespace(session=session, skills=skills, tools=tools, memory=memory, llm=llm)
 
 
@@ -184,7 +185,7 @@ async def test_application_host_build_fails_without_identities(tmp_path: Path, m
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
-                                      session_manager, skill_registry, memory_manager, agent_registry):
+                                      session_manager, skill_registry, memory_manager, agent_registry, preferred_model):
         return RuntimeServices(
             engine=_FakeLLM(),
             context_port=_FakeContextPort(),
@@ -214,7 +215,7 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
-                                      session_manager, skill_registry, memory_manager, agent_registry):
+                                      session_manager, skill_registry, memory_manager, agent_registry, preferred_model):
         return RuntimeServices(
             engine=_FakeLLM(),
             context_port=_FakeContextPort(),
@@ -258,7 +259,7 @@ async def test_application_host_build_cleans_up_partial_resources_on_init_failur
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _fake_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
-                                      session_manager, skill_registry, memory_manager, agent_registry):
+                                      session_manager, skill_registry, memory_manager, agent_registry, preferred_model):
         return RuntimeServices(
             engine=_FakeLLM(),
             context_port=_FakeContextPort(),

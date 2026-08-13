@@ -577,9 +577,9 @@ SessionManager 对外部传入 session_id 当前没有执行安全路径段校�
 
 **`model`**
 
-**职责与用途：**保存创建时传入的模型名。
+**职责与用途：**保存 Session 的长期模型绑定，是新 Run 选择首个候选的执行权威。
 
-当前普通 Session 创建通常为空；Delegation 创建时可能写目标 Identity.model。Runtime 实际模型由 agent_id→AgentPolicyResolver 冻结，因此该字段不是执行权威。
+新 Session（包括 Delegation 目标 Session）绑定 `purposes.chat.priority` 中最高优先级的 active 模型。Host 启动和首次提交都会为旧空模型 Session 补齐并原子保存；已有非空绑定不随配置优先级变化。创建 Run 时该值复制到 `RunRequest.model_id`，随后冻结进 Policy 快照；运行失败时 Router 再按 purpose 优先级降级。
 
 **`conversation_version`**
 

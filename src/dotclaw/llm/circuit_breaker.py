@@ -86,7 +86,7 @@ class CircuitBreaker:
         """
         获取 provider 当前的有效状态。
 
-        用于 Router.select() 排序：正常 > HALF_OPEN > OPEN(兜底)。
+        用于 Router.select() 过滤：CLOSED 与 HALF_OPEN 可进入候选，OPEN 被跳过。
         """
         return self._get_effective_state(provider)
 
@@ -154,6 +154,16 @@ class CircuitBreaker:
             return False
         self._half_open_attempts[provider] = attempts + 1
         return True
+
+    def cancel_half_open(self, provider: str) -> None:
+        """释放尚未进入 Provider 的 HALF_OPEN 探测名额。"""
+        if self._get_effective_state(provider) is not BreakerState.HALF_OPEN:
+            return
+        attempts = self._half_open_attempts.get(provider, 0)
+        if attempts <= 1:
+            self._half_open_attempts[provider] = 0
+        else:
+            self._half_open_attempts[provider] = attempts - 1
 
     # ================================================================
     # 内部方法

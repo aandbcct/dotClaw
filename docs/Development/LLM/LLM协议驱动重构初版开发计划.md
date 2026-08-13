@@ -395,3 +395,16 @@ model
 - `git diff --check`：通过。
 - 旧供应商客户端、Provider 注册表、自动发现、旧兼容客户端路径和未知 provider → Qwen 回退均已删除；生产与测试代码零引用。
 - 未执行真实供应商请求或 Benchmark 正式采样；jojocode Base URL、API Key 和 reasoning 业务配置仍由使用者按实际服务配置。
+
+## 14. Session 模型绑定与熔断语义增量（2026-08-13）
+
+后续确认并实施的增量语义取代本计划中“默认模型”和“Runtime 持久化格式不变”的原约束：
+
+1. 删除 `config.yaml.llm.default_model`、`RouterConfig.defaults.provider/model` 和 `AgentIdentity.model`；模型首选顺序只有 `purposes.<purpose>.priority` 一处权威。
+2. 新 Session（包括 Delegation 目标 Session）绑定 chat 用途优先级最高的 active 模型；旧空模型 Session 在 Host 启动或首次提交时补齐并持久化，已有绑定保持不变。
+3. `RunRequest.model_id` 冻结 Session 绑定，`AgentPolicyResolver` 只消费该字段；审批、重试和 Delegation 恢复继续使用已持久化 Policy 模型。
+4. Session 模型先尝试，失败后按 purpose priority 降级；它不能绕过限流或 OPEN 熔断。
+5. Provider 的一次逻辑模型调用完成全部内部重试后只记录一次失败。HALF_OPEN 只允许一个探测请求且不做内部重试，失败立即重新 OPEN 并重置冷却时间。
+6. 全部候选 OPEN、限流或禁用时快速失败，不再保留 OPEN Provider 兜底。
+
+增量验收覆盖 Session 创建/迁移/冻结、OPEN 不可绕过、逻辑失败单次计数和 HALF_OPEN 单次探测；最终全量测试结果见本次交付记录。

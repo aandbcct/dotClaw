@@ -32,6 +32,7 @@ class SessionSnapshotSource(Protocol):
 
     id: str
     conversation_version: int
+    model: str
     conversations: list[ConversationSnapshotSource]
 
     def active_history_compression(self) -> HistoryCompressionSnapshotSource | None:
@@ -59,6 +60,7 @@ def create_run_request(session: SessionSnapshotSource, agent_id: str, user_messa
     return create_run_request_from_snapshot(
         session_id=session.id,
         agent_id=agent_id,
+        model_id=session.model,
         user_message=user_message,
         conversation=ConversationSnapshot(
             session.id,
@@ -74,6 +76,7 @@ def create_run_request_from_snapshot(
     agent_id: str,
     user_message: str,
     conversation: ConversationSnapshot,
+    model_id: str = "",
 ) -> RunRequest:
     """基于已准备完成的冻结历史创建单次 RunRequest。"""
     input_message: ConversationMessage = ConversationMessage(
@@ -88,6 +91,7 @@ def create_run_request_from_snapshot(
         agent_id=agent_id,
         user_message=input_message,
         conversation=conversation,
+        model_id=model_id,
     )
 
 

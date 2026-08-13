@@ -2,7 +2,7 @@
 
 纯 dataclass，零依赖。只定义"Agent 被允许做什么"，不持有任何可执行对象。
 Agent 方法中用 Identity 约束 Runtime：allowed_tools 过滤 tool_executor，
-model 选择 LLM 调用，system_prompt_template 生成行为指令。
+system_prompt_template 生成行为指令。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ class AgentIdentity:
     Identity 定义三个维度的约束：
     1. 身份：id + name（注入 system prompt 占位符）
     2. 权限：allowed_tools（白名单过滤，空=全部允许）
-    3. 行为：system_prompt_template + model + max_loop_steps
+    3. 行为：system_prompt_template + max_loop_steps
     """
 
     # ── 身份标识 ──
@@ -44,9 +44,6 @@ class AgentIdentity:
     """Agent 级 system prompt 模板。
     支持 {agent_name} / {workspace} 占位符。
     "" 表示回退到 config.agent.system_prompt。"""
-
-    model: str = ""
-    """默认模型。"" 表示回退到调用方提供的 Router 默认模型。"""
 
     max_loop_steps: int = 10
     """ReAct 循环最大迭代次数。"""
@@ -95,20 +92,6 @@ class AgentIdentity:
             agent_name=self.agent_name,
             workspace=self.workspace,
         )
-
-    def resolve_model(self, default_model: str) -> str:
-        """解析最终使用的模型名。
-
-        Identity.model 为空时回退到传入的 default_model。
-
-        Args:
-            default_model: 全局默认模型名（Router 配置存在时来自 defaults.model）
-
-        Returns:
-            最终模型名
-        """
-        return self.model or default_model
-
 
 # ============================================================================
 # load_agent_config — 从 YAML 加载 AgentIdentity
@@ -178,7 +161,6 @@ def load_agent_config(
     return AgentIdentity(
         agent_id=raw.get("agent_id", agent_id),
         agent_name=str(raw.get("agent_name", "DotClaw")),
-        model=str(raw.get("model", "")),
         workspace=str(raw.get("workspace", ".")),
         allowed_tools=list(raw.get("allowed_tools", [])),
         max_loop_steps=int(raw.get("max_loop_steps", 10)),

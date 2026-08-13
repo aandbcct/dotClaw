@@ -533,8 +533,8 @@ python -m benchmarks.runner --baseline benchmarks/baselines/<baseline_file>.json
 | `--baseline` | 无 | 基线 snapshot 文件路径，用于回归对比 |
 | `--output` | `benchmarks/reports` | 报告输出目录 |
 
-> `llm_stream` 默认调用 `config.yaml` 中 `llm.default_model` 配置的模型（当前为 qwen3.7-max）。
-> 如需切换模型，修改 `config.yaml` 中的 `default_model` 即可。
+> `llm_stream` 调用 `model_router_config.yaml` 中 `purposes.chat.priority` 优先级最高的 active 模型。
+> 如需切换模型，调整该 priority 列表即可。
 
 ## 注意事项
 
@@ -550,7 +550,7 @@ python -m benchmarks.runner --baseline benchmarks/baselines/<baseline_file>.json
 
 ### 限制
 - `llm_stream` 默认调用真实 API（qwen3.7-max），**有费用**。不想花钱就 `--filter` 排除
-- 当前默认模型 qwen3.7-max 是推理模型，TTFT 偏高（~6s）。建议用 fast 模型（如 deepseek-v4-flash ~0.8s）来测框架流式链路
+- 若 chat 首选模型是推理模型，TTFT 通常更高；测框架流式链路时可临时把 fast 模型放到 priority 首位
 - Windows 上 `time.time()` 精度 ~15ms，sub-ms 操作可能显示 0（不影响趋势）
 - 报告中的 `[EXT]` 标记表示包含外部依赖延迟（网络/API），与框架内部延迟含义不同
 # PR7：多 Agent 委派可靠性

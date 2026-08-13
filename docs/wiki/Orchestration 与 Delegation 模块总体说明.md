@@ -890,11 +890,11 @@ _task_bindings: child_run_id → DelegationTaskBinding
 
 ```text
 title = 委托-{agent_name}
-model = identity.model
+model = preferred_model
 agent_id = identity.agent_id
 ```
 
-的持久化目标 Session。
+的持久化目标 Session。`preferred_model` 由 Bootstrap 从 chat 用途最高优先级 active 模型注入，Identity 不再拥有模型字段。
 
 **Task 创建**
 

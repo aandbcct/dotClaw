@@ -70,6 +70,7 @@ def build_runtime_services(
     skill_registry: SkillRegistry | None,
     memory_manager: MemoryManager | None,
     agent_registry: AgentRegistry,
+    preferred_model: str,
 ) -> RuntimeServices:
     """按 Port 边界装配 RuntimeEngine 与 SessionRunCoordinator。"""
     if tool_executor is None:
@@ -91,6 +92,7 @@ def build_runtime_services(
         session_manager,
         agent_registry,
         dispatcher,
+        preferred_model,
     )
     engine = RuntimeEngine(
         run_repository=run_repository,

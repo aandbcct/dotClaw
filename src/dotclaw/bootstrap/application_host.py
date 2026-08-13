@@ -100,6 +100,10 @@ class ApplicationHost:
         # ── 关键组件 ──
         self._llm_proxy = _build_llm(config, root)
         self._session_manager = SessionManager(config.session.directory)
+        preferred_model = self._llm_proxy.preferred_model("chat")
+        migrated_sessions = await self._session_manager.bind_missing_models(preferred_model)
+        if migrated_sessions:
+            logger.info("已为 %d 个旧 Session 补齐模型绑定: %s", migrated_sessions, preferred_model)
 
         # ── 可降级组件 ──
         self._skill_registry = _init_sync("技能", lambda: _build_skills(config, root))
@@ -145,6 +149,7 @@ class ApplicationHost:
             skill_registry=self._skill_registry,
             memory_manager=memory_mgr,
             agent_registry=self._agent_registry,
+            preferred_model=preferred_model,
         )
         # Host 启动时补偿未决成功提交（总体设计 §5.3）。
         await self._runtime_services.run_repository.recover_pending_success_commits()
@@ -159,6 +164,7 @@ class ApplicationHost:
             run_repository=self._runtime_services.run_repository,
             approval_repository=self._runtime_services.approval_repository,
             context_port=self._context_port,
+            preferred_model=preferred_model,
         )
         # ── 评测 Draft 服务（PR5：TraceToEvalCaseDraft 与目录 Dataset）──
         # 兼容测试以 SimpleNamespace 注入配置的场景：缺省回退到默认 Dataset 目录。
@@ -191,11 +197,11 @@ class ApplicationHost:
         return self._config
 
     @property
-    def default_model(self) -> str:
-        """返回模型路由配置中的唯一默认模型。"""
+    def preferred_chat_model(self) -> str:
+        """返回 chat 用途静态优先级最高的 active 模型。"""
         if self._llm_proxy is None:
             raise RuntimeError("ApplicationHost 尚未初始化")
-        return self._llm_proxy.default_model
+        return self._llm_proxy.preferred_model("chat")
 
     @property
     def session_interaction(self) -> SessionInteractionService:

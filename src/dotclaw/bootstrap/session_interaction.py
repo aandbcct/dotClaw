@@ -48,6 +48,7 @@ class SessionInteractionService:
         run_repository: RunRepositoryAdapter | None = None,
         approval_repository: ApprovalRepositoryAdapter | None = None,
         context_port: ContextPort | None = None,
+        preferred_model: str = "",
     ) -> None:
         """绑定路由所需的会话管理与身份目录。
 
@@ -62,6 +63,7 @@ class SessionInteractionService:
         self._run_repository: RunRepositoryAdapter | None = run_repository
         self._approval_repository: ApprovalRepositoryAdapter | None = approval_repository
         self._context_port: ContextPort | None = context_port
+        self._preferred_model: str = preferred_model
 
     # ── 创建 ──
 
@@ -81,7 +83,13 @@ class SessionInteractionService:
         resolved: str = agent_id or self._resolve_default_agent_id()
         if self._agent_registry.get(resolved) is None:
             raise UnknownIdentityError(f"未知 Identity: {resolved}")
-        return await self._session_manager.create(agent_id=resolved, title=title)
+        if not self._preferred_model:
+            raise ValueError("创建 Session 前必须配置 chat 用途的首选模型")
+        return await self._session_manager.create(
+            agent_id=resolved,
+            title=title,
+            model=self._preferred_model,
+        )
 
     # ── 路由 ──
 
@@ -114,6 +122,11 @@ class SessionInteractionService:
                 raise UnknownIdentityError(f"Session 不存在: {session}")
             session = loaded
         identity: AgentIdentity = self._require_identity(session)
+        if not session.model:
+            if not self._preferred_model:
+                raise ValueError("Session 缺少模型绑定，且未配置 chat 用途的首选模型")
+            session.model = self._preferred_model
+            await self._session_manager.save(session)
 
         async def _make_request() -> RunRequest:
             return create_run_request(session, identity.agent_id, user_message)

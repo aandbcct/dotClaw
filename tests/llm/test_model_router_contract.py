@@ -21,7 +21,7 @@ from dotclaw.llm.drivers.openai_chat_completions import (
     OpenAIChatCompletionsClient,
 )
 from dotclaw.llm.rate_limiter import RateLimiter, RateLimitConfig, RateLimitTimeout
-from dotclaw.llm.circuit_breaker import CircuitBreaker, BreakerConfig
+from dotclaw.llm.circuit_breaker import BreakerState, CircuitBreaker, BreakerConfig
 from dotclaw.llm.model_router import ModelRouter
 from dotclaw.llm.proxy import LLMProxy, CallSetupError, NonRetryableStreamError
 from dotclaw.config.settings import (
@@ -48,8 +48,6 @@ def _make_minimal_router_config(
     """构建最小测试用 RouterConfig（优先级制）"""
     return RouterConfig(
         defaults=DefaultsConfig(
-            provider=defaults.get("provider", "qwen") if defaults else "qwen",
-            model=defaults.get("model", "qwen3.7-max") if defaults else "qwen3.7-max",
             parameters={},
             fallback_enabled=True,
         ),
@@ -462,6 +460,89 @@ async def test_8b_circuit_breaker_half_open_failure():
     cb.on_failure("qwen")
     assert cb.is_open("qwen")
     print(f"  ✅ HALF_OPEN 探测失败 → 立即回到 OPEN")
+
+
+async def test_open_provider_is_never_reintroduced_by_forced_model() -> None:
+    """Session 首选模型也不能绕过 OPEN，全部熔断时应快速返回空候选。"""
+    config = _make_minimal_router_config()
+    breaker = CircuitBreaker({"qwen": BreakerConfig(failure_threshold=1, cooldown_seconds=60)})
+    router = ModelRouter(config, RateLimiter({}), breaker)
+
+    breaker.on_failure("qwen")
+
+    assert router.select("chat", forced_model="qwen3.7-max") == []
+
+
+async def test_proxy_counts_one_failure_after_all_retries() -> None:
+    """同一模型的内部重试全部失败后，熔断器只接收一次逻辑失败。"""
+    class FailingClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, stream=True):
+            self.calls += 1
+            if False:
+                yield ChatChunk()
+            raise RuntimeError("连接失败")
+
+    class Router:
+        def __init__(self) -> None:
+            self.client = FailingClient()
+            self.failures = 0
+
+        def select(self, purpose="chat", forced_model=None): return ["m"]
+        def get_client(self, model_name): return self.client
+        def get_provider_name(self, model_name): return "p"
+        def begin_call(self, model_name): return BreakerState.CLOSED
+        async def try_acquire(self, provider, timeout): return None
+        def report_success(self, model_name): return None
+        def report_failure(self, model_name): self.failures += 1
+        def _get_retry_config(self, model_name): return 3
+        def _get_backoff_config(self, model_name): return 0
+
+    router = Router()
+    proxy = LLMProxy(router)
+
+    with pytest.raises(RuntimeError, match="所有候选模型"):
+        async for _ in proxy.chat([Message(role="user", content="x")]):
+            pass
+
+    assert router.client.calls == 3
+    assert router.failures == 1
+
+
+async def test_half_open_probe_uses_single_attempt_and_reopens() -> None:
+    """HALF_OPEN 探测不执行内部重试，失败后立即重新进入 OPEN。"""
+    config = _make_minimal_router_config()
+    config.providers["qwen"].retry.max_attempts = 3
+    breaker = CircuitBreaker({"qwen": BreakerConfig(failure_threshold=1, cooldown_seconds=0.01)})
+    router = ModelRouter(config, RateLimiter({}), breaker)
+
+    class FailingClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, stream=True):
+            self.calls += 1
+            if False:
+                yield ChatChunk()
+            raise RuntimeError("探测失败")
+
+    client = FailingClient()
+    router._client_cache["qwen3.7-max"] = client
+    breaker.on_failure("qwen")
+    await asyncio.sleep(0.02)
+    assert breaker.get_state("qwen") is BreakerState.HALF_OPEN
+
+    with pytest.raises(RuntimeError, match="所有候选模型"):
+        async for _ in LLMProxy(router).chat(
+            [Message(role="user", content="x")],
+            model="qwen3.7-max",
+        ):
+            pass
+
+    assert client.calls == 1
+    assert breaker.is_open("qwen")
 
 
 # ============================================================

@@ -73,10 +73,9 @@ class LLMProxy:
         """返回当前可用的模型列表（经过限流+熔断过滤）。"""
         return self._router.select("chat")
 
-    @property
-    def default_model(self) -> str:
-        """返回 ModelRouter 的配置默认模型。"""
-        return self._router.default_model
+    def preferred_model(self, purpose: str = "chat") -> str:
+        """返回用途优先级最高的静态 active 模型。"""
+        return self._router.preferred_model(purpose)
 
     # todo 目前chat方法应该是llm调用总入口，但方法内部写死了chat()，不能进行emb或其他功能，需要解耦
     async def chat(
@@ -93,10 +92,14 @@ class LLMProxy:
         """
         统一聊天接口：选路 → 迭代候选 → 调用 → 降级。
         """
+        from .circuit_breaker import BreakerState
+        from .model_router import CircuitUnavailableError
         from .rate_limiter import RateLimitTimeout
 
         # 1. 路由选出候选列表
         candidates = self._router.select(purpose, model)
+        if not candidates:
+            raise RuntimeError(f"用途 {purpose!r} 没有可调用模型（候选均限流、熔断或未启用）")
 
         # ── Journal：LLM 调用开始 ──
         if journal:
@@ -115,21 +118,37 @@ class LLMProxy:
                 provider = self._router.get_provider_name(model_name)
                 client = self._router.get_client(model_name)
 
+                try:
+                    begin_call = getattr(self._router, "begin_call", None)
+                    breaker_state = (
+                        begin_call(model_name)
+                        if begin_call is not None
+                        else BreakerState.CLOSED
+                    )
+                except CircuitUnavailableError as error:
+                    last_error = error
+                    logger.warning("跳过模型 %s：%s", model_name, error)
+                    continue
+
                 # 单模型内指数退避重试
                 max_retries = (
                     retry_count + 1 if retry_count is not None else self._get_retry_config(model_name)
                 )
+                if breaker_state is BreakerState.HALF_OPEN:
+                    max_retries = 1
                 if max_retries <= 0:
                     raise ValueError("retry_count 必须大于等于 0")
                 base_delay = self._get_backoff_config(model_name)
 
                 try:
+                    provider_attempted = False
                     for attempt in range(max_retries):
                         try:
                             # 限流令牌获取（timeout=100ms）
                             await self._router.try_acquire(provider, timeout=0.1)
 
                             # 调用 client.chat()
+                            provider_attempted = True
                             client_options: dict[str, float | int] = {}
                             if timeout_seconds is not None:
                                 client_options["timeout_seconds"] = timeout_seconds
@@ -186,8 +205,13 @@ class LLMProxy:
 
                         except asyncio.CancelledError:
                             # 取消不计作 Provider 失败，也不进入退避或候选降级。
+                            cancel_call = getattr(self._router, "cancel_call", None)
+                            if cancel_call is not None:
+                                cancel_call(model_name, breaker_state)
                             raise
                         except NonRetryableStreamError:
+                            # 已有可见输出时禁止重试或降级，但传输失败仍计一次逻辑失败。
+                            self._router.report_failure(model_name)
                             raise
 
                         except StopAsyncIteration:
@@ -196,6 +220,9 @@ class LLMProxy:
 
                         except RateLimitTimeout as e:
                             # 限流超时 → 降级到下一个候选
+                            cancel_call = getattr(self._router, "cancel_call", None)
+                            if cancel_call is not None:
+                                cancel_call(model_name, breaker_state)
                             last_error = e
                             logger.warning(
                                 "限流 %s 超时，降级到下一个候选", model_name
@@ -205,13 +232,11 @@ class LLMProxy:
                         except CallSetupError as e:
                             # 构造错误 → 降级
                             last_error = e
-                            self._router.report_failure(model_name)
                             raise  # 抛给外层 except 处理
 
                         except Exception as e:
                             # 未知异常 → 指数退避重试
                             last_error = e
-                            self._router.report_failure(model_name)
                             if attempt < max_retries - 1:
                                 delay = base_delay * (2 ** attempt)
                                 logger.warning(
@@ -237,6 +262,8 @@ class LLMProxy:
 
                 except CallSetupError:
                     # 当前模型最终失败 → 尝试下一个候选
+                    if provider_attempted:
+                        self._router.report_failure(model_name)
                     logger.warning("降级：%s 失败，尝试下一个候选...", model_name)
                     continue
 

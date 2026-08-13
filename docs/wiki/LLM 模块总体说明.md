@@ -508,9 +508,9 @@ context_window 和 tokenizer_encoding 由 Runtime Policy 使用；capabilities �
 
 **`DefaultsConfig`**
 
-**职责与用途：**保存全局默认 Provider、模型、默认参数和 fallback 开关。
+**职责与用途：**保存跨模型共享的默认参数和 fallback 开关，不再声明默认 Provider 或默认模型。
 
-当前 Router 主要读取 `defaults.model`。`defaults.provider`、`defaults.parameters` 和 `fallback_enabled` 尚未完整进入请求和降级执行路径。
+新 Session 的模型来自 `purposes.chat.priority` 中优先级最高的 active 模型；Session 创建后持久化该绑定，后续 Run 先尝试自身绑定模型。
 
 #### 4.2.3 `RouterConfig`
 
@@ -563,7 +563,7 @@ providers.circuit_breaker
 
 **职责与用途：**当 Router 文件不存在时，Bootstrap 使用旧 `config.yaml.llm.clients` 构建兼容 RouterConfig。
 
-该路径主要生成 Chat 路由。Embedding 和 Context Compaction 若没有对应 purpose，Router 会回退 `defaults.model`。
+该路径主要生成 Chat 路由。调用不存在或没有 active 模型的 purpose 时不会跨用途回退，而是明确返回无候选错误。
 
 ---
 
@@ -598,16 +598,10 @@ model_name → LLMClient cache
 → CircuitBreaker.get_state
 → CLOSED + HALF_OPEN
 → forced_model 提升
-→ 必要时 OPEN 兜底
+→ 空候选时快速失败
 ```
 
-如果 `_build_candidates()` 返回空列表，`select()` 直接回退：
-
-```text
-[defaults.model]
-```
-
-该回退不会再次验证 defaults.model 是否存在、active、未限流或未熔断。
+`preferred_model(purpose)` 只读取静态优先级，供新 Session 初始化；`select()` 则应用实时限流和熔断状态，二者职责不同。
 
 **`_build_candidates`**
 
@@ -616,12 +610,9 @@ model_name → LLMClient cache
 ```text
 normal
 half_open
-fallback(open)
 ```
 
-正常候选为 `normal + half_open`。只在正常和半开候选都为空时，保留最优先的一个 OPEN 模型作为紧急兜底。
-
-因此熔断器不是绝对拒绝边界，而是排序与降级信号。
+正常候选为 `normal + half_open`。OPEN 模型不会进入候选；全部候选均 OPEN、限流或禁用时快速失败。
 
 **`_prioritize_forced`**
 
@@ -630,16 +621,15 @@ fallback(open)
 规则：
 
 1. forced_model 精确匹配当前 purpose 候选；
-2. forced_model 精确匹配当前 purpose 的 OPEN 候选；
-3. forced_model 精确匹配全局 active 模型时，将其加入候选首位；
-4. forced_model 匹配 Provider 名，则将该 Provider 的 active 模型放前；
-5. 不匹配则保持 purpose 顺序。
+2. forced_model 精确匹配全局 active 模型且通过限流、熔断检查时，将其加入候选首位；
+3. forced_model 匹配 Provider 名，则将该 Provider 中通过实时检查的 active 模型放前；
+4. 不匹配则保持 purpose 顺序。
 
 限制：
 
 - 精确模型只要已配置且 active，即使不在 purpose.priority 中也会加入首位；
 - Provider 匹配会扩大到全局 active 模型；
-- forced OPEN 模型仍允许立即尝试。
+- Session 绑定模型和 Provider 名匹配都不能绕过 OPEN。
 
 #### 4.3.3 `get_client`
 
@@ -668,7 +658,7 @@ model_id
 ReasoningPolicy
 ```
 
-Router 构造时会验证默认模型、purpose 引用、active 模型的 provider、driver 注册状态及能力集合；未知引用或未注册 driver 会直接启动失败。
+Router 构造时会验证 chat 至少有一个 active 模型、purpose 引用、active 模型的 provider、driver 注册状态及能力集合；未知引用或未注册 driver 会直接启动失败。
 
 **Provider 状态门面**
 
@@ -676,12 +666,15 @@ Router 构造时会验证默认模型、purpose 引用、active 模型的 provid
 
 ```text
 try_acquire(provider, timeout)
+begin_call(model)
 report_success(model)
 report_failure(model)
 get_provider_name(model)
 ```
 
 Proxy 不直接访问 RateLimiter 和 CircuitBreaker。
+
+`begin_call()` 在一次逻辑模型调用前检查熔断状态，并为 HALF_OPEN 独占一个探测名额。普通模型完成全部内部重试后才上报一次失败；HALF_OPEN 固定只调用一次，失败立即重新 OPEN 并重置冷却时间。
 
 **Retry 配置门面**
 
@@ -1381,16 +1374,15 @@ flowchart TD
     Merge --> Forced["forced_model 提升"]
     Forced --> Has{"存在候选?"}
     Has -->|是| Return["返回候选"]
-    Has -->|否且有 OPEN| Emergency["返回最优 OPEN"]
-    Has -->|完全为空| Default["select 回退 defaults.model"]
+    Has -->|否| Fail["返回空候选并快速失败"]
 ```
 
 **结论：**
 
 - status、限流和熔断是候选过滤信号。
-- OPEN Provider 在全部正常候选消失时仍可能作为紧急兜底被调用。
-- HALF_OPEN 当前只被加入候选，没有调用 `try_half_open()` 限制探测数量。
-- 完全空候选时 defaults.model 会绕过前述过滤重新进入结果。
+- OPEN Provider 始终被跳过，Session 绑定模型也不能绕过。
+- HALF_OPEN 通过 `try_half_open()` 独占探测名额，并固定只调用一次。
+- 完全空候选时由 Proxy 明确快速失败。
 - `fallback_enabled` 当前不影响该流程。
 
 ### 5.4 Forced Model
@@ -1410,10 +1402,10 @@ flowchart TD
 
 **结论：**
 
-- Identity.model 不是绝对强制，只是候选优先提示。
+- Session.model 是首个候选，但不可用时允许按 purpose 降级。
 - 精确模型不在当前 purpose.priority 中时仍会从全局 active models 加入首位。
 - Provider 名匹配可以扩大到该 Provider 的全局 active 模型。
-- forced OPEN 模型不受熔断排序保护。
+- forced OPEN 模型不会进入候选。
 - 不匹配只记录 warning，不使调用失败。
 
 ### 5.5 单模型重试与候选降级
@@ -1752,8 +1744,8 @@ LLMProxy.embed(
 
 当前行为：
 
-- 代码保留空候选防御检查，但 `ModelRouter.select()` 通常至少返回 `defaults.model`；
-- 主要失败风险是默认模型未配置、Provider 不支持 Embedding 或 API 调用失败，而不是候选列表真正为空；
+- 空候选会明确失败；
+- 主要失败风险是 purpose 未配置、候选全部不可用、Provider 不支持 Embedding 或 API 调用失败；
 - 只使用第一个候选；
 - Provider Client 按 16 条分批；
 - 不保证输出数量与输入数量在异常 Provider 下自动验证；
@@ -1894,11 +1886,11 @@ OpenAIChatCompletionsClient
 9. 一旦交付可见文本，流中断不得自动切模型产生重复输出。
 10. Provider 级限流和熔断由同 Provider 所有模型共享。
 11. RateLimiter.check 只是预判，acquire 是守门。
-12. OPEN Provider 仍可能作为最后兜底；不能把 Breaker 描述为绝对禁止。
-13. HALF_OPEN 并发限制当前未接入，不能声称 half_open_max 已生效。
+12. OPEN Provider 不进入候选，全部 OPEN 时快速失败。
+13. HALF_OPEN 并发限制已接入，单次探测失败立即重新 OPEN。
 14. forced_model 是优先提示，不是绝对强制。
 15. exact forced model 只要已配置且 active，即使不在 purpose 链也必须加入首位。
-16. defaults.model 必须存在且 active，并与 defaults.provider 一致；Router 构造时提前验证。
+16. chat purpose 必须至少引用一个 active 模型；Router 构造时提前验证。
 17. Runtime Chat 使用 stream=True；非流式 ToolCall 契约当前不完整。
 18. Context Compactor 不应携带 Tool。
 19. Compactor/Memory 摘要只应使用 response；当前实现尚未满足。
@@ -1924,7 +1916,7 @@ OpenAIChatCompletionsClient
 | 新增调用用途 | `LLMUsage`、RouterConfig purposes | Proxy、Bootstrap、消费者 | 候选链和 fallback 明确 |
 | 修改模型候选顺序 | `model_router.py::_build_candidates` | rate/breaker/forced model | priority 稳定，状态过滤可解释 |
 | 修改 forced model | `_prioritize_forced` | AgentPolicyResolver | 明确“强制”还是“优先” |
-| 修改默认回退 | `ModelRouter.select` | DefaultsConfig、Config 校验 | 默认模型必须已配置且可调用 |
+| 修改 Session 首选模型 | `Session.model`、`ModelRouter.select` | Session 迁移、熔断与降级 | 绑定模型不能绕过 OPEN |
 | 新增兼容 Provider | `model_router_config.yaml` 的 provider 配置 | Config、限流、熔断 | 必须显式选择已注册 driver |
 | 新增协议 Driver | `llm/drivers/__init__.py` + 协议实现 | Config、能力校验、测试 | 构造和能力映射必须同步注册 |
 | 修改 OpenAI 请求 | `drivers/openai_chat_completions.py::chat` | Provider 兼容、工具、reasoning | 流式/非流式语义一致 |
@@ -1991,11 +1983,11 @@ OpenAIChatCompletionsClient
 
 **问题与选择：**Chat、Context Compaction 和 Embedding 对模型的能力和成本要求不同。当前用 purpose.priority 定义独立候选链。
 
-**未选择：**所有调用固定默认模型、消费者直接指定 Provider URL。
+**未选择：**所有调用固定单一模型、消费者直接指定 Provider URL。
 
 **收益：**调用者只表达用途；配置可以调整模型顺序。
 
-**代价与边界：**capabilities 没有强制校验，purpose 缺失会直接回退默认模型。
+**代价与边界：**capabilities 没有按用途全面强制校验，purpose 缺失会明确失败。
 
 #### 8.2.3 Provider 级韧性状态
 
@@ -2108,22 +2100,15 @@ ModelConfig.capabilities 当前不参与：
 
 错误模型可能进入不支持的用途。
 
-#### L5. Exact forced model 忽略问题已修复
+#### L5. Session 绑定模型作为首选候选
 
-Runtime 将 Identity.model 作为 forced_model；Router 现在会从全局 models 接纳已配置且 active 的精确模型并放到候选首位。
+Runtime 将 Session.model 冻结为 forced_model；Router 会从全局 models 接纳已配置、active 且未熔断的精确模型并放到候选首位。
 
 未知或 disabled 模型仍不会加入候选，并保留明确 warning。
 
-#### L6. 空候选回退绕过状态过滤
+#### L6. 空候选快速失败
 
-当 purpose 候选因限流、配置或状态全部消失时，`select()` 返回 defaults.model，不重新验证：
-
-- 模型是否存在；
-- status；
-- 限流；
-- Breaker。
-
-默认模型构造错误还会在 Proxy 重试块外直接中断。
+当 purpose 候选因限流、配置或状态全部消失时，`select()` 返回空列表，Proxy 抛出包含用途和不可用原因范围的明确错误，不再绕过状态过滤。
 
 #### L7. Embedding 没有完整韧性编排
 
@@ -2357,7 +2342,7 @@ config.yaml
 | `ProviderConfig` | API、Rate Limit、Breaker、Retry |
 | `ModelConfig` | Provider、Model ID、窗口、Tokenizer、能力、状态、Reasoning |
 | `PurposeConfig` | 用途候选顺序 |
-| `DefaultsConfig` | 默认模型与参数 |
+| `DefaultsConfig` | 跨模型默认参数与 fallback 开关 |
 | `load_router_config` | 新路由配置加载 |
 | `_build_router_config_from_legacy` | 旧 LLM Config 兼容 |
 

@@ -244,9 +244,9 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
     """执行真实委派链，并通过子 Run 终态驱动父侧回灌。"""
     repository = RunRepositoryAdapter(root)
     registry = AgentRegistry()
-    registry.register(AgentIdentity(agent_id="target-agent", agent_name="Benchmark Target", model="fixture-model"))
+    registry.register(AgentIdentity(agent_id="target-agent", agent_name="Benchmark Target"))
     dispatcher = AgentDispatcher(TaskMessageBroker())
-    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher)
+    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model")
     llm = _DelegatingLLM(request_id, config.fake_delay_ms, outcome)
     context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
     engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), context, llm, tools, _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor())
@@ -326,9 +326,9 @@ async def run_harness_delegations(
     repository = RunRepositoryAdapter(root)
     registry = AgentRegistry()
     for target_agent_id in dict.fromkeys(task.target_agent_id for task in tasks):
-        registry.register(AgentIdentity(agent_id=target_agent_id, agent_name=f"Benchmark {target_agent_id}", model="fixture-model"))
+        registry.register(AgentIdentity(agent_id=target_agent_id, agent_name=f"Benchmark {target_agent_id}"))
     dispatcher = AgentDispatcher(TaskMessageBroker())
-    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher)
+    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model")
     context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
     engine = RuntimeEngine(
         repository,
@@ -397,9 +397,9 @@ async def run_concurrent_completed(root: Path, config: DelegationWorkloadConfig,
     """在一套共享存储、Broker、Adapter 与协调器内并发执行多个父 Session。"""
     repository = RunRepositoryAdapter(root)
     registry = AgentRegistry()
-    registry.register(AgentIdentity(agent_id="target-agent", agent_name="Benchmark Target", model="fixture-model"))
+    registry.register(AgentIdentity(agent_id="target-agent", agent_name="Benchmark Target"))
     dispatcher = AgentDispatcher(TaskMessageBroker())
-    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher)
+    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model")
     context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
     engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), context, _DelegatingLLM("shared", config.fake_delay_ms, delegate_all_parents=True), tools, _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor())
     coordinator = SessionRunCoordinator(engine)
@@ -440,9 +440,9 @@ async def run_parent_cancellation(root: Path, config: DelegationWorkloadConfig, 
     """取消已委派父 Run，验证子取消、执行权释放与同 Session 后续请求。"""
     repository = RunRepositoryAdapter(root)
     registry = AgentRegistry()
-    registry.register(AgentIdentity(agent_id="target-agent", agent_name="Benchmark Target", model="fixture-model"))
+    registry.register(AgentIdentity(agent_id="target-agent", agent_name="Benchmark Target"))
     dispatcher = AgentDispatcher(TaskMessageBroker())
-    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher)
+    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model")
     llm = _DelegatingLLM(request_id, config.fake_delay_ms, ChildOutcome.CANCELLED)
     engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), _FixedContext(), llm, _NoTools(), _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor())
     coordinator = SessionRunCoordinator(engine)

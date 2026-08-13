@@ -16,12 +16,16 @@ import logging
 
 from ..config.settings import LLMDriver, ModelConfig, ProviderConfig, RouterConfig
 from .base import LLMClient
-from .circuit_breaker import CircuitBreaker
+from .circuit_breaker import BreakerState, CircuitBreaker
 from .drivers import create_driver_client, get_driver_capabilities
 from .rate_limiter import RateLimiter, RateLimitTimeout
 from .reasoning import ReasoningPolicy
 
 logger = logging.getLogger("dotclaw.llm.router")
+
+
+class CircuitUnavailableError(RuntimeError):
+    """模型所属供应商正在熔断，当前调用不得进入客户端。"""
 
 
 class ModelRouter:
@@ -50,10 +54,16 @@ class ModelRouter:
     # 公共 API
     # ============================================================
 
-    @property
-    def default_model(self) -> str:
-        """返回 Router 配置声明的唯一默认模型。"""
-        return self._config.defaults.model
+    def preferred_model(self, purpose: str = "chat") -> str:
+        """返回指定用途静态优先级最高的 active 模型。"""
+        purpose_cfg = self._config.purposes.get(purpose)
+        if purpose_cfg is None:
+            raise ValueError(f"未配置用途: {purpose}")
+        for item in sorted(purpose_cfg.priority, key=lambda value: value.priority):
+            model_cfg = self._config.models.get(item.model)
+            if model_cfg is not None and model_cfg.status == "active":
+                return item.model
+        raise ValueError(f"用途 {purpose!r} 没有 active 模型")
 
     def select(
         self,
@@ -68,17 +78,23 @@ class ModelRouter:
         2. 限流: rate_limiter.check(provider) == False → 跳过
         3. 熔断: circuit_breaker.is_open(provider) → 降到最后（兜底）
         4. HALF_OPEN provider → 保留（允许探测）
-        5. 全部不可用 → 保留最优先的 OPEN provider 作为最后尝试
+        5. 全部不可用 → 返回空候选，由调用层快速失败
 
         如果 forced_model 匹配到某个模型/供应商，将其提升到候选列表第一位。
         """
         candidates = self._build_candidates(purpose, forced_model)
 
-        if not candidates:
-            logger.warning("select() 无候选模型，回退到 defaults.model")
-            return [self._config.defaults.model]
-
         return candidates
+
+    def begin_call(self, model_name: str) -> BreakerState:
+        """在逻辑模型调用前检查熔断状态，并独占 HALF_OPEN 探测名额。"""
+        provider = self.get_provider_name(model_name)
+        state = self._circuit_breaker.get_state(provider)
+        if state is BreakerState.OPEN:
+            raise CircuitUnavailableError(f"provider {provider!r} 正在熔断冷却")
+        if state is BreakerState.HALF_OPEN and not self._circuit_breaker.try_half_open(provider):
+            raise CircuitUnavailableError(f"provider {provider!r} 已有 HALF_OPEN 探测请求")
+        return state
 
     def get_client(self, model_name: str) -> LLMClient:
         """获取或懒加载创建客户端实例。"""
@@ -121,6 +137,14 @@ class ModelRouter:
         if model_cfg:
             self._circuit_breaker.on_success(model_cfg.provider)
 
+    def cancel_call(self, model_name: str, state: BreakerState) -> None:
+        """释放未真正请求 Provider 的 HALF_OPEN 探测名额。"""
+        if state is not BreakerState.HALF_OPEN:
+            return
+        model_cfg = self._config.models.get(model_name)
+        if model_cfg:
+            self._circuit_breaker.cancel_half_open(model_cfg.provider)
+
     def report_failure(self, model_name: str) -> None:
         """上报一次失败调用 → 推进熔断器状态。"""
         model_cfg = self._config.models.get(model_name)
@@ -157,21 +181,20 @@ class ModelRouter:
         """
         构建过滤后的候选列表。
 
-        三层分组：
+        两层分组：
         - normal: CLOSED 且限流通过
         - half_open: HALF_OPEN（允许探测）
-        - fallback: OPEN（全部不可用时的兜底）
+        OPEN 状态不会进入候选列表。
         """
         purpose_cfg = self._config.purposes.get(purpose)
         if not purpose_cfg or not purpose_cfg.priority:
-            return [self._config.defaults.model]
+            return []
 
         # 按 priority 升序排列
         sorted_priorities = sorted(purpose_cfg.priority, key=lambda p: p.priority)
 
         normal = []
         half_open = []
-        fallback = []
 
         for p in sorted_priorities:
             model_cfg = self._config.models.get(p.model)
@@ -194,25 +217,19 @@ class ModelRouter:
             elif cb_state.value == "half_open":
                 half_open.append(model_name)
             else:  # open
-                fallback.append(model_name)
+                logger.debug("select: %s 熔断跳过", model_name)
 
         # 排序: 如果 forced_model 匹配，提到最前
         candidates = normal + half_open
 
         if forced_model:
-            candidates = self._prioritize_forced(candidates, fallback, forced_model)
-
-        # 全部不可用 → 保留最优先的 OPEN provider 作为兜底
-        if not candidates and fallback:
-            logger.warning("select: 全部 provider 不可用，保留 %s 作为兜底", fallback[0])
-            return fallback[:1]
+            candidates = self._prioritize_forced(candidates, forced_model)
 
         return candidates
 
     def _prioritize_forced(
         self,
         candidates: list[str],
-        fallback: list[str],
         forced_model: str,
     ) -> list[str]:
         """如果 forced_model 匹配，将其提升到候选列表第一位。"""
@@ -221,16 +238,16 @@ class ModelRouter:
             candidates.remove(forced_model)
             return [forced_model] + candidates
 
-        if forced_model in fallback:
-            # forced model 在熔断中，仍然放在第一位（允许尝试）
-            fallback.remove(forced_model)
-            return [forced_model] + candidates + fallback
-
-        # 精确模型允许位于 purpose 链之外；Identity 或 Router 默认模型是明确选择，
-        # 只要已配置且 active，就应提升到首位而不是误报“不匹配”。
+        # 精确模型允许位于 purpose 链之外；Session 绑定模型是明确选择，
+        # 但仍必须通过限流和熔断检查。
         forced_config = self._config.models.get(forced_model)
-        if forced_config is not None and forced_config.status == "active":
-            return [forced_model] + candidates + fallback
+        if (
+            forced_config is not None
+            and forced_config.status == "active"
+            and self._rate_limiter.check(forced_config.provider)
+            and self._circuit_breaker.get_state(forced_config.provider) is not BreakerState.OPEN
+        ):
+            return [forced_model] + candidates
 
         # 2. 匹配 provider name → 将该 provider 的所有模型提到前面
         if forced_model in self._config.providers:
@@ -245,15 +262,20 @@ class ModelRouter:
             # 如果 candidates 中没有, 从全局 models 中找（降级作用域扩大）
             if not provider_models:
                 for name, cfg in self._config.models.items():
-                    if cfg.provider == forced_model and cfg.status == "active":
+                    if (
+                        cfg.provider == forced_model
+                        and cfg.status == "active"
+                        and self._rate_limiter.check(cfg.provider)
+                        and self._circuit_breaker.get_state(cfg.provider) is not BreakerState.OPEN
+                    ):
                         provider_models.append(name)
             if provider_models:
-                return provider_models + remaining + fallback
+                return provider_models + remaining
             logger.warning("provider '%s' 没有 active 模型", forced_model)
 
         # 3. 不匹配 → 保持原顺序
         logger.warning("forced_model '%s' 不匹配任何模型/供应商，降级使用 purpose 排序", forced_model)
-        return candidates + fallback
+        return candidates
 
     # ============================================================
     # 内部: 客户端实例化
@@ -288,21 +310,6 @@ class ModelRouter:
         if not config.models:
             raise ValueError("models 至少需要配置一个模型")
 
-        default_model = config.models.get(config.defaults.model)
-        if default_model is None:
-            raise ValueError(
-                f"defaults.model 引用未知模型: {config.defaults.model!r}"
-            )
-        if default_model.status != "active":
-            raise ValueError(
-                f"defaults.model 必须引用 active 模型: {config.defaults.model!r}"
-            )
-        if default_model.provider != config.defaults.provider:
-            raise ValueError(
-                "defaults.provider 与 defaults.model 的 provider 不一致: "
-                f"{config.defaults.provider!r} != {default_model.provider!r}"
-            )
-
         for purpose_name, purpose_cfg in config.purposes.items():
             for index, priority in enumerate(purpose_cfg.priority):
                 if priority.model not in config.models:
@@ -310,6 +317,14 @@ class ModelRouter:
                         f"purposes.{purpose_name}.priority[{index}] 引用未知模型: "
                         f"{priority.model!r}"
                     )
+
+        chat_cfg = config.purposes.get("chat")
+        if chat_cfg is None or not any(
+            config.models.get(item.model) is not None
+            and config.models[item.model].status == "active"
+            for item in chat_cfg.priority
+        ):
+            raise ValueError("purposes.chat 至少需要一个 active 模型")
 
         for model_name, model_cfg in config.models.items():
             if model_cfg.status != "active":

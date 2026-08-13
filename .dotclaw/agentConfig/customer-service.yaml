@@ -3,7 +3,6 @@ agent_id: customer-service
 agent_name: "客服/运营"
 description: "处理用户咨询、解答常见问题、提供操作指引。适合客服问答、用户引导、信息查询类任务。"
 
-model: ""
 workspace: "."
 allowed_tools:
   - read_file

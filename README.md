@@ -464,7 +464,7 @@ Copy-Item model_router_config.example.yaml model_router_config.yaml
 
 `.env`、`config.yaml` 和 `model_router_config.yaml` 都是本地文件，已被 Git 忽略；需要共享默认配置时，只修改对应的 `*.example` 模板。
 
-当前模板默认模型是 Qwen。在项目根目录的 `.env` 中填写：
+当前模板的 `purposes.chat.priority` 首选模型来自 Qwen。在项目根目录的 `.env` 中填写：
 
 ```dotenv
 QWEN_API_KEY=your_api_key
@@ -579,7 +579,6 @@ Agent Identity：
 ```text
 agent_id
 agent_name
-model
 system_prompt_template
 allowed_tools
 policy_rules
@@ -600,7 +599,6 @@ agent_id: coding
 agent_name: "Coding Assistant"
 description: "面向代码阅读与修改的本地 Agent"
 
-model: qwen3.7-max
 workspace: "."
 
 allowed_tools:
