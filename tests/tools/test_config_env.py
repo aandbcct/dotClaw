@@ -25,8 +25,8 @@ def test_load_config_reads_project_root_dotenv(tmp_path, monkeypatch) -> None:
     assert config.llm.clients["test"].api_key == "from-dotenv"
 
 
-def test_system_environment_overrides_project_dotenv(tmp_path, monkeypatch) -> None:
-    """已有系统环境变量优先，不会被项目 .env 覆盖。"""
+def test_project_dotenv_overrides_system_environment(tmp_path, monkeypatch) -> None:
+    """项目 .env 优先，覆盖已有的同名系统环境变量。"""
     _write_config(tmp_path)
     (tmp_path / ".env").write_text("DOTCLAW_TEST_API_KEY=from-dotenv\n", encoding="utf-8")
     monkeypatch.setattr(settings, "_find_project_root", lambda: tmp_path)
@@ -34,4 +34,4 @@ def test_system_environment_overrides_project_dotenv(tmp_path, monkeypatch) -> N
 
     config = settings.load_config()
 
-    assert config.llm.clients["test"].api_key == "from-system"
+    assert config.llm.clients["test"].api_key == "from-dotenv"

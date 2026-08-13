@@ -143,12 +143,12 @@ def _expand_env(value: Any) -> Any:
 
 
 def _load_project_env(project_root: Path) -> None:
-    """加载项目根目录的 .env，但不覆盖已存在的系统环境变量。
+    """加载项目根目录的 .env，并覆盖同名系统环境变量。
 
-    Provider 与配置中的 ${VAR} 共用同一进程环境；系统环境变量优先，.env 仅补齐
-    未设置的变量，便于本地开发而不改变部署侧显式配置。
+    Provider 与配置中的 ${VAR} 共用同一进程环境；项目配置优先使用仓库根目录
+    .env 的值，确保 CLI 行为不受机器级同名变量影响。
     """
-    load_dotenv(dotenv_path=project_root / ".env", override=False)
+    load_dotenv(dotenv_path=project_root / ".env", override=True)
 
 
 # ============================================================

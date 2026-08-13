@@ -476,7 +476,7 @@ QWEN_API_KEY=your_api_key
 TAVILY_API_KEY=your_tavily_api_key
 ```
 
-系统环境变量优先于项目根 `.env`。
+项目根 `.env` 优先于同名系统环境变量，便于为当前项目固定 Provider 凭证。
 
 使用其他 Provider 时，修改本地文件：
 

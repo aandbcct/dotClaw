@@ -24,11 +24,9 @@
 
 系统环境变量
         │
-        ├── 优先于项目根 .env
+项目根 .env（override=True）
         │
-项目根 .env（override=False）
-        │
-        ├── 为 ${VAR} 提供值
+        ├── 覆盖同名系统变量并为 ${VAR} 提供值
         │
 config.yaml
         ├── Config
@@ -94,7 +92,7 @@ CLI config status
 当前职责归纳为七组：
 
 1. **项目根解析**：从 `dotclaw` 包位置推导项目根。
-2. **环境加载**：读取项目根 `.env`，系统环境变量优先。
+2. **环境加载**：读取项目根 `.env`，项目文件中的同名变量优先。
 3. **主配置加载**：把 `config.yaml` 转换为 `Config`。
 4. **模型路由加载**：把 `model_router_config.yaml` 转换为 `RouterConfig`。
 5. **兼容迁移**：迁移旧 Builtin Tool 名，兼容缺少 Router 文件的旧 LLM 配置。
@@ -208,14 +206,14 @@ flowchart LR
     Result["字符串替换结果"]
 
     OS --> Process
-    DotEnv -->|override=false<br/>仅补缺失| Process
+    DotEnv -->|override=true<br/>覆盖同名值| Process
     Process --> Placeholder --> Result
 ```
 
 **结论：**
 
-- 系统环境变量优先。
-- `.env` 不覆盖已经存在的系统变量。
+- 项目根 `.env` 优先。
+- `.env` 覆盖已经存在的同名系统变量。
 - YAML 只有显式 `${VAR}` 才会使用环境变量。
 - 未设置变量保留原始占位符并记录 warning。
 - 替换只生成字符串，不按目标字段自动转换类型。
@@ -471,10 +469,10 @@ project_root/
 **职责与用途：**`_load_project_env()` 使用：
 
 ```python
-load_dotenv(project_root / ".env", override=False)
+load_dotenv(project_root / ".env", override=True)
 ```
 
-因此系统环境优先，`.env` 只补充缺失项。
+因此项目 `.env` 优先，并覆盖同名系统环境变量。
 
 `expand_env_vars()` 递归处理：
 
@@ -1011,7 +1009,7 @@ sequenceDiagram
     ConfigPkg->>Cache: 检查是否已缓存
     alt 首次加载
         ConfigPkg->>Loader: load_config()
-        Loader->>Env: load_dotenv(override=false)
+        Loader->>Env: load_dotenv(override=true)
         Loader->>YAML: yaml.safe_load()
         Loader->>Loader: expand_env_vars + _raw_to_config
         Loader-->>Cache: Config
@@ -1338,7 +1336,7 @@ get_config() -> Config
 
 - 相对路径基于推导出的项目根；
 - 缺失文件返回 Config 默认对象；
-- `.env` 不覆盖系统环境；
+- `.env` 覆盖同名系统环境变量；
 - 支持 `${VAR}`；
 - Tool 旧名迁移。
 
@@ -1653,7 +1651,7 @@ ApplicationHost.shutdown()
 
 ### 6.16 当前实现已经保证的不变量
 
-1. 系统环境变量不会被项目 `.env` 覆盖。
+1. 项目 `.env` 会覆盖同名系统环境变量。
 2. 主配置相对路径基于推导项目根。
 3. 缺失 config.yaml 会回退 Dataclass 默认。
 4. Tool 旧名在新列表字段中会迁移。
@@ -1691,7 +1689,7 @@ ApplicationHost.shutdown()
 | 增加强类型校验 | `load_config` / `_raw_to_config` | 错误类型、兼容 | 配置错误必须可定位 |
 | 修改项目根规则 | `_find_project_root` | Agent、Session、Bootstrap | 统一所有相对路径 |
 | 支持显式配置路径 | `load_config` / Host.build | CLI、ENV | 不破坏默认项目根 |
-| 修改 `.env` 优先级 | `_load_project_env` | 部署、测试 | 系统环境优先级明确 |
+| 修改 `.env` 优先级 | `_load_project_env` | 部署、测试 | 项目 `.env` 优先级明确 |
 | 增加 required env | `expand_env_vars` 上层 Schema | Secret、错误 | 不打印 Secret 值 |
 | 增加类型化 ENV | Config Schema | int/bool/float | 替换后再校验 |
 | 处理空 YAML | `load_config` | tests/config | 缺失和空文件语义明确 |
@@ -1741,7 +1739,7 @@ ApplicationHost.shutdown()
 1. `config.yaml` 是应用级主配置。
 2. `model_router_config.yaml` 存在时整体接管 LLM Router 构建。
 3. Agent Identity YAML 是独立配置域。
-4. 系统环境变量优先于 `.env`。
+4. 项目 `.env` 优先于同名系统环境变量。
 5. `.env` 只在 `load_config()` 中自动加载。
 6. `${VAR}` 只做递归字符串替换。
 7. `get_config()` 是进程级懒加载单例。

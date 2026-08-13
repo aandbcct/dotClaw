@@ -1281,7 +1281,7 @@ console.print(chunk, end="", markup=False)
 
 ```text
 _find_project_root
-→ load .env，不覆盖系统环境变量
+→ load .env，覆盖同名系统环境变量
 → 读取 config.yaml
 → 环境变量展开
 → 构造 Config
@@ -1836,7 +1836,7 @@ response：
 | Runtime Repository 根 | Host 传入的 project_root + session.directory |
 | SessionManager 根 | `dotclaw.__file__` 推导的项目根 + session.directory |
 
-默认入口下两者通常一致；自定义 project_root 当前不能保证一致。系统环境变量优先于 `.env`；`.env` 只补齐缺失值。
+默认入口下两者通常一致；自定义 project_root 当前不能保证一致。项目 `.env` 优先于同名系统环境变量。
 
 ### 6.9 启动与关闭不变量
 
