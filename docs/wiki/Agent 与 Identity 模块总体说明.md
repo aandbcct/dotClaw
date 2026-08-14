@@ -41,14 +41,14 @@ Agent 与 Identity 部分是 dotClaw 的**声明式 Agent 定义和运行策略�
 
 该部分解决的核心问题是：
 
-> 如何用稳定的 Identity 声明 Agent 的身份、模型、提示词、工具可见性、工具策略、Context Slot 和委托能力，并在 Session 与 Run 边界把这些声明转换为可审计的执行策略快照。
+> 如何用稳定的 Identity 声明 Agent 的身份、提示词、工具可见性、工具策略、Context Slot 和委托能力，并在 Session 与 Run 边界把这些声明与 Session 模型绑定转换为可审计的执行策略快照。
 
 ### 1.1 核心职责
 
 当前职责归纳为六组：
 
 1. **身份声明**：用 `agent_id`、名称、描述和标签描述一个逻辑 Agent。
-2. **行为与模型约束**：声明 System Prompt、模型和循环预算来源。
+2. **行为约束**：声明 System Prompt 和循环预算来源；模型由 Session 独立绑定。
 3. **工具与安全约束**：声明工具白名单和 Agent 级 Tool Policy 收窄规则。
 4. **Context 约束**：声明 Agent Owner 启用的 Context Slot。
 5. **目录与路由**：在启动时建立 AgentRegistry，并由 Session 持久化 `agent_id`。
@@ -65,7 +65,7 @@ Agent 与 Identity 部分是 dotClaw 的**声明式 Agent 定义和运行策略�
 | `ToolExecutor` | 按当前 Run 的 agent_id应用 Agent 级 Policy 收窄 |
 | `LLMProxyAdapter` | 使用冻结策略中的 model_id 作为模型优先项 |
 | `RuntimeDelegationAdapter` | 校验 target_agent_id，创建目标 Session 和子 Run |
-| CLI | 展示当前 Identity 名称和模型，不持有 Agent 执行对象 |
+| CLI | 展示当前 Identity 名称和 Session 绑定模型，不持有 Agent 执行对象 |
 
 ### 1.3 明确不负责的内容
 
@@ -82,14 +82,14 @@ Agent 与 Identity 不负责：
 
 | 相邻模块 | Agent/Identity 负责 | 相邻模块负责 |
 |---|---|---|
-| Config | 提供 Identity 的全局回退值 | 读取 config.yaml、模型路由和全局 Tool Policy |
+| Config | 提供 Identity 的全局 Prompt 与策略上限 | 读取 config.yaml、模型路由和全局 Tool Policy |
 | Bootstrap | 提供可加载的声明类型 | 决定加载目录、默认 Identity 和装配顺序 |
 | Orchestration | 提供逻辑主归属为 Agent 的 AgentRegistry | Task、Dispatcher、Delegation 和父子运行协调 |
-| Session | 提供可绑定的 agent_id | 持久化 Session 与 agent_id |
+| Session | 提供可绑定的 agent_id | 持久化 Session、agent_id 与模型绑定 |
 | Runtime | 提供策略声明来源 | 冻结 AgentPolicySnapshot、执行与恢复 |
 | Context | 提供 context_slot_ids、Prompt 和工具声明来源 | 解析 Plan、加载 Slot 和持久化 ContextVersion |
 | Tool | 提供 allowed_tools 与 policy_rules | Tool Registry、Capability、Policy、审批和执行 |
-| LLM | 提供模型逻辑名 | Purpose 路由、Provider 调用和 fallback |
+| LLM | 不持有模型选择 | 消费 Session 冻结的模型逻辑名，执行 Purpose 路由、Provider 调用和 fallback |
 | Channel / CLI | 提供显示名称和模型信息 | 用户交互、命令和输出 |
 | A2A / 外部 Agent 网络 | 仅保留类似 AgentCard 的标签字段 | 当前没有远程协议、端点和服务发现 |
 
@@ -262,7 +262,7 @@ flowchart TB
     subgraph AgentModule["A. Agent 逻辑模块"]
         Identity["AgentIdentity"]
         Loader["load_agent_config"]
-        Resolve["resolve_system_prompt / resolve_model"]
+        Resolve["resolve_system_prompt"]
         Registry["AgentRegistry<br/>逻辑主归属 Agent<br/>物理位于 orchestration/registry.py"]
         DirectoryAPI["load_all / register / get / list_all"]
     end
@@ -343,7 +343,7 @@ flowchart TB
 
 | 分类 | 组成部分 | 逻辑主归属 | 稳定职责 |
 |---|---|---|---|
-| Agent 核心 | `AgentIdentity` | Agent | 声明身份、模型、Prompt、工具、Context 和能力标签 |
+| Agent 核心 | `AgentIdentity` | Agent | 声明身份、Prompt、工具、Context 和能力标签 |
 | Agent 核心 | `load_agent_config` | Agent | YAML 路径、环境变量展开和 DTO 构造 |
 | Agent 目录 | `AgentRegistry` | Agent | 启动扫描、程序化注册和按 ID 查询 |
 | 启动边界 | `ApplicationHost` | Bootstrap | 加载目录、检查非空、选择默认 Identity |
@@ -365,7 +365,7 @@ flowchart TB
 
 #### 4.1.1 `AgentIdentity`
 
-**职责与用途：**`AgentIdentity` 是一个 `frozen=True` 的声明式 dataclass，用来描述“这个逻辑 Agent 被允许以什么身份、模型、Prompt、工具和 Context 参与运行”。
+**职责与用途：**`AgentIdentity` 是一个 `frozen=True` 的声明式 dataclass，用来描述“这个逻辑 Agent 被允许以什么身份、Prompt、工具和 Context 参与运行”。模型不属于 Identity 字段，由 `Session.model` 绑定。
 
 它不持有：
 
@@ -443,7 +443,7 @@ profile → allow | ask | deny
 
 该字段当前不进入 AgentPolicySnapshot，而由 ToolExecutor 的独立解析器按 agent_id重新加载并缓存。
 
-#### 4.1.5 Prompt 与模型字段
+#### 4.1.5 Prompt 字段
 
 **职责与用途：**
 
@@ -451,11 +451,6 @@ profile → allow | ask | deny
 system_prompt_template
 → resolve_system_prompt()
 → 空时回退 config.agent.system_prompt
-
-model
-→ resolve_model(global default)
-→ 作为 Runtime Policy.model_id
-→ LLM Router forced_model
 ```
 
 Prompt 模板仅支持：
@@ -524,18 +519,16 @@ None
 
 #### 4.1.9 解析方法
 
-**职责与用途：**`resolve_system_prompt()` 与 `resolve_model()` 将 Identity 局部配置与全局回退连接起来。
+**职责与用途：**`resolve_system_prompt()` 负责 Identity 局部 Prompt 模板替换。
 
 ```text
 resolve_system_prompt()
 → 只做模板替换
 → 不读取 Config
 
-resolve_model(default_model)
-→ identity.model or default_model
 ```
 
-这两个方法不验证结果是否对应已配置模型、有效路径或安全 Prompt。
+该方法不验证结果是否为安全 Prompt；模型解析方法已删除，模型归 Session 所有。
 
 ---
 
@@ -803,7 +796,7 @@ cancel_task
 **职责与用途：**
 
 ```text
-identity.resolve_model(config.llm.default_model)
+request.model_id
 → model_id
 
 RouterConfig.models[model_id]
@@ -993,11 +986,7 @@ Session 不持久化完整 Identity Snapshot。
 
 #### 4.7.3 `Session.model`
 
-**职责与用途：**Session 仍持久化 model 字段。
-
-当前普通 Session 创建不传 identity.model，Delegation 创建目标 Session 时会传入 identity.model；但 Runtime 提交只读取 session.agent_id，再由 AgentPolicyResolver 解析 model。
-
-因此 Session.model 当前是非权威冗余字段。
+**职责与用途：**Session 持久化长期模型绑定。新 Session 取 chat 用途最高优先级 active 模型；Run 创建时复制为不可变 `request.model_id`。
 
 ---
 
@@ -1037,10 +1026,10 @@ root_run_id
 
 ```text
 agent_id = identity.agent_id
-model = identity.model
+model = preferred_model
 ```
 
-真正的子 Run 策略仍由 AgentPolicyResolver 根据 child Request.agent_id 冻结。Session.model 不作为权威。
+子 Run 策略由 AgentPolicyResolver 根据 child Request.agent_id 和 Request.model_id 一同冻结。
 
 #### 4.8.4 Orchestration 边界
 
@@ -1233,8 +1222,8 @@ sequenceDiagram
 **结论：**
 
 - Identity 必须在创建前已注册。
-- Session 只保存 agent_id，不复制 Prompt、工具或 Policy。
-- 普通创建不把 identity.model 写入 Session.model。
+- Session 保存 agent_id 与独立的模型绑定，不复制 Prompt、工具或完整 Policy。
+- 普通与 Delegation 创建都写入 chat 用途首选模型。
 - Identity 文件后续变化不会改变 Session 绑定的 ID，但可能影响未来 Run 的策略来源。
 - 删除或重命名 Identity 后，旧 Session 会明确失败。
 
@@ -1266,7 +1255,7 @@ sequenceDiagram
 
 - 策略冻结发生在 AgentRun 创建前。
 - Tool Definitions 是当时 Tool Registry 的深拷贝快照。
-- Identity.model、Prompt 和 max_loop_steps 在这一安全点冻结。
+- Session.model、Identity Prompt 和 max_loop_steps 在这一安全点冻结。
 - AgentPolicySnapshot 随 Run 持久化。
 - Runtime 不在每次 LLM 轮次重新读取 Identity。
 
@@ -1300,12 +1289,8 @@ flowchart LR
     Prompt -->|是| Format["format(agent_name, workspace)"]
     Prompt -->|否| GlobalPrompt["config.agent.system_prompt"]
 
-    Identity --> Model{"model 非空?"}
-    Model -->|是| IdentityModel["Identity model"]
-    Model -->|否| GlobalModel["config.llm.default_model"]
-
-    IdentityModel --> RouterMeta["RouterConfig model metadata"]
-    GlobalModel --> RouterMeta
+    Session["Session.model"] --> Request["RunRequest.model_id"]
+    Request --> RouterMeta["RouterConfig model metadata"]
     RouterMeta --> Snapshot["AgentPolicySnapshot"]
     Format --> Snapshot
     GlobalPrompt --> Snapshot
@@ -1315,9 +1300,9 @@ flowchart LR
 
 - Prompt 和模型的回退由 AgentPolicyResolver 完成。
 - workspace 只参与 Prompt 文本。
-- model 逻辑名还需由 LLM Router 解析。
+- Session.model 逻辑名还需由 LLM Router 解析。
 - RouterConfig 缺少模型或 tokenizer 时，Run 可能在 Context Budget 阶段失败。
-- Identity.model 不保证最终 Router 一定选中该模型，因为 LLM forced model 当前是优先语义。
+- Session.model 是首个候选；不可用时仍按 purpose 优先级降级，且不能绕过 OPEN 熔断。
 
 ### 5.8 Context Plan 与 Agent Slot
 
@@ -1447,7 +1432,7 @@ sequenceDiagram
 
 - 子 Agent 是独立 Run，不是父 Agent 对象中的嵌套实例。
 - 子 Session agent_id 与 RunRequest.agent_id 一致。
-- 子 Run 使用目标 Identity 的模型、Prompt、工具和 Context Plan。
+- 子 Run 使用目标 Session 绑定模型，以及目标 Identity 的 Prompt、工具和 Context Plan。
 - 父 Agent 规则不应污染目标 Tool Scope。
 - 当前没有委托深度、环路和允许目标列表。
 
@@ -1519,7 +1504,6 @@ AgentRegistry 不从该包导出，主归属 `dotclaw.orchestration.registry`。
 | `allowed_tools` | list[str] | Run Tool Definition 白名单 | 空 = 全部 |
 | `policy_rules` | dict/None | Tool Policy 收窄 | None = 仅全局 |
 | `system_prompt_template` | str | Run System Prompt | 空 = 全局 Prompt |
-| `model` | str | Run 模型逻辑名 | 空 = 全局默认模型 |
 | `max_loop_steps` | int | Snapshot/RunBudget 最大迭代字段 | 默认 10；当前未执行限制 |
 | `workspace` | str | Prompt 占位符 | Loader 默认 "." |
 | `description` | str | Agent 目录摘要 | 空时用 agent_name |
@@ -1777,7 +1761,7 @@ Tool policy_rules 实际版本保证
 4. `RunRequest` 只携带 `agent_id`，不得携带可变 Identity 对象引用。
 5. Runtime 必须在创建 AgentRun 前冻结 `AgentPolicySnapshot`。
 6. 已开始 Run、审批恢复、delegation 恢复和 Checkpoint 恢复必须复用原 Policy Snapshot，不得按当前配置重算覆盖。
-7. Identity 的 Prompt 和模型回退必须在策略冻结时完成。
+7. Identity 的 Prompt 与 Session 的模型绑定必须在策略冻结时完成。
 8. `allowed_tools` 只控制模型可见 Tool Schema，不得替代 Tool Capability、Policy 和审批。
 9. Agent 级 `policy_rules` 只能收窄全局 Tool Policy，不能放宽全局上限。
 10. 每次 Run 的 Tool Definitions 必须使用不可变 Registry Snapshot。
@@ -1801,7 +1785,7 @@ Tool policy_rules 实际版本保证
 | 增加严格校验 | Agent Loader / 新 Schema | Registry、Bootstrap 错误处理 | 不得把坏文件伪装为 default |
 | 修改配置路径 | `load_agent_config`、Host | Tool policy resolver、project_root | 所有读取使用同一根 |
 | 修改 Prompt 占位符 | `resolve_system_prompt` | AgentPolicyResolver、文档 | 未知字段必须明确校验 |
-| 修改模型回退 | `resolve_model` + AgentPolicyResolver | LLM Router、RouterConfig | Identity model 与实际模型语义一致 |
+| 修改模型初始绑定或切换 | `Session.model` + Purpose priority + AgentPolicyResolver | LLM Router、RouterConfig、SessionInteractionService | Session 绑定与 Run 冻结模型语义一致 |
 | 修改工具白名单 | `_allowed_definitions` | Tool Registry、Context ToolsSlot | 白名单只控制可见性 |
 | 将空白名单改为拒绝 | AgentIdentity + PolicyResolver | 默认配置、迁移 | 必须显式兼容旧配置 |
 | 修改 Tool Policy 字段 | `policy_rules` 解析 | ToolExecutor、PolicyEngine | Agent 只能收窄全局上限 |
@@ -1828,7 +1812,7 @@ Tool policy_rules 实际版本保证
 | 添加委托深度限制 | RuntimeEngine / DelegationPort | root_run_id、parent_run_id | 防止循环和无限派生 |
 | 添加委托允许列表 | Identity / Policy | Context 可见性、Adapter | 展示与执行必须同源 |
 | 排查 Session 未知 Identity | Session.agent_id → Registry | Loader、重命名/删除 | 禁止静默切换默认 Agent |
-| 排查模型未生效 | Identity.model → PolicySnapshot → Router | LLM purpose / forced model | 区分优先与强制 |
+| 排查模型未生效 | Session.model → RunRequest → PolicySnapshot → Router | purpose / 熔断状态 | 区分绑定与降级 |
 | 排查 Prompt 未生效 | YAML 字段名 → Loader → Snapshot | `agent_prompt` 漂移 | 只认实际字段 |
 | 排查工具缺失 | allowed_tools → Registry snapshot → Context | disabled tools / MCP 时序 | 检查实际定义名 |
 | 排查 Tool Policy 不一致 | Tool Loader Cache vs Registry | 启动顺序、文件修改 | 记录规则来源版本 |
@@ -2123,11 +2107,9 @@ workspace 只替换 Prompt，占位值可能是相对路径；它不控制：
 
 `str.format()` 会把未知花括号视为格式字段。代码示例、JSON 或未支持占位符可能导致 Run 策略冻结失败。
 
-#### A19. Session.model 是冗余非权威字段
+#### A19. Session.model 是持久化执行权威
 
-普通 Session 多为空，Delegation Session 写 identity.model，但 Runtime 始终通过 agent_id重算 Policy.model_id。
-
-它可能与实际 Snapshot 不一致并误导调试。
+旧空值会在 Host 启动或首次提交时补齐；已有非空绑定保持稳定。每个 Run 将其复制进不可变请求与 Policy 快照，避免运行中配置变化造成漂移。
 
 #### A20. context_slot_ids 名称和语义不匹配
 

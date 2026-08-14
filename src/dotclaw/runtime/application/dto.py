@@ -69,6 +69,7 @@ class RunRequest:
     parent_run_id: str | None = None
     root_run_id: str | None = None
     run_id: str = ""
+    model_id: str = ""
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典，供执行期诊断使用。"""
@@ -81,6 +82,7 @@ class RunRequest:
             "parent_run_id": self.parent_run_id,
             "root_run_id": self.root_run_id,
             "run_id": self.run_id,
+            "model_id": self.model_id,
         }
 
 

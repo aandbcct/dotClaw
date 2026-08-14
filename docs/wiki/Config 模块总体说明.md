@@ -24,11 +24,9 @@
 
 系统环境变量
         │
-        ├── 优先于项目根 .env
+项目根 .env（override=True）
         │
-项目根 .env（override=False）
-        │
-        ├── 为 ${VAR} 提供值
+        ├── 覆盖同名系统变量并为 ${VAR} 提供值
         │
 config.yaml
         ├── Config
@@ -94,7 +92,7 @@ CLI config status
 当前职责归纳为七组：
 
 1. **项目根解析**：从 `dotclaw` 包位置推导项目根。
-2. **环境加载**：读取项目根 `.env`，系统环境变量优先。
+2. **环境加载**：读取项目根 `.env`，项目文件中的同名变量优先。
 3. **主配置加载**：把 `config.yaml` 转换为 `Config`。
 4. **模型路由加载**：把 `model_router_config.yaml` 转换为 `RouterConfig`。
 5. **兼容迁移**：迁移旧 Builtin Tool 名，兼容缺少 Router 文件的旧 LLM 配置。
@@ -113,7 +111,7 @@ CLI config status
 | `_build_mcp()` | 消费 MCP 开关、Global 和 Server 列表 |
 | `SessionManager` / Runtime Repository | 消费 Session directory |
 | `AgentPolicyResolver` | 合并 Config、RouterConfig 与 AgentIdentity |
-| CLI | 使用 Debug level、默认模型和 Host 暴露的 Config |
+| CLI | 使用 Debug level、Session 模型绑定和 Host 暴露的 Config |
 | LLM Router | 消费 Provider、Model、Purpose 与 Reasoning 配置 |
 | Tool Policy | 消费全局规则、拒绝路径、Server 允许列表和网络服务 |
 | Agent Identity Loader | 独立加载 `.dotclaw/agentConfig/*.yaml`，只复用环境变量展开 |
@@ -208,14 +206,14 @@ flowchart LR
     Result["字符串替换结果"]
 
     OS --> Process
-    DotEnv -->|override=false<br/>仅补缺失| Process
+    DotEnv -->|override=true<br/>覆盖同名值| Process
     Process --> Placeholder --> Result
 ```
 
 **结论：**
 
-- 系统环境变量优先。
-- `.env` 不覆盖已经存在的系统变量。
+- 项目根 `.env` 优先。
+- `.env` 覆盖已经存在的同名系统变量。
 - YAML 只有显式 `${VAR}` 才会使用环境变量。
 - 未设置变量保留原始占位符并记录 warning。
 - 替换只生成字符串，不按目标字段自动转换类型。
@@ -249,7 +247,7 @@ flowchart TD
 - Router 文件存在时，两条路径分别解析同一文件，得到两个独立对象。
 - Router 文件缺失时，LLMProxy 使用 Legacy 转换结果，而 AgentPolicyResolver 直接加载缺失文件并得到空 RouterConfig。
 - 这可能使实际模型选路与 Context Window、Tokenizer、Compaction Model 等运行策略来自不同配置事实。
-- `config.llm.default_model` 仍参与 Identity 模型回退，因此主 Config 也没有完全退出 LLM 决策。
+- 模型不再由 Identity 或 `config.yaml` 声明默认值。新 Session 绑定 `purposes.chat.priority` 中优先级最高的 active 模型，已有 Session 保持自身持久化绑定；Run 创建时再把该模型冻结进请求与策略快照。
 
 ### 2.4 启动配置消费图
 
@@ -414,7 +412,7 @@ flowchart TB
 
 | 域 | 当前仓库显式值 | 当前实际影响 |
 |---|---|---|
-| LLM default | `qwen3.7-max` | Identity 模型回退 |
+| LLM default | 无独立默认字段 | 新 Session 使用 `purposes.chat.priority` 中最高优先级的 active 模型 |
 | Router providers | qwen/deepseek/gemini/openai | Provider Client 配置 |
 | Router models | 5 个，gemini disabled | Purpose 路由过滤 |
 | Router purposes | chat/embedding/context_compaction | LLMProxy 选路 |
@@ -471,10 +469,10 @@ project_root/
 **职责与用途：**`_load_project_env()` 使用：
 
 ```python
-load_dotenv(project_root / ".env", override=False)
+load_dotenv(project_root / ".env", override=True)
 ```
 
-因此系统环境优先，`.env` 只补充缺失项。
+因此项目 `.env` 优先，并覆盖同名系统环境变量。
 
 `expand_env_vars()` 递归处理：
 
@@ -536,7 +534,6 @@ Config 是普通可变 dataclass：
 `LLMConfig`：
 
 ```text
-default_model
 clients
 fallbacks
 retry_max_retries
@@ -546,8 +543,7 @@ stream
 
 当前 Router 文件存在时：
 
-- `default_model` 仍被 Runtime 使用；
-- 其余字段不参与 `_build_llm()`；
+- clients 与 retry 字段不参与 `_build_llm()`；
 - Router 文件缺失时，clients/retry 转换为 RouterConfig；
 - fallbacks 没有真正进入转换结果；
 - stream 没有进入 Runtime 调用，Adapter 固定 `stream=True`。
@@ -747,12 +743,10 @@ priority[]
 
 当前消费：
 
-- defaults.model：无 Purpose 候选时回退；
-- defaults.provider：当前 Router 未直接使用；
 - defaults.parameters：当前 LLMProxy 未使用；
 - defaults.fallback_enabled：当前未使用；
 - Provider api/base/retry/rate limit：已使用；
-- Provider circuit_breaker：Builder 使用，但 Loader 当前遗漏 YAML 投影；
+- Provider circuit_breaker：Loader 保留并由 Builder 构造状态机；
 - Model capabilities：当前没有参与 Purpose 能力校验；
 - Purpose description：展示性字段，运行时未使用；
 - priority：核心路由顺序。
@@ -776,13 +770,11 @@ priority[]
 
 Reasoning 使用独立强校验。
 
-当前解析遗漏：
+当前解析限制：
 
-- Provider `circuit_breaker` 没有传给 ProviderConfig；
+- Provider `circuit_breaker` 以字典传给 ProviderConfig，由 Bootstrap 再构造状态机配置；
 - Provider 未做 Mapping 类型校验；
-- Model provider 引用未校验；
-- Purpose model 引用未校验；
-- defaults.model 是否存在未校验；
+- Model provider 与 Purpose model 引用由 ModelRouter 启动校验；
 - capabilities 与 Purpose 没有匹配校验。
 
 `load_router_config()` 本身不调用 `_load_project_env()`。正常 ApplicationHost 路径因为先执行 `get_config()`，进程环境通常已经补齐；独立调用则依赖外部环境预先加载。
@@ -794,12 +786,6 @@ Reasoning 使用独立强校验。
 转换：
 
 ```text
-第一个 Client
-→ inferred default provider
-
-LLM default_model
-→ Router defaults.model
-
 每个唯一 provider
 → ProviderConfig
 
@@ -920,9 +906,11 @@ AgentIdentity 与 Config 的合并发生在 AgentPolicyResolver：
 Identity system_prompt
 → 非空优先，否则 config.agent.system_prompt
 
-Identity model
-→ 非空优先，否则 config.llm.default_model
+Session model
+→ RunRequest.model_id
 ```
+
+Router 配置不存在时，Legacy 转换仍仅根据 clients 顺序生成 chat priority，不生成默认模型。
 
 它没有进入 Config 全局单例，也没有配置版本或统一诊断。
 
@@ -1009,7 +997,7 @@ sequenceDiagram
     ConfigPkg->>Cache: 检查是否已缓存
     alt 首次加载
         ConfigPkg->>Loader: load_config()
-        Loader->>Env: load_dotenv(override=false)
+        Loader->>Env: load_dotenv(override=true)
         Loader->>YAML: yaml.safe_load()
         Loader->>Loader: expand_env_vars + _raw_to_config
         Loader-->>Cache: Config
@@ -1142,9 +1130,9 @@ flowchart LR
 
 **结论：**
 
-- Provider 和 Model 引用关系没有在 Loader 中交叉校验。
-- Purpose 优先级只在 ModelRouter.select() 时过滤不存在或 disabled 模型。
-- defaults.model 不存在时，Router 仍可构造，错误延迟到 Client 获取。
+- Provider、Model 和 Purpose 引用在 ModelRouter 构造时交叉校验。
+- chat 至少需要一个 active 模型；purpose 优先级在 select() 时继续应用实时状态过滤。
+- 不存在默认模型字段；空候选会快速失败。
 - Reasoning 是 Model 级配置。
 - Context window 和 Tokenizer 由 Runtime 策略冻结使用。
 
@@ -1243,7 +1231,8 @@ sequenceDiagram
 
     Request->>Resolver: agent_id
     Resolver->>Identity: 解析 Agent
-    Resolver->>Config: 默认模型、Prompt、预算回退
+    Resolver->>Config: Prompt、预算上限
+    Request->>Resolver: model_id
     Resolver->>RouterB: context_window / tokenizer / compaction model
     Resolver->>Tools: snapshot definitions
     Resolver->>Resolver: Identity 覆盖 + Tool 过滤
@@ -1254,7 +1243,7 @@ sequenceDiagram
 **结论：**
 
 - Config 不是每次 Run 的最终值。
-- Identity model/prompt 优先于全局默认。
+- Session 冻结模型与 Identity prompt 分别进入策略快照。
 - Tool 白名单来自 Identity。
 - AgentPolicyResolver 读取的是 Runtime Factory 独立加载的 RouterConfig B。
 - LLMProxy 内部实际选路使用 RouterConfig A；当前两者没有共同的有效配置对象。
@@ -1336,7 +1325,7 @@ get_config() -> Config
 
 - 相对路径基于推导出的项目根；
 - 缺失文件返回 Config 默认对象；
-- `.env` 不覆盖系统环境；
+- `.env` 覆盖同名系统环境变量；
 - 支持 `${VAR}`；
 - Tool 旧名迁移。
 
@@ -1462,7 +1451,6 @@ context_slot_ids:
 
 | 字段 | 解析 | Builder/消费者 | 当前状态 |
 |---|---:|---|---|
-| `llm.default_model` | 是 | AgentPolicyResolver、CLI、Legacy Builder | **有效** |
 | `llm.clients` | 是 | 仅 Router 文件缺失时 | **条件有效** |
 | `llm.fallbacks` | 是 | Legacy Builder 未投影 | **未消费** |
 | `llm.retry.*` | 是 | 仅 Legacy Builder | **条件有效** |
@@ -1513,14 +1501,12 @@ context_slot_ids:
 
 | 字段 | LLMProxy / ModelRouter | AgentPolicyResolver | 当前状态 |
 |---|---|---|---|
-| `defaults.model` | 作为无 Purpose 候选时回退 | 不直接作为 Identity 默认 | **有效，但两实例可能分裂** |
-| `defaults.provider` | 当前 Router 未直接使用 | 不使用 | **未消费** |
 | `defaults.parameters` | LLMProxy 未使用 | 不使用 | **未消费** |
 | `defaults.fallback_enabled` | 未使用 | 不使用 | **未消费** |
 | `providers.api_key/base_url` | 有效 | 不使用 | **有效** |
 | `providers.rate_limit` | 有效 | 不使用 | **有效** |
 | `providers.retry` | 有效 | 不使用 | **有效** |
-| `providers.circuit_breaker` | Builder 有消费者，但 Loader 未投影 YAML | 不使用 | **配置失效** |
+| `providers.circuit_breaker` | Builder 构造状态机 | 不使用 | **有效** |
 | `models.provider/model_id` | 有效 | 按模型名读取预算元数据 | **有效** |
 | `models.context_window/tokenizer_encoding` | 不参与远端调用 | 提供 Run Budget | **只在 RouterConfig B 有效** |
 | `models.capabilities` | 当前不参与 Purpose 校验 | 不使用 | **未消费** |
@@ -1553,13 +1539,13 @@ flowchart LR
     Main["config.yaml"]
     RouterA["RouterConfig A<br/>LLMProxy"]
     RouterB["RouterConfig B<br/>AgentPolicyResolver"]
-    Effective["当前默认启动"]
+    Effective["当前启动配置"]
 
     Main --> Effective
     RouterA --> Effective
     RouterB --> Effective
 
-    Effective --> Models["默认模型 qwen3.7-max<br/>5个模型，1个 disabled"]
+    Effective --> Models["chat priority 首选模型<br/>其余模型用于降级"]
     Effective --> Net["Tavily / Open-Meteo 启用"]
     Effective --> MCP["MCP enabled<br/>Server 列表为空"]
     Effective --> Skills["./skills<br/>默认跳过 _ 前缀"]
@@ -1568,7 +1554,7 @@ flowchart LR
 
 **结论：**
 
-- 当前仓库存在 Router 文件，因此 A 与 B 都从同一文件独立解析，默认模型均为 qwen3.7-max。
+- 当前仓库存在 Router 文件，因此 A 与 B 都从同一文件独立解析模型元数据；Session 绑定由 chat priority 初始化。
 - Network 两个固定服务显式启用。
 - MCP 子系统开关启用，但没有 Server，因此不创建 Provider。
 - Skills 使用 `./skills`，默认跳过 `_example`。
@@ -1651,7 +1637,7 @@ ApplicationHost.shutdown()
 
 ### 6.16 当前实现已经保证的不变量
 
-1. 系统环境变量不会被项目 `.env` 覆盖。
+1. 项目 `.env` 会覆盖同名系统环境变量。
 2. 主配置相对路径基于推导项目根。
 3. 缺失 config.yaml 会回退 Dataclass 默认。
 4. Tool 旧名在新列表字段中会迁移。
@@ -1689,7 +1675,7 @@ ApplicationHost.shutdown()
 | 增加强类型校验 | `load_config` / `_raw_to_config` | 错误类型、兼容 | 配置错误必须可定位 |
 | 修改项目根规则 | `_find_project_root` | Agent、Session、Bootstrap | 统一所有相对路径 |
 | 支持显式配置路径 | `load_config` / Host.build | CLI、ENV | 不破坏默认项目根 |
-| 修改 `.env` 优先级 | `_load_project_env` | 部署、测试 | 系统环境优先级明确 |
+| 修改 `.env` 优先级 | `_load_project_env` | 部署、测试 | 项目 `.env` 优先级明确 |
 | 增加 required env | `expand_env_vars` 上层 Schema | Secret、错误 | 不打印 Secret 值 |
 | 增加类型化 ENV | Config Schema | int/bool/float | 替换后再校验 |
 | 处理空 YAML | `load_config` | tests/config | 缺失和空文件语义明确 |
@@ -1709,7 +1695,7 @@ ApplicationHost.shutdown()
 | 修改 Session 根 | SessionConfig | SessionManager、RuntimeFactory | 两套消费者使用同一 Path |
 | 修改 Debug 日志 | DebugConfig | main.py logging 初始化 | 启动日志也受配置控制 |
 | 修改 Journal 配置 | JournalConfig | Runtime Event Repository | 不混用旧 Journal 和 RunEvent |
-| 修改 Router Defaults | DefaultsConfig | ModelRouter、Proxy | defaults.model 必须存在 |
+| 修改 Router Defaults | DefaultsConfig | Proxy 调用参数 | 不承担模型选择 |
 | 修改 Provider 配置 | ProviderConfig | `_build_llm` | circuit breaker 必须投影 |
 | 修改 Model 配置 | ModelConfig | Router、Policy Resolver | provider 引用存在 |
 | 修改 Purpose | PurposeConfig | ModelRouter | model 引用和 capabilities 匹配 |
@@ -1720,7 +1706,7 @@ ApplicationHost.shutdown()
 | 增加 Config Reload | 新 ConfigService | Host、Router、Registry | 已有 Run Snapshot 不变 |
 | 增加 `/config status` | CLI + ConfigSnapshot | Secret 脱敏 | 展示实际生效值与来源 |
 | 排查配置不生效 | Loader→Builder→Consumer | Wiki 字段矩阵 | 分清解析、传递、消费 |
-| 排查模型不生效 | Router 文件存在性→Purpose→Identity | Router、CLI | 检查完整模型名 |
+| 排查模型不生效 | Router 文件存在性→Purpose→Session.model→Run Policy | Router、CLI | 检查完整模型名与 Session 绑定 |
 | 排查 Tool 不生效 | Config→Registry 顺序→Policy | MCP/Builtin | 注意 disabled_tools 时机 |
 | 排查路径错误 | project_root→消费者解析 | CWD、安装布局 | 输出规范化路径 |
 | 排查环境变量 | `.env`→os.environ→placeholder | warning、类型 | 不回显 Secret |
@@ -1739,7 +1725,7 @@ ApplicationHost.shutdown()
 1. `config.yaml` 是应用级主配置。
 2. `model_router_config.yaml` 存在时整体接管 LLM Router 构建。
 3. Agent Identity YAML 是独立配置域。
-4. 系统环境变量优先于 `.env`。
+4. 项目 `.env` 优先于同名系统环境变量。
 5. `.env` 只在 `load_config()` 中自动加载。
 6. `${VAR}` 只做递归字符串替换。
 7. `get_config()` 是进程级懒加载单例。
@@ -1773,7 +1759,7 @@ ApplicationHost.shutdown()
 
 **收益：**Router 文件可独立维护，多供应商结构清晰。
 
-**代价与边界：**默认模型、重试和 Provider 信息出现双重权威。
+**代价与边界：**Provider 重试信息仍与 Legacy clients 存在兼容路径，但模型首选顺序仅由 purpose priority 决定。
 
 #### 8.2.3 Router 文件存在即整体启用
 
@@ -1997,20 +1983,18 @@ flowchart TD
 
 `get_config()` 缓存可变对象，没有 reset/reload。修改 YAML、`.env` 或 Config 对象后，已构建组件与 Router 不会同步更新。
 
-#### C10. Router 关系缺少启动期一致性校验
+#### C10. Router 关系执行启动期一致性校验
 
-未校验：
+当前校验：
 
 ```text
-defaults.model 存在
 model.provider 存在
 purpose.model 存在
-purpose 所需能力与 model.capabilities 匹配
-embedding purpose 只选择 embedding model
 active 模型具有可用 Provider
+chat 至少存在一个 active 模型
 ```
 
-错误可能在首次请求时才出现。
+purpose 与 capability 的用途一致性仍未全面强制，例如 embedding purpose 是否只引用 embedding 模型。
 
 #### C11. Legacy LLM 转换本身不具备 Router 等价能力
 
@@ -2260,4 +2244,3 @@ Config reload 只影响新 Run
 Secret 不出现在 repr/日志
 仓库两份 YAML 通过 validate
 ```
-

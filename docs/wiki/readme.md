@@ -206,8 +206,8 @@ flowchart LR
 
 | 模块 | 定位 | 主要入口 | 当前状态 | 详细文档 |
 |---|---|---|---|---|
-| Agent 与 Identity | 声明 Agent Identity、行为、模型、权限和 Context 计划 | `AgentIdentity`、`AgentRegistry` | 主链已装配 | [Agent 与 Identity](./Agent%20与%20Identity%20模块总体说明.md) |
-| Session | 保存成功对话语义、历史压缩和会话元数据 | `Session`、`Conversation`、`SessionManager` | 主链已装配 | [Session](./Session%20模块总体说明.md) |
+| Agent 与 Identity | 声明 Agent Identity、行为、权限和 Context 计划 | `AgentIdentity`、`AgentRegistry` | 主链已装配 | [Agent 与 Identity](./Agent%20与%20Identity%20模块总体说明.md) |
+| Session | 保存模型绑定、成功对话语义、历史压缩和会话元数据 | `Session`、`Conversation`、`SessionManager` | 主链已装配 | [Session](./Session%20模块总体说明.md) |
 
 ### 3.3 执行内核
 
@@ -378,7 +378,8 @@ flowchart TB
 | 修改同 Session 的并发规则 | [Runtime](./Runtime%20模块总体说明.md) | `session_run_coordinator.py` | 活跃 Run 查询、取消和审批恢复 |
 | 新增 Context Slot | [Context](./Context%20模块总体说明.md) | `context/slots.py`、`registry.py`、默认计划 | Owner、缓存范围、刷新和快照模式 |
 | 修改历史压缩 | [Runtime](./Runtime%20模块总体说明.md) + [Context](./Context%20模块总体说明.md) | `context_budget.py`、`history_compaction.py` | Session 压缩版本、成功提交 |
-| 新增 LLM Provider | [LLM](./LLM%20模块总体说明.md) | `llm/providers/`、Provider 注册表 | RouterConfig、重试和错误分类 |
+| 新增兼容现有协议的 LLM Provider | [LLM](./LLM%20模块总体说明.md) | `model_router_config.example.yaml` 的 provider/model 配置 | driver 兼容性、RouterConfig、重试和错误分类 |
+| 新增 LLM 协议 driver | [LLM](./LLM%20模块总体说明.md) | `llm/drivers/`、`config/settings.py` | driver 构造表、能力表、协议测试与启动期校验 |
 | 修改模型路由或降级 | [LLM](./LLM%20模块总体说明.md) | `model_router.py`、`proxy.py` | RateLimiter、CircuitBreaker |
 | 新增 builtin 工具 | [Tool](./Tool%20模块总体说明.md) | `tools/builtin/`、`@tool` | Schema、Capability、Policy 和测试 |
 | 新增 ToolPolicy 或资源类型 | [Tool](./Tool%20模块总体说明.md) | `decorator.py`、`capability.py`、`policy.py` | Config、Agent 级策略收窄 |

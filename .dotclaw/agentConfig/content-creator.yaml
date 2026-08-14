@@ -3,7 +3,6 @@ agent_id: content-creator
 agent_name: "内容创作者"
 description: "撰写文章、生成创意内容、编辑文本、格式化文档。适合写作、文案、内容生成类任务。"
 
-model: ""
 workspace: "."
 allowed_tools:
   - read_file

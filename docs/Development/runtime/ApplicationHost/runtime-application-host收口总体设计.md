@@ -30,9 +30,9 @@ Runtime v4 的端口与状态机边界已经存在，但其组合根、Session �
 
 | 术语 | 本设计中的含义 |
 | --- | --- |
-| Identity | 持久化可引用的 `agent_id` 及其模型、提示词、工具白名单、上下文 Slot 等策略配置。 |
+| Identity | 持久化可引用的 `agent_id` 及其提示词、工具白名单、上下文 Slot 等策略配置。 |
 | Agent | 内部轻量门面：以一个 Identity 构造请求并调用共享 Coordinator；不是用户可见的长驻执行器。 |
-| Session | 用户可见的连续对话容器，持久化绑定一个 Identity，并保存成功对话与会话级摘要。 |
+| Session | 用户可见的连续对话容器，持久化绑定 Identity 与模型，并保存成功对话与会话级摘要。 |
 | Run | 一次真实任务执行，持有状态机、消息、事件、checkpoint 和冻结策略。 |
 | Runtime | 共享、无身份的执行内核，负责状态机、持久化、恢复、审批、取消和并发协调。 |
 | ApplicationHost | 最外层组合根与生命周期宿主；不承载领域业务或 Channel 呈现逻辑。 |
@@ -88,11 +88,11 @@ Host 不得承载对话业务规则、渲染逻辑或 Runtime 状态机。`runti
 
 该服务是必要的最小 Session 入口，不是泛化的 ChatService。它接收 `Session`（或 Session ID）、用户输入和可选输出端口，读取 `session.agent_id`，在 `AgentRegistry` 中验证 Identity（声明边界 `AgentIdentity`），再以冻结的 `RunRequest` 直接提交共享 `SessionRunCoordinator`；不构造任何运行时 Agent 门面。
 
-允许依赖：SessionManager、AgentRegistry、Coordinator。禁止依赖具体 LLM、工具、MCP 或 Channel 实现。未知或空 Identity 必须返回明确错误，不能回退到默认 Identity。`get_identity(session)` 提供只读校验入口供 CLI Banner 与 `/model` 展示。
+允许依赖：SessionManager、AgentRegistry、Coordinator。禁止依赖具体 LLM、工具、MCP 或 Channel 实现。未知或空 Identity 必须返回明确错误，不能回退到默认 Identity。`get_identity(session)` 仅为 CLI Banner 提供只读校验；`/model` 通过 `chat_models` 读取可选目录，并由 `switch_model()` 校验、持久化 Session 模型绑定。
 
 ### 4.3 `AgentIdentity`（声明边界，非可执行对象）
 
-`AgentIdentity` 是角色、模型、系统提示、可用工具、Context Slot 与策略收窄的声明边界，持有不可变约束，不是可执行对象、不拥有运行生命周期或基础设施。运行时提交以冻结的 `RunRequest.agent_id` 严格按 `session.agent_id` 路由；身份策略由 `AgentPolicyResolver` 在 Run 开始时冻结，不依赖任何运行时 Agent 实例。
+`AgentIdentity` 是角色、系统提示、可用工具、Context Slot 与策略收窄的声明边界，持有不可变约束，不是可执行对象、不拥有运行生命周期或基础设施。模型改由 `Session.model` 绑定。运行时提交以冻结的 `RunRequest.agent_id` 严格按 `session.agent_id` 路由；身份策略由 `AgentPolicyResolver` 在 Run 开始时冻结，不依赖任何运行时 Agent 实例。
 
 ### 4.4 Runtime 与 Adapter
 
@@ -181,4 +181,3 @@ sequenceDiagram
 - 底层 LLMProxy 和 ToolExecutor 现无可取消句柄，取消只能尽力传播，不能承诺中断外部副作用。
 - 当前 CLI 的诊断命令可暂从 Host 读取资源；第二个真实 Channel 出现后，再提取只读目录/维护用例接口。
 - 同一 Session 的 Identity 重新绑定不是本次功能。若未来需要，必须作为显式用例记录切换事件，并定义历史摘要和会话级 Context 的隔离/重置策略。
-

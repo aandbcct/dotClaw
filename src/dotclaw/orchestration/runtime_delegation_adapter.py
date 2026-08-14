@@ -57,12 +57,14 @@ class RuntimeDelegationAdapter(DelegationPort):
         session_manager: SessionManager,
         agent_registry: AgentRegistry,
         dispatcher: AgentDispatcher,
+        preferred_model: str,
     ) -> None:
         """绑定目标 Run 的会话仓储与 Agent 身份目录。"""
         self._coordinator: DelegationSubmissionPort | None = None
         self._session_manager: SessionManager = session_manager
         self._agent_registry: AgentRegistry = agent_registry
         self._dispatcher: AgentDispatcher = dispatcher
+        self._preferred_model: str = preferred_model
         self._results: dict[str, DelegationResult] = {}
         self._running: dict[str, asyncio.Task[RunResult]] = {}
         self._task_bindings: dict[str, DelegationTaskBinding] = {}
@@ -82,7 +84,7 @@ class RuntimeDelegationAdapter(DelegationPort):
             raise ValueError(f"未找到 delegation target Agent {request.target_agent_id}")
         session = await self._session_manager.create(
             title=f"委托-{identity.agent_name}",
-            model=identity.model,
+            model=self._preferred_model,
             agent_id=identity.agent_id,
         )
         task = await self._dispatcher.start_v2_delegation(
@@ -108,6 +110,7 @@ class RuntimeDelegationAdapter(DelegationPort):
             parent_run_id=request.parent_run_id,
             root_run_id=request.root_run_id,
             run_id=child_run_id,
+            model_id=self._preferred_model,
         )
         coordinator: DelegationSubmissionPort = self._require_coordinator()
         execution: asyncio.Task[RunResult] = asyncio.create_task(coordinator.submit(child_request))

@@ -1,4 +1,4 @@
-"""Runtime v2 DelegationPort 的父子运行与适配器契约测试。"""
+"""Runtime v2 DelegationPort 的父子运行和适配器契约测试。"""
 
 from __future__ import annotations
 
@@ -316,12 +316,12 @@ async def test_engine_submits_delegation_and_suspends_parent(tmp_path: Path) -> 
 
 async def test_engine_resume_delegation_backfills_once_when_repeated(tmp_path: Path) -> None:
     """重复回灌同一子 Run 时拒绝第二次恢复，且不新增消息、事件或子 Run。"""
-    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent", model="model")
+    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent")
     registry: AgentRegistry = AgentRegistry()
     registry.register(target)
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     dispatcher = _dispatcher()
-    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher)
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model")
     engine = RuntimeEngine(
         repository,
         CheckpointRepositoryAdapter(tmp_path),
@@ -511,11 +511,11 @@ class RecordingCoordinator:
 
 async def test_runtime_delegation_adapter_creates_target_run_with_parent_and_root(tmp_path: Path) -> None:
     """适配器创建独立 target Session，并保留 parent/root 运行关系。"""
-    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent", model="model")
+    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent")
     registry = AgentRegistry()
     registry.register(target)
     coordinator = RecordingCoordinator()
-    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, _dispatcher())
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, _dispatcher(), "model")
     adapter.bind_coordinator(coordinator)
     request = DelegationRequest(
         parent_run_id="parent-run",
@@ -538,12 +538,12 @@ async def test_runtime_delegation_adapter_creates_target_run_with_parent_and_roo
 
 async def test_runtime_delegation_adapter_executes_real_child_run_through_coordinator(tmp_path: Path) -> None:
     """真实适配器必须经协调器执行子 Run，而非仅使用伪协调器记录请求。"""
-    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent", model="model")
+    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent")
     registry: AgentRegistry = AgentRegistry()
     registry.register(target)
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     dispatcher = _dispatcher()
-    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher)
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model")
     engine = RuntimeEngine(
         repository,
         CheckpointRepositoryAdapter(tmp_path),
@@ -588,12 +588,12 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
 
 async def test_parent_cancellation_propagates_to_real_delegated_child_run(tmp_path: Path) -> None:
     """父运行取消必须通知子 Run，且父子均以取消终态收口。"""
-    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent", model="model")
+    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent")
     registry: AgentRegistry = AgentRegistry()
     registry.register(target)
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     dispatcher = _dispatcher()
-    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher)
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model")
     llm = BlockingChildLLM()
     engine = RuntimeEngine(
         repository,

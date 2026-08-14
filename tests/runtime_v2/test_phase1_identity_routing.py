@@ -44,6 +44,8 @@ def _build_service(
         session_manager=session_manager,
         agent_registry=registry,
         coordinator=coordinator,
+        preferred_model="test-model",
+        chat_models=("test-model", "other-model"),
     )
 
 
@@ -70,6 +72,7 @@ async def test_create_session_binds_explicit_identity(
     service: SessionInteractionService = _build_service(session_manager, registry)
     session: Session = await service.create_session(agent_id="a2", title="第二身份")
     assert session.agent_id == "a2"
+    assert session.model == "test-model"
     reloaded: Session | None = await session_manager.load(session.id)
     assert reloaded is not None and reloaded.agent_id == "a2"
 
@@ -83,6 +86,52 @@ async def test_create_session_default_identity_fallback(
     service: SessionInteractionService = _build_service(session_manager, single)
     session: Session = await service.create_session()
     assert session.agent_id == "only"
+    assert session.model == "test-model"
+
+
+async def test_bind_missing_models_migrates_only_empty_sessions(
+    session_manager: SessionManager,
+) -> None:
+    """旧空模型 Session 首次迁移后持久化，已有绑定保持不变。"""
+    empty = await session_manager.create(agent_id="a1")
+    bound = await session_manager.create(agent_id="a1", model="existing-model")
+
+    assert await session_manager.bind_missing_models("priority-model") == 1
+    assert (await session_manager.load(empty.id)).model == "priority-model"  # type: ignore[union-attr]
+    assert (await session_manager.load(bound.id)).model == "existing-model"  # type: ignore[union-attr]
+    assert await session_manager.bind_missing_models("new-priority-model") == 0
+
+
+async def test_switch_model_updates_session_and_persists(
+    session_manager: SessionManager,
+    registry: AgentRegistry,
+) -> None:
+    """合法 chat active 模型应更新当前 Session 并持久化。"""
+    service = _build_service(session_manager, registry)
+    session = await service.create_session(agent_id="a1")
+
+    switched = await service.switch_model(session, "other-model")
+
+    assert switched is session
+    assert session.model == "other-model"
+    reloaded = await session_manager.load(session.id)
+    assert reloaded is not None and reloaded.model == "other-model"
+
+
+async def test_switch_model_rejects_unknown_without_mutation(
+    session_manager: SessionManager,
+    registry: AgentRegistry,
+) -> None:
+    """不存在或未启用的模型不得修改内存或持久化绑定。"""
+    service = _build_service(session_manager, registry)
+    session = await service.create_session(agent_id="a1")
+
+    with pytest.raises(ValueError, match="模型不存在或未启用"):
+        await service.switch_model(session, "missing-model")
+
+    assert session.model == "test-model"
+    reloaded = await session_manager.load(session.id)
+    assert reloaded is not None and reloaded.model == "test-model"
 
 
 async def test_unknown_session_identity_is_rejected(
@@ -113,6 +162,7 @@ async def test_submit_routes_by_session_identity(
         async def submit_prepared(self, session_id: str, create_request, output_port=None) -> _FakeResult:
             req = await create_request()
             captured["agent_id"] = req.agent_id
+            captured["model_id"] = req.model_id
             return _FakeResult()
 
     service: SessionInteractionService = _build_service(
@@ -120,6 +170,7 @@ async def test_submit_routes_by_session_identity(
     )
     await service.submit(s1, "你好")
     assert captured["agent_id"] == "a1"
+    assert captured["model_id"] == "test-model"
 
 
 def test_service_has_no_config_dependency_minimal_entry(tmp_path: Path) -> None:

@@ -8,7 +8,6 @@ agent_name: "日常助手"
 description: "默认日常助手"
 
 # ── 模型 ──
-model: ""                  # 空字符串 = 使用 config.llm.default_model
 
 # ── 工作空间 ──
 workspace: "."             # . = 跟随 project_root

@@ -160,6 +160,7 @@ async def test_unknown_identity_submission_is_rejected(tmp_path: Path) -> None:
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
+        preferred_model="qwen3.7-max",
         coordinator=None,  # type: ignore[arg-type]
     )
 
@@ -207,7 +208,7 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
 
     config = Config()
     config.session.directory = str(tmp_path)
-    identity = AgentIdentity(agent_id="agent-1", agent_name="已知 Agent", model="qwen3.7-max")
+    identity = AgentIdentity(agent_id="agent-1", agent_name="已知 Agent")
     session_manager = SessionManager(tmp_path)
     registry = AgentRegistry()
     registry.register(identity)
@@ -221,12 +222,14 @@ async def test_concurrent_submissions_do_not_cross_stream(tmp_path: Path) -> Non
         skill_registry=None,
         memory_manager=None,
         agent_registry=registry,
+        preferred_model="qwen3.7-max",
     )
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
         coordinator=services.coordinator,
         default_agent_id=identity.agent_id,
+        preferred_model="qwen3.7-max",
     )
 
     collector_a: ChannelCollector = ChannelCollector()

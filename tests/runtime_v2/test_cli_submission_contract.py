@@ -21,6 +21,10 @@ def test_cli_uses_service_entry_and_returns_run_result() -> None:
     assert "channel.print_markdown(" in source
     assert "has_streamed_response" in source
     assert "await channel.stream(\"\\n\")" in source
+    assert "current_session.model" in source
+    assert "channel.select_model(" in source
+    assert "service.switch_model(" in source
+    assert "host.default_model" not in source
     # 不得重新引入运行时 Agent 门面。
     assert "agent.process(" not in source
     assert "from dotclaw.agent import Agent" not in source
@@ -44,10 +48,6 @@ async def test_refresh_banner_resolves_current_session_identity(tmp_path: Path, 
         coordinator=object(),
     )
 
-    class _FakeConfig:
-        llm = types.SimpleNamespace(default_model="default-model")
-        debug = types.SimpleNamespace(level=0)
-
     captured: dict[str, str] = {}
 
     def _fake_build_banner(agent_name, model, session_title, workspace):  # type: ignore[no-untyped-def]
@@ -60,12 +60,12 @@ async def test_refresh_banner_resolves_current_session_identity(tmp_path: Path, 
     monkeypatch.setattr("dotclaw.config._find_project_root", lambda: tmp_path)
 
     s1 = await manager.create(agent_id="a1")
-    _refresh_banner(service, s1, _FakeConfig())
+    _refresh_banner(service, s1)
     assert captured["agent_name"] == "A1"
     assert captured["session_title"] == s1.title
 
     s2 = await manager.create(agent_id="a2")
-    _refresh_banner(service, s2, _FakeConfig())
+    _refresh_banner(service, s2)
     assert captured["agent_name"] == "A2"
     assert captured["session_title"] == s2.title
 

@@ -464,7 +464,7 @@ Copy-Item model_router_config.example.yaml model_router_config.yaml
 
 `.env`、`config.yaml` 和 `model_router_config.yaml` 都是本地文件，已被 Git 忽略；需要共享默认配置时，只修改对应的 `*.example` 模板。
 
-当前模板默认模型是 Qwen。在项目根目录的 `.env` 中填写：
+当前模板的 `purposes.chat.priority` 首选模型来自 Qwen。在项目根目录的 `.env` 中填写：
 
 ```dotenv
 QWEN_API_KEY=your_api_key
@@ -476,7 +476,7 @@ QWEN_API_KEY=your_api_key
 TAVILY_API_KEY=your_tavily_api_key
 ```
 
-系统环境变量优先于项目根 `.env`。
+项目根 `.env` 优先于同名系统环境变量，便于为当前项目固定 Provider 凭证。
 
 使用其他 Provider 时，修改本地文件：
 
@@ -528,7 +528,7 @@ dotclaw --hide-thinking
 | `/cancel <run_id>` | 取消指定 Run |
 | `/retry <run_id>` | 按 `Checkpoint.action` 恢复未结束 Run |
 | `/abandon <run_id>` | 显式放弃未结束 Run |
-| `/model` | 查看当前模型 |
+| `/model` | 查看 chat active 模型并切换当前 Session 的模型 |
 | `/eval list\|show\|review\|confirm\|run ...` | 管理评测 Draft / Dataset，或运行 Playback、Re-execution |
 | `/help` | 查看帮助 |
 | `/quit` | 退出 |
@@ -579,7 +579,6 @@ Agent Identity：
 ```text
 agent_id
 agent_name
-model
 system_prompt_template
 allowed_tools
 policy_rules
@@ -600,7 +599,6 @@ agent_id: coding
 agent_name: "Coding Assistant"
 description: "面向代码阅读与修改的本地 Agent"
 
-model: qwen3.7-max
 workspace: "."
 
 allowed_tools:

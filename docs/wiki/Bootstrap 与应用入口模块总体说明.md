@@ -983,6 +983,8 @@ default_agent_id?
 RunRepositoryAdapter?
 ApprovalRepositoryAdapter?
 ContextPort?
+preferred_model
+chat_models
 ```
 
 类注释称允许依赖 SessionManager、AgentRegistry 和 Coordinator，但 Session 删除能力还直接依赖具体 Runtime Repository Adapter 和 ContextPort。
@@ -990,7 +992,7 @@ ContextPort?
 它不负责：
 
 - 创建 LLM、Tool 或 Runtime；
-- 保存当前 Session；
+- 在 CLI 之外保存“当前 Session”指针；
 - 解析 CLI 命令；
 - 询问用户是否审批；
 - 渲染 Markdown；
@@ -1025,13 +1027,17 @@ ContextPort?
 → 否则失败
 ```
 
-创建时不构造 Agent Runtime 实例。
+创建时不构造 Agent Runtime 实例，并把 `preferred_model` 持久化为初始模型绑定。
 
 #### 4.6.5 `get_identity`
 
-**职责与用途：**该只读方法为 Banner 和 `/model` 提供当前 Session 对应 Identity。它复用与提交相同的严格校验，不改变 Session。
+**职责与用途：**该只读方法为 Banner 提供当前 Session 对应 Identity。它复用与提交相同的严格校验，不改变 Session；`/model` 改用 `chat_models` 与 `switch_model()` 完成模型目录读取和绑定切换。
 
-#### 4.6.6 `submit`
+#### 4.6.6 `chat_models` 与 `switch_model`
+
+**职责与用途：**`chat_models` 暴露 Host 启动时冻结的 chat active 模型目录；`switch_model()` 校验用户选择、更新 `Session.model` 并通过 SessionManager 持久化。非法模型明确失败且不修改绑定，相同模型不重复写盘。切换只影响后续新 Run，已有 Run 继续使用自身冻结的 Policy 模型。
+
+#### 4.6.7 `submit`
 
 **职责与用途：**普通提交将 Session 与用户输入转换为延迟 `RunRequest` Factory，再交给 `SessionRunCoordinator.submit_prepared()`。
 
@@ -1048,7 +1054,7 @@ ContextPort?
 
 `output_port` 是本次 Run 的可选运行级参数，不在 Service 构造期绑定。
 
-#### 4.6.7 控制操作
+#### 4.6.8 控制操作
 
 **职责与用途：**Service 将结构化控制操作透传给 Coordinator：
 
@@ -1061,7 +1067,7 @@ ContextPort?
 
 Service 不接收自然语言审批结论，也不查找“当前 Run”进行猜测。
 
-#### 4.6.8 `delete_session`
+#### 4.6.9 `delete_session`
 
 **职责与用途：**Session 删除是应用级协调流程，不是单个 JSON 文件删除。
 
@@ -1081,7 +1087,7 @@ Service 不接收自然语言审批结论，也不查找“当前 Run”进行�
 
 `SessionManager.delete()` 使用 `shutil.rmtree()` 完成递归删除；这是完整目录删除，但不是跨文件系统意义上的原子事务。
 
-#### 4.6.9 `format_run_result`
+#### 4.6.10 `format_run_result`
 
 **职责与用途：**该函数将结构化 RunResult 转为入口可展示的非流式文本。
 
@@ -1155,7 +1161,10 @@ Runtime control:
     /cancel /retry /abandon
 
 Diagnostics:
-    /tools /mcp /skills /model
+    /tools /mcp /skills
+
+Session model:
+    /model
 
 Optional service:
     /dream
@@ -1210,14 +1219,14 @@ project root workspace
 
 Banner 不参与 Runtime Policy 冻结。
 
-#### 4.7.8 诊断命令
+#### 4.7.8 诊断与 Session 状态命令
 
-**职责与用途：**`/tools`、`/mcp`、`/skills` 和 `/model` 读取 Host 暴露的诊断资源，不修改 Runtime 状态。
+**职责与用途：**`/tools`、`/mcp` 和 `/skills` 读取 Host 暴露的诊断资源；`/model` 通过应用服务修改当前 Session 的持久化模型绑定。
 
 - `/tools` 查看当前 Tool Registry 定义；
 - `/mcp` 查看 Server 状态；
 - `/skills` 查看 SkillMeta；
-- `/model` 查看当前 Session Identity 解析的模型；
+- `/model` 展示当前模型和 chat active 模型，经 Channel 读取一次名称；合法输入持久化切换，非法输入提示后退出选择界面；
 - `/dream` 直接调用可选 DeepDream 服务。
 
 `/dream` 是 CLI 对可选服务的直接调用，不经过 Runtime AgentRun。
@@ -1246,7 +1255,7 @@ response_delta  → “回答”
 
 #### 4.7.10 `CLIChannel`
 
-**职责与用途：**CLIChannel 实现通用 Channel 的 receive/send/stream/ask_user/Markdown 输出。
+**职责与用途：**CLIChannel 实现通用 Channel 的 receive/send/stream/ask_user/select_model/Markdown 输出。
 
 模型增量使用：
 
@@ -1255,6 +1264,8 @@ console.print(chunk, end="", markup=False)
 ```
 
 避免模型输出中的 Rich 标记被解释。审批询问使用同步 `input()` 的 executor 包装。
+
+`select_model()` 展示当前模型和可选模型，读取一次名称。空输入表示取消；不在给定目录中的输入由 Channel 提示错误并返回 None，CLI 不进入持久化调用。
 
 ---
 
@@ -1281,7 +1292,7 @@ console.print(chunk, end="", markup=False)
 
 ```text
 _find_project_root
-→ load .env，不覆盖系统环境变量
+→ load .env，覆盖同名系统环境变量
 → 读取 config.yaml
 → 环境变量展开
 → 构造 Config
@@ -1653,19 +1664,22 @@ flowchart LR
     CLI --> MCP["host.mcp_provider → /mcp"]
     CLI --> Skills["host.skill_registry → /skills"]
     CLI --> Dream["host.memory_dream → /dream"]
-    CLI --> Model["service.get_identity → /model"]
+    CLI --> ModelSelect["/model → channel.select_model"]
+    ModelSelect --> ModelSwitch["service.switch_model → Session.model"]
 
     Tools -.只读展示.-> Registry["Tool Registry"]
     MCP -.只读展示.-> States["MCP States"]
     Skills -.只读展示.-> Metas["SkillMeta"]
+    ModelSwitch --> Persist["SessionManager.save<br/>持久化当前 Session 绑定"]
     Dream --> Direct["DeepDream.run<br/>直接可选服务调用"]
 ```
 
 **结论：**
 
-- `/tools`、`/mcp`、`/skills` 和 `/model` 是只读诊断。
+- `/tools`、`/mcp` 和 `/skills` 是只读诊断。
+- `/model` 是 Session 级状态命令：展示 chat active 模型，并通过应用服务校验、持久化新绑定；仅影响后续新 Run。
 - `/dream` 是应用专用操作，会直接调用 Memory 服务，不创建 AgentRun。
-- 诊断属性不应被普通消息路径用于执行 Tool。
+- 只读诊断属性不应被普通消息路径用于执行 Tool。
 - 未来增加 Web/API 入口时，应决定这些专用操作是否也需要统一应用服务和权限边界。
 
 ---
@@ -1836,7 +1850,7 @@ response：
 | Runtime Repository 根 | Host 传入的 project_root + session.directory |
 | SessionManager 根 | `dotclaw.__file__` 推导的项目根 + session.directory |
 
-默认入口下两者通常一致；自定义 project_root 当前不能保证一致。系统环境变量优先于 `.env`；`.env` 只补齐缺失值。
+默认入口下两者通常一致；自定义 project_root 当前不能保证一致。项目 `.env` 优先于同名系统环境变量。
 
 ### 6.9 启动与关闭不变量
 
@@ -2236,7 +2250,7 @@ LLMProxy 构建只创建 Router、Limiter 和 Breaker，不验证：
 
 - API Key；
 - Provider 网络；
-- 默认模型可用性；
+- chat 首选模型与 Session 绑定可用性；
 - tokenizer 配置与模型一致性。
 
 因此关键组件“构建成功”与“首个业务请求可成功”仍有距离。该选择避免启动时产生外部调用，但需要明确能力边界。
@@ -2315,7 +2329,7 @@ Runtime Repositories
 | E16 | B16 | 在 Config 加载后配置日志，使用 project_root 解析 `debug.log_file`，避免 import-time Handler | main、Config、Logging |
 | E17 | B17、B18 | 产生结构化 StartupReport/RecoveryReport，区分 DISABLED、READY、DEGRADED、FAILED 与恢复数量 | Bootstrap、CLI/API、Observability |
 | E18 | B19 | 清理阶段号和 Runtime v2 文案；版本号只用于持久化格式或发布版本 | 全仓注释、Wiki、测试标记 |
-| E19 | B20 | 提供可选 `--health-check` 或诊断命令，验证默认模型、Router 元数据、Tokenizer 和外部服务，不强制普通启动调用 | Bootstrap、LLM、CLI；增加启动延迟与外部成本 |
+| E19 | B20 | 提供可选 `--health-check` 或诊断命令，验证 chat 首选模型、Router 元数据、Tokenizer 和外部服务，不强制普通启动调用 | Bootstrap、LLM、CLI；增加启动延迟与外部成本 |
 | E20 | B21 | 明确选择是否接入 Scheduler/Journal：接入则创建应用 Service、生命周期和诊断；不接入则移除或标记未消费配置 | Bootstrap、Scheduler、Journal、Config、Channel |
 | E21 | B22 | 在 `load_router_config()` 中完整映射 circuit_breaker，并增加 YAML→ProviderConfig→BreakerConfig 的配置测试 | Config、LLM、Bootstrap |
 | E22 | B23 | 由 Host 一次性解析所有绝对路径；SessionManager 只接收已解析的 Session 根，RuntimeFactory 复用同一对象或值 | Bootstrap、Session、Runtime Repositories、测试 |

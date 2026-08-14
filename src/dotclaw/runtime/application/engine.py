@@ -242,6 +242,7 @@ class RuntimeEngine:
             agent_id=run.agent_id,
             user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
             conversation=_conversation_from_context_version(active_context_version),
+            model_id=run.policy.model_id,
         )
         approval_event = ApprovalGranted(approval_id) if approved else ApprovalRejected(approval_id)
         tr = transition(state, approval_event)
@@ -350,6 +351,7 @@ class RuntimeEngine:
             agent_id=parent_run.agent_id,
             user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
             conversation=_conversation_from_context_version(active_context_version),
+            model_id=parent_run.policy.model_id,
         )
         execution: RunExecution = RunExecution(
             run_id=parent_run.run_id,
@@ -505,6 +507,7 @@ class RuntimeEngine:
             ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
             _conversation_from_context_version(version),
             run_id=run.run_id,
+            model_id=run.policy.model_id,
         )
         resumed: AgentRun = replace(
             run,

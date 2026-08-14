@@ -53,10 +53,12 @@ class AgentPolicyResolver(RunPolicyPort):
             for definition in self._allowed_definitions(identity)
         )
         identity_version: str = _identity_version(identity)
-        model_name: str = identity.resolve_model(self._config.llm.default_model)
+        model_name: str = request.model_id
+        if not model_name:
+            raise ValueError("RunRequest 缺少 Session 冻结的 model_id")
         context_window, tokenizer_encoding = self._model_budget_settings(model_name)
         compaction_model, compaction_tokenizer = resolve_compaction_settings(
-            model_name, self._router_config, self._config.llm.default_model
+            model_name, self._router_config
         )
         return AgentPolicySnapshot(
             agent_id=identity.agent_id,
@@ -121,15 +123,14 @@ def _identity_version(identity: AgentIdentity) -> str:
 def resolve_compaction_settings(
     model_name: str,
     router_config: RouterConfig | None,
-    default_model: str,
 ) -> tuple[str, str]:
     """确定性解析上下文压缩模型与 Tokenizer 编码（开发计划阶段4 修改项5）。
 
-    优先级：RouterConfig 中该模型项 -> 回退到请求模型名 -> 无 RouterConfig 时回退默认模型；
+    优先级：RouterConfig 中该模型项 -> 回退到请求模型名；
     Tokenizer 编码缺失时回退空串，由预算端口在真正需要时拒绝。去除原硬编码的魔法字符串。
     """
     if router_config is None:
-        return default_model, ""
+        return model_name, ""
     model = router_config.models.get(model_name)
     if model is None:
         return model_name, ""

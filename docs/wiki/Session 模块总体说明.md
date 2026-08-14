@@ -577,9 +577,9 @@ SessionManager 对外部传入 session_id 当前没有执行安全路径段校�
 
 **`model`**
 
-**职责与用途：**保存创建时传入的模型名。
+**职责与用途：**保存 Session 的长期模型绑定，是新 Run 选择首个候选的执行权威。
 
-当前普通 Session 创建通常为空；Delegation 创建时可能写目标 Identity.model。Runtime 实际模型由 agent_id→AgentPolicyResolver 冻结，因此该字段不是执行权威。
+新 Session（包括 Delegation 目标 Session）绑定 `purposes.chat.priority` 中最高优先级的 active 模型。Host 启动和首次提交都会为旧空模型 Session 补齐并原子保存；已有非空绑定不随配置优先级变化。创建 Run 时该值复制到 `RunRequest.model_id`，随后冻结进 Policy 快照；运行失败时 Router 再按 purpose 优先级降级。
 
 **`conversation_version`**
 
@@ -1698,7 +1698,7 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 15. 应用级删除流程会在删除前检查活动 Run，并依次处理 Approval、Session 目录和 SESSION/RUN Context Scope。
 16. 删除单个 Session 不释放共享 AGENT Context Scope。
 17. `session.json` 使用同目录临时文件和原子替换写入。
-18. `Session.model` 不参与 Runtime 实际模型解析。
+18. `Session.model` 是后续新 Run 的首选模型权威，并冻结到 `RunRequest.model_id`；实际调用失败时仍允许 Router 降级。
 
 **必须保持但当前尚未完全落实的设计约束**
 
@@ -1720,7 +1720,7 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 | 修改 Conversation 结构 | `Conversation` | Request Factory、Projector、压缩边界 | 只保存成功业务投影 |
 | 修改 Conversation ID | `add_conversation`、`_legacy_conversation_id` | 压缩边界、迁移 | 已持久化边界必须稳定 |
 | 修改 agent_id 绑定 | Session + SessionInteractionService | AgentRegistry、RunRequest | 旧 Session 不得静默换 Agent |
-| 删除 Session.model | Session、Delegation Adapter | JSON 迁移、CLI | 模型权威保留在 PolicySnapshot |
+| 修改 Session.model | SessionInteractionService、SessionManager | CLI、RunRequest | 仅允许 chat active 模型，已有 Run 不变 |
 | 增加 JSON Schema Version | Session.to_dict/from_dict | Migration、list/load | 旧文件处理必须显式 |
 | 严格区分加载错误 | `SessionManager.load` | CLI、Interaction Service | 损坏不能伪装不存在 |
 | 修复路径安全 | `_session_path`、`session_directory` | load/delete/list | session_id 必须是单路径段 |
@@ -2090,11 +2090,9 @@ Runtime 文件严格要求 v4，session.json 没有 version 字段或显式 Migr
 
 Session 历史无法直接列出该回答涉及的子 Run。
 
-#### S18. `Session.model` 是非权威冗余字段
+#### S18. `Session.model` 是可切换的持久化绑定
 
-普通创建为空，委托创建可能有值，Runtime 仍按 agent_id 重新冻结模型。
-
-它可能与实际 Run Policy 和 LLM 最终路由不一致。
+新 Session 使用 chat priority 首选模型，旧空值由启动迁移补齐。CLI 可通过 `/model` 在 chat active 模型目录中切换；服务校验后原子保存。后续 Run 冻结新绑定，既有 Run 和恢复中的 Policy 不被改写。
 
 #### S19. `conversation.json` 形成潜在双历史源
 

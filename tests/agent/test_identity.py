@@ -19,7 +19,6 @@ class TestAgentIdentity:
         assert identity.agent_name == "测试Agent"
         assert identity.max_loop_steps == 20
         assert identity.allowed_tools == []
-        assert identity.model == ""
 
     def test_frozen(self) -> None:
         """frozen=True 不能修改字段。"""
@@ -43,19 +42,6 @@ class TestAgentIdentity:
         identity = AgentIdentity(agent_id="test")
         result = identity.resolve_system_prompt()
         assert result == ""
-
-    def test_resolve_model_with_value(self) -> None:
-        """model 有值时直接返回。"""
-        identity = AgentIdentity(agent_id="test", model="gpt-4")
-        result = identity.resolve_model("default-model")
-        assert result == "gpt-4"
-
-    def test_resolve_model_empty_fallback(self) -> None:
-        """model 为空时回退到传入的 default_model。"""
-        identity = AgentIdentity(agent_id="test")
-        result = identity.resolve_model("fallback-model")
-        assert result == "fallback-model"
-
 
 class TestAgentIdentityCard:
     """对标 A2A AgentCard 的新字段：capabilities / input_modes / output_modes。"""

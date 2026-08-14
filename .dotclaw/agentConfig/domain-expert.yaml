@@ -3,7 +3,6 @@ agent_id: domain-expert
 agent_name: "领域专家"
 description: "提供专业领域的知识问答、技术咨询、深度分析。适合需要专业知识的问答、技术解释、方案设计类任务。"
 
-model: ""
 workspace: "."
 allowed_tools:
   - read_file

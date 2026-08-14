@@ -4,7 +4,6 @@
 # ============================================
 
 llm:
-  default_model: qwen3.7-max
   clients:
     qwen3.7-max:
       provider: qwen

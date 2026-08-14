@@ -49,3 +49,10 @@ class TestNullChannel:
         ch = NullChannel()
         result = await ch.receive()
         assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_select_model_returns_none(self) -> None:
+        """NullChannel 不进入模型选择交互。"""
+        ch = NullChannel()
+        result = await ch.select_model("m1", ("m1", "m2"))
+        assert result is None

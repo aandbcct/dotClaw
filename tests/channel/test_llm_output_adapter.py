@@ -40,6 +40,14 @@ class CollectingChannel(Channel):
         """本测试不触发交互式审批。"""
         return ""
 
+    async def select_model(
+        self,
+        current_model: str,
+        available_models: tuple[str, ...],
+    ) -> str | None:
+        """本测试不触发模型选择。"""
+        return None
+
 
 def _event(run_id: str, kind: LLMOutputKind, content: str) -> LLMOutputEvent:
     """构造最小增量事件；session_id 对适配器逻辑无影响，填占位值。"""

@@ -138,13 +138,13 @@ flowchart TB
 
 ### 模块定位
 
-描述一个 Agent 的身份、模型、Prompt、工具白名单、策略收窄和 Context Slot 选择。Agent 是声明数据，不持有 Runtime、工具或会话对象。
+描述一个 Agent 的身份、Prompt、工具白名单、策略收窄和 Context Slot 选择。Agent 是声明数据，不持有 Runtime、工具或会话对象；模型由 Session 绑定。
 
 ### 逻辑组件
 
 | 组件 | 核心代码 | 核心对象 | 职责 |
 |---|---|---|---|
-| Identity 模型 | `agent/identity.py` | `AgentIdentity` | 保存身份、行为、权限、能力标签和输入输出模式 |
+| Identity 数据模型 | `agent/identity.py` | `AgentIdentity` | 保存身份、行为、权限、能力标签和输入输出模式 |
 | Identity 配置加载 | `agent/identity.py` | `load_agent_config` | 从 `.dotclaw/agentConfig/*.yaml` 加载并展开环境变量 |
 | Identity 目录 | `orchestration/registry.py` | `AgentRegistry` | 启动时扫描全部 Identity；按 `agent_id` 注册、查询和枚举 |
 | 运行策略投影 | `runtime/adapters/agent_policy_resolver.py` | `AgentPolicyResolver` | 将 Identity、全局配置和工具目录冻结为 Run 级策略快照 |
@@ -269,15 +269,15 @@ Memory、Skills 和 Agent Directory 不是 Runtime 直接拼接，而是 Context
 
 ### 模块定位
 
-LLM 模块提供统一的模型调用入口，在 Provider 客户端之上完成候选路由、限流、熔断、重试、跨模型降级和流式结果归一。
+LLM 模块提供统一的模型调用入口，在协议 driver 客户端之上完成候选路由、限流、熔断、重试、跨模型降级和流式结果归一。
 
 ### 逻辑组件
 
 | 组件 | 核心代码 | 核心对象 | 职责 |
 |---|---|---|---|
-| 基础调用契约 | `llm/base.py` | `LLMClient`、`Message`、`ChatChunk`、`ToolCall`、`ToolDefinition` | 定义 Provider 客户端和统一消息模型 |
-| Provider 注册与发现 | `llm/providers/__init__.py` | `register`、`get_provider` | 自动导入 Provider 模块并维护客户端类型注册表 |
-| Provider 客户端 | `llm/providers/*.py` | 各 `LLMClient` 实现 | 将具体供应商协议适配为统一 chat/embed 接口 |
+| 基础调用契约 | `llm/base.py` | `LLMClient`、`Message`、`ChatChunk`、`ToolCall`、`ToolDefinition` | 定义协议客户端和统一消息模型 |
+| driver 构造与能力表 | `llm/drivers/__init__.py` | `create_driver_client`、`get_driver_capabilities` | 按显式协议 driver 构造客户端并校验能力，未注册 driver 直接失败 |
+| OpenAI Chat Completions 协议客户端 | `llm/drivers/openai_chat_completions.py` | `OpenAIChatCompletionsClient`（OpenAI Chat Completions 协议客户端） | 由 Qwen、DeepSeek、OpenAI、jojocode 等兼容供应商复用统一 chat/embed 实现 |
 | 模型路由 | `llm/model_router.py` | `ModelRouter` | 按 purpose 和优先级生成候选；懒加载客户端；上报成功失败 |
 | 限流 | `llm/rate_limiter.py` | `RateLimiter` | Provider 级速率控制和获取超时 |
 | 熔断 | `llm/circuit_breaker.py` | `CircuitBreaker` | 维护 CLOSED/OPEN/HALF_OPEN 状态并过滤候选 |
@@ -288,7 +288,7 @@ LLM 模块提供统一的模型调用入口，在 Provider 客户端之上完成
 ### 已知边界问题
 
 - `LLMProxy.chat` 仍是主要入口，内部直接调用客户端 `chat()`；chat 与 embedding 的统一调用抽象尚未完全收口。
-- Router 目前直接负责客户端实例化和 Provider 注册表访问，后续重构时需要明确“路由决策”和“Provider 生命周期”是否继续绑定。
+- Router 目前通过显式 driver factory 懒加载协议客户端，路由决策与客户端实例缓存仍由同一组件管理。
 - Runtime Adapter 物理归属 Runtime，LLM 文档只应摘要说明接口；具体 Adapter 类的完整职责主归属 Runtime 文档。
 
 ---

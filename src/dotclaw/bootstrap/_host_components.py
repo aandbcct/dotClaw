@@ -87,7 +87,7 @@ def _build_llm(config: Config, project_root: Path):
         rate_limit_configs[prov_name] = RateLimitConfig(
             requests_per_minute=rl_raw.get("requests_per_minute", 0),
         )
-        cb_raw = prov_cfg.circuit_breaker if hasattr(prov_cfg, "circuit_breaker") else {}
+        cb_raw = prov_cfg.circuit_breaker
         breaker_configs[prov_name] = BreakerConfig(
             failure_threshold=cb_raw.get("failure_threshold", 5),
             cooldown_seconds=cb_raw.get("cooldown_seconds", 30),

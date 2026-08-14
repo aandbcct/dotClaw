@@ -14,13 +14,32 @@ import asyncio
 
 import pytest
 
-from dotclaw.llm.base import ChatChunk, ChatTextDelta, Message, TextDeltaKind, ToolCall
-from dotclaw.llm.openai_compat import OpenAICompatibleClient
-from dotclaw.llm.proxy import LLMProxy, CallSetupError, NonRetryableStreamError
+from dotclaw.llm.base import (
+    ChatChunk,
+    ChatTextDelta,
+    Message,
+    TextDeltaKind,
+    ToolCall,
+    ToolDefinition,
+)
+from dotclaw.llm.drivers.openai_chat_completions import (
+    OpenAIChatCompletionsClient,
+)
+from dotclaw.llm.proxy import (
+    LLMProxy,
+    CallSetupError,
+    NonRetryableStreamError,
+    _format_exception,
+)
 from dotclaw.llm.reasoning import ReasoningMode, ReasoningPolicy
 
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_empty_exception_message_keeps_exception_type() -> None:
+    """TimeoutError 等空文本异常必须在日志中保留类型。"""
+    assert _format_exception(TimeoutError()) == "TimeoutError"
 
 
 # ============================================================
@@ -61,12 +80,13 @@ class _FailAfterFirstResponse:
         raise RuntimeError("stream broke")
 
 
-class _FakeClient(OpenAICompatibleClient):
+class _FakeClient(OpenAIChatCompletionsClient):
     """可注入 mock chunk 列表与推理策略的测试客户端（单次 chat 用一份 chunk）。"""
 
     def __init__(self, mock_chunks, policy: ReasoningPolicy | None = None):
         super().__init__(policy)
         self._mock_chunks = mock_chunks
+        self.calls: list[dict] = []
 
     def _get_api_key(self) -> str:
         return "test"
@@ -83,6 +103,7 @@ class _FakeClient(OpenAICompatibleClient):
                 class completions:
                     @staticmethod
                     async def create(**kw):
+                        self.calls.append(kw)
                         return _MockAPIResponse(self._mock_chunks)
 
         return F()
@@ -107,7 +128,7 @@ class _NonStreamResponse:
         self.usage = _usage(in_tok, out_tok)
 
 
-class _FakeNonStreamClient(OpenAICompatibleClient):
+class _FakeNonStreamClient(OpenAIChatCompletionsClient):
     """注入非流式 ChatCompletion 响应的测试客户端（stream=False 调用）。"""
 
     def __init__(self, content: str, reasoning_content: str = "", in_tok: int = 0, out_tok: int = 0,
@@ -135,7 +156,7 @@ class _FakeNonStreamClient(OpenAICompatibleClient):
         return F()
 
 
-class _SeqClient(OpenAICompatibleClient):
+class _SeqClient(OpenAIChatCompletionsClient):
     """每次 chat() 调用按顺序消费一份异步响应（用于交错/异常隔离测试）。"""
 
     def __init__(self, responses, policy: ReasoningPolicy | None = None):
@@ -358,6 +379,75 @@ async def test_cross_chunk_tool_args_concatenated():
     assert tcs[0].name == "get_t"
     # 参数跨 chunk 拼接后应为合法 JSON
     assert tcs[0].arguments == '{"city":"北京"}'
+
+
+async def test_protocol_tool_name_is_reversible() -> None:
+    """带点号的内部工具名在线路上合法化，返回 Runtime 前恢复原名。"""
+    canonical_name = "builtin.files.read_text"
+    client = _FakeClient([])
+    wire_name = client._to_wire_tool_name(canonical_name)
+    client._mock_chunks = [
+        _chunk(
+            _delta(
+                tc=[
+                    {
+                        "i": 0,
+                        "id": "c1",
+                        "n": wire_name,
+                        "a": '{"path":"README.md"}',
+                    }
+                ]
+            ),
+            finish="tool_calls",
+        )
+    ]
+    tool = ToolDefinition(
+        name=canonical_name,
+        description="读取文本文件",
+        parameters={"type": "object", "properties": {}},
+    )
+
+    results = [
+        chunk
+        async for chunk in client.chat(
+            [Message(role="user", content="读取 README")],
+            tools=[tool],
+            stream=True,
+        )
+    ]
+
+    sent_name = client.calls[0]["tools"][0]["function"]["name"]
+    returned_calls = [call for chunk in results for call in chunk.tool_calls]
+    assert sent_name == wire_name
+    assert len(sent_name) <= 64
+    assert "." not in sent_name
+    assert returned_calls[0].name == canonical_name
+
+
+async def test_historical_tool_call_uses_same_wire_name() -> None:
+    """后续轮次的历史工具调用与工具结果沿用相同协议名称。"""
+    canonical_name = "builtin.files.read_text"
+    client = _FakeClient([_chunk(_delta(content="完成"), finish="stop")])
+    messages = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall("c1", canonical_name, '{"path":"README.md"}')],
+        ),
+        Message(
+            role="tool",
+            content="内容",
+            name=canonical_name,
+            tool_call_id="c1",
+        ),
+    ]
+
+    await _collect(client, messages)
+
+    sent_messages = client.calls[0]["messages"]
+    wire_name = client._to_wire_tool_name(canonical_name)
+    assert sent_messages[0]["tool_calls"][0]["function"]["name"] == wire_name
+    assert sent_messages[1]["name"] == wire_name
 
 
 # ============================================================
@@ -653,7 +743,7 @@ class _ControlledResponse:
             raise RuntimeError("close failed")
 
 
-class _ObservedClient(OpenAICompatibleClient):
+class _ObservedClient(OpenAIChatCompletionsClient):
     """记录 OpenAI 请求参数并返回可控 SDK stream 的测试客户端。"""
 
     def __init__(self, response: _ControlledResponse):
@@ -707,7 +797,10 @@ async def test_explicit_timeout_reaches_sdk_and_normal_stream_is_closed():
     assert client.request_params["timeout"].pool == 0.2
 
 
-async def _collect_explicit_timeout(client: OpenAICompatibleClient, timeout_seconds: float):
+async def _collect_explicit_timeout(
+    client: OpenAIChatCompletionsClient,
+    timeout_seconds: float,
+):
     """消费指定调用预算下的完整测试流。"""
     return [
         chunk

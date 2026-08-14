@@ -3,7 +3,6 @@ agent_id: planner-coordinator
 agent_name: "规划/协调者"
 description: "拆解复杂任务、制定执行计划、协调多个子任务。适合任务规划、流程设计、多步骤协调类任务。可派生子 Agent 来执行具体子任务。"
 
-model: ""
 workspace: "."
 allowed_tools:
   - spawn_agent

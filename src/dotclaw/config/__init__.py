@@ -18,6 +18,7 @@ from .settings import (
     # P2 路由配置
     ProviderConfig,
     ProviderRetryConfig,
+    LLMDriver,
     ModelConfig,
     PurposePriority,
     PurposeConfig,
@@ -45,6 +46,7 @@ __all__ = [
     # P2
     "ProviderConfig",
     "ProviderRetryConfig",
+    "LLMDriver",
     "ModelConfig",
     "PurposePriority",
     "PurposeConfig",

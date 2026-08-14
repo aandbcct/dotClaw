@@ -30,6 +30,14 @@ class NullChannel(Channel):
         """向用户提问 —— 返回空（子 Agent 不应阻塞等待用户确认）。"""
         return ""
 
+    async def select_model(
+        self,
+        current_model: str,
+        available_models: tuple[str, ...],
+    ) -> str | None:
+        """子 Agent 不参与交互式模型切换。"""
+        return None
+
     def print_error(self, message: str) -> None:
         """打印错误 —— 不输出。"""
 

@@ -27,8 +27,8 @@ ContextBundle
 → LLMProxy
 → ModelRouter
 → RateLimiter / CircuitBreaker
-→ Provider Registry
-→ OpenAICompatibleClient
+→ driver 显式构造表
+→ OpenAIChatCompletionsClient
 → ChatChunk
 → reasoning 输出 + response/ToolCall 聚合
 ```
@@ -114,9 +114,9 @@ flowchart TB
     Compactor["LLMContextCompactor"]
     Memory["MemoryManager / Flush / Dream"]
 
-    Registry["Provider Registry"]
-    Client["OpenAICompatibleClient"]
-    Concrete["Qwen / DeepSeek / OpenAI Clients"]
+    Registry["Driver Factory / Capabilities"]
+    Client["OpenAIChatCompletionsClient"]
+    Concrete["Provider Config"]
     SDK["AsyncOpenAI / Provider API"]
 
     Host --> Config
@@ -244,7 +244,7 @@ flowchart TB
         Breaker["CircuitBreaker"]
         Proxy["LLMProxy"]
         Reasoning["ReasoningPolicy / Parser"]
-        Provider["Provider Registry<br/>OpenAICompatibleClient"]
+        Provider["Driver Factory<br/>OpenAIChatCompletionsClient"]
     end
 
     subgraph ConfigLayer["B. 配置契约（src/dotclaw/config）"]
@@ -298,7 +298,7 @@ flowchart TB
 | LLM 核心 | CircuitBreaker | LLM | Provider 级状态机 |
 | LLM 核心 | LLMProxy | LLM | 重试、退避、候选切换和流保护 |
 | LLM 核心 | Reasoning Policy / Parser | LLM | 文本语义分流 |
-| LLM 核心 | Provider Registry / Compat Client | LLM | 实现发现、协议转换和解析 |
+| LLM 核心 | Driver Factory / Protocol Client | LLM | 协议构造、能力校验、转换和解析 |
 | 配置契约 | Router/Provider/Model/Purpose | Config | 描述候选、供应商和 reasoning |
 | 外部适配器 | LLMProxyAdapter | Runtime | DTO 转换、输出和最终消息 |
 | 外部适配器 | LLMContextCompactor | Runtime | 非流式历史压缩 |
@@ -508,9 +508,9 @@ context_window 和 tokenizer_encoding 由 Runtime Policy 使用；capabilities �
 
 **`DefaultsConfig`**
 
-**职责与用途：**保存全局默认 Provider、模型、默认参数和 fallback 开关。
+**职责与用途：**保存跨模型共享的默认参数和 fallback 开关，不再声明默认 Provider 或默认模型。
 
-当前 Router 主要读取 `defaults.model`。`defaults.provider`、`defaults.parameters` 和 `fallback_enabled` 尚未完整进入请求和降级执行路径。
+新 Session 的模型来自 `purposes.chat.priority` 中优先级最高的 active 模型；Session 创建后持久化该绑定，后续 Run 先尝试自身绑定模型。
 
 #### 4.2.3 `RouterConfig`
 
@@ -563,7 +563,7 @@ providers.circuit_breaker
 
 **职责与用途：**当 Router 文件不存在时，Bootstrap 使用旧 `config.yaml.llm.clients` 构建兼容 RouterConfig。
 
-该路径主要生成 Chat 路由。Embedding 和 Context Compaction 若没有对应 purpose，Router 会回退 `defaults.model`。
+该路径主要生成 Chat 路由。调用不存在或没有 active 模型的 purpose 时不会跨用途回退，而是明确返回无候选错误。
 
 ---
 
@@ -598,16 +598,10 @@ model_name → LLMClient cache
 → CircuitBreaker.get_state
 → CLOSED + HALF_OPEN
 → forced_model 提升
-→ 必要时 OPEN 兜底
+→ 空候选时快速失败
 ```
 
-如果 `_build_candidates()` 返回空列表，`select()` 直接回退：
-
-```text
-[defaults.model]
-```
-
-该回退不会再次验证 defaults.model 是否存在、active、未限流或未熔断。
+`preferred_model(purpose)` 只读取静态优先级，供新 Session 初始化；`select()` 则应用实时限流和熔断状态，二者职责不同。
 
 **`_build_candidates`**
 
@@ -616,12 +610,9 @@ model_name → LLMClient cache
 ```text
 normal
 half_open
-fallback(open)
 ```
 
-正常候选为 `normal + half_open`。只在正常和半开候选都为空时，保留最优先的一个 OPEN 模型作为紧急兜底。
-
-因此熔断器不是绝对拒绝边界，而是排序与降级信号。
+正常候选为 `normal + half_open`。OPEN 模型不会进入候选；全部候选均 OPEN、限流或禁用时快速失败。
 
 **`_prioritize_forced`**
 
@@ -630,15 +621,15 @@ fallback(open)
 规则：
 
 1. forced_model 精确匹配当前 purpose 候选；
-2. forced_model 精确匹配当前 purpose 的 OPEN 候选；
-3. forced_model 匹配 Provider 名，则将该 Provider 的 active 模型放前；
+2. forced_model 精确匹配全局 active 模型且通过限流、熔断检查时，将其加入候选首位；
+3. forced_model 匹配 Provider 名，则将该 Provider 中通过实时检查的 active 模型放前；
 4. 不匹配则保持 purpose 顺序。
 
 限制：
 
-- 精确模型若已配置但不在该 purpose.priority 中，不会从全局 models 自动加入；
+- 精确模型只要已配置且 active，即使不在 purpose.priority 中也会加入首位；
 - Provider 匹配会扩大到全局 active 模型；
-- forced OPEN 模型仍允许立即尝试。
+- Session 绑定模型和 Provider 名匹配都不能绕过 OPEN。
 
 #### 4.3.3 `get_client`
 
@@ -649,8 +640,8 @@ fallback(open)
 ```text
 查 ModelConfig
 → 查 ProviderConfig
-→ Provider Registry
-→ 实例化具体 Client
+→ 解析 effective driver
+→ 实例化协议 Client
 → 按 model_name 缓存
 ```
 
@@ -658,7 +649,7 @@ fallback(open)
 
 **`_instantiate_client`**
 
-**职责与用途：**从 Provider Registry 取得 Client 类，注入：
+**职责与用途：**根据 `model.driver or provider.driver` 从显式 driver 构造表取得协议 Client，并注入：
 
 ```text
 api_key
@@ -667,7 +658,7 @@ model_id
 ReasoningPolicy
 ```
 
-如果 Provider 未注册，当前回退到 `QwenClient`，而不是配置失败。
+Router 构造时会验证 chat 至少有一个 active 模型、purpose 引用、active 模型的 provider、driver 注册状态及能力集合；未知引用或未注册 driver 会直接启动失败。
 
 **Provider 状态门面**
 
@@ -675,12 +666,15 @@ ReasoningPolicy
 
 ```text
 try_acquire(provider, timeout)
+begin_call(model)
 report_success(model)
 report_failure(model)
 get_provider_name(model)
 ```
 
 Proxy 不直接访问 RateLimiter 和 CircuitBreaker。
+
+`begin_call()` 在一次逻辑模型调用前检查熔断状态，并为 HALF_OPEN 独占一个探测名额。普通模型完成全部内部重试后才上报一次失败；HALF_OPEN 固定只调用一次，失败立即重新 OPEN 并重置冷却时间。
 
 **Retry 配置门面**
 
@@ -825,6 +819,10 @@ HALF_OPEN --失败--> OPEN
 
 **职责与用途：**返回当前 `chat` purpose 的 Router 候选。结果受限流、熔断和配置状态影响，不是完整模型配置列表。
 
+**`models_for_purpose`**
+
+**职责与用途：**返回指定 purpose 中按 priority 排序、去重且 `status=active` 的静态模型目录，不读取瞬时限流或熔断状态。新 Session 初始化和 `/model` 选择使用该目录；实际调用仍通过 `select()` 应用实时健康过滤。
+
 #### 4.6.4 `chat`
 
 **职责与用途：**完整流程：
@@ -947,32 +945,27 @@ EXPLICIT_RESPONSE
 
 ---
 
-### 4.8 Provider 注册表
+### 4.8 Driver 显式注册
 
-#### 4.8.1 Provider Registry
+#### 4.8.1 Driver Factory 与能力表
 
-**职责与用途：**装饰器将 provider_name 映射到 LLMClient 类。
+**职责与用途：**`llm/drivers/__init__.py` 将 `LLMDriver` 显式映射到 LLMClient 构造函数和能力集合。
 
-重复名称当前直接覆盖，没有冲突错误。
+当前只注册 `openai_chat_completions`，能力为 chat、function_calling 和 embedding。
 
-**`get_provider`**
+**`create_driver_client`**
 
-**职责与用途：**首次 Registry 为空时触发自动发现，然后按名称查询。
+**职责与用途：**按已解析的枚举值构造协议 Client；未注册值直接抛出配置错误。
 
-**`_discover`**
+**`get_driver_capabilities`**
 
-**职责与用途：**遍历 providers 目录下所有 Python 模块并导入，触发注册装饰器。
+**职责与用途：**返回协议实现声明的能力集合，供 Router 在启动阶段与 active 模型能力交叉校验。
 
-特点：
-
-- 单个模块导入失败记录 warning；
-- `_auto_discovered` 在导入前设置为 True；
-- 失败模块不会在后续自动重试；
-- 若 Registry 在调用前已非空，`get_provider()` 不会触发完整发现。
+两张表都是代码内显式事实，不扫描文件、不按 provider 名称猜测，也不提供默认回退。
 
 ---
 
-### 4.9 `OpenAICompatibleClient`
+### 4.9 `OpenAIChatCompletionsClient`
 
 #### 4.9.1 `_StreamParseState`
 
@@ -987,12 +980,13 @@ output_tokens
 
 每次 chat 新建，避免缓存 Client 的并发调用共享工具参数或 reasoning Parser。
 
-#### 4.9.2 `OpenAICompatibleClient`
+#### 4.9.2 `OpenAIChatCompletionsClient`
 
 **职责与用途：**统一 OpenAI-compatible Provider 的：
 
 - Message 转换；
 - Tool Schema 转换；
+- 内部工具名与协议合法函数名的请求级双向映射；
 - Chat 请求；
 - SSE 解析；
 - ToolCall 累积；
@@ -1000,11 +994,13 @@ output_tokens
 - Token Usage；
 - Embedding 分批。
 
-具体 Provider 只提供 API Key、Base URL、Model ID 和 AsyncOpenAI Client。
+ProviderConfig 提供 API Key、Base URL 与运维策略，ModelConfig 提供 Model ID；协议客户端不再按供应商名称派生空壳子类。
 
 **`_convert_messages`**
 
 **职责与用途：**转换 role、content、name、tool_call_id 和 tool_calls。
+
+内部工具名允许使用点号命名空间；发送前转换为满足 `[a-zA-Z0-9_-]{1,64}` 的稳定协议名称，历史 ToolCall 和 Tool 结果使用同一映射。模型返回工具调用后再恢复内部规范名称，因此 Tool/Runtime 无需感知供应商命名限制。
 
 当前不发送：
 
@@ -1064,7 +1060,7 @@ function.name
 function.arguments
 ```
 
-finish_reason 出现时一次性输出所有 name 非空的 ToolCall。
+finish_reason 出现时一次性输出所有 name 非空的 ToolCall，并将协议工具名恢复为内部规范名称。
 
 #### 4.9.4 非流式 Chat
 
@@ -1092,25 +1088,11 @@ ModelRouter 缓存的是 Client 包装器，底层 AsyncOpenAI 当前没有跨�
 
 ---
 
-### 4.10 具体 Provider
+### 4.10 Provider 与 driver 分工
 
-#### 4.10.1 `QwenClient`
+`ProviderConfig` 管理供应商身份、API Key、Base URL、限流、重试与熔断；`LLMDriver` 声明通信协议。qwen、deepseek、openai、jojocode 当前均配置为 `openai_chat_completions`，复用同一个协议客户端。
 
-**职责与用途：**注册名 `qwen`，使用 OpenAI-compatible 基类，仅保存 api_key、base_url 和 model。
-
-#### 4.10.2 `DeepSeekClient`
-
-**职责与用途：**注册名 `deepseek`，复用相同协议基类。Reasoning 行为由模型配置而不是 Client 类硬编码。
-
-#### 4.10.3 `OpenAIClient`
-
-**职责与用途：**注册名 `openai`，复用相同协议基类。
-
-#### 4.10.4 未注册 Provider 回退
-
-**职责与用途：**ModelRouter 对未知 provider 当前回退到 QwenClient。
-
-由于 QwenClient 本质也是 OpenAI-compatible 包装器，该回退可能对部分兼容端点工作，但会把配置错误延迟到请求阶段，并缺少明确 Provider 能力验证。
+driver 构造表和能力表均为显式映射。新增兼容供应商只需增加 provider 配置；只有引入新协议时才新增 driver 实现。旧 Provider 注册表、自动发现与供应商空壳客户端已删除。
 
 ---
 
@@ -1396,16 +1378,15 @@ flowchart TD
     Merge --> Forced["forced_model 提升"]
     Forced --> Has{"存在候选?"}
     Has -->|是| Return["返回候选"]
-    Has -->|否且有 OPEN| Emergency["返回最优 OPEN"]
-    Has -->|完全为空| Default["select 回退 defaults.model"]
+    Has -->|否| Fail["返回空候选并快速失败"]
 ```
 
 **结论：**
 
 - status、限流和熔断是候选过滤信号。
-- OPEN Provider 在全部正常候选消失时仍可能作为紧急兜底被调用。
-- HALF_OPEN 当前只被加入候选，没有调用 `try_half_open()` 限制探测数量。
-- 完全空候选时 defaults.model 会绕过前述过滤重新进入结果。
+- OPEN Provider 始终被跳过，Session 绑定模型也不能绕过。
+- HALF_OPEN 通过 `try_half_open()` 独占探测名额，并固定只调用一次。
+- 完全空候选时由 Proxy 明确快速失败。
 - `fallback_enabled` 当前不影响该流程。
 
 ### 5.4 Forced Model
@@ -1416,17 +1397,19 @@ flowchart TD
     Exact -->|是| Front["移到首位"]
     Exact -->|否| OpenExact{"在 purpose OPEN fallback?"}
     OpenExact -->|是| OpenFront["置于首位并允许尝试"]
-    OpenExact -->|否| Provider{"匹配 Provider 名?"}
+    OpenExact -->|否| GlobalExact{"匹配全局 active model?"}
+    GlobalExact -->|是| GlobalFront["加入候选首位"]
+    GlobalExact -->|否| Provider{"匹配 Provider 名?"}
     Provider -->|是| ProviderModels["将 Provider active models 提前"]
     Provider -->|否| Ignore["保持 purpose 顺序"]
 ```
 
 **结论：**
 
-- Identity.model 不是绝对强制，只是候选优先提示。
-- 精确模型若不在当前 purpose.priority 中会被忽略。
+- Session.model 是首个候选，但不可用时允许按 purpose 降级。
+- 精确模型不在当前 purpose.priority 中时仍会从全局 active models 加入首位。
 - Provider 名匹配可以扩大到该 Provider 的全局 active 模型。
-- forced OPEN 模型不受熔断排序保护。
+- forced OPEN 模型不会进入候选。
 - 不匹配只记录 warning，不使调用失败。
 
 ### 5.5 单模型重试与候选降级
@@ -1530,7 +1513,7 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     participant SDK as Provider SSE
-    participant Client as OpenAICompatibleClient
+    participant Client as OpenAIChatCompletionsClient
     participant State as _StreamParseState
     participant Proxy as LLMProxy
     participant Adapter as Runtime Adapter
@@ -1615,7 +1598,7 @@ flowchart TD
     Proxy --> Select["Router.select(embedding, model?)"]
     Select --> First["取 candidates[0]"]
     First --> Client["Router.get_client"]
-    Client --> Batch["OpenAICompatibleClient.embed"]
+    Client --> Batch["OpenAIChatCompletionsClient.embed"]
     Batch --> API["每批 16 条 Embeddings API"]
     API --> Vectors["vectors"]
     Vectors --> Memory
@@ -1672,31 +1655,26 @@ stateDiagram-v2
 - 全部正常候选消失时 Router 仍会尝试一个 OPEN Provider。
 - 状态修改没有锁，不是跨线程/多协程严格原子状态机。
 
-### 5.15 Provider 自动发现
+### 5.15 Driver 解析与启动校验
 
 ```mermaid
 flowchart TD
-    Router["get_client(model)"] --> Get["get_provider(name)"]
-    Get --> Empty{"Registry 为空?"}
-    Empty -->|是| Discover["_discover"]
-    Discover --> Files["遍历 providers/*.py"]
-    Files --> Import["import module"]
-    Import --> Decorator["@register"]
-    Decorator --> Registry["provider → Client class"]
-    Empty -->|否| Lookup["直接查询"]
-    Registry --> Lookup
-    Lookup --> Found{"找到?"}
-    Found -->|是| Instantiate["实例化"]
-    Found -->|否| Qwen["回退 QwenClient"]
+    Load["load_router_config"] --> Parse["解析 provider/model driver"]
+    Parse --> Validate["ModelRouter._validate_config"]
+    Validate --> Refs["校验 defaults / purpose / provider"]
+    Refs --> Caps["校验 driver 注册与 capabilities"]
+    Caps --> Client["get_client(model)"]
+    Client --> Effective["model.driver or provider.driver"]
+    Effective --> Factory["显式 driver factory"]
+    Factory --> Instantiate["实例化协议 Client"]
 ```
 
 **结论：**
 
-- 发现发生在首次 Client 创建，而不是 Host 启动时主动验证。
-- 单模块导入失败只 warning，Registry 可能部分可用。
-- 未注册 Provider 不会立即失败，而会进入 Qwen-compatible 回退。
-- Provider 注册重复会覆盖。
-- Provider 能力和 ModelConfig.capabilities 当前未交叉校验。
+- YAML 中 provider.driver 必填，model.driver 可选覆盖。
+- 未知 driver 在配置加载时失败，未注册 driver 在 Router 构造时失败。
+- active 模型的 provider 引用和 capabilities 在 Router 构造时交叉校验。
+- 不存在未知 provider 到 Qwen 的兼容回退。
 
 ---
 
@@ -1732,7 +1710,7 @@ BreakerConfig
 BreakerState
 ```
 
-OpenAICompatibleClient 和 Provider Registry 未从顶层 `__init__` 导出。
+OpenAIChatCompletionsClient 和 driver 构造函数未从顶层 `__init__` 导出。
 
 ### 6.2 Chat 请求契约
 
@@ -1770,8 +1748,8 @@ LLMProxy.embed(
 
 当前行为：
 
-- 代码保留空候选防御检查，但 `ModelRouter.select()` 通常至少返回 `defaults.model`；
-- 主要失败风险是默认模型未配置、Provider 不支持 Embedding 或 API 调用失败，而不是候选列表真正为空；
+- 空候选会明确失败；
+- 主要失败风险是 purpose 未配置、候选全部不可用、Provider 不支持 Embedding 或 API 调用失败；
 - 只使用第一个候选；
 - Provider Client 按 16 条分批；
 - 不保证输出数量与输入数量在异常 Provider 下自动验证；
@@ -1888,7 +1866,7 @@ ChatTextDelta(RESPONSE)
 ModelRouter
 → 缓存 LLMClient per model
 
-OpenAICompatibleClient
+OpenAIChatCompletionsClient
 → 每次 chat/embed 创建 AsyncOpenAI
 ```
 
@@ -1912,18 +1890,18 @@ OpenAICompatibleClient
 9. 一旦交付可见文本，流中断不得自动切模型产生重复输出。
 10. Provider 级限流和熔断由同 Provider 所有模型共享。
 11. RateLimiter.check 只是预判，acquire 是守门。
-12. OPEN Provider 仍可能作为最后兜底；不能把 Breaker 描述为绝对禁止。
-13. HALF_OPEN 并发限制当前未接入，不能声称 half_open_max 已生效。
+12. OPEN Provider 不进入候选，全部 OPEN 时快速失败。
+13. HALF_OPEN 并发限制已接入，单次探测失败立即重新 OPEN。
 14. forced_model 是优先提示，不是绝对强制。
-15. exact forced model 不在 purpose 链时当前可能被忽略。
-16. defaults.model 回退必须存在于 models 才能成功创建 Client；当前未提前验证。
+15. exact forced model 只要已配置且 active，即使不在 purpose 链也必须加入首位。
+16. chat purpose 必须至少引用一个 active 模型；Router 构造时提前验证。
 17. Runtime Chat 使用 stream=True；非流式 ToolCall 契约当前不完整。
 18. Context Compactor 不应携带 Tool。
 19. Compactor/Memory 摘要只应使用 response；当前实现尚未满足。
 20. Embedding 当前不具备 Chat 等价的限流、重试和降级。
-21. RouterConfig 的 circuit_breaker YAML 当前未贯通。
-22. Provider Registry 自动发现失败不是可靠事实源。
-23. 未注册 Provider 当前会回退 QwenClient，不能视为已验证兼容。
+21. RouterConfig 的 circuit_breaker YAML 必须完整贯通到启动组装。
+22. driver 构造表和能力表必须显式注册，禁止运行时自动发现。
+23. 未注册 driver 或未知 provider 必须在启动阶段失败，禁止兼容回退。
 24. Message 不保存 Provider reasoning state。
 25. LLMProxyAdapter.cancel 当前不终止底层请求。
 26. Runtime 输出端口异常不应被误判为 Provider 不可用；当前尚未分离。
@@ -1942,13 +1920,13 @@ OpenAICompatibleClient
 | 新增调用用途 | `LLMUsage`、RouterConfig purposes | Proxy、Bootstrap、消费者 | 候选链和 fallback 明确 |
 | 修改模型候选顺序 | `model_router.py::_build_candidates` | rate/breaker/forced model | priority 稳定，状态过滤可解释 |
 | 修改 forced model | `_prioritize_forced` | AgentPolicyResolver | 明确“强制”还是“优先” |
-| 修改默认回退 | `ModelRouter.select` | DefaultsConfig、Config 校验 | 默认模型必须已配置且可调用 |
-| 新增 Provider | `llm/providers/*.py` + `@register` | Config、Reasoning、Embedding | 不依赖 Runtime，定义能力边界 |
-| 修改 Provider 发现 | `providers/__init__.py` | 启动验证、日志 | 失败和重复不可静默 |
-| 修改 OpenAI 请求 | `openai_compat.py::chat` | Provider 兼容、工具、reasoning | 流式/非流式语义一致 |
+| 修改 Session 首选模型 | `Session.model`、`ModelRouter.select` | Session 迁移、熔断与降级 | 绑定模型不能绕过 OPEN |
+| 新增兼容 Provider | `model_router_config.yaml` 的 provider 配置 | Config、限流、熔断 | 必须显式选择已注册 driver |
+| 新增协议 Driver | `llm/drivers/__init__.py` + 协议实现 | Config、能力校验、测试 | 构造和能力映射必须同步注册 |
+| 修改 OpenAI 请求 | `drivers/openai_chat_completions.py::chat` | Provider 兼容、工具、reasoning | 流式/非流式语义一致 |
 | 修改 Message 转换 | `_convert_messages` | reasoning passthrough、ToolCall | role 和关联 ID 不丢失 |
 | 修改 ToolCall 解析 | `_parse_stream_chunk` | Runtime Adapter、Tool | 按 index 组装，finish 边界明确 |
-| 完善非流式 ToolCall | `OpenAICompatibleClient.chat` 非流分支 | Compactor、未来调用者 | 与流式标准 Chunk 一致 |
+| 完善非流式 ToolCall | `OpenAIChatCompletionsClient.chat` 非流分支 | Compactor、未来调用者 | 与流式标准 Chunk 一致 |
 | 修改 native reasoning | `_extract_text_deltas` | ModelReasoningConfig、Runtime Output | reasoning 不混入 response |
 | 修改 tags reasoning | `ReasoningStreamParser` | 配置校验、测试 | 跨 Chunk 标签不丢失 |
 | 修改标签配置 | `_parse_reasoning_config` | ReasoningPolicy | 检查四标签冲突 |
@@ -1966,7 +1944,7 @@ OpenAICompatibleClient
 | 修改 Memory Flush | `memory/flush.py` | LLM Proxy、JSON parser | reasoning 不污染 JSON |
 | 修改 Embedding 路由配置 | `model_router_config.yaml` | Memory Config、Model capabilities | 使用 embedding 模型 |
 | 修改 Router Loader | `config/settings.py::load_router_config` | Bootstrap、Policy | 完整映射所有 Provider 字段 |
-| 修改 Client 生命周期 | OpenAICompatibleClient / Host | AsyncOpenAI、shutdown | 不泄漏连接池 |
+| 修改 Client 生命周期 | OpenAIChatCompletionsClient / Host | AsyncOpenAI、shutdown | 不泄漏连接池 |
 | 接入 Journal | LLMProxy + Bootstrap/Runtime | Observability | 不影响调用成功语义 |
 | 排查模型未按 Identity 选择 | Policy model → purpose priority → forced model | RouterConfig | exact model 必须在候选链或定义强制语义 |
 | 排查无 Token Usage | Provider stream_options → final Chunk → Adapter | SDK 兼容 | 0 不应伪装精确值 |
@@ -2009,11 +1987,11 @@ OpenAICompatibleClient
 
 **问题与选择：**Chat、Context Compaction 和 Embedding 对模型的能力和成本要求不同。当前用 purpose.priority 定义独立候选链。
 
-**未选择：**所有调用固定默认模型、消费者直接指定 Provider URL。
+**未选择：**所有调用固定单一模型、消费者直接指定 Provider URL。
 
 **收益：**调用者只表达用途；配置可以调整模型顺序。
 
-**代价与边界：**capabilities 没有强制校验，purpose 缺失会直接回退默认模型。
+**代价与边界：**capabilities 没有按用途全面强制校验，purpose 缺失会明确失败。
 
 #### 8.2.3 Provider 级韧性状态
 
@@ -2075,15 +2053,15 @@ OpenAICompatibleClient
 
 **代价与边界：**非流式分支容易与流式能力不一致，当前 ToolCall 和 finish_reason 已出现差异。
 
-#### 8.2.9 Unknown Provider 兼容回退
+#### 8.2.9 Provider 与协议 Driver 分离
 
-**问题与选择：**部分供应商提供 OpenAI-compatible Endpoint。当前未注册 Provider 会使用 QwenClient 作为兼容 Wrapper。
+**问题与选择：**多数供应商提供兼容端点。当前通过 provider.driver 显式选择协议实现，兼容供应商复用 `OpenAIChatCompletionsClient`。
 
-**未选择：**未知名称立即失败、每个兼容 Provider 都写空壳 Client。
+**未选择：**每个兼容 Provider 都写空壳 Client，或对未知 provider 猜测协议。
 
-**收益：**兼容端点可能无需新增代码。
+**收益：**兼容端点无需新增代码，同时保留供应商级限流、重试和熔断边界。
 
-**代价与边界：**配置拼写错误和真实不兼容被延迟到请求期，Provider 能力不可验证。
+**代价与边界：**配置必须显式填写 driver；声明兼容但端点实际不兼容仍会在请求期由协议错误暴露。
 
 #### 8.2.10 同一 Proxy 复用到辅助能力
 
@@ -2126,22 +2104,15 @@ ModelConfig.capabilities 当前不参与：
 
 错误模型可能进入不支持的用途。
 
-#### L5. Exact forced model 可能被静默忽略
+#### L5. Session 绑定模型作为首选候选
 
-Runtime 将 Identity.model 作为 forced_model，但精确模型若不在 purpose.priority 中，Router 不会从全局 models 加入，只记录 warning 并使用原候选。
+Runtime 将 Session.model 冻结为 forced_model；Router 会从全局 models 接纳已配置、active 且未熔断的精确模型并放到候选首位。
 
-“Agent 指定模型”与“实际使用模型”可能不一致。
+未知或 disabled 模型仍不会加入候选，并保留明确 warning。
 
-#### L6. 空候选回退绕过状态过滤
+#### L6. 空候选快速失败
 
-当 purpose 候选因限流、配置或状态全部消失时，`select()` 返回 defaults.model，不重新验证：
-
-- 模型是否存在；
-- status；
-- 限流；
-- Breaker。
-
-默认模型构造错误还会在 Proxy 重试块外直接中断。
+当 purpose 候选因限流、配置或状态全部消失时，`select()` 返回空列表，Proxy 抛出包含用途和不可用原因范围的明确错误，不再绕过状态过滤。
 
 #### L7. Embedding 没有完整韧性编排
 
@@ -2193,21 +2164,17 @@ Proxy 对所有用途和 Provider 固定 timeout=0.1。高配额短突发场景�
 
 Router.get_client 在 Proxy 单候选 try/except 之前执行。模型未配置、Provider 未配置或 Client 构造失败会终止整个 Chat，而不是尝试后续候选。
 
-#### L15. Provider 自动发现不完整且不可重试
+#### L15. Driver 注册需要同步维护两张显式表
 
-`_auto_discovered` 在导入前设为 True；单模块导入失败后不再自动重试。
+新增协议实现时必须同时登记构造函数和能力集合；Router 启动校验会阻断漏注册，但当前尚未用单一描述对象消除两表同步成本。
 
-若 Registry 已因手工导入存在一个 Provider，get_provider 不触发全目录发现。
+#### L16. 协议兼容性仍依赖配置事实
 
-#### L16. Provider 注册冲突和未知回退过于宽松
-
-重复注册直接覆盖；未知 Provider 回退 QwenClient。
-
-系统没有启动期 ProviderLoadReport 或模型→Client 能力校验。
+系统能够验证 driver 名称和声明能力，但不能在不发起真实请求的情况下证明第三方 Base URL 完全兼容所选协议。
 
 #### L17. 底层 AsyncOpenAI 每次调用创建且不关闭
 
-ModelRouter 缓存 Wrapper Client，但 Qwen/DeepSeek/OpenAI Client 每次 `_get_client()` 都创建 AsyncOpenAI。
+ModelRouter 缓存协议 Wrapper Client，但 `OpenAIChatCompletionsClient` 每次 `_get_client()` 都创建 AsyncOpenAI。
 
 没有跨调用连接池复用，也没有 Host shutdown 生命周期。
 
@@ -2311,14 +2278,14 @@ Runtime Adapter 固定 stream=True；Compactor/Flush 显式 stream=False。旧 C
 | E1 | L1、L2 | Bootstrap 只构造一次完整 RouterConfig，同时注入 LLM Router 和 Runtime Policy；补齐 circuit_breaker 映射 | Config、Bootstrap、Runtime Policy |
 | E2 | L3 | 定义 RequestOptions，将 defaults.parameters 和 fallback_enabled 明确接入或删除未消费配置 | Config、Proxy、Provider |
 | E3 | L4、L8 | 统一 `LLMUsage`，Router 按 capabilities 校验 chat/tool/embedding/reasoning | Base、Config、Router、测试 |
-| E4 | L5 | 明确 forced_model 语义：精确模型已配置且 active 时加入候选，或改名 preferred_model | Router、Agent Policy |
+| E4 | L5 | **已完成**：精确模型已配置且 active 时加入候选首位 | Router、Agent Policy |
 | E5 | L6、L14 | Router 启动期验证 defaults/purpose/model/provider；Client 构造失败转换为候选级 SetupError | Router、Bootstrap、Proxy |
 | E6 | L7 | 提取通用 `execute_candidates(operation)`，Chat 与 Embed 共用限流、重试、Breaker 和 fallback | Proxy、LLMClient、Memory |
 | E7 | L9、L10、L11 | 为 Breaker 增加原子 probe lease；明确 OPEN 是否允许 emergency fallback，并按 logical call/错误类别计数 | CircuitBreaker、Router、Proxy |
 | E8 | L12、L13 | RateLimiter 使用条件循环或 semaphore/token bucket，按 deadline 等待；timeout 进入配置 | RateLimiter、ProviderConfig |
-| E9 | L15、L16 | Host 启动时显式 discover/validate，返回 ProviderLoadReport；重复和未知 Provider 默认失败 | Provider Registry、Bootstrap |
+| E9 | L15、L16 | 将 driver 构造与能力元数据合并为单一显式描述，并保留启动校验 | Drivers、Config、Bootstrap |
 | E10 | L17 | Provider Client 持有可复用 AsyncOpenAI，并实现 async close；Host 统一逆序关闭 | Providers、Bootstrap |
-| E11 | L18 | 流式和非流式共用同一标准化解析，补齐 ToolCall、finish_reason 和 usage 测试 | OpenAICompatibleClient |
+| E11 | L18 | 流式和非流式共用同一标准化解析，补齐 ToolCall、finish_reason 和 usage 测试 | OpenAIChatCompletionsClient |
 | E12 | L19、L20 | 增加 ProviderMessageState/ReasoningPassthrough Hook，仅保存协议必需状态而非默认持久化全文 | Base DTO、Provider、Runtime Context |
 | E13 | L21 | 校验四标签全局唯一、非空和前缀冲突，或构建确定性 tokenizer | Config、Reasoning Parser |
 | E14 | L22 | 辅助消费者只聚合 RESPONSE；reasoning 可丢弃或进入受控观测字段 | Compactor、Memory Flush/Dream |
@@ -2345,15 +2312,12 @@ src/dotclaw/llm/
 ├── rate_limiter.py
 ├── circuit_breaker.py
 ├── reasoning.py
-├── openai_compat.py
-└── providers/
+└── drivers/
     ├── __init__.py
-    ├── qwen.py
-    ├── deepseek.py
-    └── openai.py
+    └── openai_chat_completions.py
 ```
 
-上表列出本次扫描确认的 LLM 文件和具体 Provider 实现。Provider Registry 会自动导入目录内其他 Python 模块，因此实际新增 Provider 应以仓库当前目录为准。
+上表列出 LLM 核心文件和当前协议实现。供应商配置与协议实现分离；新增兼容供应商不新增 Python Client。
 
 ### 9.2 LLM 核心文件
 
@@ -2366,11 +2330,8 @@ src/dotclaw/llm/
 | `llm/rate_limiter.py` | 限流 | Provider 令牌桶 |
 | `llm/circuit_breaker.py` | 熔断 | CLOSED/OPEN/HALF_OPEN |
 | `llm/reasoning.py` | Reasoning | Policy 和标签流解析 |
-| `llm/openai_compat.py` | 协议适配 | OpenAI 消息、SSE、ToolCall、Embedding |
-| `llm/providers/__init__.py` | Provider 注册 | 注册表和自动发现 |
-| `llm/providers/qwen.py` | Provider | Qwen OpenAI-compatible Client |
-| `llm/providers/deepseek.py` | Provider | DeepSeek OpenAI-compatible Client |
-| `llm/providers/openai.py` | Provider | OpenAI Client |
+| `llm/drivers/__init__.py` | Driver 注册 | 显式构造表和能力表 |
+| `llm/drivers/openai_chat_completions.py` | 协议适配 | OpenAI 消息、SSE、ToolCall、Embedding |
 
 ### 9.3 Config 接入
 
@@ -2385,7 +2346,7 @@ config.yaml
 | `ProviderConfig` | API、Rate Limit、Breaker、Retry |
 | `ModelConfig` | Provider、Model ID、窗口、Tokenizer、能力、状态、Reasoning |
 | `PurposeConfig` | 用途候选顺序 |
-| `DefaultsConfig` | 默认模型与参数 |
+| `DefaultsConfig` | 跨模型默认参数与 fallback 开关 |
 | `load_router_config` | 新路由配置加载 |
 | `_build_router_config_from_legacy` | 旧 LLM Config 兼容 |
 
@@ -2447,4 +2408,3 @@ src/dotclaw/channel/runtime_llm_output.py
 ```
 
 该 Adapter 消费 Runtime `LLMOutputEvent`，按 run_id 展示“思考/回答”分区。它不直接依赖 LLM Provider Client。
-

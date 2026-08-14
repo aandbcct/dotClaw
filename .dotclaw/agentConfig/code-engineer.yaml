@@ -3,7 +3,6 @@ agent_id: code-engineer
 agent_name: "代码工程师"
 description: "编写、调试、审查代码，执行脚本，操作文件和目录。适合编程、脚本、代码审查类任务。"
 
-model: ""
 workspace: "."
 allowed_tools:
   - exec

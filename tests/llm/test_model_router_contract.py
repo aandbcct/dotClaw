@@ -17,13 +17,15 @@ import pytest
 
 
 from dotclaw.llm.base import ChatChunk, ChatTextDelta, Message, TextDeltaKind, ToolCall
-from dotclaw.llm.openai_compat import OpenAICompatibleClient
+from dotclaw.llm.drivers.openai_chat_completions import (
+    OpenAIChatCompletionsClient,
+)
 from dotclaw.llm.rate_limiter import RateLimiter, RateLimitConfig, RateLimitTimeout
-from dotclaw.llm.circuit_breaker import CircuitBreaker, BreakerConfig
+from dotclaw.llm.circuit_breaker import BreakerState, CircuitBreaker, BreakerConfig
 from dotclaw.llm.model_router import ModelRouter
 from dotclaw.llm.proxy import LLMProxy, CallSetupError, NonRetryableStreamError
 from dotclaw.config.settings import (
-    RouterConfig, DefaultsConfig, ProviderConfig, ProviderRetryConfig,
+    RouterConfig, DefaultsConfig, LLMDriver, ProviderConfig, ProviderRetryConfig,
     ModelConfig, PurposeConfig, PurposePriority,
 )
 
@@ -46,13 +48,12 @@ def _make_minimal_router_config(
     """构建最小测试用 RouterConfig（优先级制）"""
     return RouterConfig(
         defaults=DefaultsConfig(
-            provider=defaults.get("provider", "qwen") if defaults else "qwen",
-            model=defaults.get("model", "qwen3.7-max") if defaults else "qwen3.7-max",
             parameters={},
             fallback_enabled=True,
         ),
         providers=providers or {
             "qwen": ProviderConfig(
+                driver=LLMDriver.OPENAI_CHAT_COMPLETIONS,
                 api_key="test-key",
                 base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
                 retry=ProviderRetryConfig(max_attempts=1, backoff_factor=0.01),
@@ -82,7 +83,7 @@ def _make_router(config: RouterConfig) -> ModelRouter:
 
 
 # ============================================================
-# 场景 1：OpenAICompatibleClient 等价性
+# 场景 1：OpenAI Chat Completions 协议客户端等价性
 # ============================================================
 
 class _MockAPIResponse:
@@ -93,7 +94,7 @@ class _MockAPIResponse:
         except StopIteration: raise StopAsyncIteration
 
 
-class _TestClient(OpenAICompatibleClient):
+class _TestClient(OpenAIChatCompletionsClient):
     def __init__(self, mock_chunks):
         super().__init__()
         self._mock_chunks = mock_chunks
@@ -130,7 +131,7 @@ def _chunk(content="", tc=None, finish=None):
 
 
 async def test_1_equivalence():
-    print("\n=== 场景 1：OpenAICompatibleClient 等价性 ===")
+    print("\n=== 场景 1：OpenAI Chat Completions 协议客户端等价性 ===")
     chunks = [
         _chunk(content="你好"),
         _chunk(content="，"),
@@ -173,6 +174,39 @@ async def test_2_priority():
 
     print(f"  ✅ select() 始终返回 [qwen-turbo, qwen3.7-max]")
     print(f"  ✅ 候选列表: {router.select('chat')}")
+
+
+async def test_static_models_for_purpose_include_active_models_only() -> None:
+    """Session 模型目录应只受静态配置影响，不受临时熔断影响。"""
+    config = _make_minimal_router_config(
+        models={
+            "primary": ModelConfig(provider="qwen", model_id="primary"),
+            "disabled": ModelConfig(
+                provider="qwen",
+                model_id="disabled",
+                status="disabled",
+            ),
+            "fallback": ModelConfig(provider="qwen", model_id="fallback"),
+        },
+        priorities=[
+            PurposePriority(model="fallback", priority=3),
+            PurposePriority(model="disabled", priority=1),
+            PurposePriority(model="primary", priority=2),
+            PurposePriority(model="primary", priority=4),
+        ],
+    )
+    breaker = CircuitBreaker(
+        {"qwen": BreakerConfig(failure_threshold=1, cooldown_seconds=60)}
+    )
+    router = ModelRouter(config, RateLimiter({}), breaker)
+
+    assert router.models_for_purpose("chat") == ("primary", "fallback")
+    assert router.preferred_model("chat") == "primary"
+
+    breaker.on_failure("qwen")
+
+    assert router.select("chat") == []
+    assert router.models_for_purpose("chat") == ("primary", "fallback")
 
 
 # ============================================================
@@ -246,8 +280,16 @@ async def test_4_forced_model():
     config = _make_minimal_router_config(
         defaults={"provider": "qwen", "model": "qwen3.7-max"},
         providers={
-            "qwen": ProviderConfig(api_key="k", base_url="http://qwen"),
-            "deepseek": ProviderConfig(api_key="k", base_url="http://ds"),
+            "qwen": ProviderConfig(
+                driver=LLMDriver.OPENAI_CHAT_COMPLETIONS,
+                api_key="k",
+                base_url="http://qwen",
+            ),
+            "deepseek": ProviderConfig(
+                driver=LLMDriver.OPENAI_CHAT_COMPLETIONS,
+                api_key="k",
+                base_url="http://ds",
+            ),
         },
         models={
             "qwen3.7-max": ModelConfig(provider="qwen", model_id="qwen3.7-max"),
@@ -260,6 +302,10 @@ async def test_4_forced_model():
     # 精确匹配：forced_model 排在候选列表第一位
     c1 = router.select(purpose="chat", forced_model="qwen3.7-max")
     assert c1[0] == "qwen3.7-max"
+
+    # 精确模型不在 purpose 链中时，仍应按明确选择提升到第一位。
+    outside_purpose = router.select(purpose="chat", forced_model="deepseek-v3")
+    assert outside_purpose[0] == "deepseek-v3"
 
     # provider 匹配：该 provider 的所有模型排在最前面
     c2 = router.select(purpose="chat", forced_model="deepseek")
@@ -447,6 +493,89 @@ async def test_8b_circuit_breaker_half_open_failure():
     cb.on_failure("qwen")
     assert cb.is_open("qwen")
     print(f"  ✅ HALF_OPEN 探测失败 → 立即回到 OPEN")
+
+
+async def test_open_provider_is_never_reintroduced_by_forced_model() -> None:
+    """Session 首选模型也不能绕过 OPEN，全部熔断时应快速返回空候选。"""
+    config = _make_minimal_router_config()
+    breaker = CircuitBreaker({"qwen": BreakerConfig(failure_threshold=1, cooldown_seconds=60)})
+    router = ModelRouter(config, RateLimiter({}), breaker)
+
+    breaker.on_failure("qwen")
+
+    assert router.select("chat", forced_model="qwen3.7-max") == []
+
+
+async def test_proxy_counts_one_failure_after_all_retries() -> None:
+    """同一模型的内部重试全部失败后，熔断器只接收一次逻辑失败。"""
+    class FailingClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, stream=True):
+            self.calls += 1
+            if False:
+                yield ChatChunk()
+            raise RuntimeError("连接失败")
+
+    class Router:
+        def __init__(self) -> None:
+            self.client = FailingClient()
+            self.failures = 0
+
+        def select(self, purpose="chat", forced_model=None): return ["m"]
+        def get_client(self, model_name): return self.client
+        def get_provider_name(self, model_name): return "p"
+        def begin_call(self, model_name): return BreakerState.CLOSED
+        async def try_acquire(self, provider, timeout): return None
+        def report_success(self, model_name): return None
+        def report_failure(self, model_name): self.failures += 1
+        def _get_retry_config(self, model_name): return 3
+        def _get_backoff_config(self, model_name): return 0
+
+    router = Router()
+    proxy = LLMProxy(router)
+
+    with pytest.raises(RuntimeError, match="所有候选模型"):
+        async for _ in proxy.chat([Message(role="user", content="x")]):
+            pass
+
+    assert router.client.calls == 3
+    assert router.failures == 1
+
+
+async def test_half_open_probe_uses_single_attempt_and_reopens() -> None:
+    """HALF_OPEN 探测不执行内部重试，失败后立即重新进入 OPEN。"""
+    config = _make_minimal_router_config()
+    config.providers["qwen"].retry.max_attempts = 3
+    breaker = CircuitBreaker({"qwen": BreakerConfig(failure_threshold=1, cooldown_seconds=0.01)})
+    router = ModelRouter(config, RateLimiter({}), breaker)
+
+    class FailingClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, stream=True):
+            self.calls += 1
+            if False:
+                yield ChatChunk()
+            raise RuntimeError("探测失败")
+
+    client = FailingClient()
+    router._client_cache["qwen3.7-max"] = client
+    breaker.on_failure("qwen")
+    await asyncio.sleep(0.02)
+    assert breaker.get_state("qwen") is BreakerState.HALF_OPEN
+
+    with pytest.raises(RuntimeError, match="所有候选模型"):
+        async for _ in LLMProxy(router).chat(
+            [Message(role="user", content="x")],
+            model="qwen3.7-max",
+        ):
+            pass
+
+    assert client.calls == 1
+    assert breaker.is_open("qwen")
 
 
 # ============================================================

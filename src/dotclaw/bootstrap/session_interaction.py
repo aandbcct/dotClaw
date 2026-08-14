@@ -48,6 +48,8 @@ class SessionInteractionService:
         run_repository: RunRepositoryAdapter | None = None,
         approval_repository: ApprovalRepositoryAdapter | None = None,
         context_port: ContextPort | None = None,
+        preferred_model: str = "",
+        chat_models: tuple[str, ...] = (),
     ) -> None:
         """绑定路由所需的会话管理与身份目录。
 
@@ -62,6 +64,10 @@ class SessionInteractionService:
         self._run_repository: RunRepositoryAdapter | None = run_repository
         self._approval_repository: ApprovalRepositoryAdapter | None = approval_repository
         self._context_port: ContextPort | None = context_port
+        self._preferred_model: str = preferred_model
+        self._chat_models: tuple[str, ...] = chat_models or (
+            (preferred_model,) if preferred_model else ()
+        )
 
     # ── 创建 ──
 
@@ -81,7 +87,13 @@ class SessionInteractionService:
         resolved: str = agent_id or self._resolve_default_agent_id()
         if self._agent_registry.get(resolved) is None:
             raise UnknownIdentityError(f"未知 Identity: {resolved}")
-        return await self._session_manager.create(agent_id=resolved, title=title)
+        if not self._preferred_model:
+            raise ValueError("创建 Session 前必须配置 chat 用途的首选模型")
+        return await self._session_manager.create(
+            agent_id=resolved,
+            title=title,
+            model=self._preferred_model,
+        )
 
     # ── 路由 ──
 
@@ -99,6 +111,27 @@ class SessionInteractionService:
         """
         return self._require_identity(session)
 
+    @property
+    def chat_models(self) -> tuple[str, ...]:
+        """返回可供 Session 绑定的全部 chat active 模型。"""
+        return self._chat_models
+
+    async def switch_model(self, session: Session | str, model: str) -> Session:
+        """校验并持久化 Session 的模型绑定，仅影响后续新 Run。"""
+        if model not in self._chat_models:
+            raise ValueError(f"模型不存在或未启用: {model}")
+        if isinstance(session, str):
+            loaded = await self._session_manager.load(session)
+            if loaded is None:
+                raise ValueError(f"Session 不存在: {session}")
+            session = loaded
+        self._require_identity(session)
+        if session.model == model:
+            return session
+        session.model = model
+        await self._session_manager.save(session)
+        return session
+
     # ── 提交与控制 ──
 
     async def submit(self, session: Session | str, user_message: str, output_port: LLMOutputPort | None = None) -> RunResult:
@@ -114,6 +147,11 @@ class SessionInteractionService:
                 raise UnknownIdentityError(f"Session 不存在: {session}")
             session = loaded
         identity: AgentIdentity = self._require_identity(session)
+        if not session.model:
+            if not self._preferred_model:
+                raise ValueError("Session 缺少模型绑定，且未配置 chat 用途的首选模型")
+            session.model = self._preferred_model
+            await self._session_manager.save(session)
 
         async def _make_request() -> RunRequest:
             return create_run_request(session, identity.agent_id, user_message)

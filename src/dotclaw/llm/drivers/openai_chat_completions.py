@@ -1,29 +1,28 @@
-"""OpenAI 兼容客户端基类
+"""OpenAI Chat Completions 兼容协议客户端。
 
 封装 OpenAI 兼容 API 的通用逻辑：
 - 消息格式转换（含 tool_calls 序列化）
 - 流式 chunk 解析 + tool_calls 参数累积（按推理模式分离 reasoning / response）
 - 请求级流式状态（每次 chat() 局部创建，并发调用互不串线）
 
-子类只需覆写三个钩子方法：
-- _get_api_key() → str
-- _get_base_url() → str
-- _get_model_id() → str
+供应商身份与协议实现分离：Qwen、DeepSeek、OpenAI、jojocode 等服务
+只要兼容该协议，就直接复用此客户端并注入各自连接参数。
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
-from abc import abstractmethod
+import re
 from typing import Any, AsyncIterator, Iterator
 
 import httpx
 from openai import AsyncOpenAI
 
-from .base import (
+from ..base import (
     ChatChunk,
     ChatTextDelta,
     LLMClient,
@@ -33,7 +32,10 @@ from .base import (
     ToolCall,
     ToolDefinition,
 )
-from .reasoning import ReasoningMode, ReasoningPolicy, ReasoningStreamParser
+from ..reasoning import ReasoningMode, ReasoningPolicy, ReasoningStreamParser
+
+
+_OPENAI_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 class _StreamParseState:
@@ -51,12 +53,12 @@ class _StreamParseState:
         self.output_tokens: int = 0
 
 
-class OpenAICompatibleClient(LLMClient):
+class OpenAIChatCompletionsClient(LLMClient):
     """
-    OpenAI 兼容客户端基类。
+    OpenAI Chat Completions 兼容协议客户端。
 
-    所有继承 OpenAI API 格式的供应商（Qwen、DeepSeek、OpenAI 等）
-    共享此实现，仅覆写 provider 特定的钩子。
+    所有兼容 Chat Completions 与 Embeddings API 的供应商共享此实现，
+    客户端不根据供应商名称猜测协议，也不读取路由配置。
 
     推理模式由注入的不可变 ReasoningPolicy 决定：
     - none：content 原样归为 response；
@@ -69,33 +71,35 @@ class OpenAICompatibleClient(LLMClient):
     _FIRST_CHUNK_TIMEOUT_RATIO: float = 0.5
     _STREAM_IDLE_TIMEOUT_RATIO: float = 0.5
 
-    def __init__(self, policy: ReasoningPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: ReasoningPolicy | None = None,
+        *,
+        api_key: str = "",
+        base_url: str = "https://api.openai.com/v1",
+        model: str = "",
+    ) -> None:
         # Policy 为不可变策略，由 ModelRouter 从 ModelReasoningConfig 转换注入；
         # Client 仅保存策略，不保存任何请求级流状态（请求级状态在 chat() 内局部创建）。
         self._policy = policy or ReasoningPolicy()
+        self._api_key = api_key
+        self._base_url = base_url
+        self._model = model
 
-    # ---- 子类必须覆写的钩子 ----
-
-    @abstractmethod
     def _get_api_key(self) -> str:
-        """返回该 provider 的 API key"""
-        ...
+        """返回当前供应商实例的 API Key。"""
+        return self._api_key
 
-    @abstractmethod
     def _get_base_url(self) -> str:
-        """返回该 provider 的 base URL"""
-        ...
+        """返回当前供应商实例的 Base URL。"""
+        return self._base_url
 
-    @abstractmethod
     def _get_model_id(self) -> str:
-        """返回当前实例绑定的 model 名称"""
-        ...
-
-    # ---- 子类可选覆写的钩子 ----
+        """返回当前实例绑定的模型标识。"""
+        return self._model
 
     def _get_client(self) -> AsyncOpenAI:
-        """创建 AsyncOpenAI 实例（子类可覆写以注入 custom headers）"""
-        assert False, "subclass must implement _get_client"
+        """创建 SDK 客户端；测试替身可覆写此方法注入受控响应。"""
         return AsyncOpenAI(
             api_key=self._get_api_key(),
             base_url=self._get_base_url(),
@@ -143,7 +147,11 @@ class OpenAICompatibleClient(LLMClient):
         """执行一次 OpenAI 兼容调用，并确保流在全部退出路径关闭。"""
         del retry_count  # 重试由 LLMProxy 统一编排，客户端只消费本次请求的时间预算。
         request_timeout: float = self._resolve_timeout_seconds(timeout_seconds)
-        openai_messages = self._convert_messages(messages)
+        tool_name_to_wire, wire_to_tool_name = self._build_tool_name_maps(
+            messages,
+            tools,
+        )
+        openai_messages = self._convert_messages(messages, tool_name_to_wire)
 
         openai_tools = None
         if tools:
@@ -151,7 +159,7 @@ class OpenAICompatibleClient(LLMClient):
                 {
                     "type": "function",
                     "function": {
-                        "name": t.name,
+                        "name": tool_name_to_wire[t.name],
                         "description": t.description,
                         "parameters": t.parameters,
                     },
@@ -194,7 +202,12 @@ class OpenAICompatibleClient(LLMClient):
                     while True:
                         chunk = await anext(response)
                         emitted = False
-                        for sub in self._parse_response_chunk(chunk, state, parser):
+                        for sub in self._parse_response_chunk(
+                            chunk,
+                            state,
+                            parser,
+                            wire_to_tool_name,
+                        ):
                             emitted = True
                             yield sub
                         if emitted:
@@ -207,7 +220,12 @@ class OpenAICompatibleClient(LLMClient):
                         )
                     except StopAsyncIteration:
                         break
-                    for sub in self._parse_response_chunk(chunk, state, parser):
+                    for sub in self._parse_response_chunk(
+                        chunk,
+                        state,
+                        parser,
+                        wire_to_tool_name,
+                    ):
                         yield sub
                 # 标签模式 flush 剩余缓冲（不展示协议标签）
                 if parser is not None:
@@ -267,12 +285,18 @@ class OpenAICompatibleClient(LLMClient):
         chunk: Any,
         state: _StreamParseState,
         parser: ReasoningStreamParser | None,
+        wire_to_tool_name: dict[str, str],
     ) -> Iterator[ChatChunk]:
         """先记录 usage，再将原始 SDK chunk 转换为业务流包。"""
         if getattr(chunk, "usage", None):
             state.input_tokens = chunk.usage.prompt_tokens or 0
             state.output_tokens = chunk.usage.completion_tokens or 0
-        yield from self._parse_stream_chunk(chunk, state, parser)
+        yield from self._parse_stream_chunk(
+            chunk,
+            state,
+            parser,
+            wire_to_tool_name,
+        )
 
     async def _close_stream(self, response: Any) -> None:
         """尽力关闭 SDK stream，关闭失败仅记录且绝不掩盖原始异常。"""
@@ -288,13 +312,17 @@ class OpenAICompatibleClient(LLMClient):
 
     # ---- 消息格式转换 ----
 
-    def _convert_messages(self, messages: list[Message]) -> list[dict]:
+    def _convert_messages(
+        self,
+        messages: list[Message],
+        tool_name_to_wire: dict[str, str],
+    ) -> list[dict]:
         """将 dotClaw Message 转换为 OpenAI 格式"""
         result = []
         for msg in messages:
             m: dict = {"role": msg.role, "content": msg.content}
             if msg.name:
-                m["name"] = msg.name
+                m["name"] = tool_name_to_wire.get(msg.name, msg.name)
             if msg.tool_call_id:
                 m["tool_call_id"] = msg.tool_call_id
             if msg.tool_calls:
@@ -303,7 +331,7 @@ class OpenAICompatibleClient(LLMClient):
                         "id": tc.id,
                         "type": "function",
                         "function": {
-                            "name": tc.name,
+                            "name": tool_name_to_wire.get(tc.name, tc.name),
                             "arguments": tc.arguments,
                         },
                     }
@@ -319,6 +347,7 @@ class OpenAICompatibleClient(LLMClient):
         chunk,
         state: _StreamParseState,
         parser: ReasoningStreamParser | None,
+        wire_to_tool_name: dict[str, str],
     ) -> Iterator[ChatChunk]:
         """解析 OpenAI SSE chunk，按推理模式分离 reasoning/response 并累积工具调用。
 
@@ -362,12 +391,54 @@ class OpenAICompatibleClient(LLMClient):
         # 工具调用在结束包一次性写出（多个完成的工具调用一次写入，不逐条）
         if finish_detected:
             completed = [
-                ToolCall(id=p["id"], name=p["name"], arguments=p["arguments"])
+                ToolCall(
+                    id=p["id"],
+                    name=wire_to_tool_name.get(p["name"], p["name"]),
+                    arguments=p["arguments"],
+                )
                 for p in state.pending_tool_calls.values()
                 if p["name"]
             ]
             if completed:
                 yield ChatChunk(tool_calls=tuple(completed))
+
+    def _build_tool_name_maps(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """构造请求局部的规范工具名与协议工具名双向映射。"""
+        canonical_names: list[str] = [tool.name for tool in tools or ()]
+        for message in messages:
+            if message.name:
+                canonical_names.append(message.name)
+            canonical_names.extend(
+                tool_call.name for tool_call in message.tool_calls or ()
+            )
+
+        canonical_to_wire: dict[str, str] = {}
+        wire_to_canonical: dict[str, str] = {}
+        for canonical_name in canonical_names:
+            if canonical_name in canonical_to_wire:
+                continue
+            wire_name = self._to_wire_tool_name(canonical_name)
+            existing = wire_to_canonical.get(wire_name)
+            if existing is not None and existing != canonical_name:
+                raise ValueError(
+                    f"工具名映射冲突: {existing!r} 与 {canonical_name!r}"
+                )
+            canonical_to_wire[canonical_name] = wire_name
+            wire_to_canonical[wire_name] = canonical_name
+        return canonical_to_wire, wire_to_canonical
+
+    @staticmethod
+    def _to_wire_tool_name(canonical_name: str) -> str:
+        """将内部工具名转换为满足 OpenAI 函数名约束的稳定名称。"""
+        if _OPENAI_TOOL_NAME_PATTERN.fullmatch(canonical_name):
+            return canonical_name
+        readable = re.sub(r"[^a-zA-Z0-9_-]", "_", canonical_name)[:44]
+        digest = hashlib.sha256(canonical_name.encode("utf-8")).hexdigest()[:16]
+        return f"dc_{readable}_{digest}"
 
     def _extract_text_deltas(
         self,

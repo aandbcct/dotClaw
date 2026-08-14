@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -142,12 +143,12 @@ def _expand_env(value: Any) -> Any:
 
 
 def _load_project_env(project_root: Path) -> None:
-    """加载项目根目录的 .env，但不覆盖已存在的系统环境变量。
+    """加载项目根目录的 .env，并覆盖同名系统环境变量。
 
-    Provider 与配置中的 ${VAR} 共用同一进程环境；系统环境变量优先，.env 仅补齐
-    未设置的变量，便于本地开发而不改变部署侧显式配置。
+    Provider 与配置中的 ${VAR} 共用同一进程环境；项目配置优先使用仓库根目录
+    .env 的值，确保 CLI 行为不受机器级同名变量影响。
     """
-    load_dotenv(dotenv_path=project_root / ".env", override=False)
+    load_dotenv(dotenv_path=project_root / ".env", override=True)
 
 
 # ============================================================
@@ -164,7 +165,6 @@ class LLMClientConfig:
 
 @dataclass
 class LLMConfig:
-    default_model: str = "qwen-plus"
     clients: dict[str, LLMClientConfig] = field(default_factory=dict)
     fallbacks: list[str] = field(default_factory=list)
     retry_max_retries: int = 3
@@ -400,13 +400,20 @@ class ProviderRetryConfig:
     backoff_factor: float = 2.0
 
 
+class LLMDriver(StrEnum):
+    """LLM 供应商使用的通信协议。"""
+
+    OPENAI_CHAT_COMPLETIONS = "openai_chat_completions"
+
+
 @dataclass
 class ProviderConfig:
     """供应商配置"""
+    driver: LLMDriver
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     rate_limit: dict = field(default_factory=dict)
-    circuit_breaker: dict = field(default_factory=dict)  # phase: llmRouter refactoring
+    circuit_breaker: dict = field(default_factory=dict)
     retry: ProviderRetryConfig = field(default_factory=ProviderRetryConfig)
 
 
@@ -437,6 +444,7 @@ class ModelReasoningConfig:
 class ModelConfig:
     """模型配置"""
     provider: str = "qwen"
+    driver: LLMDriver | None = None
     model_id: str = "qwen-plus"
     context_window: int = 32000
     tokenizer_encoding: str = ""
@@ -461,9 +469,7 @@ class PurposeConfig:
 
 @dataclass
 class DefaultsConfig:
-    """全局默认"""
-    provider: str = "qwen"
-    model: str = "qwen-plus"
+    """跨模型共享的默认调用参数。"""
     parameters: dict = field(default_factory=dict)
     fallback_enabled: bool = True
 
@@ -528,6 +534,19 @@ def _parse_reasoning_config(raw: Any) -> ModelReasoningConfig:
     )
 
 
+def _parse_driver(raw: Any, *, path: str, required: bool) -> LLMDriver | None:
+    """解析显式 driver；缺失或未知值均报告准确配置路径。"""
+    if raw is None:
+        if required:
+            raise ValueError(f"{path} 缺少必填字段 driver")
+        return None
+    try:
+        return LLMDriver(str(raw))
+    except ValueError as exc:
+        allowed = ", ".join(driver.value for driver in LLMDriver)
+        raise ValueError(f"{path}.driver={raw!r} 未注册，允许值: {allowed}") from exc
+
+
 def load_router_config(path: str | Path | None = None) -> RouterConfig:
     """
     加载 model_router_config.yaml。
@@ -549,8 +568,6 @@ def load_router_config(path: str | Path | None = None) -> RouterConfig:
     # defaults
     defaults_raw = raw.get("defaults", {})
     defaults = DefaultsConfig(
-        provider=defaults_raw.get("provider", "qwen"),
-        model=defaults_raw.get("model", "qwen-plus"),
         parameters=defaults_raw.get("parameters", {}),
         fallback_enabled=defaults_raw.get("fallback_enabled", True),
     )
@@ -559,10 +576,17 @@ def load_router_config(path: str | Path | None = None) -> RouterConfig:
     providers = {}
     for name, cfg in raw.get("providers", {}).items():
         retry_raw = cfg.get("retry", {})
+        provider_driver = _parse_driver(
+            cfg.get("driver"), path=f"providers.{name}", required=True
+        )
+        # required=True 已保证此处一定得到具体协议，断言同时收窄静态类型。
+        assert provider_driver is not None
         providers[name] = ProviderConfig(
+            driver=provider_driver,
             api_key=cfg.get("api_key", ""),
             base_url=cfg.get("base_url", "https://api.openai.com/v1"),
             rate_limit=cfg.get("rate_limit", {}),
+            circuit_breaker=cfg.get("circuit_breaker", {}),
             retry=ProviderRetryConfig(
                 max_attempts=retry_raw.get("max_attempts", 3),
                 backoff_factor=retry_raw.get("backoff_factor", 2.0),
@@ -574,6 +598,9 @@ def load_router_config(path: str | Path | None = None) -> RouterConfig:
     for name, cfg in raw.get("models", {}).items():
         models[name] = ModelConfig(
             provider=cfg.get("provider", "qwen"),
+            driver=_parse_driver(
+                cfg.get("driver"), path=f"models.{name}", required=False
+            ),
             model_id=cfg.get("model_id", name),
             context_window=cfg.get("context_window", 32000),
             tokenizer_encoding=cfg.get("tokenizer_encoding", ""),
@@ -607,8 +634,6 @@ def _build_router_config_from_legacy(llm_config: LLMConfig) -> RouterConfig:
     从旧 config.yaml 的 llm.clients 格式自动构建 RouterConfig。
 
     规则：
-    - defaults.provider 从第一个 client 的 provider 推断
-    - defaults.model = llm_config.default_model
     - providers: 每个 client 的 provider 生成一个 ProviderConfig
     - models: 每个 client 映射为一个 ModelConfig
     - purposes.chat.priority: 按 clients 顺序排列，权重平均分配
@@ -618,13 +643,7 @@ def _build_router_config_from_legacy(llm_config: LLMConfig) -> RouterConfig:
     if not clients:
         return RouterConfig()
 
-    # 推断 provider
-    first_client = next(iter(clients.values()))
-    inferred_provider = first_client.provider if first_client.provider else "qwen"
-
     defaults = DefaultsConfig(
-        provider=inferred_provider,
-        model=llm_config.default_model,
         parameters={"temperature": 0.7, "max_tokens": 4096},
         fallback_enabled=True,
     )
@@ -637,6 +656,7 @@ def _build_router_config_from_legacy(llm_config: LLMConfig) -> RouterConfig:
         if provider_name not in seen_providers:
             seen_providers.add(provider_name)
             providers[provider_name] = ProviderConfig(
+                driver=LLMDriver.OPENAI_CHAT_COMPLETIONS,
                 api_key=cfg.api_key,
                 base_url=cfg.base_url,
                 rate_limit={"requests_per_minute": 0},
@@ -690,7 +710,6 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         clients[name] = LLMClientConfig(**cfg)
 
     llm = LLMConfig(
-        default_model=llm_raw.get("default_model", "qwen-plus"),
         clients=clients,
         fallbacks=llm_raw.get("fallbacks", []),
         retry_max_retries=llm_raw.get("retry", {}).get("max_retries", 3),
