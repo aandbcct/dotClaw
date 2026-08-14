@@ -1031,7 +1031,7 @@ chat_models
 
 #### 4.6.5 `get_identity`
 
-**职责与用途：**该只读方法为 Banner 和 `/model` 提供当前 Session 对应 Identity。它复用与提交相同的严格校验，不改变 Session。
+**职责与用途：**该只读方法为 Banner 提供当前 Session 对应 Identity。它复用与提交相同的严格校验，不改变 Session；`/model` 改用 `chat_models` 与 `switch_model()` 完成模型目录读取和绑定切换。
 
 #### 4.6.6 `chat_models` 与 `switch_model`
 
@@ -1161,7 +1161,10 @@ Runtime control:
     /cancel /retry /abandon
 
 Diagnostics:
-    /tools /mcp /skills /model
+    /tools /mcp /skills
+
+Session model:
+    /model
 
 Optional service:
     /dream
@@ -1216,7 +1219,7 @@ project root workspace
 
 Banner 不参与 Runtime Policy 冻结。
 
-#### 4.7.8 诊断命令
+#### 4.7.8 诊断与 Session 状态命令
 
 **职责与用途：**`/tools`、`/mcp` 和 `/skills` 读取 Host 暴露的诊断资源；`/model` 通过应用服务修改当前 Session 的持久化模型绑定。
 
@@ -1661,19 +1664,22 @@ flowchart LR
     CLI --> MCP["host.mcp_provider → /mcp"]
     CLI --> Skills["host.skill_registry → /skills"]
     CLI --> Dream["host.memory_dream → /dream"]
-    CLI --> Model["service.get_identity → /model"]
+    CLI --> ModelSelect["/model → channel.select_model"]
+    ModelSelect --> ModelSwitch["service.switch_model → Session.model"]
 
     Tools -.只读展示.-> Registry["Tool Registry"]
     MCP -.只读展示.-> States["MCP States"]
     Skills -.只读展示.-> Metas["SkillMeta"]
+    ModelSwitch --> Persist["SessionManager.save<br/>持久化当前 Session 绑定"]
     Dream --> Direct["DeepDream.run<br/>直接可选服务调用"]
 ```
 
 **结论：**
 
-- `/tools`、`/mcp`、`/skills` 和 `/model` 是只读诊断。
+- `/tools`、`/mcp` 和 `/skills` 是只读诊断。
+- `/model` 是 Session 级状态命令：展示 chat active 模型，并通过应用服务校验、持久化新绑定；仅影响后续新 Run。
 - `/dream` 是应用专用操作，会直接调用 Memory 服务，不创建 AgentRun。
-- 诊断属性不应被普通消息路径用于执行 Tool。
+- 只读诊断属性不应被普通消息路径用于执行 Tool。
 - 未来增加 Web/API 入口时，应决定这些专用操作是否也需要统一应用服务和权限边界。
 
 ---

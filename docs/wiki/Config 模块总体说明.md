@@ -412,7 +412,7 @@ flowchart TB
 
 | 域 | 当前仓库显式值 | 当前实际影响 |
 |---|---|---|
-| LLM default | `qwen3.7-max` | Identity 模型回退 |
+| LLM default | 无独立默认字段 | 新 Session 使用 `purposes.chat.priority` 中最高优先级的 active 模型 |
 | Router providers | qwen/deepseek/gemini/openai | Provider Client 配置 |
 | Router models | 5 个，gemini disabled | Purpose 路由过滤 |
 | Router purposes | chat/embedding/context_compaction | LLMProxy 选路 |
@@ -1706,7 +1706,7 @@ ApplicationHost.shutdown()
 | 增加 Config Reload | 新 ConfigService | Host、Router、Registry | 已有 Run Snapshot 不变 |
 | 增加 `/config status` | CLI + ConfigSnapshot | Secret 脱敏 | 展示实际生效值与来源 |
 | 排查配置不生效 | Loader→Builder→Consumer | Wiki 字段矩阵 | 分清解析、传递、消费 |
-| 排查模型不生效 | Router 文件存在性→Purpose→Identity | Router、CLI | 检查完整模型名 |
+| 排查模型不生效 | Router 文件存在性→Purpose→Session.model→Run Policy | Router、CLI | 检查完整模型名与 Session 绑定 |
 | 排查 Tool 不生效 | Config→Registry 顺序→Policy | MCP/Builtin | 注意 disabled_tools 时机 |
 | 排查路径错误 | project_root→消费者解析 | CWD、安装布局 | 输出规范化路径 |
 | 排查环境变量 | `.env`→os.environ→placeholder | warning、类型 | 不回显 Secret |

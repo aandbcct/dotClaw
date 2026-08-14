@@ -49,7 +49,7 @@
 - 新增 `session_interaction.py`（名称以实现时项目风格为准）中的 `SessionInteractionService`。
 - `SessionManager.create()` 的 `agent_id` 改为必填；构造与反序列化校验空值/未知值策略。
 - Host 负责显式优先、默认兜底的 Identity 选择并在创建时落盘。
-- 删除运行时 `Agent` 门面；`AgentIdentity` 保留为身份、模型与能力范围的声明边界，不持有基础设施或执行状态。
+- 删除运行时 `Agent` 门面；`AgentIdentity` 保留为身份与能力范围的声明边界，不持有基础设施或执行状态。模型由 `Session.model` 独立绑定。
 - SessionInteractionService 校验 Session Identity 后，在 Coordinator 的 Session 租约内冻结 `RunRequest`，避免调用方绕过 Session 权威。
 - `main.py` 的 Session 创建、切换和正常消息路径改为调用 SessionInteractionService。
 

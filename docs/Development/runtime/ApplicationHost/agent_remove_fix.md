@@ -7,7 +7,7 @@
 已确认的设计结论：
 
 - `Session` 是用户可见的会话边界，`session.agent_id` 是该会话绑定 Identity 的唯一权威。
-- `AgentIdentity` 是身份、模型、系统提示、可用工具、Context Slot 与策略收窄的声明边界；它不是可执行对象，必须保留。
+- `AgentIdentity` 是身份、系统提示、可用工具、Context Slot 与策略收窄的声明边界；它不是可执行对象，必须保留。模型由 `Session.model` 独立绑定。
 - `SessionInteractionService` 是 Session 用例入口，负责 Session/Identity 路由、创建、删除和对外控制请求；它不持有 LLM、Tool、MCP 或 Runtime 执行状态。
 - `SessionRunCoordinator` 是 Runtime 的并发与恢复协调器，负责同 Session 串行、审批恢复/重试串行化和取消死锁规避；它不读取 `SessionManager` 或 `AgentRegistry`。
 - `RuntimeEngine` 继续只消费已冻结 `RunRequest` 和 Port；不直接依赖 Session、Identity Registry 或 Channel。
@@ -48,7 +48,7 @@ Channel / CLI / Web
 - 空或未知的 `session.agent_id` 明确失败，不能回退到默认 Identity；
 - CLI 的普通消息、审批恢复、取消、重试与放弃只经 `SessionInteractionService`；
 - 同一 Session 的普通提交、审批恢复与重试仍由 `SessionRunCoordinator` 串行；取消仍不等待该锁；
-- `AgentIdentity` 的模型展示、策略冻结、Context Slot 覆盖和工具收窄行为不变。
+- `AgentIdentity` 的策略冻结、Context Slot 覆盖和工具收窄行为不变；模型展示改读取 `Session.model`。
 
 已有 `tests/runtime_v2/test_phase1_identity_routing.py`、`test_entry_migration_contract.py`、`test_cli_submission_contract.py` 需从“Agent 门面存在”改为上述外部行为契约；不得保留仅为测试旧门面而存在的兼容层。
 
@@ -59,14 +59,14 @@ Channel / CLI / Web
 - 新增私有请求工厂：在已经验证 Identity 后，以 `create_run_request(session, identity.agent_id, user_message)` 创建 `RunRequest`；将其传给 `coordinator.submit_prepared(session.id, request_factory, output_port)`。
   - `RunRequest` 必须在 Coordinator 取得该 Session 租约后创建，保持历史压缩、Conversation 快照与 Run 创建的原有并发语义。
 - `submit()`、`resolve_approval()`、`retry_interrupted()`、`abandon_interrupted()` 统一返回结构化 `RunResult`，不在 Service 内部映射为 CLI 文本。这样审批循环可从 `RunResult.approval_id` 继续恢复，也不会把 Channel 展示语义固化为应用服务 API。
-- 新增或保留 `get_identity(session) -> AgentIdentity` 的只读校验入口，供 CLI Banner 与 `/model` 使用；它不创建运行时 Agent 对象。
+- 新增或保留 `get_identity(session) -> AgentIdentity` 的只读校验入口，供 CLI Banner 使用；它不创建运行时 Agent 对象。后续模型切换增量由 `chat_models` 和 `switch_model()` 为 `/model` 提供独立入口。
 - Service 仍只把结构化控制请求交给 Coordinator，不自行保存 `last_run_result` 或 Channel 状态。
 - Session 删除协调逻辑不变：拒绝活动 Run、清理审批索引、删除完整目录、释放 SESSION/RUN 缓存；不释放共享 AGENT 缓存。
 
 ### 3.3 修改 CLI 与公开入口
 
 - `main.py` 删除 `from dotclaw.agent import Agent`。
-- Banner 直接由当前 Session 的 `AgentIdentity` 取得 `agent_name` 与解析后的模型；CLI 使用 `service.get_identity(current_session)`，避免绕过 Session-Identity 校验。
+- Banner 由当前 Session 的 `AgentIdentity` 取得 `agent_name`，由 `Session.model` 取得模型；CLI 使用 `service.get_identity(current_session)`，避免绕过 Session-Identity 校验。
 - 普通消息直接调用 `service.submit(current_session, user_input, text_stream_port)`；不再预先构造 Agent。
 - 审批循环依据结构化 `RunResult.approval_id` 调用 `service.resolve_approval(approval_id, approved, text_stream_port)`；不得依赖已删除的 `Agent.last_run_result`。
 - CLI 新增本地 `RunResult → Markdown/错误/流式收尾` 渲染函数：根据 `final_message`、`error`、`has_streamed_text` 和 `approval_id` 展示结果。其他 Channel 可按自身协议渲染同一领域结果。
