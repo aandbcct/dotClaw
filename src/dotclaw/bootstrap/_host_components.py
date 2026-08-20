@@ -236,6 +236,7 @@ def _build_tools(
         capability_broker=capability_broker,
         skill_parser=skill_parser,
         approval_commands=set(config.tools.approval_commands),
+        unattended_allow_profiles=set(config.tools.unattended_allow_profiles),
         agent_policy_resolver=_resolve_agent_policy_rules,
         http_client=http_client,
     )

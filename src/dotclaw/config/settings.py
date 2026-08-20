@@ -229,6 +229,9 @@ class ToolsConfig:
     # 危险命令审批列表（默认使用阶段二迁移后的新规范名）
     approval_commands: list[str] = field(default_factory=lambda: ["builtin.process.execute"])
 
+    # 无人值守入口可显式预授权的策略档案；仅在最终策略为 ALLOW 时跳过声明式审批。
+    unattended_allow_profiles: list[str] = field(default_factory=list)
+
     # 单工具禁用列表（向后兼容旧 config.exec.enabled=false）
     disabled_tools: list[str] = field(default_factory=list)
 
@@ -739,6 +742,9 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         mcp_enabled=tools_raw.get("mcp_enabled", True),
         skill_enabled=tools_raw.get("skill_enabled", True),
         approval_commands=approval_commands,
+        unattended_allow_profiles=[
+            str(item) for item in tools_raw.get("unattended_allow_profiles", [])
+        ],
         disabled_tools=disabled_tools,
         exec_timeout=tools_raw.get("exec_timeout", 60.0),
         # Tool v1 阶段一：固定网络服务配置（取代旧 web_search_enabled）。

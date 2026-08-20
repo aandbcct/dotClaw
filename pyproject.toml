@@ -36,6 +36,7 @@ trace = [
 
 [project.scripts]
 dotclaw = "dotclaw.main:main"
+dotclaw-benchmark = "dotclaw.benchmark_runner:main"
 
 [build-system]
 requires = ["hatchling"]

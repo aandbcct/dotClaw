@@ -78,6 +78,7 @@ class OpenAIChatCompletionsClient(LLMClient):
         api_key: str = "",
         base_url: str = "https://api.openai.com/v1",
         model: str = "",
+        parameters: dict[str, Any] | None = None,
     ) -> None:
         # Policy 为不可变策略，由 ModelRouter 从 ModelReasoningConfig 转换注入；
         # Client 仅保存策略，不保存任何请求级流状态（请求级状态在 chat() 内局部创建）。
@@ -85,6 +86,11 @@ class OpenAIChatCompletionsClient(LLMClient):
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
+        # 仅接受驱动明确支持的生成参数，避免配置覆盖协议必需字段。
+        supported = {"temperature", "max_tokens"}
+        self._parameters = {
+            key: value for key, value in (parameters or {}).items() if key in supported
+        }
 
     def _get_api_key(self) -> str:
         """返回当前供应商实例的 API Key。"""
@@ -175,6 +181,7 @@ class OpenAIChatCompletionsClient(LLMClient):
             # OpenAI SDK 将该请求选项下传至 httpx，四类 HTTP timeout 使用同一调用预算。
             "timeout": httpx.Timeout(request_timeout),
         }
+        params.update(self._parameters)
         if stream:
             params["stream_options"] = {"include_usage": True}
         if openai_tools:

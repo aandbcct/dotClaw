@@ -1,0 +1,52 @@
+{
+  "models": {
+    "dotclaw-luna": {
+      "adapter": "generic_cli",
+      "command": "<DOTCLAW_REPO>/.venv/Scripts/python.exe",
+      "session_prefix": "harnessbench-dotclaw-luna",
+      "model": "gpt-5.6-luna",
+      "args": [
+        "-m", "dotclaw.benchmark_runner",
+        "--workspace", "{workspace}",
+        "--sandbox", "{sandbox}",
+        "--prompt-file", "{prompt_file}",
+        "--session-id", "{session_id}",
+        "--task-id", "{task_id}",
+        "--model", "gpt-5.6-luna"
+      ]
+    },
+    "nanobot-luna": {
+      "adapter": "nanobot",
+      "command": "<NANOBOT_VENV>/Scripts/nanobot.exe",
+      "user_config": "<HARNESS_WORK_ROOT>/nanobot-luna.json",
+      "session_prefix": "harnessbench-nanobot-luna",
+      "model": "gpt-5.6-luna",
+      "no_markdown": true,
+      "logs": false
+    },
+    "dotclaw-qwen37plus": {
+      "adapter": "generic_cli",
+      "command": "<DOTCLAW_REPO>/.venv/Scripts/python.exe",
+      "session_prefix": "harnessbench-dotclaw",
+      "model": "qwen3.7-plus-2026-05-26",
+      "args": [
+        "-m", "dotclaw.benchmark_runner",
+        "--workspace", "{workspace}",
+        "--sandbox", "{sandbox}",
+        "--prompt-file", "{prompt_file}",
+        "--session-id", "{session_id}",
+        "--task-id", "{task_id}",
+        "--model", "qwen3.7-plus"
+      ]
+    },
+    "nanobot-qwen37plus": {
+      "adapter": "nanobot",
+      "command": "<NANOBOT_VENV>/Scripts/nanobot.exe",
+      "user_config": "<HARNESS_WORK_ROOT>/nanobot.json",
+      "session_prefix": "harnessbench-nanobot",
+      "model": "qwen3.7-plus-2026-05-26",
+      "no_markdown": true,
+      "logs": false
+    }
+  }
+}

@@ -306,6 +306,7 @@ class ModelRouter:
             base_url=provider_cfg.base_url,
             model=model_cfg.model_id,
             policy=ReasoningPolicy.from_config(model_cfg.reasoning),
+            parameters=dict(self._config.defaults.parameters),
         )
 
     @staticmethod

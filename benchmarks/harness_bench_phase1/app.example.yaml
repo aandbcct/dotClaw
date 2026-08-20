@@ -1,0 +1,8 @@
+{
+  "data_dir": "<HARNESS_WORK_ROOT>/data",
+  "tasks_dir": "<HARNESS_BENCH_REPO>/tasks",
+  "default_timeout_sec": 900,
+  "default_rounds": 1,
+  "results_dir": "<HARNESS_WORK_ROOT>/results",
+  "work_root": "<HARNESS_WORK_ROOT>/sandbox"
+}

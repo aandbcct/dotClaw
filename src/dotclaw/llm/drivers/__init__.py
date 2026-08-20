@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from dotclaw.config.settings import LLMDriver
 
@@ -31,6 +32,7 @@ def create_driver_client(
     base_url: str,
     model: str,
     policy: ReasoningPolicy,
+    parameters: dict[str, Any] | None = None,
 ) -> LLMClient:
     """按显式协议名称创建客户端，未知协议不得回退。"""
     factory = _DRIVER_FACTORIES.get(driver)
@@ -41,6 +43,7 @@ def create_driver_client(
         base_url=base_url,
         model=model,
         policy=policy,
+        parameters=parameters,
     )
 
 
