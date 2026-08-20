@@ -11,7 +11,7 @@ allowed_tools:
 
 max_loop_steps: 10
 
-system_prompt_template: |
+agent_prompt: |
   你是 {agent_name}，专注于文本内容创作。
   你可以撰写文章、编辑文本、生成创意内容。
   内容应清晰、有条理、符合用户意图。

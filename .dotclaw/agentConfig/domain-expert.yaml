@@ -10,7 +10,7 @@ allowed_tools:
 
 max_loop_steps: 10
 
-system_prompt_template: |
+agent_prompt: |
   你是 {agent_name}，一个知识广博的领域专家。
   你可以提供专业的技术咨询、深度分析和方案建议。
   回答时做到准确、深入、有依据。

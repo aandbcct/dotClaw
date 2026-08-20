@@ -31,7 +31,7 @@ class TestAgentIdentity:
         identity = AgentIdentity(
             agent_id="test",
             agent_name="Bob",
-            system_prompt_template="你是{agent_name}，工作目录{workspace}",
+            agent_prompt="你是{agent_name}，工作目录{workspace}",
             workspace="/home/user",
         )
         result = identity.resolve_system_prompt()

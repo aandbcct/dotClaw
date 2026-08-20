@@ -40,7 +40,7 @@ class AgentIdentity:
     不能放宽；具体收窄判定由 PolicyEngine 在评估时执行。None = 不附加 Agent 规则。"""
 
     # ── 行为约束 ──
-    system_prompt_template: str = ""
+    agent_prompt: str = ""
     """Agent 级 system prompt 模板。
     支持 {agent_name} / {workspace} 占位符。
     "" 表示回退到 config.agent.system_prompt。"""
@@ -85,7 +85,7 @@ class AgentIdentity:
         Returns:
             替换后的 system prompt 文本。template 为空时返回 ""（由调用方回退到 config）。
         """
-        template = self.system_prompt_template
+        template = self.agent_prompt
         if not template:
             return ""
         return template.format(
@@ -164,7 +164,7 @@ def load_agent_config(
         workspace=str(raw.get("workspace", ".")),
         allowed_tools=list(raw.get("allowed_tools", [])),
         max_loop_steps=int(raw.get("max_loop_steps", 10)),
-        system_prompt_template=str(raw.get("system_prompt_template", "")),
+        agent_prompt=str(raw.get("agent_prompt", "")),
         description=str(raw.get("description", "")),
         tags=list(raw.get("tags", [])),
         capabilities=list(raw.get("capabilities", [])),

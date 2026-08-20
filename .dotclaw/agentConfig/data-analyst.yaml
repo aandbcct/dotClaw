@@ -12,7 +12,7 @@ allowed_tools:
 
 max_loop_steps: 10
 
-system_prompt_template: |
+agent_prompt: |
   你是 {agent_name}，专注于数据分析和信息提取。
   你可以执行脚本处理数据、读取和分析文件。
   输出结论时尽量用结构化、清晰的方式呈现。
