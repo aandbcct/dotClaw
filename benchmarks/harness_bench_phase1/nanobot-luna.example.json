@@ -12,7 +12,7 @@
   "providers": {
     "jojocode": {
       "apiKey": "${JOJOCODE_API_KEY}",
-      "apiBase": "https://max2.jojocode.com/v1"
+      "apiBase": "https://api2.jojocode.com/v1"
     }
   },
   "tools": {

@@ -32,7 +32,7 @@ if (-not $Model) {
 }
 if (-not $Endpoint) {
     $Endpoint = if ($isLuna) {
-        "https://max2.jojocode.com/v1"
+        "https://api2.jojocode.com/v1"
     } else {
         "https://dashscope.aliyuncs.com/compatible-mode/v1"
     }
