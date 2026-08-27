@@ -15,25 +15,29 @@ from dotclaw.tools.base import ToolContext
 from dotclaw.tools.decorator import ToolPolicy, tool
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+WORKSPACE_PATH_DESCRIPTION = (
+    "以当前 workspace 为根的路径；优先使用相对路径，例如 out/result.json。"
+    "也接受工作区内绝对路径；不要重复拼接 workspace 根目录"
+)
 
 
 class ReadTextArgs(BaseModel):
     """读取文本文件的参数。"""
 
-    path: str = Field(description="文件路径（绝对或相对路径）")
+    path: str = Field(description=WORKSPACE_PATH_DESCRIPTION)
 
 
 class WriteTextArgs(BaseModel):
     """写入文本文件的参数。"""
 
-    path: str = Field(description="文件路径")
+    path: str = Field(description=WORKSPACE_PATH_DESCRIPTION)
     content: str = Field(description="要写入的内容")
 
 
 class ListDirectoryArgs(BaseModel):
     """列出目录内容的参数。"""
 
-    path: str = Field(default=".", description="目录路径（默认当前目录）")
+    path: str = Field(default=".", description=WORKSPACE_PATH_DESCRIPTION)
 
 
 @tool(

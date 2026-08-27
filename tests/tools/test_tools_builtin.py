@@ -79,12 +79,16 @@ def test_network_tools_static_declaration(handlers) -> None:
 def test_schemas_required_and_defaults(handlers) -> None:
     rt = handlers["builtin.files.read_text"].definition()
     assert rt.parameters["required"] == ["path"]
+    assert "优先使用相对路径" in rt.parameters["properties"]["path"]["description"]
+    assert "out/result.json" in rt.parameters["properties"]["path"]["description"]
 
     wt = handlers["builtin.files.write_text"].definition()
     assert set(wt.parameters["required"]) == {"path", "content"}
+    assert "不要重复拼接 workspace" in wt.parameters["properties"]["path"]["description"]
 
     ld = handlers["builtin.files.list_directory"].definition()
     assert ld.parameters["properties"]["path"]["default"] == "."
+    assert "优先使用相对路径" in ld.parameters["properties"]["path"]["description"]
 
     ex = handlers["builtin.process.execute"].definition()
     assert ex.parameters["required"] == ["command"]
