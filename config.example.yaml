@@ -38,6 +38,8 @@ tools:
   skill_enabled: true
   approval_commands:
     - builtin.process.execute
+  # 无人值守入口可显式预授权的策略档案；普通交互配置保持为空。
+  unattended_allow_profiles: []
   disabled_tools: []
   exec_timeout: 60
   network:

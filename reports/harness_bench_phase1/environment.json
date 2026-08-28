@@ -1,0 +1,57 @@
+{
+  "harness_bench_commit": "1025086a446653702b80cfb48babbeec35db6b2c",
+  "dotclaw_commit": "1a27ceef6e2739339f89660be23af21c771c9b28",
+  "dotclaw_worktree_dirty_during_run": true,
+  "nanobot_version": "0.3.0",
+  "python_version": "3.13.5",
+  "os": "Windows-11-10.0.26200-SP0",
+  "model": "gpt-5.6-luna",
+  "provider": "jojocode",
+  "endpoint_identifier": "https://max2.jojocode.com/v1",
+  "model_parameters": {
+    "temperature": 0.7,
+    "max_tokens": 4096
+  },
+  "timeout": "official per-task task.yaml timeout_sec",
+  "budget": {
+    "dotclaw_max_tool_iterations": 15
+  },
+  "report_generated_at": "2026-08-20T08:45:23.324457+00:00",
+  "run_timestamp": {
+    "start": "2026-08-19T18:49:00+08:00",
+    "end": "2026-08-20T16:20:00+08:00"
+  },
+  "dotclaw_diff_sha256": "7e1c8c063dcc0cea1be155eb457b888ffa96047fc790d5ae37554a2b4a0959bc",
+  "harness_bench_worktree_patch_sha256": "9571195d558ff5c0ba382521212b3663cd0427c00d1e4939796e99866eecb8de",
+  "task_list": [
+    "001-file",
+    "002-exec",
+    "003-browser",
+    "006-access-bilibili",
+    "008-image-recognize",
+    "013-image-edit",
+    "020-archive-checksum",
+    "021-batch-rename-transform",
+    "022-local-rest-api-summary",
+    "023-web-form-extraction",
+    "077-archive-manifest-defense",
+    "078-local-api-cursor-retry-ledger",
+    "079-smallfile-batch-reject-ledger",
+    "080-schema-roundtrip-conversion",
+    "081-local-html-dom-form-extract",
+    "007-session-memory",
+    "014-task-decomposition",
+    "057-interruption-resume",
+    "058-multiday-project-state",
+    "059-event-update-replan",
+    "060-task-cancellation-cleanup",
+    "061-periodic-status-rollup",
+    "103-policy-update-replan-diff",
+    "104-async-ops-window-rollup",
+    "105-partial-batch-resume-ledger",
+    "106-release-approval-gate-plan"
+  ],
+  "sample_count_per_harness": 26,
+  "attempts_per_task": 1,
+  "secrets_persisted": false
+}

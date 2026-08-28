@@ -1,0 +1,314 @@
+diff --git a/src/harnessbench/adapters/generic_cli.py b/src/harnessbench/adapters/generic_cli.py
+index ef4cabd..bcfe7ae 100644
+--- a/src/harnessbench/adapters/generic_cli.py
++++ b/src/harnessbench/adapters/generic_cli.py
+@@ -39,15 +39,28 @@ class GenericCliAdapter(BaseAdapter):
+             env["HARNESSBENCH_LLM_PROXY_URL"] = str(ctx.env["HARNESSBENCH_LLM_PROXY_URL"])
+         if ctx.env.get("HARNESSBENCH_LLM_PROXY_ROUTES"):
+             env["HARNESSBENCH_LLM_PROXY_ROUTES"] = str(ctx.env["HARNESSBENCH_LLM_PROXY_ROUTES"])
+-        completed = subprocess.run(
+-            cmd,
+-            cwd=str(ctx.workspace),
+-            text=True,
+-            capture_output=True,
+-            timeout=ctx.timeout_sec,
+-            env=env,
+-            check=False,
+-        )
++        try:
++            completed = subprocess.run(
++                cmd,
++                cwd=str(ctx.workspace),
++                text=True,
++                encoding="utf-8",
++                errors="replace",
++                capture_output=True,
++                timeout=ctx.timeout_sec,
++                env=env,
++                check=False,
++            )
++        except subprocess.TimeoutExpired as exc:
++            stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
++            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
++            return AdapterRunResult(
++                ok=False,
++                command=cmd,
++                stdout=stdout,
++                stderr=f"{stderr}\ncommand timed out after {ctx.timeout_sec} seconds".strip(),
++                metadata={"returncode": None, "timeout": True},
++            )
+         return AdapterRunResult(
+             ok=completed.returncode == 0,
+             command=cmd,
+diff --git a/src/harnessbench/adapters/nanobot.py b/src/harnessbench/adapters/nanobot.py
+index 41f84ed..9c64a10 100644
+--- a/src/harnessbench/adapters/nanobot.py
++++ b/src/harnessbench/adapters/nanobot.py
+@@ -106,15 +106,33 @@ class NanoBotAdapter(BaseAdapter):
+         env["NANOBOT_HOME"] = str(nanobot_home)
+         env["NANOBOT_WORKSPACE"] = str(nanobot_workspace)
+         env["WORKSPACE"] = str(ctx.workspace)
+-        completed = subprocess.run(
+-            cmd,
+-            cwd=str(ctx.sandbox),
+-            text=True,
+-            capture_output=True,
+-            timeout=ctx.timeout_sec,
+-            env=env,
+-            check=False,
+-        )
++        try:
++            completed = subprocess.run(
++                cmd,
++                cwd=str(ctx.sandbox),
++                text=True,
++                encoding="utf-8",
++                errors="replace",
++                capture_output=True,
++                timeout=ctx.timeout_sec,
++                env=env,
++                check=False,
++            )
++        except subprocess.TimeoutExpired as exc:
++            stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
++            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
++            return AdapterRunResult(
++                ok=False,
++                command=cmd,
++                stdout=stdout,
++                stderr=f"{stderr}\ncommand timed out after {ctx.timeout_sec} seconds".strip(),
++                metadata={
++                    "returncode": None,
++                    "timeout": True,
++                    "nanobot_config_path": str(merged_cfg),
++                    "workspace": str(ctx.workspace),
++                },
++            )
+         return AdapterRunResult(
+             ok=completed.returncode == 0,
+             command=cmd,
+diff --git a/src/harnessbench/grading/rubric_llm.py b/src/harnessbench/grading/rubric_llm.py
+index 73f500e..77aca99 100644
+--- a/src/harnessbench/grading/rubric_llm.py
++++ b/src/harnessbench/grading/rubric_llm.py
+@@ -5,6 +5,7 @@ import base64
+ import json
+ import os
+ import re
++import time
+ import urllib.error
+ import urllib.request
+ from pathlib import Path
+@@ -265,6 +266,11 @@ def run_llm_rubric(
+         if vm:
+             mdl = vm
+ 
++    stream_response = os.environ.get("HARNESSBENCH_RUBRIC_STREAM", "").strip().lower() in {
++        "1",
++        "true",
++        "yes",
++    }
+     payload = {
+         "model": mdl,
+         "messages": [
+@@ -272,30 +278,56 @@ def run_llm_rubric(
+             {"role": "user", "content": user},
+         ],
+         "temperature": 0.2,
++        "max_tokens": int(os.environ.get("HARNESSBENCH_RUBRIC_MAX_TOKENS", "4096")),
+     }
++    if stream_response:
++        payload["stream"] = True
++        payload["stream_options"] = {"include_usage": True}
+     body = json.dumps(payload).encode("utf-8")
+-    req = urllib.request.Request(
+-        f"{base}/chat/completions",
+-        data=body,
+-        headers={
+-            "Content-Type": "application/json",
+-            "Authorization": f"Bearer {key}",
+-        },
+-        method="POST",
+-    )
+     effective_timeout = timeout_sec
+     if isinstance(user, list):
+         effective_timeout = max(
+             timeout_sec,
+             int(os.environ.get("HARNESSBENCH_RUBRIC_VISION_TIMEOUT_SEC", "300")),
+         )
+-    try:
+-        with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
+-            data = json.loads(resp.read().decode("utf-8"))
+-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
++    data: dict[str, Any] | None = None
++    last_error: Exception | None = None
++    retryable_statuses = {408, 429, 500, 502, 503, 504}
++    # 评分模型与被测 Agent 一样可能遇到瞬时上游故障；只重试通用瞬时错误。
++    for attempt in range(3):
++        req = urllib.request.Request(
++            f"{base}/chat/completions",
++            data=body,
++            headers={
++                "Content-Type": "application/json",
++                "Authorization": f"Bearer {key}",
++            },
++            method="POST",
++        )
++        try:
++            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
++                response_text = resp.read().decode("utf-8")
++                parsed_response = (
++                    _aggregate_sse_chat_response(response_text)
++                    if stream_response
++                    else json.loads(response_text)
++                )
++                if isinstance(parsed_response, dict):
++                    data = parsed_response
++                    break
++                last_error = ValueError("unexpected non-object API response")
++        except urllib.error.HTTPError as error:
++            last_error = error
++            if error.code not in retryable_statuses:
++                break
++        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as error:
++            last_error = error
++        if attempt < 2:
++            time.sleep(2**attempt)
++    if data is None:
+         return {
+             "skipped": True,
+-            "reason": str(e),
++            "reason": str(last_error or "rubric request failed"),
+             "scores": {},
+             "total": None,
+             "notes": "",
+@@ -355,3 +387,32 @@ def run_llm_rubric(
+     if isinstance(qv, (int, float)):
+         out["quality"] = max(0.0, min(1.0, float(qv)))
+     return out
++
++
++def _aggregate_sse_chat_response(text: str) -> dict[str, Any]:
++    """把流式 Chat Completions 聚合为 rubric 既有的非流式响应形状。"""
++    content_parts: list[str] = []
++    model = ""
++    for line in text.splitlines():
++        if not line.startswith("data:"):
++            continue
++        raw = line.removeprefix("data:").strip()
++        if not raw or raw == "[DONE]":
++            continue
++        item = json.loads(raw)
++        if isinstance(item.get("error"), dict):
++            raise ValueError(str(item["error"].get("message") or "stream error"))
++        model = str(item.get("model") or model)
++        choices = item.get("choices") or []
++        if not choices:
++            continue
++        delta = choices[0].get("delta") or {}
++        content = delta.get("content")
++        if isinstance(content, str):
++            content_parts.append(content)
++    if not content_parts:
++        raise ValueError("stream response contained no rubric content")
++    return {
++        "model": model,
++        "choices": [{"message": {"content": "".join(content_parts)}}],
++    }
+diff --git a/src/harnessbench/runner.py b/src/harnessbench/runner.py
+index b091737..ccb2c3d 100644
+--- a/src/harnessbench/runner.py
++++ b/src/harnessbench/runner.py
+@@ -89,8 +89,11 @@ def _last_response_model_from_proxy_log(log_file: Path) -> str | None:
+ def _cli_model_from_adapter_command(command: Any) -> str | None:
+     if not isinstance(command, list):
+         return None
+-    for i, arg in enumerate(command):
+-        if str(arg) in ("-m", "--model") and i + 1 < len(command):
++    # Generic CLI 常用 Python 的 -m 启动模块，应优先读取显式 --model。
++    for option in ("--model", "-m"):
++        for i, arg in enumerate(command):
++            if str(arg) != option or i + 1 >= len(command):
++                continue
+             m = str(command[i + 1]).strip()
+             return m or None
+     return None
+diff --git a/src/harnessbench/usage_proxy.py b/src/harnessbench/usage_proxy.py
+index 75a31e3..628fb13 100644
+--- a/src/harnessbench/usage_proxy.py
++++ b/src/harnessbench/usage_proxy.py
+@@ -219,7 +219,9 @@ class _UsageProxyHandler(BaseHTTPRequestHandler):
+             response_body = exc.read()
+             response_headers = list(exc.headers.items())
+         except URLError as exc:
+-            self.send_error(502, f"proxy upstream error: {exc.reason}")
++            # BaseHTTPRequestHandler 的状态行只能使用 Latin-1，先转义非 ASCII 异常文本。
++            safe_reason = str(exc.reason).encode("ascii", "backslashreplace").decode("ascii")
++            self.send_error(502, f"proxy upstream error: {safe_reason}")
+             return
+ 
+         try:
+@@ -251,6 +253,12 @@ class _UsageProxyHandler(BaseHTTPRequestHandler):
+         content_type = next((value for key, value in response_headers if key.lower() == "content-type"), "")
+         if content_type:
+             log_entry["content_type"] = content_type
++        # 原始证据只保留请求结构，认证头必须在落盘前脱敏。
++        sensitive_headers = {"authorization", "proxy-authorization", "x-api-key", "api-key"}
++        safe_request_headers = {
++            key: "[REDACTED]" if key.lower() in sensitive_headers else value
++            for key, value in self.headers.items()
++        }
+         raw_record = {
+             "task_id": self.server.config.task_id,
+             "session_id": self.server.config.session_id,
+@@ -261,7 +269,7 @@ class _UsageProxyHandler(BaseHTTPRequestHandler):
+             "path": remainder,
+             "method": self.command,
+             "status": status,
+-            "request_headers": dict(self.headers.items()),
++            "request_headers": safe_request_headers,
+             "request_body": body.decode("utf-8", errors="replace"),
+             "response_headers": dict(response_headers),
+             "response_text": decoded_text,
+diff --git a/tasks/003-browser/hooks.py b/tasks/003-browser/hooks.py
+index e8160ce..cd11f6b 100644
+--- a/tasks/003-browser/hooks.py
++++ b/tasks/003-browser/hooks.py
+@@ -6,6 +6,7 @@ import re
+ import shlex
+ import shutil
+ import subprocess
++import sys
+ import time
+ from pathlib import Path
+ from typing import Any
+@@ -69,7 +70,7 @@ def prepare_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
+     port = 31000 + random.randint(0, 2000)
+     www = workspace / "www"
+     proc = subprocess.Popen(
+-        ["python3", "-m", "http.server", str(port), "--directory", str(www)],
++        [sys.executable, "-m", "http.server", str(port), "--directory", str(www)],
+         stdout=subprocess.DEVNULL,
+         stderr=subprocess.DEVNULL,
+     )
+diff --git a/tasks/006-access-bilibili/hooks.py b/tasks/006-access-bilibili/hooks.py
+index 32d4ac5..3c840f7 100644
+--- a/tasks/006-access-bilibili/hooks.py
++++ b/tasks/006-access-bilibili/hooks.py
+@@ -6,6 +6,7 @@ import re
+ import shlex
+ import shutil
+ import subprocess
++import sys
+ import time
+ from pathlib import Path
+ from typing import Any
+@@ -69,7 +70,7 @@ def prepare_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
+     port = 32000 + random.randint(0, 2000)
+     www = workspace / "www"
+     proc = subprocess.Popen(
+-        ["python3", "-m", "http.server", str(port), "--directory", str(www)],
++        [sys.executable, "-m", "http.server", str(port), "--directory", str(www)],
+         stdout=subprocess.DEVNULL,
+         stderr=subprocess.DEVNULL,
+     )

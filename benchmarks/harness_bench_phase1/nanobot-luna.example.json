@@ -1,0 +1,22 @@
+{
+  "agents": {
+    "defaults": {
+      "model": "gpt-5.6-luna",
+      "provider": "jojocode",
+      "maxTokens": 4096,
+      "temperature": 0.7,
+      "maxToolIterations": 15,
+      "fallbackModels": []
+    }
+  },
+  "providers": {
+    "jojocode": {
+      "apiKey": "${JOJOCODE_API_KEY}",
+      "apiBase": "https://api2.jojocode.com/v1"
+    }
+  },
+  "tools": {
+    "restrictToWorkspace": false,
+    "mcpServers": {}
+  }
+}

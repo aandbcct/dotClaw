@@ -207,3 +207,29 @@ async def test_workspace_escape_blocked_by_policy():
         res = await _executor(scope).execute("e.read", {"path": "../evil.txt"})
         assert res.is_error
         assert res.error_code == "POLICY_DENIED"
+        assert "错误类型：workspace 路径越界" in res.output
+        assert "原始路径：../evil.txt" in res.output
+        assert "规范化路径：" in res.output
+        assert f"workspace 根目录：{os.path.realpath(root)}" in res.output
+        assert "已拒绝，未执行文件操作" in res.output
+        assert "out/result.json" in res.output
+
+
+async def test_workspace_escape_can_recover_with_explicit_relative_retry():
+    """拒绝错误路径后，新的相对路径调用必须能够继续执行。"""
+    with tempfile.TemporaryDirectory() as root:
+        scope = PolicyScope(
+            global_rules=dict(default_policy_scope().global_rules),
+            workspace_root=root,
+        )
+        executor = _executor(scope)
+
+        denied = await executor.execute("e.read", {"path": "../evil.txt"})
+        assert denied.is_error
+
+        recovered = await executor.execute("e.read", {"path": "out/result.json"})
+        assert not recovered.is_error
+        assert recovered.output == "READ:" + resolve_workspace_path(
+            root,
+            "out/result.json",
+        )

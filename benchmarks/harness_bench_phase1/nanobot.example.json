@@ -1,0 +1,22 @@
+{
+  "agents": {
+    "defaults": {
+      "model": "qwen3.7-plus-2026-05-26",
+      "provider": "qwen",
+      "maxTokens": 4096,
+      "temperature": 0.7,
+      "maxToolIterations": 15,
+      "fallbackModels": []
+    }
+  },
+  "providers": {
+    "qwen": {
+      "apiKey": "${QWEN_API_KEY}",
+      "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    }
+  },
+  "tools": {
+    "restrictToWorkspace": false,
+    "mcpServers": {}
+  }
+}

@@ -13,7 +13,7 @@ allowed_tools:
 
 max_loop_steps: 15
 
-system_prompt_template: |
+agent_prompt: |
   你是 {agent_name}，专注于代码开发和工程任务。
   你可以：
   - 编写和修改代码文件

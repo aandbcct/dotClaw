@@ -22,6 +22,9 @@ from typing import Any
 from .capability import CapabilityRequest, ResourceKind
 
 
+WORKSPACE_ESCAPE_REASON = "路径逃逸 workspace 根目录"
+
+
 class PolicyDecision(str, Enum):
     """策略决策：允许 / 需审批 / 拒绝。"""
 
@@ -141,7 +144,7 @@ class PolicyEngine:
         # 资源约束（优先级高于 ask/allow 的档案决策）。
         if request.kind in (ResourceKind.FILE_READ, ResourceKind.FILE_WRITE):
             if request.escaped:
-                return PolicyOutcome(PolicyDecision.DENY, request.profile, "路径逃逸 workspace 根目录")
+                return PolicyOutcome(PolicyDecision.DENY, request.profile, WORKSPACE_ESCAPE_REASON)
             if request.normalized_path and _match_denied_paths(
                 scope.denied_paths, request.normalized_path
             ):

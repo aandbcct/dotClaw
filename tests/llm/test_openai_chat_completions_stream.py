@@ -83,8 +83,8 @@ class _FailAfterFirstResponse:
 class _FakeClient(OpenAIChatCompletionsClient):
     """可注入 mock chunk 列表与推理策略的测试客户端（单次 chat 用一份 chunk）。"""
 
-    def __init__(self, mock_chunks, policy: ReasoningPolicy | None = None):
-        super().__init__(policy)
+    def __init__(self, mock_chunks, policy: ReasoningPolicy | None = None, parameters=None):
+        super().__init__(policy, parameters=parameters)
         self._mock_chunks = mock_chunks
         self.calls: list[dict] = []
 
@@ -107,6 +107,21 @@ class _FakeClient(OpenAIChatCompletionsClient):
                         return _MockAPIResponse(self._mock_chunks)
 
         return F()
+
+
+@pytest.mark.asyncio
+async def test_chat_sends_configured_generation_parameters() -> None:
+    client = _FakeClient(
+        [_chunk(_delta(content="ok"), finish="stop", usage=_usage(1, 1))],
+        parameters={"temperature": 0.7, "max_tokens": 4096, "model": "forbidden"},
+    )
+
+    chunks = [chunk async for chunk in client.chat([Message(role="user", content="hello")])]
+
+    assert chunks
+    assert client.calls[0]["temperature"] == 0.7
+    assert client.calls[0]["max_tokens"] == 4096
+    assert client.calls[0]["model"] == "test-model"
 
 
 class _NonStreamMessage:

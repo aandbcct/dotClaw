@@ -11,7 +11,7 @@ allowed_tools:
 
 max_loop_steps: 20
 
-system_prompt_template: |
+agent_prompt: |
   你是 {agent_name}，专注于任务规划和多 Agent 协调。
   你可以：
   - 将复杂任务拆解为可执行的子任务

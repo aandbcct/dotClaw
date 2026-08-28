@@ -12,12 +12,30 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
 
 logger = logging.getLogger(__name__)
+
+
+def validate_path_segment(value: str, field_name: str) -> str:
+    """校验外部标识只能表示单个非空路径片段。
+
+    同时按 Windows 与 POSIX 规则解析，避免测试或部署平台不同导致另一种
+    路径分隔符绕过仓储边界。
+    """
+    posix_candidate = PurePosixPath(value)
+    windows_candidate = PureWindowsPath(value)
+    if (
+        not value
+        or value in {".", ".."}
+        or posix_candidate.name != value
+        or windows_candidate.name != value
+    ):
+        raise ValueError(f"{field_name} 必须是单个非空路径片段")
+    return value
 
 
 def expand_env_vars(value: Any) -> Any:

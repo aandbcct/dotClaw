@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -34,7 +35,13 @@ from .base import (
 from .capability import CapabilityBroker, CapabilityRequest, ResourceKind
 from .decorator import ToolPolicy
 from .handler import ToolHandler
-from .policy import PolicyDecision, PolicyEngine, PolicyScope, default_policy_scope
+from .policy import (
+    WORKSPACE_ESCAPE_REASON,
+    PolicyDecision,
+    PolicyEngine,
+    PolicyScope,
+    default_policy_scope,
+)
 from .registry import ToolRegistry
 from .schema import ToolValidationError, validate_args, validate_json_schema
 from .approval import ApprovalManager
@@ -59,6 +66,7 @@ class ToolExecutor:
         capability_broker: CapabilityBroker | None = None,
         skill_parser: "SkillParser | None" = None,
         approval_commands: set[str] | None = None,
+        unattended_allow_profiles: set[str] | None = None,
         agent_policy_resolver: "Callable[[str], dict[str, str] | None] | None" = None,
         http_client: "HttpClient | None" = None,
     ):
@@ -75,6 +83,8 @@ class ToolExecutor:
         # 配置级审批命令列表（新规范名）。与工具声明式 needs_approval 合并参与决策，
         # 解决"approval_commands 死配置"问题（开发计划阶段五审计）。
         self._approval_commands = set(approval_commands or [])
+        # 仅供显式无人值守入口使用；Policy 为 ASK/DENY 时绝不跳过审批或拒绝。
+        self._unattended_allow_profiles = set(unattended_allow_profiles or [])
         # Agent 级策略解析器：按 agent_id 解析其 policy_rules，供每次调用冻结
         # 独立的策略作用域（P1 修复：Agent 级策略不再保存在全局 Executor，避免
         # delegation 子 Agent 继承主 Agent 规则或主 Agent 规则污染所有 Agent）。
@@ -129,7 +139,8 @@ class ToolExecutor:
         if handler is None:
             return False
         definition = handler.definition()
-        if definition.needs_approval or definition.name in self._approval_commands:
+        explicit_approval = definition.needs_approval or definition.name in self._approval_commands
+        if explicit_approval and not self._is_unattended_allow(definition.policy_profile, execution_context):
             return True
         profile = definition.policy_profile
         if profile is not None:
@@ -149,6 +160,20 @@ class ToolExecutor:
             if effective is PolicyDecision.ASK:
                 return True
         return False
+
+    def _is_unattended_allow(
+        self, profile: str | None, execution_context: ToolExecutionContext | None
+    ) -> bool:
+        """仅当全局与 Agent 最终策略均为 ALLOW 时跳过声明式人工审批。"""
+        if profile is None or profile not in self._unattended_allow_profiles:
+            return False
+        scope = self._effective_scope(execution_context)
+        global_decision = scope.global_rules.get(profile, PolicyDecision.ASK)
+        agent_decision = scope.agent_rules.get(profile, global_decision)
+        return (
+            global_decision is PolicyDecision.ALLOW
+            and agent_decision is PolicyDecision.ALLOW
+        )
 
     async def execute_approved(
         self,
@@ -253,7 +278,11 @@ class ToolExecutor:
         if outcome.decision is PolicyDecision.DENY:
             result = ToolResult.from_error(
                 code=ToolErrorCode.POLICY_DENIED,
-                message=f"策略拒绝：{outcome.reason}",
+                message=_format_policy_denied_message(
+                    outcome.reason,
+                    requests,
+                    scope.workspace_root,
+                ),
                 error_type=ToolErrorType.POLICY,
             )
             if journal:
@@ -500,3 +529,41 @@ def _summarize_requests(requests: list[CapabilityRequest]) -> str:
     if not requests:
         return ""
     return "; ".join(req.describe() for req in requests)
+
+
+def _format_policy_denied_message(
+    reason: str,
+    requests: list[CapabilityRequest],
+    workspace_root: str,
+) -> str:
+    """为 workspace 路径逃逸返回可恢复诊断，其他拒绝保持原有简短消息。"""
+    if reason != WORKSPACE_ESCAPE_REASON:
+        return f"策略拒绝：{reason}"
+
+    escaped_request = next(
+        (
+            request
+            for request in requests
+            if request.kind in (ResourceKind.FILE_READ, ResourceKind.FILE_WRITE)
+            and request.escaped
+        ),
+        None,
+    )
+    if escaped_request is None:
+        return f"策略拒绝：{reason}"
+
+    original_path = escaped_request.requested_path or "(未知)"
+    normalized_path = escaped_request.normalized_path or "(未知)"
+    resolved_root = os.path.realpath(os.path.expanduser(workspace_root))
+    return "\n".join(
+        (
+            "策略拒绝：路径逃逸 workspace 根目录",
+            "错误类型：workspace 路径越界",
+            f"原始路径：{original_path}",
+            f"规范化路径：{normalized_path}",
+            f"workspace 根目录：{resolved_root}",
+            "处理结果：已拒绝，未执行文件操作",
+            "恢复建议：请根据任务目标重新提交相对于 workspace 的路径，"
+            "例如 out/result.json；不要包含或重复拼接 workspace 根目录。",
+        )
+    )

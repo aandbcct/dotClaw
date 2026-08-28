@@ -11,7 +11,7 @@ from dotclaw.bootstrap.session_interaction import SessionInteractionService
 from dotclaw.channel.base import Channel
 from dotclaw.channel.runtime_llm_output import ChannelLLMOutputAdapter
 from dotclaw.config.settings import Config
-from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind, TokenUsage
+from dotclaw.llm.base import ChatChunk, ChatTextDelta, Message, TextDeltaKind, TokenUsage
 from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.session.session import SessionManager
 from dotclaw.tools.executor import ToolExecutor
@@ -24,8 +24,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 class FinalProxy:
     """供组合根测试使用的最小旧 LLMProxy 替身。"""
 
+    def __init__(self) -> None:
+        """记录每次模型调用收到的完整消息，验证连续对话上下文。"""
+        self.calls: list[tuple[Message, ...]] = []
+
     async def chat(self, messages, tools, model, stream) -> AsyncIterator[ChatChunk]:
         """返回一个普通完成回复。"""
+        self.calls.append(tuple(messages))
         yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "已通过新版入口"),), finish_reason="stop", usage=TokenUsage(2, 2))
 
 
@@ -62,17 +67,18 @@ class ChannelCollector(Channel):
 
 
 async def test_submit_writes_conversation_through_coordinator_and_projector(tmp_path: Path) -> None:
-    """普通消息经 Service 直接提交 Coordinator/Engine，Agent 本身不直接写 Session。"""
+    """连续提交会重新加载最新 Session，并通过 Coordinator/Engine 投影历史。"""
     config = Config()
     config.session.directory = str(tmp_path)
     identity = AgentIdentity(agent_id="agent-1", agent_name="测试 Agent")
     session_manager = SessionManager(tmp_path)
     channel: ChannelCollector = ChannelCollector()
+    proxy = FinalProxy()
     services = build_runtime_services(
         config=config,
         project_root=PROJECT_ROOT,
         identity=identity,
-        llm_proxy=FinalProxy(),
+        llm_proxy=proxy,
         tool_executor=ToolExecutor(ToolRegistry()),
         session_manager=session_manager,
         skill_registry=None,
@@ -90,15 +96,26 @@ async def test_submit_writes_conversation_through_coordinator_and_projector(tmp_
     session = await session_manager.create(agent_id=identity.agent_id, model="qwen3.7-max")
 
     result = await service.submit(session, "你好", output_port=ChannelLLMOutputAdapter(channel))
+    second_result = await service.submit(session, "继续", output_port=ChannelLLMOutputAdapter(channel))
     projected = await session_manager.load(session.id)
 
     assert result.final_message is not None
     assert result.final_message.content == "已通过新版入口"
     assert result.has_streamed_response is True
+    assert second_result.final_message is not None
     # 适配器按语义分区：response 首次出现打印一次「回答：」标题，再拼接正文。
-    assert channel.chunks == ["\n回答：\n", "已通过新版入口"]
+    assert channel.chunks == [
+        "\n回答：\n", "已通过新版入口",
+        "\n回答：\n", "已通过新版入口",
+    ]
     assert projected is not None
-    assert [(item.user_query, item.final_answer) for item in projected.conversations] == [("你好", "已通过新版入口")]
+    assert [(item.user_query, item.final_answer) for item in projected.conversations] == [
+        ("你好", "已通过新版入口"),
+        ("继续", "已通过新版入口"),
+    ]
+    second_call_contents: list[str] = [message.content for message in proxy.calls[1]]
+    assert "你好" in second_call_contents
+    assert "已通过新版入口" in second_call_contents
 
 
 def test_normal_entry_files_have_no_legacy_runtime_or_direct_session_write() -> None:

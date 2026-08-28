@@ -117,8 +117,10 @@ def test_provider_circuit_breaker_is_loaded(tmp_path) -> None:
 
 
 def test_jojocode_uses_openai_chat_completions_driver() -> None:
+    config = _minimal_router_config()
+    config.defaults.parameters = {"temperature": 0.7, "max_tokens": 4096}
     router = ModelRouter(
-        _minimal_router_config(),
+        config,
         RateLimiter({}),
         CircuitBreaker({}),
     )
@@ -129,6 +131,7 @@ def test_jojocode_uses_openai_chat_completions_driver() -> None:
     assert client._get_api_key() == "test-key"
     assert client._get_base_url() == "https://example.test/v1"
     assert client._get_model_id() == "jojo-model-id"
+    assert client._parameters == {"temperature": 0.7, "max_tokens": 4096}
 
 
 def test_unknown_provider_fails_during_router_startup() -> None:

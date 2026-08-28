@@ -10,7 +10,7 @@ allowed_tools:
 
 max_loop_steps: 8
 
-system_prompt_template: |
+agent_prompt: |
   你是 {agent_name}，专注于用户服务和运营支持。
   以友善、耐心、专业的态度回答用户问题。
   直接给出清晰准确的答案，语气亲切但不过度热情。
