@@ -140,6 +140,23 @@ async def test_idempotent_when_session_missing(tmp_path: Path) -> None:
     assert not (tmp_path / "no-such-session").exists()
 
 
+@pytest.mark.parametrize(
+    "invalid_session_id",
+    ("", ".", "..", "../outside", r"..\outside", "nested/session", r"C:\temp\session", "C:/temp/session"),
+)
+async def test_external_session_id_cannot_escape_storage_root(
+    tmp_path: Path,
+    invalid_session_id: str,
+) -> None:
+    """所有外部 Session 标识必须是跨平台意义上的单个路径片段。"""
+    session_manager, service, _, _ = _service(tmp_path)
+
+    with pytest.raises(ValueError, match="session_id 必须是单个非空路径片段"):
+        await session_manager.load(invalid_session_id)
+    with pytest.raises(ValueError, match="session_id 必须是单个非空路径片段"):
+        await service.delete_session(invalid_session_id)
+
+
 async def test_approval_cleanup_scoped_to_session(tmp_path: Path) -> None:
     """按 Session 清理审批时，只移除目标 Session 的记录，保留其他 Session 的审批。"""
     session_manager, service, _, approval_repo = _service(tmp_path)
@@ -196,4 +213,3 @@ async def test_delete_session_keeps_shared_agent_cache_for_other_sessions(tmp_pa
     assert (ContextOwner.AGENT, "agent-1") not in context_port.calls
     # 同一 Identity 下另一 Session 的缓存不得被误伤
     assert (ContextOwner.SESSION, s2.id) not in context_port.calls
-
