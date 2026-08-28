@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -34,7 +35,13 @@ from .base import (
 from .capability import CapabilityBroker, CapabilityRequest, ResourceKind
 from .decorator import ToolPolicy
 from .handler import ToolHandler
-from .policy import PolicyDecision, PolicyEngine, PolicyScope, default_policy_scope
+from .policy import (
+    WORKSPACE_ESCAPE_REASON,
+    PolicyDecision,
+    PolicyEngine,
+    PolicyScope,
+    default_policy_scope,
+)
 from .registry import ToolRegistry
 from .schema import ToolValidationError, validate_args, validate_json_schema
 from .approval import ApprovalManager
@@ -271,7 +278,11 @@ class ToolExecutor:
         if outcome.decision is PolicyDecision.DENY:
             result = ToolResult.from_error(
                 code=ToolErrorCode.POLICY_DENIED,
-                message=f"策略拒绝：{outcome.reason}",
+                message=_format_policy_denied_message(
+                    outcome.reason,
+                    requests,
+                    scope.workspace_root,
+                ),
                 error_type=ToolErrorType.POLICY,
             )
             if journal:
@@ -518,3 +529,41 @@ def _summarize_requests(requests: list[CapabilityRequest]) -> str:
     if not requests:
         return ""
     return "; ".join(req.describe() for req in requests)
+
+
+def _format_policy_denied_message(
+    reason: str,
+    requests: list[CapabilityRequest],
+    workspace_root: str,
+) -> str:
+    """为 workspace 路径逃逸返回可恢复诊断，其他拒绝保持原有简短消息。"""
+    if reason != WORKSPACE_ESCAPE_REASON:
+        return f"策略拒绝：{reason}"
+
+    escaped_request = next(
+        (
+            request
+            for request in requests
+            if request.kind in (ResourceKind.FILE_READ, ResourceKind.FILE_WRITE)
+            and request.escaped
+        ),
+        None,
+    )
+    if escaped_request is None:
+        return f"策略拒绝：{reason}"
+
+    original_path = escaped_request.requested_path or "(未知)"
+    normalized_path = escaped_request.normalized_path or "(未知)"
+    resolved_root = os.path.realpath(os.path.expanduser(workspace_root))
+    return "\n".join(
+        (
+            "策略拒绝：路径逃逸 workspace 根目录",
+            "错误类型：workspace 路径越界",
+            f"原始路径：{original_path}",
+            f"规范化路径：{normalized_path}",
+            f"workspace 根目录：{resolved_root}",
+            "处理结果：已拒绝，未执行文件操作",
+            "恢复建议：请根据任务目标重新提交相对于 workspace 的路径，"
+            "例如 out/result.json；不要包含或重复拼接 workspace 根目录。",
+        )
+    )

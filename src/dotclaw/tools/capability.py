@@ -59,6 +59,8 @@ class CapabilityRequest:
                                          # 供 Executor 回填给 handler，确保实际操作目标与策略
                                          # 检查目标完全一致（P0 修复：自定义 workspace_root 时
                                          # handler 若用 CWD 解析会落到错误位置）。
+    requested_path: str | None = None   # 文件类：调用方提交的原始路径，仅用于拒绝后的
+                                         # 可恢复诊断；不得据此自动修正或执行另一目标。
     param_field: str | None = None      # 文件类：路径参数名（path_param 或默认 "path"），
                                          # 供 Executor 定位需回填的参数。
 
@@ -167,6 +169,7 @@ class CapabilityBroker:
             normalized_path=normalized,
             escaped=escaped,
             absolute_path=absolute,
+            requested_path=path,
             param_field=field,
         )
 

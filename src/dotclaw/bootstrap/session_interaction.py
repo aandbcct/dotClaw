@@ -138,25 +138,29 @@ class SessionInteractionService:
         """提交一次普通消息，按 Session 路由到对应 Identity 并冻结 RunRequest。
 
         ``output_port`` 为本提交的运行级输出端口，透传至 Runtime 执行参数。
-        冻结请求在 Coordinator 取得 Session 租约后创建（见 ``submit_prepared``），
-        保持历史压缩、Conversation 快照与 Run 创建的原有并发语义。
+        冻结请求在 Coordinator 取得 Session 租约后重新加载最新 Session 并创建
+        （见 ``submit_prepared``），避免入口持有的旧对象遗漏上一轮成功投影。
         """
-        if isinstance(session, str):
-            loaded: Session | None = await self._session_manager.load(session)
-            if loaded is None:
-                raise UnknownIdentityError(f"Session 不存在: {session}")
-            session = loaded
-        identity: AgentIdentity = self._require_identity(session)
-        if not session.model:
-            if not self._preferred_model:
-                raise ValueError("Session 缺少模型绑定，且未配置 chat 用途的首选模型")
-            session.model = self._preferred_model
-            await self._session_manager.save(session)
+        session_id: str = session if isinstance(session, str) else session.id
+        initial_session: Session | None = await self._session_manager.load(session_id)
+        if initial_session is None:
+            raise UnknownIdentityError(f"Session 不存在: {session_id}")
+        # 保留入口快速拒绝契约；租约内仍会再次校验，防止两次读取之间绑定发生变化。
+        self._require_identity(initial_session)
 
         async def _make_request() -> RunRequest:
-            return create_run_request(session, identity.agent_id, user_message)
+            latest_session: Session | None = await self._session_manager.load(session_id)
+            if latest_session is None:
+                raise UnknownIdentityError(f"Session 不存在: {session_id}")
+            identity: AgentIdentity = self._require_identity(latest_session)
+            if not latest_session.model:
+                if not self._preferred_model:
+                    raise ValueError("Session 缺少模型绑定，且未配置 chat 用途的首选模型")
+                latest_session.model = self._preferred_model
+                await self._session_manager.save(latest_session)
+            return create_run_request(latest_session, identity.agent_id, user_message)
 
-        return await self._coordinator.submit_prepared(session.id, _make_request, output_port)
+        return await self._coordinator.submit_prepared(session_id, _make_request, output_port)
 
     async def resolve_approval(self, approval_id: str, approved: bool, output_port: LLMOutputPort | None = None) -> RunResult:
         """提交审批决定并返回恢复后的结构化结果；透传运行级输出端口。"""

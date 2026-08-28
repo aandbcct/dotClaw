@@ -1703,12 +1703,10 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 **必须保持但当前尚未完全落实的设计约束**
 
 1. SessionManager 与 Runtime Repository 应使用同一个由 Host 解析的受控绝对存储根；自定义 `project_root` 下当前仍可能分裂。
-2. 所有外部 `session_id` 都必须通过单路径段校验；SessionManager 当前尚未执行。
-3. ConversationSnapshot 应在取得 Session 串行权后重新加载最新 Session 再冻结；当前 request_factory 可能捕获陈旧对象。
-4. Session 成功投影应基于 `conversation_version` 或等价 CAS 防止陈旧写入；当前尚未校验。
-5. 删除的活动检查、阻止新提交和目录清理应属于同一生命周期事务；当前存在竞态窗口。
-6. HistoryCompression 在加载时应验证版本连续、active 引用、边界顺序和 Hash；当前只在正常追加路径做部分检查。
-7. 若支持多进程运行，同 Session 占用必须由持久化 Lease 或数据库唯一约束保证；当前 `asyncio.Lock` 和 `lease_id` 不满足该要求。
+2. Session 成功投影应基于 `conversation_version` 或等价 CAS 防止陈旧写入；当前尚未校验。
+3. 删除的活动检查、阻止新提交和目录清理应属于同一生命周期事务；当前存在竞态窗口。
+4. HistoryCompression 在加载时应验证版本连续、active 引用、边界顺序和 Hash；当前只在正常追加路径做部分检查。
+5. 若支持多进程运行，同 Session 占用必须由持久化 Lease 或数据库唯一约束保证；当前 `asyncio.Lock` 和 `lease_id` 不满足该要求。
 
 ---
 
@@ -1910,32 +1908,23 @@ SessionManager 相对路径基于包位置推导项目根；RuntimeFactory 相�
 
 ### 8.3 已知痛点
 
-#### S1. SessionManager 未验证 session_id 路径段
+#### S1. SessionManager 的 session_id 路径段校验（已修复）
 
 
 ```mermaid
 flowchart LR
     Input["外部 session_id"] --> Manager["SessionManager"]
-    Manager --> Join["_data_dir / session_id"]
-    Join --> Load["load / session_directory / delete"]
+    Manager --> Validate["validate_path_segment"]
+    Validate --> Safe["受控 load / session_directory / delete"]
     Input --> Runtime["Runtime Repository"]
-    Runtime --> Validate["validate_path_segment"]
-    Validate --> Safe["受控 run/session 路径"]
+    Runtime --> Validate
 ```
 
-**结论：**SessionManager 的路径校验弱于 Runtime Repository；外部 Session ID 当前可以在进入文件操作前绕过统一路径段验证。
+**结论：**SessionManager 与 Runtime Repository 现在共用 `common.utils.validate_path_segment()`；所有 Session 文件入口都会先校验标识。
 
-`_session_path()` 和 `session_directory()` 直接执行：
+校验同时按 Windows 与 POSIX 路径语义解析，拒绝空值、`.`、`..`、两类分隔符和绝对路径形式，避免部署平台不同造成绕过。
 
-```text
-_data_dir / session_id
-```
-
-外部 `/switch`、字符串 submit 和 delete_session 可以传入任意文本。相对父目录片段可能越过 Session 根，形成路径遍历和误删风险。
-
-Runtime Repository 已有 `validate_path_segment()`，SessionManager 未复用。
-
-#### S2. CLI 长期持有陈旧 Session 对象
+#### S2. CLI 长期持有陈旧 Session 对象（已修复）
 
 
 ```mermaid
@@ -1952,26 +1941,28 @@ sequenceDiagram
     Projector-->>CLI: 不更新原对象
 
     CLI->>Entry: submit(current_session v0)
-    Entry->>Coord: request_factory 捕获 v0
+    Entry->>Coord: request_factory 捕获 session_id
     Coord->>Entry: 锁内调用 factory
-    Entry-->>Coord: ConversationSnapshot v0
+    Entry->>Disk: 重新加载 Session v1
+    Entry-->>Coord: ConversationSnapshot v1
 ```
 
-**结论：**锁内执行 request_factory 不能弥补其捕获陈旧 Session 对象的问题；正确边界是取得锁后按 session_id 重新加载再冻结。
+**结论：**入口对象仍可用于 CLI 展示，但不再作为新 Run 的历史事实源。请求工厂取得同 Session 租约后按 `session_id` 重新加载并冻结最新快照。
 
 CLI 启动或 `/switch` 时加载 current_session，普通成功 Run 后不重新加载。
 
 Success Projector 更新磁盘中的另一个 Session 实例，因此 current_session.conversations 和 conversation_version 不会自动前进。
 
-#### S3. `submit_prepared` 没有真正保证锁内读取最新 Session
+#### S3. `submit_prepared` 锁内读取最新 Session（已修复）
 
-SessionInteractionService 在锁外取得 Session 对象，request_factory 只是延迟调用：
+SessionInteractionService 在锁外只提取 `session_id`，request_factory 在锁内执行：
 
 ```python
-create_run_request(session, ...)
+latest_session = await session_manager.load(session_id)
+create_run_request(latest_session, ...)
 ```
 
-即使 Factory 在 Lock 内执行，数据源仍可能陈旧。等待上一 Run 完成后，新请求仍可能冻结旧历史。
+等待上一 Run 完成后，新请求会读取其成功投影和最新 `conversation_version`，再创建不可变 ConversationSnapshot。
 
 #### S4. conversation_version 没有参与乐观并发
 

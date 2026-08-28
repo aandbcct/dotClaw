@@ -8,6 +8,7 @@ import tempfile
 from enum import IntEnum, StrEnum
 from pathlib import Path
 
+from ...common.utils import validate_path_segment
 from ..domain.facts import JSONMap, JSONValue, require_json_map
 
 
@@ -32,14 +33,6 @@ class SessionStorageFileName(StrEnum):
     """Session 目录中由新仓储负责的固定文件名。"""
 
     CONVERSATION = "conversation.json"
-
-
-def validate_path_segment(value: str, field_name: str) -> str:
-    """阻止运行标识越过仓储根目录。"""
-    candidate: Path = Path(value)
-    if not value or candidate.name != value or value in {".", ".."}:
-        raise ValueError(f"{field_name} 必须是单个非空路径片段")
-    return value
 
 
 def load_json_map(path: Path) -> JSONMap:

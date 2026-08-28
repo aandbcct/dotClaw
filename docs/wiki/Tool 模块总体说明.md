@@ -497,6 +497,7 @@ async def discover_and_register(registry: ToolRegistry) -> list[str]
 - `normalized_path`：相对 workspace 的逻辑路径；
 - `escaped`：真实路径是否逃逸 workspace；
 - `absolute_path`：仅供执行前回填，不进入审批展示；
+- `requested_path`：调用方提交的原始路径，仅在拒绝后生成可恢复诊断，不用于自动修正执行目标；
 - `param_field`：应回填的实际参数名；
 - `command`：已脱敏的命令摘要；
 - `service` / `host`：固定网络服务和精确主机；
@@ -831,7 +832,9 @@ flowchart LR
 
 **职责与用途：**文件工具向模型提供工作区内文本读取、覆盖写入和目录列举能力。它们依赖 Broker 与 Policy 完成真实路径解析和访问约束，Handler 本身只执行已经获准的文件操作。
 
+- 文件参数默认以当前 workspace 为根，并明确提示模型优先使用 `out/result.json` 形式的相对路径；
 - Broker 限制实际路径必须位于 workspace；
+- 路径逃逸时保留 `POLICY_DENIED`，同时返回原始路径、规范化路径、workspace 根目录和相对路径恢复建议；原调用仍不执行；
 - `read_text` 有 10 MiB 文件上限；
 - 写入采用覆盖语义；
 - `list_directory` 只列一层；
@@ -1115,6 +1118,7 @@ flowchart LR
     Args["已验证路径参数"] --> Normalize["expanduser + realpath"]
     Normalize --> Check{"是否位于 workspace"}
     Check -->|否| Deny["escaped=true → DENY"]
+    Deny --> Diagnose["返回路径诊断与相对路径恢复建议"]
     Check -->|是| Rules{"是否命中 denied_paths"}
     Rules -->|是| Deny
     Rules -->|否| Decision["ALLOW / ASK"]
@@ -1126,6 +1130,7 @@ flowchart LR
 
 - 先解析真实路径，再判断 workspace 边界，避免 `..`、`~`、符号链接和联接点绕过。
 - `absolute_path` 只用于执行目标回填，不应写入面向用户的审批摘要。
+- 拒绝诊断不会猜测或自动改写目标；Agent 需要使用明确的工作区相对路径发起新的工具调用。
 - 该约束只覆盖文件类 Handler，不限制 Shell 命令内部访问的路径。
 
 ### 5.6 固定网络工具调用流程

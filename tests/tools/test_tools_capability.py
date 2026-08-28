@@ -97,6 +97,7 @@ def test_read_maps_to_file_read():
     assert reqs[0].kind is ResourceKind.FILE_READ
     assert reqs[0].profile == "workspace.read"
     assert reqs[0].normalized_path == "a.txt"
+    assert reqs[0].requested_path == "a.txt"
     assert reqs[0].escaped is False
 
 
@@ -138,6 +139,67 @@ def test_normalize_inside_path_is_relative_and_not_escaped():
         normalized, escaped = normalize_workspace_path(root, "sub/file.txt")
         assert escaped is False
         assert normalized == "sub/file.txt"
+
+
+def test_normalize_inside_absolute_path_is_relative_and_not_escaped():
+    """工作区内绝对路径必须归约为相对逻辑路径。"""
+    with tempfile.TemporaryDirectory() as root:
+        absolute = os.path.join(root, "out", "result.json")
+        normalized, escaped = normalize_workspace_path(root, absolute)
+        assert escaped is False
+        assert normalized == "out/result.json"
+
+
+def test_normalize_windows_separator_styles_are_equivalent():
+    """Windows 正反斜杠形式必须解析为同一工作区相对路径。"""
+    if os.name != "nt":
+        pytest.skip("仅 Windows 上验证路径分隔符等价性")
+    with tempfile.TemporaryDirectory() as root:
+        absolute = os.path.join(root, "out", "result.json")
+        backslash_result = normalize_workspace_path(root, absolute)
+        slash_result = normalize_workspace_path(root, absolute.replace("\\", "/"))
+        assert backslash_result == slash_result == ("out/result.json", False)
+
+
+def test_normalize_windows_path_case_is_equivalent():
+    """Windows 工作区路径大小写变化不应被误判为逃逸。"""
+    if os.name != "nt":
+        pytest.skip("仅 Windows 上验证路径大小写等价性")
+    with tempfile.TemporaryDirectory() as root:
+        absolute = os.path.join(root, "out", "result.json")
+        normalized, escaped = normalize_workspace_path(root, absolute.swapcase())
+        assert escaped is False
+        assert normalized.lower() == "out/result.json"
+
+
+def test_normalize_windows_other_drive_escapes_workspace_root():
+    """Windows 其他盘符的绝对路径必须继续被严格拒绝。"""
+    if os.name != "nt":
+        pytest.skip("仅 Windows 上验证跨盘符逃逸")
+    with tempfile.TemporaryDirectory() as root:
+        root_drive = os.path.splitdrive(root)[0].upper()
+        other_drive = "Z:" if root_drive != "Z:" else "Y:"
+        normalized, escaped = normalize_workspace_path(
+            root,
+            f"{other_drive}\\outside\\result.json",
+        )
+        assert escaped is True
+        assert normalized.lower().startswith(other_drive.lower())
+
+
+def test_malformed_duplicated_absolute_path_is_not_auto_corrected():
+    """损坏的重复绝对路径必须拒绝，不能猜测并重定向到工作区内。"""
+    with tempfile.TemporaryDirectory() as root:
+        malformed = os.path.join(
+            os.path.dirname(root),
+            "duplicated-model-directory",
+            os.path.basename(root),
+            "out",
+            "result.json",
+        )
+        normalized, escaped = normalize_workspace_path(root, malformed)
+        assert escaped is True
+        assert normalized != "out/result.json"
 
 
 def test_normalize_dotdot_escapes_workspace_root():

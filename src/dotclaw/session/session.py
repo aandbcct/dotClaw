@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from ..common.utils import validate_path_segment
+
 
 # ============================================================================
 # Conversation — 一条请求的持久化记录
@@ -233,7 +235,8 @@ class SessionManager:
 
     def _session_path(self, session_id: str) -> Path:
         """获取 Session 文件路径（同时创建目录，供创建/保存/加载使用）。"""
-        session_dir: Path = self._data_dir / session_id
+        safe_session_id: str = validate_path_segment(session_id, "session_id")
+        session_dir: Path = self._data_dir / safe_session_id
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir / "session.json"
 
@@ -243,7 +246,8 @@ class SessionManager:
         该目录包含 session.json、agent_runs/、conversation.json、checkpoint 与
         事件等全部运行事实；删除协调流程据此做整目录原子清理（开发计划阶段 5）。
         """
-        return self._data_dir / session_id
+        safe_session_id: str = validate_path_segment(session_id, "session_id")
+        return self._data_dir / safe_session_id
 
     async def create(self, agent_id: str, title: str = "新对话",
                      model: str = "") -> Session:
