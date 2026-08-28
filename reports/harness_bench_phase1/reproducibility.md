@@ -32,5 +32,4 @@
 ## 哈希
 
 - dotClaw 工作区 diff SHA-256：`7e1c8c063dcc0cea1be155eb457b888ffa96047fc790d5ae37554a2b4a0959bc`
-- Harness-Bench 补丁 SHA-256：`61813ad6c4b05adb6ff8f1e8eddae069d3abb3efb4c8fe36671ccac72ac43e58`
-
+- Harness-Bench 补丁 SHA-256：`9571195d558ff5c0ba382521212b3663cd0427c00d1e4939796e99866eecb8de`

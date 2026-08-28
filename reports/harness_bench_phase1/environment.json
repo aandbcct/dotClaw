@@ -22,7 +22,7 @@
     "end": "2026-08-20T16:20:00+08:00"
   },
   "dotclaw_diff_sha256": "7e1c8c063dcc0cea1be155eb457b888ffa96047fc790d5ae37554a2b4a0959bc",
-  "harness_bench_worktree_patch_sha256": "61813ad6c4b05adb6ff8f1e8eddae069d3abb3efb4c8fe36671ccac72ac43e58",
+  "harness_bench_worktree_patch_sha256": "9571195d558ff5c0ba382521212b3663cd0427c00d1e4939796e99866eecb8de",
   "task_list": [
     "001-file",
     "002-exec",
