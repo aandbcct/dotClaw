@@ -174,6 +174,24 @@ class SessionInteractionService:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
+    async def cancel_session(self, session_id: str, reason: str) -> str | None:
+        """按 Session 取消唯一活动 Run，并返回其标识。
+
+        GUI 只持有当前 Session，不应读取 Runtime 私有仓储或猜测 ``run_id``。
+        当前 Session 串行契约要求最多存在一个活动 Run；若持久化事实违反该
+        不变量则明确失败，避免取消错误目标。
+        """
+        if self._run_repository is None:
+            raise RuntimeError("按 Session 取消需要运行仓储")
+        active_runs = await self._run_repository.list_active_runs(session_id)
+        if not active_runs:
+            return None
+        if len(active_runs) != 1:
+            raise RuntimeError(f"Session {session_id} 存在多个活动 Run，拒绝猜测取消目标")
+        run_id: str = active_runs[0].run_id
+        await self.cancel(run_id, reason)
+        return run_id
+
     async def resume_run(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
         """恢复未结束 Run，并返回结构化结果；透传运行级输出端口。"""
         return await self._coordinator.resume_run(run_id, output_port)

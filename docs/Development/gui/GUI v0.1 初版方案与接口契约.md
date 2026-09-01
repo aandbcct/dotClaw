@@ -1,6 +1,6 @@
 # dotClaw GUI v0.1 初版方案与接口契约
 
-> 状态：初版基线已确认，进入后端契约测试阶段。
+> 状态：后端契约测试与 FastAPI/SSE 闭环已完成，React/Vite 前端待实现。
 > 本文是 GUI v0.1 讨论期唯一方案档案；实现与验收以本文为准。
 
 ## 1. 唯一目标
@@ -25,7 +25,7 @@ React/Vite 页面
 - `SessionManager（会话持久化管理器）` 已支持会话的创建、加载、列表和删除；`Session.conversations` 是刷新页面后读取已完成对话历史的现有投影。
 - `LLMOutputEvent（模型增量输出事件）` 已携带 `session_id`、`run_id`、增量类别和文本，可直接适配为 SSE。
 - Runtime 审计事件写入 `events.jsonl`，当前没有面向 GUI 的实时订阅出口；v0.1 不扩展该事件系统。
-- 当前依赖和源码中没有 FastAPI、Uvicorn、React 或 Vite 实现。
+- 方案冻结时依赖和源码中没有 FastAPI、Uvicorn、React 或 Vite 实现；任务 3 已新增独立 `gui` 可选依赖与 `dotclaw.channel.web` 后端，前端仍未实现。
 
 因此本 PR 不再抽取新的通用应用服务层，只增加 Web 适配边界和 GUI 所必需的最小会话取消能力。
 
@@ -50,9 +50,9 @@ React/Vite 页面
 
 ## 4. 任务列表
 
-1. **方案与契约**：冻结本文的范围、接口、事件、并发和验收语义。
-2. **后端契约测试**：先写会话、历史、SSE、取消和错误映射测试。
-3. **后端实现**：实现 FastAPI 适配层和 SSE 消息闭环，使任务 2 的测试通过。
+1. **方案与契约（已完成）**：冻结本文的范围、接口、事件、并发和验收语义。
+2. **后端契约测试（已完成）**：先写会话、历史、SSE、取消和错误映射测试。
+3. **后端实现（已完成）**：实现 FastAPI 适配层和 SSE 消息闭环，使任务 2 的测试通过。
 4. **前端实现**：搭建 React/Vite 页面并接入接口。
 5. **联调与审计**：验证浏览器闭环、断连语义、CLI 回归并同步使用文档。
 
@@ -61,15 +61,23 @@ React/Vite 页面
 新增后端：
 
 ```text
-src/dotclaw/web/
-├── __init__.py
-├── app.py          # create_app()、lifespan、路由装配和静态资源入口
-├── schemas.py      # HTTP 请求/响应及 SSE 数据模型
-└── sse.py          # SSE 编码与运行级输出适配
+src/dotclaw/channel/
+├── cli/               # CLI 行为、Rich 样式与横幅
+│   ├── __init__.py
+│   ├── channel.py
+│   └── banner.py
+└── web/               # HTTP/SSE 入站交互适配
+    ├── __init__.py
+    ├── app.py          # create_app()、lifespan、路由装配和静态资源入口
+    ├── schemas.py      # HTTP 请求/响应及 SSE 数据模型
+    └── sse.py          # SSE 编码与运行级输出适配
 
-tests/web/
-├── test_api_contract.py
-└── test_sse_contract.py
+tests/channel/
+├── cli/
+│   └── test_channel.py
+└── web/
+    ├── test_api_contract.py
+    └── test_sse_contract.py
 ```
 
 新增前端（任务 4）：

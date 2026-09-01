@@ -28,9 +28,9 @@ from dotclaw.runtime.domain.state import (
     SuspendReason,
 )
 from dotclaw.session.session import Session
-from dotclaw.web.app import create_app
-from dotclaw.web.schemas import SSEEvent
-from dotclaw.web.sse import SSEOutputAdapter, encode_sse_event
+from dotclaw.channel.web.app import create_app
+from dotclaw.channel.web.schemas import SSEEvent
+from dotclaw.channel.web.sse import SSEOutputAdapter, encode_sse_event
 
 
 @dataclass(frozen=True)

@@ -33,10 +33,15 @@ trace = [
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
 ]
+gui = [
+    "fastapi>=0.141.1,<1.0",
+    "uvicorn>=0.52.4,<1.0",
+]
 
 [project.scripts]
 dotclaw = "dotclaw.main:main"
 dotclaw-benchmark = "dotclaw.benchmark_runner:main"
+dotclaw-web = "dotclaw.channel.web.app:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -62,7 +67,6 @@ testpaths = [
     "tests/tools",
     "tests/trace",
     "tests/eval",
-    "tests/web",
 ]
 asyncio_mode = "auto"
 pythonpath = ["src"]

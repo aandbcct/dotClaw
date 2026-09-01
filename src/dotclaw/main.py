@@ -36,7 +36,7 @@ from dotclaw.bootstrap.session_interaction import (
     SessionInteractionService,
     format_run_result,
 )
-from dotclaw.cli.banner import build_banner, console as rich_console
+from dotclaw.channel.cli.banner import build_banner, console as rich_console
 from dotclaw.mcp.provider import MCPToolProvider
 from dotclaw.memory.dream import DeepDream
 from dotclaw.skills.registry import SkillRegistry

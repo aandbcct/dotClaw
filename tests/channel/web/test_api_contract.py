@@ -1,7 +1,7 @@
 """GUI v0.1 HTTP 接口契约测试。
 
 本文件只固定 Web 适配边界，不调用真实模型、工具或网络。
-生产实现将在下一任务中补齐，当前阶段预期因 ``dotclaw.web`` 尚未实现而保持红灯。
+生产实现位于 ``dotclaw.channel.web``，测试用于锁定后端 HTTP/SSE 契约。
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import pytest
 
 from dotclaw.bootstrap.session_interaction import UnknownIdentityError
 from dotclaw.session.session import Conversation, Session
-from dotclaw.web.app import create_app
+from dotclaw.channel.web.app import create_app
 
 
 class _FakeSessionManager:
@@ -355,3 +355,32 @@ async def test_lifespan_shuts_down_injected_host() -> None:
         assert host.shutdown_called is False
 
     assert host.shutdown_called is True
+
+
+def test_web_command_binds_only_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本地 Web 启动命令不得监听全部网卡。"""
+    captured: dict[str, str | int | bool] = {}
+
+    def fake_run(
+        app: str,
+        *,
+        factory: bool,
+        host: str,
+        port: int,
+    ) -> None:
+        """记录 Uvicorn 启动参数。"""
+        captured.update(
+            {"app": app, "factory": factory, "host": host, "port": port}
+        )
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+    from dotclaw.channel.web.app import main
+
+    main()
+
+    assert captured == {
+        "app": "dotclaw.channel.web.app:create_app",
+        "factory": True,
+        "host": "127.0.0.1",
+        "port": 8765,
+    }

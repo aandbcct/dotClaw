@@ -2374,7 +2374,9 @@ src/dotclaw/
 |---|---|
 | `main.py` | 命令入口、CLI 循环、审批和结果展示 |
 | `channel/base.py` | 通用 Channel 输入输出协议 |
-| `channel/cli.py` | Rich CLI 实现 |
+| `channel/cli/channel.py` | Rich CLI 交互实现 |
+| `channel/cli/banner.py` | Rich CLI 横幅与样式 |
+| `channel/web/` | FastAPI HTTP/SSE 交互适配 |
 | `channel/runtime_llm_output.py` | Runtime LLMOutputPort 到 Channel 的运行级适配 |
 
 ### 9.4 配置与 Identity
