@@ -6,11 +6,13 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import cast
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from ...bootstrap.application_host import ApplicationHost
 from ...bootstrap.session_interaction import UnknownIdentityError
@@ -40,7 +42,11 @@ _LOCAL_WEB_HOST = "127.0.0.1"
 _DEFAULT_WEB_PORT = 8765
 
 
-def create_app(*, host_factory: HostFactory | None = None) -> FastAPI:
+def create_app(
+    *,
+    host_factory: HostFactory | None = None,
+    frontend_dir: Path | None = None,
+) -> FastAPI:
     """创建可注入 Host 工厂的本地 Web 应用。"""
     factory: HostFactory = host_factory or ApplicationHost.build
 
@@ -205,7 +211,21 @@ def create_app(*, host_factory: HostFactory | None = None) -> FastAPI:
             "status": WebRunStatus.CANCELLING.value,
         }
 
+    static_directory = frontend_dir or _frontend_dist_directory()
+    if (static_directory / "index.html").is_file():
+        # API 路由必须先注册；根挂载只负责构建后的前端文件。
+        app.mount(
+            "/",
+            StaticFiles(directory=static_directory, html=True),
+            name="frontend",
+        )
+
     return app
+
+
+def _frontend_dist_directory() -> Path:
+    """定位源码工作区中的 Vite 构建目录。"""
+    return Path(__file__).resolve().parents[4] / "frontend" / "dist"
 
 
 def _host(request: Request) -> ApplicationHost:

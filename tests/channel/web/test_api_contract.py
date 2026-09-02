@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -109,9 +110,16 @@ async def _ready_host(host: _FakeHost) -> _FakeHost:
 
 
 @asynccontextmanager
-async def _client(host: _FakeHost) -> AsyncIterator[httpx.AsyncClient]:
+async def _client(
+    host: _FakeHost,
+    *,
+    frontend_dir: Path | None = None,
+) -> AsyncIterator[httpx.AsyncClient]:
     """启动应用 lifespan，并通过内存 ASGI 传输访问接口。"""
-    app = create_app(host_factory=lambda: _ready_host(host))
+    app = create_app(
+        host_factory=lambda: _ready_host(host),
+        frontend_dir=frontend_dir,
+    )
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
@@ -126,6 +134,25 @@ def _host(*sessions: Session) -> tuple[_FakeHost, _FakeSessionInteraction]:
     manager = _FakeSessionManager(sessions)
     interaction = _FakeSessionInteraction(manager)
     return _FakeHost(manager, interaction), interaction
+
+
+@pytest.mark.asyncio
+async def test_built_frontend_is_served_without_shadowing_api(tmp_path: Path) -> None:
+    """构建后的首页由同一进程托管，且不得遮蔽既有 API。"""
+    (tmp_path / "index.html").write_text(
+        "<html><body>dotClaw GUI</body></html>",
+        encoding="utf-8",
+    )
+    host, _ = _host()
+
+    async with _client(host, frontend_dir=tmp_path) as client:
+        page_response = await client.get("/")
+        api_response = await client.get("/api/v1/sessions")
+
+    assert page_response.status_code == 200
+    assert "dotClaw GUI" in page_response.text
+    assert api_response.status_code == 200
+    assert api_response.json() == []
 
 
 @pytest.mark.asyncio
