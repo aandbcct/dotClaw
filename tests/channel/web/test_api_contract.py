@@ -9,12 +9,20 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from unittest.mock import Mock
 
 import httpx
 import pytest
 
-from dotclaw.bootstrap.session_interaction import UnknownIdentityError
-from dotclaw.session.session import Conversation, Session
+from dotclaw.bootstrap.session_interaction import SessionInteractionService, UnknownIdentityError
+from dotclaw.agent.identity import AgentIdentity
+from dotclaw.session.session import Conversation, Session, SessionManager
+from dotclaw.orchestration.registry import AgentRegistry
+from dotclaw.runtime.application.dto import RunResult
+from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator, RuntimeControlPort
+from dotclaw.runtime.domain.events import RunEvent, RunEventType
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, MessageRole, RunMessage, RunMessageKind, ToolCall
+from dotclaw.runtime.domain.state import AgentRunState, Ended, RunOutcome, RunStage, Suspended, SuspendReason
 from dotclaw.channel.web.app import create_app
 
 
@@ -40,22 +48,36 @@ class _FakeSessionInteraction:
         self._manager: _FakeSessionManager = manager
         self.create_error: Exception | None = None
         self.cancelled_run_id: str | None = "run-active"
-        self.create_calls: list[tuple[str | None, str]] = []
+        self.create_calls: list[tuple[str | None, str, str | None]] = []
         self.cancel_calls: list[tuple[str, str]] = []
+        self.activity_run: AgentRun | None = None
+        self.activity_events: tuple[RunEvent, ...] = ()
+        self.activity_messages: tuple[RunMessage, ...] = ()
+        self.executing = False
+        self.approval_calls: list[tuple[str, bool]] = []
+        self.delegation_resume_calls: list[str] = []
+        self.run_resume_calls: list[str] = []
+
+    @property
+    def default_agent_id(self) -> str:
+        """返回测试配置中的默认 Agent。"""
+        return "default"
 
     async def create_session(
         self,
         agent_id: str | None = None,
         title: str = "新对话",
+        model: str | None = None,
     ) -> Session:
         """创建固定测试会话，或抛出预设业务错误。"""
-        self.create_calls.append((agent_id, title))
+        self.create_calls.append((agent_id, title, model))
         if self.create_error is not None:
             raise self.create_error
         session = _session(
             "created-1",
             title=title,
             agent_id=agent_id or "default",
+            model=model or "chat-model",
             updated_at="2026-09-01T12:00:00+08:00",
         )
         self._manager.sessions[session.id] = session
@@ -65,6 +87,49 @@ class _FakeSessionInteraction:
         """返回预设活动 Run，并记录显式取消原因。"""
         self.cancel_calls.append((session_id, reason))
         return self.cancelled_run_id
+
+    async def get_run(self, session_id: str, run_id: str | None = None) -> AgentRun | None:
+        """返回预设运行，同时校验 Session 与可选运行标识。"""
+        run = self.activity_run
+        if run is None or run.session_id != session_id:
+            return None
+        return run if run_id is None or run.run_id == run_id else None
+
+    async def get_run_by_id(self, run_id: str) -> AgentRun | None:
+        """按标识返回预设运行。"""
+        return self.activity_run if self.activity_run and self.activity_run.run_id == run_id else None
+
+    async def get_run_evidence(
+        self, session_id: str, run_id: str,
+    ) -> tuple[tuple[RunEvent, ...], tuple[RunMessage, ...]]:
+        """返回预设工具执行证据。"""
+        del session_id, run_id
+        return self.activity_events, self.activity_messages
+
+    async def is_session_executing(self, session_id: str) -> bool:
+        """返回当前进程是否正在执行预设运行。"""
+        del session_id
+        return self.executing
+
+    async def resolve_approval(
+        self, approval_id: str, approved: bool, output_port=None,
+    ) -> RunResult:
+        """记录网页审批并返回已取消的测试终态。"""
+        del output_port
+        self.approval_calls.append((approval_id, approved))
+        return RunResult("run-1", AgentRunState(mode=Ended(RunOutcome.CANCELLED)))
+
+    async def resume_delegation(self, child_run_id: str, output_port=None) -> RunResult:
+        """记录网页端的父运行恢复请求。"""
+        del output_port
+        self.delegation_resume_calls.append(child_run_id)
+        return RunResult("run-1", AgentRunState(mode=Ended(RunOutcome.CANCELLED)))
+
+    async def resume_run(self, run_id: str, output_port=None) -> RunResult:
+        """记录网页端的检查点恢复请求。"""
+        del output_port
+        self.run_resume_calls.append(run_id)
+        return RunResult("run-1", AgentRunState(mode=Ended(RunOutcome.CANCELLED)))
 
 
 class _FakeHost:
@@ -77,6 +142,11 @@ class _FakeHost:
     ) -> None:
         self.session_manager: _FakeSessionManager = manager
         self.session_interaction: _FakeSessionInteraction = interaction
+        self.agent_registry = AgentRegistry()
+        self.agent_registry.register(AgentIdentity("default", "默认助手", description="通用任务"))
+        self.agent_registry.register(AgentIdentity("writer", "写作助手", description="内容写作"))
+        self.chat_models = ("chat-model", "fast-model")
+        self.preferred_chat_model = "chat-model"
         self.shutdown_called: bool = False
 
     async def shutdown(self) -> None:
@@ -91,13 +161,14 @@ def _session(
     agent_id: str = "default",
     updated_at: str = "2026-09-01T10:00:00+08:00",
     conversations: list[Conversation] | None = None,
+    model: str = "chat-model",
 ) -> Session:
     """构造字段完整的持久化 Session。"""
     return Session(
         id=session_id,
         title=title,
         agent_id=agent_id,
-        model="chat-model",
+        model=model,
         created_at="2026-09-01T09:00:00+08:00",
         updated_at=updated_at,
         conversations=conversations or [],
@@ -107,6 +178,71 @@ def _session(
 async def _ready_host(host: _FakeHost) -> _FakeHost:
     """把已构造的测试宿主包装为异步工厂。"""
     return host
+
+
+def _persistent_host(tmp_path: Path) -> tuple[_FakeHost, SessionRunCoordinator]:
+    """使用真实持久化与会话租约，仅替换未执行的模型引擎。"""
+    manager = SessionManager(tmp_path)
+    coordinator = SessionRunCoordinator(Mock(spec=RuntimeControlPort))
+    interaction = SessionInteractionService(manager, AgentRegistry(), coordinator)
+    return _FakeHost(manager, interaction), coordinator  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_metadata_patch_persists_without_losing_conversations(tmp_path: Path) -> None:
+    """标题、归档和恢复落盘，且不删除已有问答。"""
+    host, _ = _persistent_host(tmp_path)
+    session = await host.session_manager.create(agent_id="default")
+    session.add_conversation("已有问题", "已有回答", ["run-1"])
+    await host.session_manager.save(session)
+    async with _client(host) as client:
+        response = await client.patch(f"/api/v1/sessions/{session.id}", json={"title": "  新标题  ", "archived": True})
+        assert response.status_code == 200
+        assert response.json()["title"] == "新标题"
+        assert response.json()["archived"] is True
+        persisted = await SessionManager(tmp_path).load(session.id)
+        assert persisted is not None and persisted.archived
+        assert persisted.title == "新标题"
+        assert persisted.conversations[0].final_answer == "已有回答"
+        listing = await client.get("/api/v1/sessions")
+        assert listing.json()[0]["archived"] is True
+        restored = await client.patch(f"/api/v1/sessions/{session.id}", json={"archived": False})
+        assert restored.status_code == 200
+        detail = await client.get(f"/api/v1/sessions/{session.id}")
+        assert detail.json()["archived"] is False
+        assert len(detail.json()["messages"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{}, {"title": "  "}, {"title": None}, {"archived": None}, {"model": "other"}])
+async def test_metadata_patch_rejects_invalid_updates(tmp_path: Path, payload: dict) -> None:
+    """空值与越界字段不能写入会话。"""
+    host, _ = _persistent_host(tmp_path)
+    async with _client(host) as client:
+        response = await client.patch("/api/v1/sessions/missing", json=payload)
+        assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_metadata_patch_missing_and_busy_session(tmp_path: Path) -> None:
+    """不存在返回 404；执行租约占用时返回 409 且不改变标题。"""
+    host, coordinator = _persistent_host(tmp_path)
+    session = await host.session_manager.create(agent_id="default")
+    async with _client(host) as client:
+        missing = await client.patch("/api/v1/sessions/missing", json={"title": "新标题"})
+        assert missing.status_code == 404
+        async with coordinator.edit_session(session.id):
+            busy = await client.patch(f"/api/v1/sessions/{session.id}", json={"title": "新标题"})
+        assert busy.status_code == 409
+        persisted = await host.session_manager.load(session.id)
+        assert persisted is not None and persisted.title == "新对话"
+
+
+def test_legacy_session_defaults_to_unarchived() -> None:
+    """已有磁盘记录无需迁移即可读取。"""
+    payload = _session("legacy").to_dict()
+    del payload["archived"]
+    assert Session.from_dict(payload).archived is False
 
 
 @asynccontextmanager
@@ -182,6 +318,7 @@ async def test_list_sessions_returns_stable_updated_descending_summaries() -> No
         {
             "id": "newer",
             "title": "新会话",
+            "archived": False,
             "agent_id": "default",
             "model": "chat-model",
             "created_at": "2026-09-01T09:00:00+08:00",
@@ -190,6 +327,7 @@ async def test_list_sessions_returns_stable_updated_descending_summaries() -> No
         {
             "id": "older",
             "title": "旧会话",
+            "archived": False,
             "agent_id": "default",
             "model": "chat-model",
             "created_at": "2026-09-01T09:00:00+08:00",
@@ -213,12 +351,120 @@ async def test_create_session_uses_interaction_service_and_returns_201() -> None
     assert response.json() == {
         "id": "created-1",
         "title": "GUI 会话",
+        "archived": False,
         "agent_id": "writer",
         "model": "chat-model",
         "created_at": "2026-09-01T09:00:00+08:00",
         "updated_at": "2026-09-01T12:00:00+08:00",
     }
-    assert interaction.create_calls == [("writer", "GUI 会话")]
+    assert interaction.create_calls == [("writer", "GUI 会话", None)]
+
+
+@pytest.mark.asyncio
+async def test_options_and_explicit_model_are_exposed_for_session_creation() -> None:
+    """网页能读取真实 Agent/模型选项，并把显式模型写入新会话。"""
+    host, interaction = _host()
+
+    async with _client(host) as client:
+        options = await client.get("/api/v1/options")
+        created = await client.post(
+            "/api/v1/sessions",
+            json={"agent_id": "writer", "model": "fast-model"},
+        )
+
+    assert options.status_code == 200
+    assert options.json() == {
+        "agents": [
+            {"id": "default", "name": "默认助手", "description": "通用任务"},
+            {"id": "writer", "name": "写作助手", "description": "内容写作"},
+        ],
+        "models": ["chat-model", "fast-model"],
+        "default_agent_id": "default",
+        "default_model": "chat-model",
+    }
+    assert created.status_code == 201
+    assert created.json()["agent_id"] == "writer"
+    assert created.json()["model"] == "fast-model"
+    assert interaction.create_calls == [("writer", "新对话", "fast-model")]
+
+
+@pytest.mark.asyncio
+async def test_activity_exposes_tool_evidence_and_web_approval_stream() -> None:
+    """工具参数、结果和待审批状态来自运行事实，审批后继续返回 SSE 终态。"""
+    host, interaction = _host(_session("session-1"))
+    interaction.activity_run = AgentRun(
+        run_id="run-1",
+        session_id="session-1",
+        agent_id="default",
+        state=AgentRunState(
+            mode=Suspended(SuspendReason.APPROVAL, "approval-1", RunStage.EXECUTING_TOOLS),
+        ),
+        started_at="2026-09-01T09:00:00+08:00",
+        policy=AgentPolicySnapshot("default", "v1", "chat-model", 10),
+        input_message_id="input-1",
+    )
+    interaction.activity_messages = (
+        RunMessage(
+            "assistant-1", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+            tool_calls=(ToolCall("call-1", "read_file", {"path": "README.md"}),),
+        ),
+        RunMessage(
+            "tool-1", 3, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "文件内容",
+            tool_call_id="call-1", name="read_file",
+        ),
+    )
+    interaction.activity_events = (
+        RunEvent("run-1", 1, RunEventType.TOOL_STARTED, "2026-09-01T09:00:01+08:00", ("assistant-1",), data={"call_id": "call-1", "tool_name": "read_file"}),
+        RunEvent("run-1", 2, RunEventType.TOOL_COMPLETED, "2026-09-01T09:00:02+08:00", ("tool-1",), data={"call_id": "call-1", "tool_name": "read_file", "status": "approval_required"}),
+    )
+
+    async with _client(host) as client:
+        activity = await client.get("/api/v1/sessions/session-1/activity")
+        decision = await client.post("/api/v1/approvals/approval-1", json={"approved": False})
+
+    assert activity.status_code == 200
+    assert activity.json()["status"] == "waiting_approval"
+    assert activity.json()["approval_id"] == "approval-1"
+    assert activity.json()["tools"] == [{
+        "call_id": "call-1",
+        "name": "read_file",
+        "status": "approval_required",
+        "started_at": "2026-09-01T09:00:01+08:00",
+        "completed_at": "2026-09-01T09:00:02+08:00",
+        "arguments": {"path": "README.md"},
+        "result": "文件内容",
+        "error": "",
+    }]
+    assert decision.status_code == 200
+    assert "event: run.cancelled" in decision.text
+    assert '"session_id":"session-1"' in decision.text
+    assert interaction.approval_calls == [("approval-1", False)]
+
+
+@pytest.mark.asyncio
+async def test_web_can_resume_delegation_and_interrupted_run() -> None:
+    """网页恢复入口必须调用既有控制能力，并继续返回规范 SSE 终态。"""
+    host, interaction = _host(_session("session-1"))
+    interaction.activity_run = AgentRun(
+        run_id="run-1",
+        session_id="session-1",
+        agent_id="default",
+        state=AgentRunState(mode=Suspended(SuspendReason.APPROVAL, "approval-1", RunStage.EXECUTING_TOOLS)),
+        started_at="2026-09-01T09:00:00+08:00",
+        policy=AgentPolicySnapshot("default", "v1", "chat-model", 10),
+        input_message_id="input-1",
+    )
+
+    async with _client(host) as client:
+        delegation = await client.post("/api/v1/delegations/child-1/resume")
+        interrupted = await client.post("/api/v1/runs/run-1/resume")
+
+    assert delegation.status_code == 200
+    assert interrupted.status_code == 200
+    assert "event: run.cancelled" in delegation.text
+    assert "event: run.cancelled" in interrupted.text
+    assert interaction.delegation_resume_calls == ["child-1"]
+    assert interaction.run_resume_calls == ["run-1"]
 
 
 @pytest.mark.asyncio
@@ -261,6 +507,7 @@ async def test_session_detail_flattens_only_completed_conversations() -> None:
     assert response.json() == {
         "id": "session-1",
         "title": "新对话",
+        "archived": False,
         "agent_id": "default",
         "model": "chat-model",
         "created_at": "2026-09-01T09:00:00+08:00",

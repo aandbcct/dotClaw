@@ -3,6 +3,8 @@ import type {
   SessionDetail,
   SessionSummary,
   StreamEvent,
+  RunActivity,
+  WorkspaceOptions,
 } from "./types";
 
 const API_ROOT = "/api/v1";
@@ -51,12 +53,45 @@ export function getSession(sessionId: string): Promise<SessionDetail> {
   return requestJson<SessionDetail>(`${API_ROOT}/sessions/${sessionId}`);
 }
 
-export function createSession(): Promise<SessionSummary> {
+export function updateSession(
+  sessionId: string,
+  changes: { title?: string; archived?: boolean },
+): Promise<SessionSummary> {
+  return requestJson<SessionSummary>(`${API_ROOT}/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(changes),
+  });
+}
+
+export function getWorkspaceOptions(): Promise<WorkspaceOptions> {
+  return requestJson<WorkspaceOptions>(`${API_ROOT}/options`);
+}
+
+export function createSession(options?: {
+  agent_id?: string;
+  model?: string;
+}): Promise<SessionSummary> {
   return requestJson<SessionSummary>(`${API_ROOT}/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: "新对话" }),
+    body: JSON.stringify({ title: "新对话", ...options }),
   });
+}
+
+export async function getRunActivity(
+  sessionId: string,
+  runId?: string,
+): Promise<RunActivity | null> {
+  const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+  const activity = await requestJson<RunActivity | null>(
+    `${API_ROOT}/sessions/${sessionId}/activity${query}`,
+  );
+  if (activity === null) return null;
+  if (!isRecord(activity) || !Array.isArray(activity.tools)) {
+    throw new ApiError("运行状态数据格式无效", "invalid_activity", 200);
+  }
+  return activity;
 }
 
 export async function cancelSession(sessionId: string): Promise<void> {
@@ -76,12 +111,53 @@ export async function submitMessage(
   onEvent: (event: StreamEvent) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(`${API_ROOT}/sessions/${sessionId}/messages`, {
+  await streamRequest(`${API_ROOT}/sessions/${sessionId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
-    signal,
-  });
+  }, onEvent, signal);
+}
+
+export async function resolveApproval(
+  approvalId: string,
+  approved: boolean,
+  onEvent: (event: StreamEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  await streamRequest(`${API_ROOT}/approvals/${approvalId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved }),
+  }, onEvent, signal);
+}
+
+export async function resumeDelegation(
+  childRunId: string,
+  onEvent: (event: StreamEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  await streamRequest(`${API_ROOT}/delegations/${childRunId}/resume`, {
+    method: "POST",
+  }, onEvent, signal);
+}
+
+export async function resumeRun(
+  runId: string,
+  onEvent: (event: StreamEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  await streamRequest(`${API_ROOT}/runs/${runId}/resume`, {
+    method: "POST",
+  }, onEvent, signal);
+}
+
+async function streamRequest(
+  url: string,
+  init: RequestInit,
+  onEvent: (event: StreamEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const response = await fetch(url, { ...init, signal });
   if (!response.ok) {
     throw await responseError(response);
   }

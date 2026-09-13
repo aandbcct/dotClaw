@@ -17,20 +17,27 @@ from fastapi.staticfiles import StaticFiles
 from ...bootstrap.application_host import ApplicationHost
 from ...bootstrap.session_interaction import UnknownIdentityError
 from ...runtime.application.dto import RunResult
-from ...runtime.domain.facts import JSONMap, MessageRole, RunError, RunErrorCode
-from ...runtime.domain.state import RunOutcome
+from ...runtime.domain.events import RunEvent, RunEventType
+from ...runtime.domain.facts import AgentRun, JSONMap, MessageRole, RunError, RunErrorCode, RunMessage, RunMessageKind
+from ...runtime.domain.state import RunOutcome, Suspended
 from ...session.session import Conversation, Session
 from .schemas import (
     CancelSessionRequest,
     CreateSessionRequest,
+    AgentOptionResponse,
+    ResolveApprovalRequest,
+    RunActivityResponse,
     SSEEvent,
     SSEEventType,
     SessionDetailResponse,
     SessionMessageResponse,
     SessionSummaryResponse,
     SubmitMessageRequest,
+    ToolExecutionResponse,
+    UpdateSessionRequest,
     WebErrorCode,
     WebRunStatus,
+    WorkspaceOptionsResponse,
 )
 from .sse import SSEOutputAdapter
 
@@ -86,6 +93,43 @@ def create_app(
         sessions.sort(key=lambda item: item.updated_at, reverse=True)
         return [_session_summary(item) for item in sessions]
 
+    @app.get("/api/v1/options", response_model=WorkspaceOptionsResponse)
+    async def workspace_options(request: Request) -> WorkspaceOptionsResponse:
+        """返回新建会话可用的 Agent 与 chat 模型。"""
+        host = _host(request)
+        identities = host.agent_registry.list_all()
+        return WorkspaceOptionsResponse(
+            agents=[
+                AgentOptionResponse(
+                    id=item.agent_id,
+                    name=item.agent_name or item.agent_id,
+                    description=item.description,
+                )
+                for item in identities
+            ],
+            models=list(host.chat_models),
+            default_agent_id=host.session_interaction.default_agent_id,
+            default_model=host.preferred_chat_model,
+        )
+
+    @app.patch("/api/v1/sessions/{session_id}", response_model=SessionSummaryResponse)
+    async def update_session(
+        session_id: str, payload: UpdateSessionRequest, request: Request,
+    ) -> SessionSummaryResponse | JSONResponse:
+        """通过会话交互入口持久化重命名或归档，不改变历史内容。"""
+        try:
+            session = await _host(request).session_interaction.update_session(
+                session_id, title=payload.title, archived=payload.archived,
+            )
+        except LookupError:
+            return _session_not_found()
+        except ValueError:
+            return _error_response(
+                status.HTTP_409_CONFLICT, WebErrorCode.SESSION_BUSY,
+                "会话正在运行，请结束后再修改",
+            )
+        return _session_summary(session)
+
     @app.post(
         "/api/v1/sessions",
         response_model=SessionSummaryResponse,
@@ -100,6 +144,7 @@ def create_app(
             session = await _host(request).session_interaction.create_session(
                 agent_id=payload.agent_id,
                 title=payload.title,
+                model=payload.model,
             )
         except UnknownIdentityError as error:
             return _error_response(
@@ -143,44 +188,75 @@ def create_app(
         if await host.session_manager.load(session_id) is None:
             return _session_not_found()
 
-        adapter = SSEOutputAdapter()
+        return _run_stream(
+            request,
+            session_id,
+            lambda adapter: host.session_interaction.submit(
+                session_id, payload.content, adapter,
+            ),
+        )
 
-        async def produce() -> None:
-            """独立执行 Run；HTTP 订阅断开不会取消该任务。"""
-            try:
-                result = await host.session_interaction.submit(
-                    session_id,
-                    payload.content,
-                    adapter,
-                )
-                await adapter.finish(_result_event(session_id, result))
-            except Exception as error:
-                logger.error(
-                    "Web 消息流执行失败：session_id=%s error_type=%s",
-                    session_id,
-                    type(error).__name__,
-                )
-                await adapter.finish(_stream_error_event(session_id))
+    @app.get(
+        "/api/v1/sessions/{session_id}/activity",
+        response_model=RunActivityResponse | None,
+    )
+    async def get_run_activity(
+        session_id: str,
+        request: Request,
+        run_id: str | None = None,
+    ) -> RunActivityResponse | JSONResponse | None:
+        """查询当前或指定运行的真实状态和工具执行证据。"""
+        host = _host(request)
+        if await host.session_manager.load(session_id) is None:
+            return _session_not_found()
+        run = await host.session_interaction.get_run(session_id, run_id)
+        if run is None:
+            return None
+        events, messages = await host.session_interaction.get_run_evidence(
+            session_id, run.run_id,
+        )
+        executing = await host.session_interaction.is_session_executing(session_id)
+        return _run_activity(run, events, messages, executing)
 
-        async def body() -> AsyncIterator[str]:
-            """在响应生命周期内消费事件，断连时只关闭订阅。"""
-            task = asyncio.create_task(produce())
-            tasks = _submission_tasks(request.app)
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
-            try:
-                async for chunk in adapter.stream():
-                    yield chunk
-            finally:
-                adapter.disconnect()
+    @app.post("/api/v1/approvals/{approval_id}", response_model=None)
+    async def resolve_approval(
+        approval_id: str,
+        payload: ResolveApprovalRequest,
+        request: Request,
+    ) -> StreamingResponse:
+        """提交网页审批决定，并继续以 SSE 返回恢复后的运行。"""
+        host = _host(request)
+        return _run_stream(
+            request,
+            "",
+            lambda adapter: host.session_interaction.resolve_approval(
+                approval_id, payload.approved, adapter,
+            ),
+        )
 
-        return StreamingResponse(
-            body(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+    @app.post("/api/v1/delegations/{child_run_id}/resume", response_model=None)
+    async def resume_delegation(
+        child_run_id: str,
+        request: Request,
+    ) -> StreamingResponse:
+        """将已完成的子运行结果回灌并恢复父运行。"""
+        host = _host(request)
+        return _run_stream(
+            request,
+            "",
+            lambda adapter: host.session_interaction.resume_delegation(
+                child_run_id, adapter,
+            ),
+        )
+
+    @app.post("/api/v1/runs/{run_id}/resume", response_model=None)
+    async def resume_run(run_id: str, request: Request) -> StreamingResponse:
+        """恢复进程重启后留下的未结束运行。"""
+        host = _host(request)
+        return _run_stream(
+            request,
+            "",
+            lambda adapter: host.session_interaction.resume_run(run_id, adapter),
         )
 
     @app.post(
@@ -238,11 +314,56 @@ def _submission_tasks(app: FastAPI) -> set[asyncio.Task[None]]:
     return cast(set[asyncio.Task[None]], app.state.submission_tasks)
 
 
+def _run_stream(
+    request: Request,
+    session_id: str,
+    operation: Callable[[SSEOutputAdapter], Awaitable[RunResult]],
+) -> StreamingResponse:
+    """把提交、审批和恢复统一包装为断连不取消的 SSE 运行。"""
+    adapter = SSEOutputAdapter()
+
+    async def produce() -> None:
+        """独立执行运行控制；HTTP 订阅断开不取消任务。"""
+        try:
+            result = await operation(adapter)
+            result_session_id = session_id
+            if not result_session_id and result.run_id:
+                run = await _host(request).session_interaction.get_run_by_id(result.run_id)
+                result_session_id = "" if run is None else run.session_id
+            await adapter.finish(_result_event(result_session_id, result))
+        except Exception as error:
+            logger.error(
+                "Web 运行流执行失败：session_id=%s error_type=%s",
+                session_id,
+                type(error).__name__,
+            )
+            await adapter.finish(_stream_error_event(session_id))
+
+    async def body() -> AsyncIterator[str]:
+        """在响应生命周期内消费事件，断连时只关闭订阅。"""
+        task = asyncio.create_task(produce())
+        tasks = _submission_tasks(request.app)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        try:
+            async for chunk in adapter.stream():
+                yield chunk
+        finally:
+            adapter.disconnect()
+
+    return StreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 def _session_summary(session: Session) -> SessionSummaryResponse:
     """从现有 Session 投影稳定的 Web 摘要。"""
     return SessionSummaryResponse(
         id=session.id,
         title=session.title,
+        archived=session.archived,
         agent_id=session.agent_id,
         model=session.model,
         created_at=session.created_at,
@@ -273,6 +394,77 @@ def _session_detail(session: Session) -> SessionDetailResponse:
         )
     summary = _session_summary(session)
     return SessionDetailResponse(**summary.model_dump(), messages=messages)
+
+
+def _run_activity(
+    run: AgentRun,
+    events: tuple[RunEvent, ...],
+    messages: tuple[RunMessage, ...],
+    executing: bool,
+) -> RunActivityResponse:
+    """把运行事实整理为前端可增量刷新的工具执行视图。"""
+    calls = {
+        call.call_id: call
+        for message in messages
+        for call in message.tool_calls
+    }
+    results = {
+        message.tool_call_id: message.content
+        for message in messages
+        if message.kind is RunMessageKind.TOOL_RESULT and message.tool_call_id
+    }
+    steps: dict[str, ToolExecutionResponse] = {}
+    for event in events:
+        if event.event_type not in {
+            RunEventType.TOOL_STARTED,
+            RunEventType.TOOL_COMPLETED,
+        }:
+            continue
+        call_id = str(event.data.get("call_id", ""))
+        if not call_id:
+            continue
+        call = calls.get(call_id)
+        current = steps.get(call_id)
+        if current is None:
+            current = ToolExecutionResponse(
+                call_id=call_id,
+                name=str(event.data.get("tool_name", "工具")),
+                status="running",
+                started_at=event.occurred_at if event.event_type is RunEventType.TOOL_STARTED else "",
+                arguments={} if call is None else call.arguments,
+            )
+            steps[call_id] = current
+        if event.event_type is RunEventType.TOOL_STARTED:
+            current.started_at = current.started_at or event.occurred_at
+            current.status = "running"
+        else:
+            current.completed_at = event.occurred_at
+            current.status = str(event.data.get("status", "completed"))
+            current.result = results.get(call_id, "")
+            current.error = str(event.data.get("error_summary", ""))
+
+    approval_id: str | None = None
+    child_run_id: str | None = None
+    if run.state.is_waiting_approval() and isinstance(run.state.mode, Suspended):
+        status_value = WebRunStatus.WAITING_APPROVAL.value
+        approval_id = run.state.mode.control_id
+    elif run.state.is_waiting_delegation() and isinstance(run.state.mode, Suspended):
+        status_value = WebRunStatus.WAITING_DELEGATION.value
+        child_run_id = run.state.mode.control_id
+    elif run.state.is_ended():
+        outcome = run.state.outcome()
+        status_value = outcome.value if outcome is not None else WebRunStatus.FAILED.value
+    else:
+        status_value = (
+            WebRunStatus.RUNNING.value if executing else WebRunStatus.RECOVERABLE.value
+        )
+    return RunActivityResponse(
+        run_id=run.run_id,
+        status=status_value,
+        approval_id=approval_id,
+        child_run_id=child_run_id,
+        tools=list(steps.values()),
+    )
 
 
 def _result_event(session_id: str, result: RunResult) -> SSEEvent:

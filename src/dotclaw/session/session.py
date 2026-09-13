@@ -116,6 +116,9 @@ class Session:
     history_compressions: list[HistoryCompression] = field(default_factory=list)
     """按版本递增保存的历史压缩摘要链。"""
 
+    archived: bool = False
+    """是否从 Web 最近会话中归档；对话历史仍保留。"""
+
     # ── 序列化 ──
 
     def to_dict(self) -> dict:

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -16,9 +16,236 @@ const session: SessionSummary = {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  localStorage.clear();
 });
 
 describe("dotClaw GUI", () => {
+  it("新建会话先选择 Agent 和模型，并把选择提交给后端", async () => {
+    let createBody: Record<string, unknown> | null = null;
+    const created = { ...session, agent_id: "writer", model: "fast-model" };
+    stubFetch((url, init) => {
+      if (url.endsWith("/options")) return jsonResponse({
+        agents: [
+          { id: "default", name: "默认助手", description: "通用任务" },
+          { id: "writer", name: "写作助手", description: "内容写作" },
+        ],
+        models: ["chat-model", "fast-model"],
+        default_agent_id: "default",
+        default_model: "chat-model",
+      });
+      if (url.endsWith("/sessions") && init?.method === "POST") {
+        createBody = JSON.parse(String(init.body));
+        return jsonResponse(created, 201);
+      }
+      if (url.endsWith("/activity")) return jsonResponse(null);
+      if (url.endsWith("/session-1")) return jsonResponse({ ...created, messages: [] });
+      return jsonResponse([]);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("当前还没有会话");
+    await user.click(screen.getByRole("button", { name: "创建第一个会话" }));
+    await screen.findByRole("dialog", { name: "选择这次对话的工作方式" });
+    await user.selectOptions(screen.getByLabelText("Agent"), "writer");
+    await user.selectOptions(screen.getByLabelText("模型"), "fast-model");
+    await user.click(screen.getByRole("button", { name: "开始对话" }));
+    await screen.findByText("把任务交给 dotClaw。");
+    expect(createBody).toEqual({ title: "新对话", agent_id: "writer", model: "fast-model" });
+    expect(screen.getByText(/writer/)).toBeTruthy();
+    expect(screen.getAllByText(/fast-model/).length).toBeGreaterThan(0);
+  });
+
+  it("展示真实工具过程，并可在网页批准后继续消费运行流", async () => {
+    const approvalRequests: RequestInit[] = [];
+    stubFetch((url, init) => {
+      if (url.endsWith("/approvals/approval-1")) {
+        approvalRequests.push(init ?? {});
+        return eventStreamResponse([eventBlock("run.cancelled", {
+          session_id: session.id,
+          run_id: "run-1",
+          status: "cancelled",
+        })]);
+      }
+      if (url.includes("/activity")) return jsonResponse({
+        run_id: "run-1",
+        status: "waiting_approval",
+        approval_id: "approval-1",
+        child_run_id: null,
+        tools: [{
+          call_id: "call-1",
+          name: "read_file",
+          status: "approval_required",
+          started_at: session.created_at,
+          completed_at: session.updated_at,
+          arguments: { path: "README.md" },
+          result: "读取完成",
+          error: "",
+        }],
+      });
+      if (url.endsWith("/session-1")) return jsonResponse({ ...session, messages: [] });
+      return jsonResponse([session]);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("执行记录");
+    await user.click(screen.getByText("read_file"));
+    expect(screen.getByText(/README\.md/)).toBeTruthy();
+    expect(screen.getByText("读取完成")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "批准并继续" }));
+    await screen.findByText("已停止");
+    expect(approvalRequests).toHaveLength(1);
+    expect(JSON.parse(String(approvalRequests[0].body))).toEqual({ approved: true });
+  });
+
+  it("刷新后发现未结束运行时可以从网页恢复", async () => {
+    let resumed = false;
+    stubFetch((url, init) => {
+      if (url.endsWith("/runs/run-1/resume") && init?.method === "POST") {
+        resumed = true;
+        return eventStreamResponse([eventBlock("run.cancelled", {
+          session_id: session.id,
+          run_id: "run-1",
+          status: "cancelled",
+        })]);
+      }
+      if (url.includes("/activity")) return jsonResponse({
+        run_id: "run-1",
+        status: "recoverable",
+        approval_id: null,
+        child_run_id: null,
+        tools: [],
+      });
+      if (url.endsWith("/session-1")) return jsonResponse({ ...session, messages: [] });
+      return jsonResponse([session]);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "恢复运行" }));
+    await screen.findByText("已停止");
+    expect(resumed).toBe(true);
+  });
+
+  it("草稿按会话隔离，刷新后恢复且发送后清除", async () => {
+    const second = { ...session, id: "session-2", title: "第二会话" };
+    stubFetch((url, init) => {
+      if (init?.method === "POST") return eventStreamResponse([eventBlock("run.cancelled", {})]);
+      if (url.endsWith("/session-1")) return jsonResponse({ ...session, messages: [] });
+      if (url.endsWith("/session-2")) return jsonResponse({ ...second, messages: [] });
+      return jsonResponse([session, second]);
+    });
+    const user = userEvent.setup();
+    const firstPage = render(<App />);
+    await screen.findByText("把任务交给 dotClaw。");
+    await user.type(screen.getByLabelText("输入消息"), "第一份草稿");
+    await user.click(screen.getByRole("button", { name: /第二会话\s*chat-model/ }));
+    expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("");
+    await user.type(screen.getByLabelText("输入消息"), "第二份草稿");
+    await user.click(screen.getByRole("button", { name: /本地测试会话\s*chat-model/ }));
+    expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("第一份草稿");
+    firstPage.unmount();
+    render(<App />);
+    await screen.findByText("把任务交给 dotClaw。");
+    expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("第一份草稿");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByText("已停止");
+    expect(JSON.parse(localStorage.getItem("dotclaw.drafts") || "{}")).toEqual({ "session-2": "第二份草稿" });
+  });
+
+  it("中文选词回车不发送，Shift Enter 换行，普通回车发送", async () => {
+    const fetchMock = stubFetch((url, init) => {
+      if (init?.method === "POST") return eventStreamResponse([eventBlock("run.cancelled", {})]);
+      return jsonResponse(url.endsWith("/session-1") ? { ...session, messages: [] } : [session]);
+    });
+    render(<App />);
+    await screen.findByText("把任务交给 dotClaw。");
+    const input = screen.getByLabelText("输入消息");
+    fireEvent.change(input, { target: { value: "中文输入" } });
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", shiftKey: true });
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    await screen.findByText("已停止");
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("搜索标题、重命名、归档和恢复使用持久化更新接口", async () => {
+    let current = { ...session };
+    stubFetch((url, init) => {
+      if (init?.method === "PATCH") {
+        current = { ...current, ...JSON.parse(String(init.body)) };
+        return jsonResponse(current);
+      }
+      return jsonResponse(url.endsWith("/session-1") ? { ...current, messages: [] } : [current]);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("把任务交给 dotClaw。");
+    await user.type(screen.getByLabelText("搜索会话标题"), "不匹配");
+    expect(screen.getByText("没有匹配的会话")).toBeTruthy();
+    await user.clear(screen.getByLabelText("搜索会话标题"));
+    await user.click(screen.getByRole("button", { name: "重命名会话：本地测试会话" }));
+    await user.clear(screen.getByLabelText("会话新标题"));
+    await user.type(screen.getByLabelText("会话新标题"), "我的计划");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await screen.findByRole("heading", { name: "我的计划" });
+    await user.click(screen.getByRole("button", { name: "归档会话：我的计划" }));
+    await screen.findByText("暂无会话");
+    expect(current.archived).toBe(true);
+    await user.click(screen.getByRole("button", { name: "已归档" }));
+    await user.click(screen.getByRole("button", { name: "恢复会话：我的计划" }));
+    await screen.findByText("暂无归档会话");
+    expect(current.archived).toBe(false);
+    await user.click(screen.getByRole("button", { name: "最近会话" }));
+    expect(screen.getByRole("button", { name: /我的计划\s*chat-model/ })).toBeTruthy();
+  });
+
+  it("向上阅读时流式更新不拉走位置，回到底部后继续跟随", async () => {
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const encoder = new TextEncoder();
+    stubFetch((url, init) => {
+      if (init?.method === "POST") return Promise.resolve(new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } })));
+      return jsonResponse(url.endsWith("/session-1") ? { ...session, messages: [] } : [session]);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("把任务交给 dotClaw。");
+    await user.type(screen.getByLabelText("输入消息"), "长回答");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    const region = screen.getByRole("region", { name: "对话内容" });
+    Object.defineProperties(region, { scrollHeight: { configurable: true, value: 1200 }, clientHeight: { configurable: true, value: 400 }, scrollTop: { configurable: true, writable: true, value: 100 } });
+    fireEvent.scroll(region);
+    controller?.enqueue(encoder.encode(eventBlock("message.delta", { kind: "response_delta", content: "新增内容" })));
+    await screen.findByText("新增内容");
+    expect(region.scrollTop).toBe(100);
+    await user.click(screen.getByRole("button", { name: /有新内容 · 回到底部/ }));
+    expect(region.scrollTop).toBe(1200);
+    Object.defineProperty(region, "scrollHeight", { value: 1400 });
+    controller?.enqueue(encoder.encode(eventBlock("message.delta", { kind: "response_delta", content: "继续输出" })));
+    await screen.findByText("新增内容继续输出");
+    expect(region.scrollTop).toBe(1400);
+    controller?.enqueue(encoder.encode(eventBlock("run.cancelled", {})));
+    controller?.close();
+    await screen.findByText("已停止");
+  });
+
+  it("切换外观后重新打开页面仍保留选择", async () => {
+    stubFetch(() => jsonResponse([]));
+    const user = userEvent.setup();
+    const firstPage = render(<App />);
+    await screen.findByText("当前还没有会话");
+    await user.click(screen.getByRole("button", { name: "切换深色外观" }));
+    firstPage.unmount();
+
+    render(<App />);
+    await screen.findByText("当前还没有会话");
+    expect(screen.getByRole("button", { name: "切换浅色外观" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "切换浅色外观" }));
+    expect(localStorage.getItem("dotclaw.theme")).toBe("light");
+  });
+
   it("加载会话并展示持久化历史", async () => {
     const detail: SessionDetail = {
       ...session,

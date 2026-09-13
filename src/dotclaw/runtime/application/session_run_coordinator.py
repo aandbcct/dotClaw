@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Protocol
 
 from ..domain.facts import AgentRun, RunError, RunErrorCode
@@ -61,6 +62,20 @@ class SessionRunCoordinator:
         self._engine: RuntimeControlPort = engine
         self._locks: dict[str, asyncio.Lock] = {}
         self._locks_guard: asyncio.Lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def edit_session(self, session_id: str) -> AsyncIterator[None]:
+        """在执行租约内编辑会话元数据，运行中立即拒绝而不排队等待。"""
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        if lock.locked():
+            raise ValueError("会话正在运行，请结束后再修改")
+        async with lock:
+            yield
+
+    async def is_session_executing(self, session_id: str) -> bool:
+        """判断当前进程是否正持有 Session 执行租约。"""
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        return lock.locked()
 
     async def submit(self, request: RunRequest, output_port: LLMOutputPort | None = None) -> RunResult:
         """按 Session 获取 FIFO 租约后执行请求；output_port 为本提交运行级端口。"""

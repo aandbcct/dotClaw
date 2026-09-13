@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from ...runtime.domain.facts import JSONMap, MessageRole
 
@@ -30,6 +31,9 @@ class WebRunStatus(StrEnum):
     WAITING_APPROVAL = "waiting_approval"
     WAITING_DELEGATION = "waiting_delegation"
     CANCELLING = "cancelling"
+    RUNNING = "running"
+    RECOVERABLE = "recoverable"
+    ABANDONED = "abandoned"
 
 
 class WebErrorCode(StrEnum):
@@ -40,6 +44,7 @@ class WebErrorCode(StrEnum):
     SESSION_CREATION_FAILED = "session_creation_failed"
     SESSION_NOT_FOUND = "session_not_found"
     NO_ACTIVE_RUN = "no_active_run"
+    SESSION_BUSY = "session_busy"
     INTERNAL_ERROR = "internal_error"
 
 
@@ -50,6 +55,7 @@ class CreateSessionRequest(BaseModel):
 
     title: str = "新对话"
     agent_id: str | None = None
+    model: str | None = None
 
     @field_validator("title")
     @classmethod
@@ -60,7 +66,7 @@ class CreateSessionRequest(BaseModel):
             raise ValueError("title 不能为空")
         return normalized
 
-    @field_validator("agent_id")
+    @field_validator("agent_id", "model")
     @classmethod
     def validate_agent_id(cls, value: str | None) -> str | None:
         """把空白 Identity 视为未指定。"""
@@ -68,6 +74,35 @@ class CreateSessionRequest(BaseModel):
             return None
         normalized = value.strip()
         return normalized or None
+
+
+class ResolveApprovalRequest(BaseModel):
+    """网页提交的审批决定。"""
+
+    model_config = ConfigDict(extra="forbid")
+    approved: bool
+
+
+class UpdateSessionRequest(BaseModel):
+    """仅允许修改会话标题和归档状态。"""
+
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = None
+    archived: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> UpdateSessionRequest:
+        """拒绝空更新、显式空值与空白标题。"""
+        if not self.model_fields_set:
+            raise ValueError("至少提供一个更新字段")
+        for name in self.model_fields_set:
+            if getattr(self, name) is None:
+                raise ValueError("更新字段不能为 null")
+        if self.title is not None:
+            self.title = self.title.strip()
+            if not self.title:
+                raise ValueError("标题不能为空")
+        return self
 
 
 class SubmitMessageRequest(BaseModel):
@@ -107,6 +142,7 @@ class SessionSummaryResponse(BaseModel):
 
     id: str
     title: str
+    archived: bool = False
     agent_id: str
     model: str
     created_at: str
@@ -126,6 +162,46 @@ class SessionDetailResponse(SessionSummaryResponse):
     """会话详情与已完成历史消息。"""
 
     messages: list[SessionMessageResponse]
+
+
+class AgentOptionResponse(BaseModel):
+    """新建会话可选的 Agent 摘要。"""
+
+    id: str
+    name: str
+    description: str
+
+
+class WorkspaceOptionsResponse(BaseModel):
+    """GUI 新建会话所需的静态选项。"""
+
+    agents: list[AgentOptionResponse]
+    models: list[str]
+    default_agent_id: str
+    default_model: str
+
+
+class ToolExecutionResponse(BaseModel):
+    """单次工具调用的可折叠展示数据。"""
+
+    call_id: str
+    name: str
+    status: str
+    started_at: str = ""
+    completed_at: str = ""
+    arguments: dict[str, Any]
+    result: str = ""
+    error: str = ""
+
+
+class RunActivityResponse(BaseModel):
+    """当前或指定运行的状态与工具执行过程。"""
+
+    run_id: str
+    status: str
+    approval_id: str | None = None
+    child_run_id: str | None = None
+    tools: list[ToolExecutionResponse]
 
 
 @dataclass(frozen=True)
