@@ -292,6 +292,10 @@ class SessionManager:
         except Exception:
             return None
 
+    def exists(self, session_id: str) -> bool:
+        """入口预检只检查路径；内容读取留在应用层提交租约内。"""
+        return self._session_path(session_id).is_file()
+
     async def save(self, session: Session) -> None:
         """保存 Session 到磁盘。"""
         session.updated_at = datetime.now().isoformat()

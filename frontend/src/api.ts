@@ -4,6 +4,8 @@ import type {
   SessionSummary,
   StreamEvent,
   RunActivity,
+  RuntimeSettings,
+  SearchResults,
   WorkspaceOptions,
 } from "./types";
 
@@ -53,6 +55,21 @@ export function getSession(sessionId: string): Promise<SessionDetail> {
   return requestJson<SessionDetail>(`${API_ROOT}/sessions/${sessionId}`);
 }
 
+export function switchSessionModel(sessionId: string, model: string): Promise<SessionSummary> {
+  return requestJson<SessionSummary>(`${API_ROOT}/sessions/${sessionId}/model`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }),
+  });
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${API_ROOT}/sessions/${sessionId}`, { method: "DELETE" });
+  if (!response.ok) throw await responseError(response);
+}
+
+export function searchSessions(query: string, signal?: AbortSignal): Promise<SearchResults> {
+  return requestJson<SearchResults>(`${API_ROOT}/sessions/search?${new URLSearchParams({ q: query, archived: "all", limit: "30" })}`, { signal });
+}
+
 export function updateSession(
   sessionId: string,
   changes: { title?: string; archived?: boolean },
@@ -66,6 +83,30 @@ export function updateSession(
 
 export function getWorkspaceOptions(): Promise<WorkspaceOptions> {
   return requestJson<WorkspaceOptions>(`${API_ROOT}/options`);
+}
+
+export function getRuntimeSettings(): Promise<RuntimeSettings> {
+  return requestJson<RuntimeSettings>(`${API_ROOT}/settings`);
+}
+
+export function toggleTool(name: string, enabled: boolean): Promise<RuntimeSettings> {
+  return requestJson<RuntimeSettings>(`${API_ROOT}/settings/tools/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export function toggleSkill(name: string, enabled: boolean): Promise<RuntimeSettings> {
+  return requestJson<RuntimeSettings>(`${API_ROOT}/settings/skills/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export function reconnectMcp(): Promise<RuntimeSettings> {
+  return requestJson<RuntimeSettings>(`${API_ROOT}/settings/mcp/reconnect`, { method: "POST" });
 }
 
 export function createSession(options?: {

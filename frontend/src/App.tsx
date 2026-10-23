@@ -1,815 +1,266 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type FormEvent,
-  type KeyboardEvent,
-} from "react";
-import { CopyButton, MessageContent } from "./MessageContent";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { ApiError, createSession, deleteSession, getRunActivity, getRuntimeSettings, getSession, getWorkspaceOptions, reconnectMcp, resolveApproval, resumeDelegation, resumeRun, switchSessionModel, toggleSkill, toggleTool, updateSession } from "./api";
 import { CreateSessionDialog } from "./CreateSessionDialog";
+import { Dialog } from "./Dialog";
+import { CopyButton, MessageContent } from "./MessageContent";
 import { RunActivityPanel } from "./RunActivityPanel";
-import { SessionList } from "./SessionList";
-import { useDraft } from "./useDraft";
+import { SearchDialog } from "./SearchDialog";
+import { SearchSources } from "./SearchSources";
+import { SessionList, SessionMenu } from "./SessionList";
+import { SettingsPanel } from "./SettingsPanel";
+import { exportMarkdown, readPreference, writePreference } from "./preferences";
 import { useConversationScroll } from "./useConversationScroll";
-
-import {
-  ApiError,
-  cancelSession,
-  createSession,
-  getRunActivity,
-  getSession,
-  getWorkspaceOptions,
-  listSessions,
-  resolveApproval,
-  resumeDelegation,
-  resumeRun,
-  submitMessage,
-  updateSession,
-} from "./api";
-import type {
-  DisplayMessage,
-  RunActivity,
-  RunPhase,
-  SessionDetail,
-  SessionSummary,
-  StreamEvent,
-  WorkspaceOptions,
-} from "./types";
-
-const TERMINAL_EVENTS = new Set([
-  "run.completed",
-  "run.failed",
-  "run.cancelled",
-  "run.suspended",
-  "stream.error",
-]);
+import { useDraft } from "./useDraft";
+import { phaseLabel, useSessionWorkspace } from "./useSessionWorkspace";
+import type { DisplayMessage, RunActivity, RuntimeSettings, SearchHit, SessionSummary, WorkspaceOptions } from "./types";
 
 export function App() {
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    try {
-      return localStorage.getItem("dotclaw.theme") === "dark" ? "dark" : "light";
-    } catch {
-      return "light";
-    }
-  });
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [selectedSession, setSelectedSession] = useState<SessionSummary | null>(null);
-  const [messages, setMessages] = useState<DisplayMessage[]>([]);
-  const { draft, setDraft, storageFailed } = useDraft(selectedSession?.id);
-  const [loading, setLoading] = useState(true);
+  const workspace = useSessionWorkspace();
+  const { selected, selectedId, view } = workspace;
+  const { draft, setDraft, storageFailed } = useDraft(selectedId || undefined);
+  const [theme, setTheme] = useState(() => { try { return localStorage.getItem("dotclaw.theme") === "dark" ? "dark" : "light"; } catch { return "light"; } });
+  const [collapsed, setCollapsed] = useState(() => readPreference("dotclaw.sidebar.v1", window.innerWidth < 1024));
+  const [mobileNav, setMobileNav] = useState(false);
+  const [pinned, setPinned] = useState<string[]>(() => { const value = readPreference<unknown>("dotclaw.pins.v1", []); return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; });
+  const [options, setOptions] = useState<WorkspaceOptions | null>(null);
+  const [nextChoice, setNextChoice] = useState<{ agent_id: string; model: string } | null>(null);
+  const [advanced, setAdvanced] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [modelError, setModelError] = useState("");
+  const [modelBusy, setModelBusy] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [menu, setMenu] = useState<SessionSummary | null>(null);
+  const [deleting, setDeleting] = useState<SessionSummary | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState("");
   const [creating, setCreating] = useState(false);
-  const [createOptions, setCreateOptions] = useState<WorkspaceOptions | null>(null);
-  const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [updating, setUpdating] = useState(false);
-  const [runPhase, setRunPhase] = useState<RunPhase>("idle");
-  const [runActivity, setRunActivity] = useState<RunActivity | null>(null);
-  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const detailRequestId = useRef(0);
-  const streamController = useRef<AbortController | null>(null);
-  const controlInFlight = useRef(false);
-  const terminalRunIds = useRef(new Set<string>());
+  const [newError, setNewError] = useState("");
+  const submitting = useRef(false);
   const composing = useRef(false);
-  const { conversationRef, onScroll, scrollToBottom, awayFromBottom, hasNewContent } = useConversationScroll(selectedSession?.id, messages);
-
-  const isRunning = runPhase === "running" || runPhase === "stopping";
-
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState<RuntimeSettings | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsBusy, setSettingsBusy] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState("");
+  const [inspector, setInspector] = useState<{ sessionId: string; runIds: string[]; activity: RunActivity | null; error: string } | null>(null);
+  const inspectorRequest = useRef(0);
+  const [targetMessage, setTargetMessage] = useState<string | null>(null);
+  const [highlight, setHighlight] = useState<string | null>(null);
+  const { conversationRef, onScroll, scrollToBottom, awayFromBottom, hasNewContent } = useConversationScroll(selectedId || undefined, view.messages);
+  const busy = workspace.isStreaming(selectedId) || ["running", "stopping", "suspended", "recoverable"].includes(view.phase);
+  useEffect(() => { try { localStorage.setItem("dotclaw.theme", theme); } catch { /* 外观仍在本页生效。 */ } }, [theme]);
+  useEffect(() => { writePreference("dotclaw.sidebar.v1", collapsed); }, [collapsed]);
+  useEffect(() => { writePreference("dotclaw.pins.v1", pinned); }, [pinned]);
   useEffect(() => {
-    try {
-      localStorage.setItem("dotclaw.theme", theme);
-    } catch {
-      // 浏览器禁用本地存储时，仍允许切换当前页面的外观。
-    }
-  }, [theme]);
-
+    if (workspace.loading) return;
+    setPinned((current) => current.filter((id) => workspace.sessions.some((session) => session.id === id)));
+  }, [workspace.loading, workspace.sessions]);
   useEffect(() => {
-    void loadWorkspace();
-    return () => streamController.current?.abort();
-  }, []);
-
+    if (!targetMessage || view.loading) return;
+    const element = document.getElementById(`message-${targetMessage}`);
+    if (!element) return;
+    element.scrollIntoView({ block: "center" });
+    setHighlight(targetMessage); setTargetMessage(null);
+  }, [targetMessage, view.loading, view.messages]);
   useEffect(() => {
-    if (selectedSession === null || !["running", "stopping", "suspended", "recoverable"].includes(runPhase)) {
-      return;
-    }
-    let active = true;
-    const refresh = async () => {
-      try {
-        const activity = await getRunActivity(selectedSession.id, currentRunId ?? undefined);
-        if (active && activity !== null) {
-          if ((controlInFlight.current || terminalRunIds.current.has(activity.run_id)) && ["waiting_approval", "waiting_delegation", "recoverable"].includes(activity.status)) {
-            return;
-          }
-          setRunActivity(activity);
-          setCurrentRunId(activity.run_id);
-          syncActivityPhase(activity);
-          if (activity.status === "completed") {
-            await refreshCompletedSession(selectedSession.id);
-          }
-        }
-      } catch {
-        // 短暂读取失败不覆盖正在进行的回答与控制状态。
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 600);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [selectedSession?.id, currentRunId, runPhase]);
-
-  async function loadWorkspace(): Promise<void> {
-    setLoading(true);
-    setError(null);
-    try {
-      const availableSessions = await listSessions();
-      setSessions(availableSessions);
-      const latest = availableSessions.find((session) => !session.archived);
-      if (latest) {
-        await openSession(latest);
-      }
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setLoading(false);
-    }
+    if (!highlight) return;
+    const timer = window.setTimeout(() => setHighlight(null), 2400);
+    return () => window.clearTimeout(timer);
+  }, [highlight]);
+  async function loadOptions(): Promise<WorkspaceOptions> {
+    const value = options || await getWorkspaceOptions();
+    if (!value.models.length) throw new Error("没有可用的对话模型，请检查本地模型配置并重启");
+    setOptions(value); return value;
   }
-
-  async function openSession(session: SessionSummary): Promise<void> {
-    if (isRunning || updating) {
-      return;
-    }
-    const requestId = detailRequestId.current + 1;
-    detailRequestId.current = requestId;
-    setSelectedSession(session);
-    setMessages([]);
-    setError(null);
-    setRunPhase("idle");
-    setRunActivity(null);
-    setCurrentRunId(null);
-    terminalRunIds.current.clear();
-    setSidebarOpen(false);
-    try {
-      const detail = await getSession(session.id);
-      if (detailRequestId.current === requestId) {
-        setSelectedSession(detail);
-        setMessages(detail.messages);
-        try {
-          const activity = await getRunActivity(session.id);
-          if (detailRequestId.current === requestId && activity !== null) {
-            setRunActivity(activity);
-            setCurrentRunId(activity.run_id);
-            syncActivityPhase(activity);
-          }
-        } catch {
-          // 会话历史仍可使用，运行状态读取失败不阻塞打开会话。
-        }
-      }
-    } catch (caught) {
-      if (detailRequestId.current === requestId) {
-        setError(errorMessage(caught));
-      }
-    }
+  function startNew(): void {
+    workspace.startNew(); setMobileNav(false); setNewError(""); setModelError("");
+    inputRef.current?.focus();
   }
-
-  async function handleRequestCreateSession(): Promise<void> {
-    if (creating || isRunning || updating) return;
-    setError(null);
-    try {
-      const options = createOptions ?? await getWorkspaceOptions();
-      setCreateOptions(options);
-      setShowCreateDialog(true);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
+  async function open(session: SessionSummary): Promise<void> {
+    setMobileNav(false); setInspector(null); setModelOpen(false); setModelError(""); setNewError("");
+    await workspace.open(session);
   }
-
-  async function handleCreateSession(agentId: string, model: string): Promise<void> {
-    if (creating || isRunning || updating) {
-      return;
-    }
-    setCreating(true);
-    setError(null);
-    try {
-      const created = await createSession({ agent_id: agentId, model });
-      setSessions((current) => [created, ...current]);
-      setShowCreateDialog(false);
-      await openSession(created);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  async function handleSubmit(event?: FormEvent): Promise<void> {
+  async function submit(event?: FormEvent): Promise<void> {
     event?.preventDefault();
     const content = draft.trim();
-    if (selectedSession === null || !content || isRunning || updating) {
-      return;
-    }
-
-    const sessionId = selectedSession.id;
-    const createdAt = new Date().toISOString();
-    const userMessageId = `local-user-${crypto.randomUUID()}`;
-    const assistantMessageId = `local-assistant-${crypto.randomUUID()}`;
-    setMessages((current) => [
-      ...current,
-      { id: userMessageId, role: "user", content, created_at: createdAt },
-      {
-        id: assistantMessageId,
-        role: "assistant",
-        content: "",
-        reasoning: "",
-        created_at: createdAt,
-        pending: true,
-      },
-    ]);
-    setDraft("");
-    scrollToBottom();
-    setError(null);
-    setRunPhase("running");
-    setRunActivity(null);
-    setCurrentRunId(null);
-
-    const controller = new AbortController();
-    streamController.current = controller;
-    let terminalReceived = false;
-    let completed = false;
-
+    if (!content || busy || submitting.current) return;
+    submitting.current = true;
+    let id = selectedId;
+    setNewError("");
     try {
-      await submitMessage(
-        sessionId,
-        content,
-        (streamEvent) => {
-          if (TERMINAL_EVENTS.has(streamEvent.event)) {
-            terminalReceived = true;
-          }
-          if (streamEvent.event === "run.completed") {
-            completed = true;
-          }
-          const runId = stringField(streamEvent.data, "run_id");
-          if (runId) setCurrentRunId(runId);
-          applyStreamEvent(streamEvent, assistantMessageId);
-        },
-        controller.signal,
-      );
-      if (!terminalReceived) {
-        setRunPhase("failed");
-        setError("消息流提前结束，请刷新后确认运行结果");
-      } else if (completed) {
-        await refreshCompletedSession(sessionId);
+      if (!id) {
+        setCreating(true);
+        const choices = await loadOptions();
+        const created = await createSession(nextChoice || { agent_id: choices.default_agent_id, model: choices.default_model });
+        id = created.id;
+        workspace.upsert(created);
+        setDraft(content, id);
+        await workspace.open(created);
+        setDraft("", "new");
       }
-    } catch (caught) {
-      if (!controller.signal.aborted) {
-        setRunPhase("failed");
-        setError(errorMessage(caught));
-        markAssistantFinished(assistantMessageId);
-      }
-    } finally {
-      if (streamController.current === controller) {
-        streamController.current = null;
-      }
-    }
+      setDraft("", id);
+      scrollToBottom();
+      void workspace.send(id, content);
+    } catch (error) { setNewError(errorText(error)); }
+    finally { submitting.current = false; setCreating(false); }
   }
-
-  function applyStreamEvent(
-    streamEvent: StreamEvent,
-    assistantMessageId: string,
-  ): void {
-    if (streamEvent.event === "message.delta") {
-      const content = stringField(streamEvent.data, "content");
-      const kind = stringField(streamEvent.data, "kind");
-      setMessages((current) =>
-        current.map((message) => {
-          if (message.id !== assistantMessageId) {
-            return message;
-          }
-          if (kind === "reasoning_delta") {
-            return { ...message, reasoning: `${message.reasoning ?? ""}${content}` };
-          }
-          return { ...message, content: `${message.content}${content}` };
-        }),
-      );
-      return;
-    }
-
-    markAssistantFinished(assistantMessageId);
-    if (streamEvent.event === "run.completed") {
-      terminalRunIds.current.add(stringField(streamEvent.data, "run_id"));
-      const finalContent = nestedStringField(streamEvent.data, "final_message", "content");
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantMessageId && !message.content
-            ? { ...message, content: finalContent }
-            : message,
-        ),
-      );
-      setRunPhase("completed");
-      setRunActivity((current) => current ? { ...current, status: "completed" } : current);
-      return;
-    }
-    if (streamEvent.event === "run.cancelled") {
-      terminalRunIds.current.add(stringField(streamEvent.data, "run_id"));
-      setRunPhase("cancelled");
-      setRunActivity((current) => current ? { ...current, status: "cancelled" } : current);
-      return;
-    }
-    if (streamEvent.event === "run.suspended") {
-      setRunPhase("suspended");
-      return;
-    }
-
-    setRunPhase("failed");
-    terminalRunIds.current.add(stringField(streamEvent.data, "run_id"));
-    setRunActivity((current) => current ? { ...current, status: "failed" } : current);
-    setError(
-      nestedStringField(streamEvent.data, "error", "message") ||
-        "运行失败，请稍后重试",
-    );
-  }
-
-  function markAssistantFinished(assistantMessageId: string): void {
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === assistantMessageId
-          ? { ...message, pending: false }
-          : message,
-      ),
-    );
-  }
-
-  async function refreshCompletedSession(sessionId: string): Promise<void> {
-    try {
-      const [detail, availableSessions] = await Promise.all([
-        getSession(sessionId),
-        listSessions(),
-      ]);
-      setSelectedSession(detail);
-      setMessages(detail.messages);
-      setSessions(availableSessions);
-      if (currentRunId) {
-        try {
-          setRunActivity(await getRunActivity(sessionId, currentRunId));
-        } catch {
-          // 对话投影已经刷新，执行记录读取失败不改变成功状态。
-        }
-      }
-    } catch {
-      // 流式回答已经完整展示，刷新投影失败不覆盖本次成功结果。
-    }
-  }
-
-  function syncActivityPhase(activity: RunActivity): void {
-    if (activity.status === "waiting_approval" || activity.status === "waiting_delegation") {
-      if (runPhase !== "running") setRunPhase("suspended");
-    } else if (activity.status === "recoverable") {
-      setRunPhase("recoverable");
-    } else if (activity.status === "running") {
-      setRunPhase("running");
-    } else if (activity.status === "completed") {
-      setRunPhase("completed");
-    } else if (activity.status === "cancelled" || activity.status === "abandoned") {
-      setRunPhase("cancelled");
-    } else if (activity.status === "failed") {
-      setRunPhase("failed");
-    }
-  }
-
-  async function handleRunControl(
-    operation: (
-      onEvent: (event: StreamEvent) => void,
-      signal: AbortSignal,
-    ) => Promise<void>,
-  ): Promise<void> {
-    if (selectedSession === null || isRunning) return;
-    setError(null);
-    setRunPhase("running");
-    controlInFlight.current = true;
-    let assistantMessageId = [...messages].reverse().find((item) => item.role === "assistant")?.id;
-    if (!assistantMessageId) {
-      assistantMessageId = `local-assistant-${crypto.randomUUID()}`;
-      setMessages((current) => [...current, {
-        id: assistantMessageId as string,
-        role: "assistant",
-        content: "",
-        reasoning: "",
-        created_at: new Date().toISOString(),
-        pending: true,
-      }]);
-    } else {
-      const targetId = assistantMessageId;
-      setMessages((current) => current.map((item) => item.id === targetId ? { ...item, pending: true } : item));
-    }
-    const controller = new AbortController();
-    streamController.current = controller;
-    let terminalReceived = false;
-    let completed = false;
-    try {
-      await operation((streamEvent) => {
-        terminalReceived ||= TERMINAL_EVENTS.has(streamEvent.event);
-        completed ||= streamEvent.event === "run.completed";
-        const runId = stringField(streamEvent.data, "run_id");
-        if (runId) setCurrentRunId(runId);
-        applyStreamEvent(streamEvent, assistantMessageId as string);
-      }, controller.signal);
-      if (!terminalReceived) {
-        setRunPhase("failed");
-        setError("消息流提前结束，请刷新后确认运行结果");
-      } else if (completed) {
-        await refreshCompletedSession(selectedSession.id);
-      }
-    } catch (caught) {
-      if (!controller.signal.aborted) {
-        setRunPhase("failed");
-        setError(errorMessage(caught));
-        markAssistantFinished(assistantMessageId);
-      }
-    } finally {
-      controlInFlight.current = false;
-      if (streamController.current === controller) streamController.current = null;
-    }
-  }
-
-  function handleApproval(approved: boolean): void {
-    const approvalId = runActivity?.approval_id;
-    if (!approvalId) return;
-    void handleRunControl((onEvent, signal) => resolveApproval(approvalId, approved, onEvent, signal));
-  }
-
-  function handleResumeDelegation(): void {
-    const childRunId = runActivity?.child_run_id;
-    if (!childRunId) return;
-    void handleRunControl((onEvent, signal) => resumeDelegation(childRunId, onEvent, signal));
-  }
-
-  function handleResumeRun(): void {
-    const runId = runActivity?.run_id;
-    if (!runId) return;
-    void handleRunControl((onEvent, signal) => resumeRun(runId, onEvent, signal));
-  }
-
-  async function handleStop(): Promise<void> {
-    if (selectedSession === null || runPhase !== "running") {
-      return;
-    }
-    setRunPhase("stopping");
-    setError(null);
-    try {
-      await cancelSession(selectedSession.id);
-    } catch (caught) {
-      setRunPhase("running");
-      setError(errorMessage(caught));
-    }
-  }
-
-  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+  function keyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
     if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      void handleSubmit();
-    }
+    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); }
   }
-
-  async function handleUpdateSession(
-    session: SessionSummary, changes: { title?: string; archived?: boolean },
-  ): Promise<boolean> {
-    if (isRunning || updating) return false;
-    setUpdating(true);
-    setError(null);
+  async function requestAdvanced(): Promise<void> {
+    try { await loadOptions(); setAdvanced(true); } catch (error) { setNewError(errorText(error)); }
+  }
+  async function requestModel(): Promise<void> {
+    setModelError("");
+    try { await loadOptions(); setModelOpen(true); } catch (error) { setModelError(errorText(error)); }
+  }
+  async function changeModel(model: string): Promise<void> {
+    if (!selected) { setNextChoice({ agent_id: nextChoice?.agent_id || options?.default_agent_id || "default", model }); setModelOpen(false); return; }
+    setModelBusy(true); setModelError("");
+    try { workspace.upsert(await switchSessionModel(selected.id, model)); setModelOpen(false); }
+    catch (error) { setModelError(errorText(error)); }
+    finally { setModelBusy(false); }
+  }
+  async function changeSession(changes: { title?: string; archived?: boolean }): Promise<void> {
+    if (!menu) return;
+    setActionBusy(true); setActionError("");
     try {
-      const updated = await updateSession(session.id, changes);
-      setSessions((current) => current.map((item) => item.id === updated.id ? updated : item));
-      if (selectedSession?.id === session.id) {
-        if (changes.archived === true) {
-          detailRequestId.current += 1;
-          setSelectedSession(null);
-          setMessages([]);
-          setRunPhase("idle");
-        } else setSelectedSession(updated);
-      }
-      return true;
-    } catch (caught) {
-      setError(errorMessage(caught));
-      return false;
-    } finally {
-      setUpdating(false);
-    }
+      const updated = await updateSession(menu.id, changes); workspace.upsert(updated); setMenu(null);
+      if (changes.archived && selectedId === menu.id) workspace.startNew();
+    } catch (error) { setActionError(errorText(error)); }
+    finally { setActionBusy(false); }
   }
-
-  const statusLabel = useMemo(() => phaseLabel(runPhase), [runPhase]);
-
-  return (
-    <div className="app-shell" data-theme={theme}>
-      <aside className={`sidebar ${sidebarOpen ? "sidebar--open" : ""}`}>
-        <div className="brand-row">
-          <div className="brand-mark" aria-hidden="true">
-            d<span>·</span>c
-          </div>
-          <div>
-            <div className="brand-name">dotClaw</div>
-            <div className="brand-caption">你的本地 AI 工作区</div>
-          </div>
-          <button
-            className="sidebar-close"
-            type="button"
-            aria-label="关闭会话列表"
-            onClick={() => setSidebarOpen(false)}
-          >
-            ×
-          </button>
+  async function confirmDelete(): Promise<void> {
+    if (!deleting) return;
+    const session = deleting; setActionBusy(true); setActionError("");
+    try {
+      await deleteSession(session.id); workspace.remove(session.id); setDraft("", session.id);
+      setPinned((current) => current.filter((id) => id !== session.id));
+      setDeleting(null);
+    } catch (error) { setActionError(errorText(error)); }
+    finally { setActionBusy(false); }
+  }
+  async function exportSession(session: SessionSummary): Promise<void> {
+    setActionError("");
+    try { exportMarkdown(await getSession(session.id), ["running", "stopping"].includes(workspace.views[session.id]?.phase)); setMenu(null); }
+    catch (error) { setActionError(errorText(error)); }
+  }
+  async function selectSearch(hit: SearchHit): Promise<void> {
+    setSearchOpen(false);
+    try {
+      const session = workspace.sessions.find((item) => item.id === hit.session_id) || await getSession(hit.session_id);
+      await open(session); setTargetMessage(hit.message_id);
+    } catch (error) { setNewError(errorText(error)); }
+  }
+  async function loadSettings(): Promise<void> {
+    setSettingsOpen(true); setMobileNav(false); setSettingsLoading(true); setSettingsError("");
+    try { setSettings(await getRuntimeSettings()); } catch (error) { setSettingsError(errorText(error)); }
+    finally { setSettingsLoading(false); }
+  }
+  async function settingAction(key: string, action: () => Promise<RuntimeSettings>): Promise<void> {
+    if (settingsBusy) return;
+    setSettingsBusy(key); setSettingsError("");
+    try { setSettings(await action()); } catch (error) { setSettingsError(errorText(error)); }
+    finally { setSettingsBusy(null); }
+  }
+  async function showRun(sessionId: string, runIds: string[], chosen = runIds[0]): Promise<void> {
+    const request = ++inspectorRequest.current;
+    setInspector({ sessionId, runIds, activity: null, error: "" });
+    try {
+      const activity = await getRunActivity(sessionId, chosen);
+      setInspector((current) => request === inspectorRequest.current && current?.sessionId === sessionId ? { ...current, activity, error: activity ? "" : "该运行记录不存在或不属于此会话" } : current);
+    } catch (error) { setInspector((current) => request === inspectorRequest.current && current ? { ...current, error: errorText(error) } : current); }
+  }
+  const liveInspector = inspector && workspace.views[inspector.sessionId]?.activity;
+  const detailActivity = liveInspector && liveInspector.run_id === inspector?.activity?.run_id ? liveInspector : inspector?.activity;
+  const canControl = Boolean(inspector && detailActivity && workspace.views[inspector.sessionId]?.activity?.run_id === detailActivity.run_id);
+  function controlRun(action: "approve" | "reject" | "delegation" | "resume"): void {
+    if (!inspector || !detailActivity || !canControl) return;
+    const activity = detailActivity; const id = inspector.sessionId;
+    if (action === "approve" || action === "reject") {
+      if (activity.approval_id) void workspace.control(id, (callback, signal) => resolveApproval(activity.approval_id!, action === "approve", callback, signal));
+    } else if (action === "delegation" && activity.child_run_id) void workspace.control(id, (callback, signal) => resumeDelegation(activity.child_run_id!, callback, signal));
+    else if (action === "resume") void workspace.control(id, (callback, signal) => resumeRun(activity.run_id, callback, signal));
+  }
+  const navigation = <>
+    <div className="brand-row"><strong className="brand-name">dotClaw</strong><button type="button" aria-label="折叠侧栏" onClick={() => { setCollapsed(!collapsed); setMobileNav(false); }}>◧</button></div>
+    <button className="nav-action" type="button" aria-label="新对话" onClick={startNew}><span aria-hidden="true">＋</span><span>新对话</span></button>
+    <button className="nav-action" type="button" aria-label="搜索对话" onClick={() => { setSearchOpen(true); setMobileNav(false); }}><span aria-hidden="true">⌕</span><span>搜索对话</span></button>
+    <SessionList sessions={workspace.sessions} selectedId={selectedId || undefined} pinned={pinned} activeIds={Object.entries(workspace.views).filter(([, value]) => ["running", "stopping", "suspended", "recoverable"].includes(value.phase)).map(([id]) => id)} onSelect={(session) => void open(session)} onMenu={(session) => { setActionError(""); setMenu(session); }} />
+    <button className="nav-action settings-entry" type="button" aria-label="设置" onClick={() => void loadSettings()}><span aria-hidden="true">⚙</span><span>设置</span></button>
+  </>;
+  return <div className={`app-shell ${collapsed ? "sidebar-collapsed" : ""}`} data-theme={theme}>
+    <aside className="sidebar" aria-label="工作区导航">{navigation}</aside>
+    {mobileNav && <Dialog title="会话导航" className="mobile-navigation" onClose={() => setMobileNav(false)}>{navigation}</Dialog>}
+    <main className={`workspace ${!selected && !view.messages.length ? "workspace--new" : ""}`}>
+      <header className="workspace-header">
+        <button className="menu-button" type="button" aria-label="打开会话列表" onClick={() => setMobileNav(true)}>☰</button>
+        <div className="model-context">
+          <button className="model-selector" type="button" disabled={modelBusy || ["running", "stopping"].includes(view.phase)} onClick={() => void requestModel()}>{selected?.model || nextChoice?.model || "dotClaw"} <span aria-hidden="true">⌄</span></button>
+          {modelError && !modelOpen && <span className="inline-error" role="alert">{modelError}</span>}
         </div>
-
-        <button
-          className="new-session"
-          type="button"
-          disabled={creating || isRunning || updating}
-          onClick={() => void handleRequestCreateSession()}
-        >
-          <span aria-hidden="true">＋</span>
-          {creating ? "正在创建" : "新建会话"}
-        </button>
-
-        <SessionList
-          sessions={sessions}
-          selectedId={selectedSession?.id}
-          disabled={isRunning || updating || creating}
-          onSelect={(session) => void openSession(session)}
-          onUpdate={handleUpdateSession}
-        />
-
-        <div className="runtime-note">
-          <span className="status-dot" />
-          <div>
-            <strong>仅本机访问</strong>
-            <span>127.0.0.1 · 数据保留在本地</span>
-          </div>
-        </div>
-      </aside>
-
-      {sidebarOpen && (
-        <button
-          className="sidebar-scrim"
-          type="button"
-          aria-label="关闭会话列表"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      <main className="workspace">
-        <header className="workspace-header">
-          <button
-            className="menu-button"
-            type="button"
-            aria-label="打开会话列表"
-            onClick={() => setSidebarOpen(true)}
-          >
-            <span />
-            <span />
-          </button>
-          <div className="session-context">
-            <h1>{selectedSession?.title ?? "本地工作区"}</h1>
-            {selectedSession && (
-              <p>
-                {selectedSession.agent_id} <span>/</span> {selectedSession.model}
-              </p>
-            )}
-          </div>
-          <div className={`run-state run-state--${runPhase}`} aria-live="polite">
-            <span />
-            {statusLabel}
-          </div>
-          <button
-            className="theme-button"
-            type="button"
-            aria-label={theme === "light" ? "切换深色外观" : "切换浅色外观"}
-            title={theme === "light" ? "切换深色外观" : "切换浅色外观"}
-            onClick={() => setTheme(theme === "light" ? "dark" : "light")}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              {theme === "light" ? (
-                <path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z" />
-              ) : (
-                <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></>
-              )}
-            </svg>
-          </button>
-        </header>
-
-        <section className="conversation" aria-label="对话内容" ref={conversationRef} onScroll={onScroll}>
-          {loading ? (
-            <LoadingState />
-          ) : selectedSession === null ? (
-            <EmptyState hasSessions={sessions.length > 0} onCreate={() => void handleRequestCreateSession()} />
-          ) : messages.length === 0 && runActivity === null ? (
-            <WelcomeState />
-          ) : (
-            <div className="message-column">
-              {messages.map((message) => (
-                <Message key={message.id} message={message} />
-              ))}
-              {runActivity && (
-                <RunActivityPanel
-                  activity={runActivity}
-                  busy={isRunning}
-                  onApprove={handleApproval}
-                  onResumeDelegation={handleResumeDelegation}
-                  onResumeRun={handleResumeRun}
-                />
-              )}
+        <span className="header-title" title={selected?.title}>{selected?.title || "新对话"}</span>
+        {["running", "stopping", "suspended", "recoverable", "failed"].includes(view.phase) && <span className={`run-state run-state--${view.phase}`}>{phaseLabel(view.phase)}</span>}
+        <button className="icon-button theme-button" type="button" aria-label={theme === "light" ? "切换深色外观" : "切换浅色外观"} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? "☾" : "☀"}</button>
+        {selected && <button className="icon-button" type="button" aria-label="当前会话更多操作" onClick={() => { setMenu(selected); setActionError(""); }}>⋯</button>}
+      </header>
+      <section className="conversation" aria-label="对话内容" ref={conversationRef} onScroll={onScroll}>
+        {workspace.loading || view.loading ? <p className="empty-note muted">正在读取会话…</p> : <div className="message-column">
+          {!view.messages.length && !view.activity && <h1 className="welcome-title">有什么可以帮你？</h1>}
+          {view.messages.map((message) => <article id={`message-${message.id}`} className={`message message--${message.role} ${highlight === message.id ? "message--highlight" : ""}`} key={message.id}>
+            <span className="sr-only">{message.role === "user" ? "你" : "dotClaw"}</span>
+            <div className="message-body" title={message.created_at}>
+              {message.reasoning && <details className="reasoning"><summary>思考过程</summary><p>{message.reasoning}</p></details>}
+              <div className="message-content">{message.role === "assistant" ? <MessageContent content={message.content} /> : message.content}</div>
+              {message.pending && <span className="stream-cursor" aria-label="正在生成" />}
             </div>
-          )}
-        </section>
-
-        <div className="composer-region">
-          {awayFromBottom && <button className="scroll-bottom" type="button" onClick={scrollToBottom}>{hasNewContent ? "有新内容 · 回到底部 ↓" : "回到底部 ↓"}</button>}
-          {error && (
-            <div className="error-strip" role="alert">
-              <span>!</span>
-              <p>{error}</p>
-              <button type="button" onClick={() => setError(null)} aria-label="关闭错误">
-                ×
-              </button>
-            </div>
-          )}
-          <form className="composer" onSubmit={(event) => void handleSubmit(event)}>
-            <label className="sr-only" htmlFor="message-input">
-              输入消息
-            </label>
-            <textarea
-              id="message-input"
-              value={draft}
-              rows={1}
-              disabled={selectedSession === null || isRunning || updating}
-              placeholder={selectedSession ? "输入消息，Enter 发送" : "请先创建一个会话"}
-              onChange={(event) => setDraft(event.target.value)}
-              onCompositionStart={() => { composing.current = true; }}
-              onCompositionEnd={() => { composing.current = false; }}
-              onKeyDown={handleComposerKeyDown}
-            />
-            {isRunning ? (
-              <button
-                className="composer-action composer-action--stop"
-                type="button"
-                disabled={runPhase === "stopping"}
-                aria-label="停止运行"
-                onClick={() => void handleStop()}
-              >
-                <span />
-              </button>
-            ) : (
-              <button
-                className="composer-action"
-                type="submit"
-                disabled={selectedSession === null || !draft.trim() || updating}
-                aria-label="发送消息"
-              >
-                <ArrowIcon />
-              </button>
-            )}
-          </form>
-          <div className="composer-hint">
-            <span>Enter 发送 · Shift + Enter 换行</span>
-            <span>{storageFailed ? "草稿暂未保存到浏览器" : "草稿自动保存在此浏览器"}</span>
-          </div>
-        </div>
-      </main>
-      {showCreateDialog && createOptions && (
-        <CreateSessionDialog
-          options={createOptions}
-          busy={creating}
-          onCancel={() => setShowCreateDialog(false)}
-          onCreate={(agentId, model) => void handleCreateSession(agentId, model)}
-        />
-      )}
-    </div>
-  );
-}
-
-function Message({ message }: { message: DisplayMessage }) {
-  const isAssistant = message.role === "assistant";
-  return (
-    <article className={`message message--${message.role}`}>
-      <div className="message-author">
-        <span>{isAssistant ? "dotClaw" : "你"}</span>
-        <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
+            {message.role === "assistant" && !message.pending && <div className="message-actions">
+              {message.content && <CopyButton getText={() => message.content} label="复制回答" />}
+              {message.content && <button type="button" onClick={() => { setDraft(message.content); inputRef.current?.focus(); }}>引用到输入框</button>}
+              {Boolean(message.run_ids?.length) && selectedId && <button type="button" onClick={() => void showRun(selectedId, message.run_ids!)}>执行记录</button>}
+            </div>}
+            {message.role === "assistant" && !message.pending && Boolean(message.run_ids?.length) && selectedId && <SearchSources sessionId={selectedId} runIds={message.run_ids!} />}
+          </article>)}
+          {view.detached && <p className="status-note">任务仍在运行，完成后显示结果。当前连接没有可恢复的逐字增量。</p>}
+          {view.activity && <div className={`run-summary ${view.activity.status === "waiting_approval" ? "run-summary--approval" : ""}`}>
+            <span>{view.activity.status === "waiting_approval" ? "需要你的批准" : `执行记录 · ${phaseLabel(view.phase)} · ${view.activity.tools.length} 个工具`}</span>
+            <button type="button" onClick={() => selectedId && void showRun(selectedId, [view.activity!.run_id])}>{view.activity.status === "waiting_approval" ? "查看并决定" : "查看详情"}</button>
+          </div>}
+        </div>}
+      </section>
+      <div className="composer-region">
+        {(view.error || newError || workspace.loadError) && <p className="error-strip" role="alert">{view.error || newError || workspace.loadError}</p>}
+        <form className="composer" onSubmit={(event) => void submit(event)}>
+          <label className="sr-only" htmlFor="message-input">输入消息</label>
+          <textarea ref={inputRef} id="message-input" value={draft} placeholder="输入消息…" rows={2} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} />
+          {["running", "stopping"].includes(view.phase) ? <button className="composer-action" type="button" aria-label="停止运行" disabled={view.phase === "stopping"} onClick={() => selectedId && void workspace.stop(selectedId)}>■</button> : <button className="composer-action" aria-label="发送消息" type="submit" disabled={!draft.trim() || busy || creating}>↑</button>}
+        </form>
+        <div className="composer-hint"><span>Enter 发送 · Shift + Enter 换行</span>{!selected && <button type="button" onClick={() => void requestAdvanced()}>智能体与模型</button>}{storageFailed && <span role="alert">草稿保存失败</span>}</div>
       </div>
-      <div className="message-body">
-        {isAssistant && message.reasoning && (
-          <details className="reasoning" open={message.pending || undefined}>
-            <summary>思考过程</summary>
-            <p>{message.reasoning}</p>
-          </details>
-        )}
-        <div className="message-content">
-          {message.content ? (
-            isAssistant ? (
-              <MessageContent content={message.content} />
-            ) : (
-              message.content
-            )
-          ) : message.pending ? (
-            "正在组织回答"
-          ) : (
-            "运行未返回内容"
-          )}
-          {message.pending && <span className="stream-cursor" aria-hidden="true" />}
-        </div>
-        {isAssistant && message.content && !message.pending && <div className="message-actions"><CopyButton label="复制回答" getText={() => message.content} /></div>}
-      </div>
-    </article>
-  );
+      {awayFromBottom && <button className="back-to-bottom" type="button" onClick={scrollToBottom}>{hasNewContent ? "有新内容 · 回到底部" : "回到底部"} ↓</button>}
+    </main>
+    {advanced && options && <CreateSessionDialog options={options} onCancel={() => setAdvanced(false)} onCreate={(agent_id, model) => { setNextChoice({ agent_id, model }); setAdvanced(false); }} />}
+    {modelOpen && options && <Dialog title="选择模型" className="model-dialog" onClose={() => setModelOpen(false)}>
+      <p className="muted">用于后续新消息；当前运行保持原模型。智能体：{selected?.agent_id || nextChoice?.agent_id || options.default_agent_id}</p>
+      <div className="menu-actions">{options.models.map((model) => <button type="button" aria-pressed={(selected?.model || nextChoice?.model || options.default_model) === model} disabled={modelBusy} key={model} onClick={() => void changeModel(model)}>{model}</button>)}</div>
+      {modelError && <p className="inline-error" role="alert">{modelError}</p>}
+    </Dialog>}
+    {searchOpen && <SearchDialog onClose={() => setSearchOpen(false)} onSelect={(hit) => void selectSearch(hit)} />}
+    {menu && <SessionMenu session={menu} pinned={pinned.includes(menu.id)} busy={actionBusy} error={actionError} onClose={() => setMenu(null)} onUpdate={changeSession} onPin={() => { setPinned((current) => current.includes(menu.id) ? current.filter((id) => id !== menu.id) : [...current, menu.id]); setMenu(null); }} onExport={() => void exportSession(menu)} onDelete={() => { setDeleting(menu); setMenu(null); setActionError(""); }} />}
+    {deleting && <Dialog title="删除会话" onClose={() => { if (!actionBusy) setDeleting(null); }}>
+      <p>删除“{deleting.title}”及其运行记录，无法恢复。</p>
+      {actionError && <p className="inline-error" role="alert">{actionError}</p>}
+      <footer className="dialog-actions"><button data-initial-focus autoFocus type="button" className="secondary-button" disabled={actionBusy} onClick={() => setDeleting(null)}>取消</button>{actionError && <button type="button" onClick={() => { void open(deleting); setDeleting(null); }}>打开会话处理运行</button>}<button type="button" className="danger-button" disabled={actionBusy} onClick={() => void confirmDelete()}>确认删除</button></footer>
+    </Dialog>}
+    {settingsOpen && <SettingsPanel settings={settings} loading={settingsLoading} busyKey={settingsBusy} error={settingsError} onRetry={() => void loadSettings()} onClose={() => setSettingsOpen(false)} onToggleTool={(name, enabled) => void settingAction(name, () => toggleTool(name, enabled))} onToggleSkill={(name, enabled) => void settingAction(name, () => toggleSkill(name, enabled))} onReconnectMcp={() => void settingAction("mcp", reconnectMcp)} />}
+    {inspector && <Dialog title="执行详情" className="execution-drawer" onClose={() => setInspector(null)}>
+      {inspector.runIds.length > 1 && <label>本轮运行<select aria-label="选择运行记录" onChange={(event) => void showRun(inspector.sessionId, inspector.runIds, event.target.value)} value={detailActivity?.run_id || ""}>{inspector.runIds.map((id) => <option key={id}>{id}</option>)}</select></label>}
+      {inspector.error && <p className="inline-error" role="alert">{inspector.error}</p>}
+      {!detailActivity && !inspector.error && <p className="muted">正在读取执行记录…</p>}
+      {detailActivity && <RunActivityPanel activity={detailActivity} busy={!canControl || ["running", "stopping"].includes(workspace.views[inspector.sessionId]?.phase)} onApprove={(approved) => controlRun(approved ? "approve" : "reject")} onResumeDelegation={() => controlRun("delegation")} onResumeRun={() => controlRun("resume")} />}
+    </Dialog>}
+  </div>;
 }
-
-function EmptyState({ onCreate, hasSessions }: { onCreate: () => void; hasSessions: boolean }) {
-  return (
-    <div className="empty-state">
-      <div className="welcome-mark" aria-hidden="true">d<span>·</span>c</div>
-      <p>{hasSessions ? "选择已有会话，或开始新的对话" : "当前还没有会话"}</p>
-      <h2>从一个清晰的问题开始。</h2>
-      <button type="button" onClick={onCreate}>
-        {hasSessions ? "创建新会话" : "创建第一个会话"} <ArrowIcon />
-      </button>
-    </div>
-  );
-}
-
-function WelcomeState() {
-  return (
-    <div className="welcome-state">
-      <div className="welcome-mark" aria-hidden="true">d<span>·</span>c</div>
-      <p>一切就绪，开始新的对话</p>
-      <h2>把任务交给 dotClaw。</h2>
-      <span>回答会在这里实时出现，运行期间可以随时停止。</span>
-    </div>
-  );
-}
-
-function LoadingState() {
-  return (
-    <div className="loading-state" aria-label="正在加载工作区">
-      <span />
-      <span />
-      <span />
-    </div>
-  );
-}
-
-function ArrowIcon() {
-  return (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M4 10h11M11 5l5 5-5 5" />
-    </svg>
-  );
-}
-
-function phaseLabel(phase: RunPhase): string {
-  const labels: Record<RunPhase, string> = {
-    idle: "就绪",
-    running: "运行中",
-    stopping: "正在停止",
-    completed: "已完成",
-    failed: "运行失败",
-    cancelled: "已停止",
-    suspended: "已挂起",
-    recoverable: "可恢复",
-  };
-  return labels[phase];
-}
-
-function stringField(data: Record<string, unknown>, field: string): string {
-  const value = data[field];
-  return typeof value === "string" ? value : "";
-}
-
-function nestedStringField(
-  data: Record<string, unknown>,
-  parent: string,
-  field: string,
-): string {
-  const value = data[parent];
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return "";
-  }
-  return stringField(value as Record<string, unknown>, field);
-}
-
-function errorMessage(caught: unknown): string {
-  if (caught instanceof ApiError || caught instanceof Error) {
-    return caught.message;
-  }
-  return "发生未知错误，请稍后重试";
-}
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
+function errorText(error: unknown): string { return error instanceof ApiError || error instanceof Error ? error.message : "请求失败，请稍后再试"; }

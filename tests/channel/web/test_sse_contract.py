@@ -60,6 +60,10 @@ class _FakeSessionManager:
         """读取已知测试会话。"""
         return self._sessions.get(session_id)
 
+    def exists(self, session_id: str) -> bool:
+        """入口只做存在性预检，真实内容在提交租约内读取。"""
+        return session_id in self._sessions
+
     async def list_all(self) -> list[Session]:
         """满足应用装配所需的最小列表接口。"""
         return list(self._sessions.values())

@@ -201,6 +201,11 @@ class ApplicationHost:
         return self._config
 
     @property
+    def project_root(self) -> Path:
+        """返回当前应用解析配置与运行数据使用的项目根目录。"""
+        return self._project_root
+
+    @property
     def preferred_chat_model(self) -> str:
         """返回 chat 用途静态优先级最高的 active 模型。"""
         if self._llm_proxy is None:
@@ -213,6 +218,13 @@ class ApplicationHost:
         if self._llm_proxy is None:
             raise RuntimeError("ApplicationHost 尚未初始化")
         return self._llm_proxy.models_for_purpose("chat")
+
+    @property
+    def router_config(self):
+        """返回模型路由配置，敏感字段由具体展示边界负责裁剪。"""
+        if self._llm_proxy is None:
+            raise RuntimeError("ApplicationHost 尚未初始化")
+        return self._llm_proxy.router_config
 
     @property
     def session_interaction(self) -> SessionInteractionService:

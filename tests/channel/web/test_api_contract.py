@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -24,6 +26,10 @@ from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, MessageRole, RunMessage, RunMessageKind, ToolCall
 from dotclaw.runtime.domain.state import AgentRunState, Ended, RunOutcome, RunStage, Suspended, SuspendReason
 from dotclaw.channel.web.app import create_app
+from dotclaw.skills.models import SkillMeta
+from dotclaw.skills.registry import SkillRegistry
+from dotclaw.tools.base import ToolDefinition, ToolSource
+from dotclaw.tools.registry import ToolRegistry
 
 
 class _FakeSessionManager:
@@ -39,6 +45,10 @@ class _FakeSessionManager:
     async def load(self, session_id: str) -> Session | None:
         """按标识返回测试 Session。"""
         return self.sessions.get(session_id)
+
+    def exists(self, session_id: str) -> bool:
+        """路径存在预检替身，不读取会话文件。"""
+        return session_id in self.sessions
 
 
 class _FakeSessionInteraction:
@@ -147,6 +157,35 @@ class _FakeHost:
         self.agent_registry.register(AgentIdentity("writer", "写作助手", description="内容写作"))
         self.chat_models = ("chat-model", "fast-model")
         self.preferred_chat_model = "chat-model"
+        self.config = SimpleNamespace(
+            llm=SimpleNamespace(stream=True),
+            agent=SimpleNamespace(max_context_tokens=8000, keep_recent_messages=10),
+            tools=SimpleNamespace(exec_timeout=60.0, approval_commands=[], mcp_enabled=False, mcp_servers=[]),
+            scheduler=SimpleNamespace(enabled=True),
+        )
+        self.router_config = SimpleNamespace(
+            models={
+                "chat-model": SimpleNamespace(
+                    provider="provider", model_id="chat-model", context_window=32000,
+                    capabilities=["chat", "function_calling"], status="active",
+                    reasoning=SimpleNamespace(mode="none"),
+                ),
+            },
+            providers={"provider": SimpleNamespace(api_key="configured")},
+        )
+        tool_registry = ToolRegistry()
+        tool_handler = Mock()
+        tool_handler.name = "builtin.files.read_text"
+        tool_handler.definition.return_value = ToolDefinition(
+            name=tool_handler.name,
+            description="读取文本文件",
+            source=ToolSource.BUILTIN,
+        )
+        tool_registry.register(tool_handler)
+        self.tool_executor = SimpleNamespace(registry=tool_registry)
+        self.skill_registry = SkillRegistry()
+        self.skill_registry.register(SkillMeta(name="code-review", description="审查代码"))
+        self.mcp_provider = None
         self.shutdown_called: bool = False
 
     async def shutdown(self) -> None:
@@ -184,7 +223,9 @@ def _persistent_host(tmp_path: Path) -> tuple[_FakeHost, SessionRunCoordinator]:
     """使用真实持久化与会话租约，仅替换未执行的模型引擎。"""
     manager = SessionManager(tmp_path)
     coordinator = SessionRunCoordinator(Mock(spec=RuntimeControlPort))
-    interaction = SessionInteractionService(manager, AgentRegistry(), coordinator)
+    registry = AgentRegistry()
+    registry.register(AgentIdentity("default", "默认助手"))
+    interaction = SessionInteractionService(manager, registry, coordinator, preferred_model="chat-model", chat_models=("chat-model", "fast-model"))
     return _FakeHost(manager, interaction), coordinator  # type: ignore[arg-type]
 
 
@@ -236,6 +277,135 @@ async def test_metadata_patch_missing_and_busy_session(tmp_path: Path) -> None:
         assert busy.status_code == 409
         persisted = await host.session_manager.load(session.id)
         assert persisted is not None and persisted.title == "新对话"
+
+
+@pytest.mark.asyncio
+async def test_model_switch_validates_and_preserves_history_under_lease(tmp_path: Path) -> None:
+    """持久化模型绑定、拒绝忙会话和非法模型，且不覆盖完成投影。"""
+    host, coordinator = _persistent_host(tmp_path)
+    session = await host.session_manager.create(agent_id="default", model="chat-model")
+    stale = await host.session_manager.load(session.id)
+    session.add_conversation("完成的问题", "完成的回答", ["run-1"])
+    await host.session_manager.save(session)
+    await host.session_interaction.switch_model(stale, "fast-model")
+    assert (await host.session_manager.load(session.id)).conversations[0].final_answer == "完成的回答"
+    async with _client(host) as client:
+        async with coordinator.edit_session(session.id):
+            busy = await client.patch(f"/api/v1/sessions/{session.id}/model", json={"model": "chat-model"})
+            assert busy.status_code == 409
+        for model in ("", "missing-model"):
+            invalid = await client.patch(f"/api/v1/sessions/{session.id}/model", json={"model": model})
+            assert invalid.status_code == 422
+        missing = await client.patch("/api/v1/sessions/missing/model", json={"model": "fast-model"})
+        assert missing.status_code == 404
+        changed = await client.patch(f"/api/v1/sessions/{session.id}/model", json={"model": "chat-model"})
+        assert changed.json()["model"] == "chat-model"
+    assert (await SessionManager(tmp_path).load(session.id)).model == "chat-model"
+
+
+@pytest.mark.asyncio
+async def test_completion_and_model_edit_share_the_same_execution_lease(tmp_path: Path) -> None:
+    """用真实并发任务冻结旧模型，完成投影后再切换不会丢历史。"""
+    host, coordinator = _persistent_host(tmp_path)
+    engine = coordinator._engine
+    engine.recover_session = AsyncMock()
+    engine.active_run = AsyncMock(return_value=None)
+    entered, release = asyncio.Event(), asyncio.Event()
+    frozen_models: list[str] = []
+    session = await host.session_manager.create(agent_id="default", model="chat-model")
+
+    async def execute(request, output_port=None):
+        frozen_models.append(request.model_id)
+        entered.set()
+        await release.wait()
+        latest = await host.session_manager.load(session.id)
+        latest.add_conversation("问题", "并发完成回答", ["r1"])
+        await host.session_manager.save(latest)
+        return RunResult("r1", AgentRunState(mode=Ended(RunOutcome.COMPLETED)))
+
+    engine.execute = execute
+    running = asyncio.create_task(host.session_interaction.submit(session.id, "问题"))
+    await asyncio.wait_for(entered.wait(), 2)
+    async with _client(host) as client:
+        edit = await client.patch(f"/api/v1/sessions/{session.id}/model", json={"model": "fast-model"})
+        deletion = await client.delete(f"/api/v1/sessions/{session.id}")
+        assert edit.status_code == deletion.status_code == 409
+        release.set()
+        await asyncio.wait_for(running, 2)
+        assert (await client.patch(f"/api/v1/sessions/{session.id}/model", json={"model": "fast-model"})).status_code == 200
+    persisted = await SessionManager(tmp_path).load(session.id)
+    assert persisted.model == "fast-model"
+    assert persisted.conversations[0].final_answer == "并发完成回答"
+    assert frozen_models == ["chat-model"]
+
+
+@pytest.mark.asyncio
+async def test_submit_waits_for_delete_and_does_not_recreate_deleted_session(tmp_path: Path) -> None:
+    """删除已取得租约时，新提交在删除后重读失败，不产生孤儿运行。"""
+    host, coordinator = _persistent_host(tmp_path)
+    engine = coordinator._engine
+    engine.recover_session = AsyncMock()
+    engine.active_run = AsyncMock(return_value=None)
+    engine.execute = AsyncMock()
+    repository = Mock()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def list_active_runs(session_id):
+        entered.set()
+        await release.wait()
+        return []
+
+    repository.list_active_runs = list_active_runs
+    host.session_interaction._run_repository = repository
+    session = await host.session_manager.create(agent_id="default", model="chat-model")
+    deleting = asyncio.create_task(host.session_interaction.delete_session(session.id))
+    await asyncio.wait_for(entered.wait(), 2)
+    submitting = asyncio.create_task(host.session_interaction.submit(session.id, "不能重建"))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait_for(deleting, 2)
+    with pytest.raises(UnknownIdentityError):
+        await asyncio.wait_for(submitting, 2)
+    engine.execute.assert_not_called()
+    assert await host.session_manager.load(session.id) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_uses_application_lease_and_is_idempotent(tmp_path: Path) -> None:
+    """执行期间删除拒绝；空闲后清理完整会话，重复删除成功。"""
+    host, coordinator = _persistent_host(tmp_path)
+    session = await host.session_manager.create(agent_id="default")
+    other = await host.session_manager.create(agent_id="default")
+    async with _client(host) as client:
+        async with coordinator.edit_session(session.id):
+            busy = await client.delete(f"/api/v1/sessions/{session.id}")
+        assert busy.status_code == 409
+        assert await host.session_manager.load(session.id) is not None
+        first = await client.delete(f"/api/v1/sessions/{session.id}")
+        second = await client.delete(f"/api/v1/sessions/{session.id}")
+        assert first.status_code == second.status_code == 204
+        assert first.content == b""
+    assert await host.session_manager.load(session.id) is None
+    assert await host.session_manager.load(other.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_search_finds_body_title_archive_and_stable_message_ids() -> None:
+    """中文、大小写及归档过滤使用纯文本，并且静态路由不被 ID 路由截获。"""
+    first = _session("one", title="标题", conversations=[Conversation("问题", conversation_id="c1", final_answer="包含 NEEDLE 中文 <script>")])
+    second = _session("two", title="Needle 标题")
+    second.archived = True
+    host, _ = _host(first, second)
+    async with _client(host) as client:
+        result = (await client.get("/api/v1/sessions/search", params={"q": "needle", "limit": 1})).json()
+        assert result["has_more"] is True
+        assert result["items"][0]["message_id"] == "c1:assistant"
+        archived = (await client.get("/api/v1/sessions/search", params={"q": "needle", "archived": "true"})).json()
+        assert archived["items"][0]["message_id"] is None
+        chinese = (await client.get("/api/v1/sessions/search", params={"q": "中文"})).json()
+        assert "<script>" in chinese["items"][0]["snippet"]
+        for params in ({"q": " "}, {"q": "a", "limit": 0}, {"q": "a", "archived": "bad"}):
+            assert (await client.get("/api/v1/sessions/search", params=params)).status_code == 422
 
 
 def test_legacy_session_defaults_to_unarchived() -> None:
@@ -389,6 +559,41 @@ async def test_options_and_explicit_model_are_exposed_for_session_creation() -> 
 
 
 @pytest.mark.asyncio
+async def test_settings_exposes_redacted_runtime_and_toggles_catalog_items(tmp_path: Path) -> None:
+    """设置接口不返回密钥，并让工具与 Skill 开关立即生效。"""
+    host, _ = _host()
+    host.project_root = tmp_path
+
+    async with _client(host) as client:
+        initial = await client.get("/api/v1/settings")
+        tool_update = await client.patch(
+            "/api/v1/settings/tools/builtin.files.read_text", json={"enabled": False},
+        )
+        skill_update = await client.patch(
+            "/api/v1/settings/skills/code-review", json={"enabled": False},
+        )
+
+    assert initial.status_code == 200
+    assert initial.json()["models"][0]["api_key_configured"] is True
+    assert '"api_key":' not in initial.text
+    assert initial.json()["tools"][0]["enabled"] is True
+    assert tool_update.json()["tools"][0]["enabled"] is False
+    assert skill_update.json()["skills"][0]["enabled"] is False
+    assert host.tool_executor.registry.get("builtin.files.read_text") is None
+    assert host.skill_registry.get("code-review") is None
+    saved = (tmp_path / "data" / "web-settings.json").read_text(encoding="utf-8")
+    assert "builtin.files.read_text" in saved
+    assert "code-review" in saved
+
+    restored_host, _ = _host()
+    restored_host.project_root = tmp_path
+    async with _client(restored_host) as client:
+        restored = await client.get("/api/v1/settings")
+    assert restored.json()["tools"][0]["enabled"] is False
+    assert restored.json()["skills"][0]["enabled"] is False
+
+
+@pytest.mark.asyncio
 async def test_activity_exposes_tool_evidence_and_web_approval_stream() -> None:
     """工具参数、结果和待审批状态来自运行事实，审批后继续返回 SSE 终态。"""
     host, interaction = _host(_session("session-1"))
@@ -439,6 +644,28 @@ async def test_activity_exposes_tool_evidence_and_web_approval_stream() -> None:
     assert "event: run.cancelled" in decision.text
     assert '"session_id":"session-1"' in decision.text
     assert interaction.approval_calls == [("approval-1", False)]
+
+
+@pytest.mark.asyncio
+async def test_history_runs_are_per_round_and_cannot_cross_session_boundaries() -> None:
+    """逐轮投影运行 ID；证据查询必须验证指定运行的会话归属。"""
+    host, interaction = _host(_session("session-1", conversations=[
+        Conversation("第一轮", conversation_id="c1", final_answer="回答一", agent_run_ids=["r1", "child-1"]),
+        Conversation("第二轮", conversation_id="c2", final_answer="回答二", agent_run_ids=["r2"]),
+        Conversation("旧数据", conversation_id="c3", final_answer="旧回答"),
+    ]))
+    interaction.activity_run = AgentRun(
+        run_id="foreign", session_id="other", agent_id="default",
+        state=AgentRunState(mode=Ended(RunOutcome.COMPLETED)),
+        started_at="t", policy=AgentPolicySnapshot("default", "v1", "chat-model", 10), input_message_id="input",
+    )
+    async with _client(host) as client:
+        messages = (await client.get("/api/v1/sessions/session-1")).json()["messages"]
+        assert messages[1]["run_ids"] == ["r1", "child-1"]
+        assert messages[3]["run_ids"] == ["r2"]
+        assert messages[5]["run_ids"] == []
+        foreign = await client.get("/api/v1/sessions/session-1/activity", params={"run_id": "foreign"})
+        assert foreign.json() is None
 
 
 @pytest.mark.asyncio
@@ -518,12 +745,14 @@ async def test_session_detail_flattens_only_completed_conversations() -> None:
                 "role": "user",
                 "content": "问题",
                 "created_at": "2026-09-01T09:30:00+08:00",
+                "run_ids": [],
             },
             {
                 "id": "conversation-1:assistant",
                 "role": "assistant",
                 "content": "回答",
                 "created_at": "2026-09-01T09:30:00+08:00",
+                "run_ids": ["run-1"],
             },
         ],
     }

@@ -9,13 +9,17 @@ describe("消息展示与复制", () => {
     const write = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
     const code = 'const answer = 42;\n  console.log(answer);\n';
     const content = '| 名称 | 值 |\n| --- | --- |\n| 答案 | 42 |\n\n- [x] 已完成\n\n```js\n' + code + '```';
-    const { container } = render(<MessageContent content={content} />);
+    const { container, rerender } = render(<MessageContent content={content} />);
     expect(screen.getByRole("table")).toBeTruthy();
     expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
     expect(container.querySelector(".hljs-keyword")?.textContent).toBe("const");
     await user.click(screen.getByRole("button", { name: "复制代码" }));
     expect(write).toHaveBeenCalledWith(code);
     expect(screen.getByText("已复制")).toBeTruthy();
+    const tableScroll = container.querySelector<HTMLElement>(".table-scroll")!;
+    tableScroll.scrollLeft = 120;
+    rerender(<MessageContent content={content + "\n\n继续补充说明"} />);
+    expect(container.querySelector(".table-scroll")?.scrollLeft).toBe(120);
   });
 
   it("复制回答保留 Markdown 原文，并显示剪贴板失败", async () => {

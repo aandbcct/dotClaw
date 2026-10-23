@@ -14,6 +14,7 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 from .base import ChatChunk, LLMClient, Message, ToolDefinition
 
 if TYPE_CHECKING:
+    from dotclaw.config.settings import RouterConfig
     from .model_router import ModelRouter
 
 logger = logging.getLogger("dotclaw.llm")
@@ -80,6 +81,11 @@ class LLMProxy:
     def models_for_purpose(self, purpose: str = "chat") -> tuple[str, ...]:
         """返回用途下按优先级排序的全部静态 active 模型。"""
         return self._router.models_for_purpose(purpose)
+
+    @property
+    def router_config(self) -> "RouterConfig":
+        """返回只读展示所需的模型路由配置。"""
+        return self._router.config
 
     # todo 目前chat方法应该是llm调用总入口，但方法内部写死了chat()，不能进行emb或其他功能，需要解耦
     async def chat(

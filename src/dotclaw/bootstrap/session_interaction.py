@@ -151,17 +151,16 @@ class SessionInteractionService:
         """校验并持久化 Session 的模型绑定，仅影响后续新 Run。"""
         if model not in self._chat_models:
             raise ValueError(f"模型不存在或未启用: {model}")
-        if isinstance(session, str):
-            loaded = await self._session_manager.load(session)
+        session_id = session if isinstance(session, str) else session.id
+        async with self._coordinator.edit_session(session_id):
+            loaded = await self._session_manager.load(session_id)
             if loaded is None:
-                raise ValueError(f"Session 不存在: {session}")
-            session = loaded
-        self._require_identity(session)
-        if session.model == model:
-            return session
-        session.model = model
-        await self._session_manager.save(session)
-        return session
+                raise LookupError(f"Session 不存在: {session_id}")
+            self._require_identity(loaded)
+            if loaded.model != model:
+                loaded.model = model
+                await self._session_manager.save(loaded)
+            return loaded
 
     # ── 提交与控制 ──
 
@@ -173,12 +172,7 @@ class SessionInteractionService:
         （见 ``submit_prepared``），避免入口持有的旧对象遗漏上一轮成功投影。
         """
         session_id: str = session if isinstance(session, str) else session.id
-        initial_session: Session | None = await self._session_manager.load(session_id)
-        if initial_session is None:
-            raise UnknownIdentityError(f"Session 不存在: {session_id}")
-        # 保留入口快速拒绝契约；租约内仍会再次校验，防止两次读取之间绑定发生变化。
-        self._require_identity(initial_session)
-
+        # 文件读取也属于会话租约，避免 Windows 上读取句柄与完整目录删除相撞。
         async def _make_request() -> RunRequest:
             latest_session: Session | None = await self._session_manager.load(session_id)
             if latest_session is None:
@@ -267,6 +261,11 @@ class SessionInteractionService:
     # ── 删除协调 ──
 
     async def delete_session(self, session_id: str) -> None:
+        """与提交共用租约，租约内确认活动状态后完成清理。"""
+        async with self._coordinator.edit_session(session_id):
+            await self._delete_session_locked(session_id)
+
+    async def _delete_session_locked(self, session_id: str) -> None:
         """应用级 Session 删除协调流程（开发计划阶段 5 + 总体设计 §5.2）。
 
         删除是应用级流程，不是只删单个 JSON 文件：

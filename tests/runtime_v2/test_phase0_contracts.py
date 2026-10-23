@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
+from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator, RuntimeControlPort
 
 import pytest
 
@@ -161,7 +163,7 @@ async def test_unknown_identity_submission_is_rejected(tmp_path: Path) -> None:
         session_manager=session_manager,
         agent_registry=registry,
         preferred_model="qwen3.7-max",
-        coordinator=None,  # type: ignore[arg-type]
+        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort, active_run=AsyncMock(return_value=None))),
     )
 
     # 创建绑定未知 Identity 的 Session。
@@ -354,7 +356,7 @@ async def test_active_session_deletion_is_rejected(tmp_path: Path) -> None:
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
-        coordinator=None,  # type: ignore[arg-type]
+        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort, active_run=AsyncMock(return_value=None))),
         run_repository=run_repository,
     )
 
@@ -400,7 +402,7 @@ async def test_terminal_session_deletion_removes_session_directory_and_approvals
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
-        coordinator=None,  # type: ignore[arg-type]
+        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort, active_run=AsyncMock(return_value=None))),
         approval_repository=approval_repo,
     )
 

@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
+from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ...bootstrap.application_host import ApplicationHost
-from ...bootstrap.session_interaction import UnknownIdentityError
+from ...bootstrap.session_interaction import SessionDeletionRejected, UnknownIdentityError
+from ...runtime.application.session_run_coordinator import SessionBusyError
 from ...runtime.application.dto import RunResult
 from ...runtime.domain.events import RunEvent, RunEventType
 from ...runtime.domain.facts import AgentRun, JSONMap, MessageRole, RunError, RunErrorCode, RunMessage, RunMessageKind
@@ -27,6 +30,11 @@ from .schemas import (
     AgentOptionResponse,
     ResolveApprovalRequest,
     RunActivityResponse,
+    RuntimeSettingsResponse,
+    GeneralSettingResponse,
+    McpServerSettingResponse,
+    ModelSettingResponse,
+    SkillSettingResponse,
     SSEEvent,
     SSEEventType,
     SessionDetailResponse,
@@ -34,10 +42,15 @@ from .schemas import (
     SessionSummaryResponse,
     SubmitMessageRequest,
     ToolExecutionResponse,
+    ToolSettingResponse,
+    ToggleSettingRequest,
     UpdateSessionRequest,
     WebErrorCode,
     WebRunStatus,
     WorkspaceOptionsResponse,
+    SwitchModelRequest,
+    SearchHitResponse,
+    SearchSessionsResponse,
 )
 from .sse import SSEOutputAdapter
 
@@ -61,6 +74,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """持有唯一 ApplicationHost，并在退出时等待提交后关闭资源。"""
         host = await factory()
+        _load_runtime_preferences(host)
         app.state.host = host
         app.state.submission_tasks = set()
         try:
@@ -93,6 +107,69 @@ def create_app(
         sessions.sort(key=lambda item: item.updated_at, reverse=True)
         return [_session_summary(item) for item in sessions]
 
+    @app.get("/api/v1/sessions/search", response_model=SearchSessionsResponse)
+    async def search_sessions(
+        request: Request,
+        q: str = Query(min_length=1, max_length=100),
+        archived: Literal["all", "true", "false"] = "all",
+        limit: int = Query(default=30, ge=1, le=50),
+    ) -> SearchSessionsResponse | JSONResponse:
+        """按更新时间顺序扫描标题和完整问答，不创建额外检索索引。"""
+        query = q.strip().casefold()
+        if not query:
+            return _error_response(422, WebErrorCode.INVALID_REQUEST, "搜索词不能为空")
+        sessions = await _host(request).session_manager.list_all()
+        sessions.sort(key=lambda item: item.updated_at, reverse=True)
+        hits: list[SearchHitResponse] = []
+        for session in sessions:
+            if archived != "all" and session.archived != (archived == "true"):
+                continue
+            matched_message = False
+            for message in _session_detail(session).messages:
+                position = message.content.casefold().find(query)
+                if position < 0:
+                    continue
+                matched_message = True
+                hits.append(SearchHitResponse(
+                    session_id=session.id, title=session.title,
+                    updated_at=session.updated_at, archived=session.archived,
+                    message_id=message.id, role=message.role,
+                    snippet=message.content[max(0, position - 80):position + len(query) + 80],
+                ))
+            if not matched_message and query in session.title.casefold():
+                hits.append(SearchHitResponse(
+                    session_id=session.id, title=session.title,
+                    updated_at=session.updated_at, archived=session.archived,
+                    snippet=session.title,
+                ))
+            if len(hits) > limit:
+                break
+        return SearchSessionsResponse(items=hits[:limit], has_more=len(hits) > limit)
+
+    @app.patch("/api/v1/sessions/{session_id}/model", response_model=SessionSummaryResponse)
+    async def switch_session_model(
+        session_id: str, payload: SwitchModelRequest, request: Request,
+    ) -> SessionSummaryResponse | JSONResponse:
+        """通过应用服务在会话租约内重读并切换模型。"""
+        try:
+            session = await _host(request).session_interaction.switch_model(session_id, payload.model)
+        except SessionBusyError:
+            return _error_response(409, WebErrorCode.SESSION_BUSY, "会话正在运行，请结束后再切换")
+        except LookupError:
+            return _session_not_found()
+        except ValueError as error:
+            return _error_response(422, WebErrorCode.INVALID_REQUEST, str(error))
+        return _session_summary(session)
+
+    @app.delete("/api/v1/sessions/{session_id}", status_code=204, response_model=None)
+    async def delete_session(session_id: str, request: Request) -> Response:
+        """删除完整会话，幂等且保留应用层清理与运行保护。"""
+        try:
+            await _host(request).session_interaction.delete_session(session_id)
+        except (SessionBusyError, SessionDeletionRejected):
+            return _error_response(409, WebErrorCode.SESSION_BUSY, "会话仍有未结束运行，请打开会话处理后再删除")
+        return Response(status_code=204)
+
     @app.get("/api/v1/options", response_model=WorkspaceOptionsResponse)
     async def workspace_options(request: Request) -> WorkspaceOptionsResponse:
         """返回新建会话可用的 Agent 与 chat 模型。"""
@@ -111,6 +188,45 @@ def create_app(
             default_agent_id=host.session_interaction.default_agent_id,
             default_model=host.preferred_chat_model,
         )
+
+    @app.get("/api/v1/settings", response_model=RuntimeSettingsResponse)
+    async def runtime_settings(request: Request) -> RuntimeSettingsResponse:
+        """返回模型、工具、Skill 与 MCP 的脱敏运行时快照。"""
+        return _runtime_settings(_host(request))
+
+    @app.patch("/api/v1/settings/tools/{tool_name}", response_model=RuntimeSettingsResponse)
+    async def toggle_tool(
+        tool_name: str, payload: ToggleSettingRequest, request: Request,
+    ) -> RuntimeSettingsResponse | JSONResponse:
+        """让工具开关立即作用于后续 Run 的工具快照。"""
+        host = _host(request)
+        executor = host.tool_executor
+        if executor is None or not executor.registry.set_enabled(tool_name, payload.enabled):
+            return _error_response(status.HTTP_404_NOT_FOUND, WebErrorCode.INVALID_REQUEST, "工具不存在")
+        _save_runtime_preferences(host)
+        return _runtime_settings(host)
+
+    @app.patch("/api/v1/settings/skills/{skill_name}", response_model=RuntimeSettingsResponse)
+    async def toggle_skill(
+        skill_name: str, payload: ToggleSettingRequest, request: Request,
+    ) -> RuntimeSettingsResponse | JSONResponse:
+        """让 Skill 开关立即作用于后续匹配与提示词注入。"""
+        host = _host(request)
+        registry = host.skill_registry
+        if registry is None or not registry.set_enabled(skill_name, payload.enabled):
+            return _error_response(status.HTTP_404_NOT_FOUND, WebErrorCode.INVALID_REQUEST, "Skill 不存在")
+        _save_runtime_preferences(host)
+        return _runtime_settings(host)
+
+    @app.post("/api/v1/settings/mcp/reconnect", response_model=RuntimeSettingsResponse)
+    async def reconnect_mcp(request: Request) -> RuntimeSettingsResponse | JSONResponse:
+        """重新连接当前配置中的全部 MCP server。"""
+        host = _host(request)
+        provider = host.mcp_provider
+        if provider is None:
+            return _error_response(status.HTTP_409_CONFLICT, WebErrorCode.INVALID_REQUEST, "MCP 未启用或未配置 server")
+        await provider.reconnect()
+        return _runtime_settings(host)
 
     @app.patch("/api/v1/sessions/{session_id}", response_model=SessionSummaryResponse)
     async def update_session(
@@ -185,7 +301,7 @@ def create_app(
     ) -> StreamingResponse | JSONResponse:
         """提交一条消息，并以 SSE 返回模型增量与唯一终态。"""
         host = _host(request)
-        if await host.session_manager.load(session_id) is None:
+        if not host.session_manager.exists(session_id):
             return _session_not_found()
 
         return _run_stream(
@@ -309,6 +425,152 @@ def _host(request: Request) -> ApplicationHost:
     return cast(ApplicationHost, request.app.state.host)
 
 
+def _runtime_settings(host: ApplicationHost) -> RuntimeSettingsResponse:
+    """把宿主持有的真实配置和目录投影为脱敏网页数据。"""
+    config = host.config
+    router = host.router_config
+    preferred = host.preferred_chat_model
+    models = []
+    for name, model in router.models.items():
+        provider = router.providers.get(model.provider)
+        models.append(ModelSettingResponse(
+            name=name,
+            provider=model.provider,
+            model_id=model.model_id,
+            context_window=model.context_window,
+            capabilities=list(model.capabilities),
+            status=model.status,
+            reasoning_mode=model.reasoning.mode,
+            api_key_configured=bool(provider and provider.api_key),
+            preferred=name == preferred,
+        ))
+
+    executor = host.tool_executor
+    tools = []
+    if executor is not None:
+        tools = [
+            ToolSettingResponse(
+                name=item.name,
+                description=item.description,
+                source=item.source.value,
+                enabled=executor.registry.is_enabled(item.name),
+                needs_approval=item.needs_approval or item.name in config.tools.approval_commands,
+            )
+            for item in executor.registry.catalog_snapshot()
+        ]
+
+    skill_registry = host.skill_registry
+    skills = []
+    if skill_registry is not None:
+        skills = [
+            SkillSettingResponse(
+                name=item.name,
+                description=item.truncated_description(100),
+                emoji=item.emoji,
+                enabled=skill_registry.is_enabled(item.name),
+                always_load=item.always_load,
+            )
+            for item in skill_registry.list_catalog()
+        ]
+
+    provider = host.mcp_provider
+    states = provider.get_server_states() if provider is not None else {}
+    mcp_servers = []
+    for server in config.tools.mcp_servers:
+        state, detail = states.get(server.name, (None, "未连接"))
+        prefix = f"mcp.{server.name}."
+        mcp_servers.append(McpServerSettingResponse(
+            name=server.name,
+            transport=server.transport,
+            endpoint=_safe_mcp_endpoint(server.transport, server.command, server.url),
+            state=state.value if state is not None else "disconnected",
+            detail=detail,
+            tool_count=sum(1 for item in tools if item.name.startswith(prefix)),
+        ))
+
+    return RuntimeSettingsResponse(
+        general=GeneralSettingResponse(
+            stream=config.llm.stream,
+            max_context_tokens=config.agent.max_context_tokens,
+            keep_recent_messages=config.agent.keep_recent_messages,
+            exec_timeout=config.tools.exec_timeout,
+            scheduler_enabled=config.scheduler.enabled,
+        ),
+        models=models,
+        tools=sorted(tools, key=lambda item: (item.source, item.name)),
+        skills=sorted(skills, key=lambda item: item.name),
+        mcp_enabled=config.tools.mcp_enabled,
+        mcp_servers=mcp_servers,
+    )
+
+
+def _safe_mcp_endpoint(transport: str, command: str, url: str) -> str:
+    """隐藏 HTTP 查询参数，避免设置页泄露令牌。"""
+    if transport == "stdio":
+        return command
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _runtime_preferences_path(host: ApplicationHost) -> Path | None:
+    """定位 Web 运行开关文件；测试替身未声明项目根时跳过持久化。"""
+    root = getattr(host, "project_root", None)
+    return Path(root) / "data" / "web-settings.json" if root is not None else None
+
+
+def _load_runtime_preferences(host: ApplicationHost) -> None:
+    """在网页服务启动时恢复工具与 Skill 的关闭列表。"""
+    path = _runtime_preferences_path(host)
+    if path is None or not path.is_file():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        logger.warning("Web 运行设置读取失败，已使用默认状态: %s", error)
+        return
+    executor = host.tool_executor
+    if executor is not None:
+        for name in payload.get("disabled_tools", []):
+            if isinstance(name, str):
+                executor.registry.set_enabled(name, False)
+    registry = host.skill_registry
+    if registry is not None:
+        for name in payload.get("disabled_skills", []):
+            if isinstance(name, str):
+                registry.set_enabled(name, False)
+
+
+def _save_runtime_preferences(host: ApplicationHost) -> None:
+    """原子写入当前关闭列表，避免进程中断留下半个 JSON 文件。"""
+    path = _runtime_preferences_path(host)
+    if path is None:
+        return
+    executor = host.tool_executor
+    disabled_tools = []
+    if executor is not None:
+        disabled_tools = [
+            item.name for item in executor.registry.catalog_snapshot()
+            if not executor.registry.is_enabled(item.name)
+        ]
+    registry = host.skill_registry
+    disabled_skills = []
+    if registry is not None:
+        disabled_skills = [
+            item.name for item in registry.list_catalog()
+            if not registry.is_enabled(item.name)
+        ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({
+            "disabled_tools": sorted(disabled_tools),
+            "disabled_skills": sorted(disabled_skills),
+        }, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
 def _submission_tasks(app: FastAPI) -> set[asyncio.Task[None]]:
     """取得用于保证断连后任务存活的强引用集合。"""
     return cast(set[asyncio.Task[None]], app.state.submission_tasks)
@@ -389,6 +651,7 @@ def _session_detail(session: Session) -> SessionDetailResponse:
                     role=MessageRole.ASSISTANT,
                     content=conversation.final_answer,
                     created_at=conversation.created_at,
+                    run_ids=list(conversation.agent_run_ids),
                 ),
             )
         )

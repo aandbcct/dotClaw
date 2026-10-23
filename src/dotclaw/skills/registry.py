@@ -16,6 +16,7 @@ class SkillRegistry:
 
     def __init__(self):
         self._index: dict[str, "SkillMeta"] = {}
+        self._disabled: set[str] = set()
 
     def register(self, meta: "SkillMeta") -> None:
         """注册 Skill。同名后注册覆盖前注册（静默覆盖）。"""
@@ -26,11 +27,31 @@ class SkillRegistry:
 
     def get(self, name: str) -> "SkillMeta | None":
         """按名称获取 Skill 元数据。"""
+        if name in self._disabled:
+            return None
         return self._index.get(name)
 
     def list_all(self) -> list["SkillMeta"]:
         """返回所有已注册的 Skill 元数据。"""
+        return [meta for name, meta in self._index.items() if name not in self._disabled]
+
+    def list_catalog(self) -> list["SkillMeta"]:
+        """返回包含已停用项的完整 Skill 目录。"""
         return list(self._index.values())
+
+    def set_enabled(self, name: str, enabled: bool) -> bool:
+        """切换 Skill 是否参与匹配与提示词注入。"""
+        if name not in self._index:
+            return False
+        if enabled:
+            self._disabled.discard(name)
+        else:
+            self._disabled.add(name)
+        return True
+
+    def is_enabled(self, name: str) -> bool:
+        """返回 Skill 是否已注册且当前启用。"""
+        return name in self._index and name not in self._disabled
 
     def get_descriptions_block(self, max_desc_len: int = 40) -> str:
         """生成注入 system prompt 的 Skill 描述列表。"""

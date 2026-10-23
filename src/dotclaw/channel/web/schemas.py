@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...runtime.domain.facts import JSONMap, MessageRole
 
@@ -83,6 +83,47 @@ class ResolveApprovalRequest(BaseModel):
     approved: bool
 
 
+class SwitchModelRequest(BaseModel):
+    """只允许修改后续新运行的模型绑定。"""
+
+    model_config = ConfigDict(extra="forbid")
+    model: str
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        """拒绝空模型名称。"""
+        if not value.strip():
+            raise ValueError("模型不能为空")
+        return value.strip()
+
+
+class SearchHitResponse(BaseModel):
+    """一条历史标题或正文命中，消息标识与详情页一致。"""
+
+    session_id: str
+    title: str
+    updated_at: str
+    archived: bool
+    message_id: str | None = None
+    role: MessageRole | None = None
+    snippet: str
+
+
+class SearchSessionsResponse(BaseModel):
+    """有界的历史字面搜索结果。"""
+
+    items: list[SearchHitResponse]
+    has_more: bool
+
+
+class ToggleSettingRequest(BaseModel):
+    """切换单个运行时能力。"""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
 class UpdateSessionRequest(BaseModel):
     """仅允许修改会话标题和归档状态。"""
 
@@ -156,6 +197,7 @@ class SessionMessageResponse(BaseModel):
     role: MessageRole
     content: str
     created_at: str
+    run_ids: list[str] = Field(default_factory=list)
 
 
 class SessionDetailResponse(SessionSummaryResponse):
@@ -179,6 +221,72 @@ class WorkspaceOptionsResponse(BaseModel):
     models: list[str]
     default_agent_id: str
     default_model: str
+
+
+class ModelSettingResponse(BaseModel):
+    """脱敏后的模型配置摘要。"""
+
+    name: str
+    provider: str
+    model_id: str
+    context_window: int
+    capabilities: list[str]
+    status: str
+    reasoning_mode: str
+    api_key_configured: bool
+    preferred: bool = False
+
+
+class GeneralSettingResponse(BaseModel):
+    """当前进程正在使用的通用配置。"""
+
+    stream: bool
+    max_context_tokens: int
+    keep_recent_messages: int
+    exec_timeout: float
+    scheduler_enabled: bool
+
+
+class ToolSettingResponse(BaseModel):
+    """工具目录中的单项状态。"""
+
+    name: str
+    description: str
+    source: str
+    enabled: bool
+    needs_approval: bool
+
+
+class SkillSettingResponse(BaseModel):
+    """Skill 目录中的单项状态。"""
+
+    name: str
+    description: str
+    emoji: str = ""
+    enabled: bool
+    always_load: bool
+
+
+class McpServerSettingResponse(BaseModel):
+    """脱敏后的 MCP server 配置与连接状态。"""
+
+    name: str
+    transport: str
+    endpoint: str
+    state: str
+    detail: str = ""
+    tool_count: int = 0
+
+
+class RuntimeSettingsResponse(BaseModel):
+    """网页设置中心使用的真实运行时快照。"""
+
+    general: GeneralSettingResponse
+    models: list[ModelSettingResponse]
+    tools: list[ToolSettingResponse]
+    skills: list[SkillSettingResponse]
+    mcp_enabled: bool
+    mcp_servers: list[McpServerSettingResponse]
 
 
 class ToolExecutionResponse(BaseModel):

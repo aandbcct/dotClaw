@@ -15,6 +15,22 @@ export interface SessionMessage {
   role: MessageRole;
   content: string;
   created_at: string;
+  run_ids?: string[];
+}
+
+export interface SearchHit {
+  session_id: string;
+  title: string;
+  updated_at: string;
+  archived: boolean;
+  message_id: string | null;
+  role: MessageRole | null;
+  snippet: string;
+}
+
+export interface SearchResults {
+  items: SearchHit[];
+  has_more: boolean;
 }
 
 export interface SessionDetail extends SessionSummary {
@@ -68,6 +84,58 @@ export interface RunActivity {
   approval_id: string | null;
   child_run_id: string | null;
   tools: ToolExecution[];
+}
+
+export interface ModelSetting {
+  name: string;
+  provider: string;
+  model_id: string;
+  context_window: number;
+  capabilities: string[];
+  status: string;
+  reasoning_mode: string;
+  api_key_configured: boolean;
+  preferred: boolean;
+}
+
+export interface ToolSetting {
+  name: string;
+  description: string;
+  source: string;
+  enabled: boolean;
+  needs_approval: boolean;
+}
+
+export interface SkillSetting {
+  name: string;
+  description: string;
+  emoji: string;
+  enabled: boolean;
+  always_load: boolean;
+}
+
+export interface McpServerSetting {
+  name: string;
+  transport: string;
+  endpoint: string;
+  state: string;
+  detail: string;
+  tool_count: number;
+}
+
+export interface RuntimeSettings {
+  general: {
+    stream: boolean;
+    max_context_tokens: number;
+    keep_recent_messages: number;
+    exec_timeout: number;
+    scheduler_enabled: boolean;
+  };
+  models: ModelSetting[];
+  tools: ToolSetting[];
+  skills: SkillSetting[];
+  mcp_enabled: boolean;
+  mcp_servers: McpServerSetting[];
 }
 
 export type RunPhase =

@@ -25,15 +25,14 @@ export function useDraft(sessionId: string | undefined) {
     }
   }, [drafts]);
 
-  function setDraft(value: string): void {
-    if (!sessionId) return;
+  function setDraft(value: string, targetId = sessionId || "new"): void {
     setDrafts((current) => {
       const next = { ...current };
-      if (value) next[sessionId] = value;
-      else delete next[sessionId];
+      if (value) next[targetId] = value;
+      else delete next[targetId];
       return next;
     });
   }
 
-  return { draft: sessionId ? drafts[sessionId] || "" : "", setDraft, storageFailed };
+  return { draft: drafts[sessionId || "new"] || "", setDraft, storageFailed };
 }

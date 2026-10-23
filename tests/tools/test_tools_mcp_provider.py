@@ -179,6 +179,26 @@ def test_server_states_observable():
     assert states["s2"][0] is McpClientState.FAILED
 
 
+def test_reconnect_replaces_registered_tools_without_name_conflict():
+    """网页重连会先注销旧 MCP 工具，再完成同名工具发现。"""
+    registry = ToolRegistry()
+    provider = MCPToolProvider(
+        global_config=None,
+        server_configs=[FakeServerConfig("s1")],
+        registry=registry,
+        client_factory=_factory({"s1": [_tool("foo")]}),
+    )
+
+    async def run():
+        await provider.start()
+        return await provider.reconnect()
+
+    names = asyncio.run(run())
+    assert names == ["mcp.s1.foo"]
+    assert registry.all_names() == ["mcp.s1.foo"]
+    assert provider.get_server_states()["s1"][0] is McpClientState.CONNECTED
+
+
 def test_mcp_connect_gate_denies_disallowed_server():
     registry = ToolRegistry()
     # 仅允许 github server 连接；evil 被 mcp.connect 网关拒绝。

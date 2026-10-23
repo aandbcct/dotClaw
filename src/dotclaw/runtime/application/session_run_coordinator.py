@@ -54,6 +54,10 @@ class RuntimeControlPort(RuntimeExecutionPort, Protocol):
         """显式放弃未结束 Run。"""
 
 
+class SessionBusyError(ValueError):
+    """会话执行租约已被占用，编辑操作不得排队覆盖运行结果。"""
+
+
 class SessionRunCoordinator:
     """同一 Session FIFO、不同 Session 可并行的轻量租约协调器。"""
 
@@ -68,7 +72,7 @@ class SessionRunCoordinator:
         """在执行租约内编辑会话元数据，运行中立即拒绝而不排队等待。"""
         lock: asyncio.Lock = await self._get_lock(session_id)
         if lock.locked():
-            raise ValueError("会话正在运行，请结束后再修改")
+            raise SessionBusyError("会话正在运行，请结束后再修改")
         async with lock:
             yield
 
