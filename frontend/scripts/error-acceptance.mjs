@@ -76,7 +76,8 @@ try {
       const alert = f.page.getByRole("alert");
       if (mode === "empty") {
         await alert.getByText(error.message).waitFor();
-        await f.page.getByRole("button", { name: "复制错误运行 ID" }).click();
+        await f.page.getByRole("button", { name: "查看执行记录", exact: true }).click();
+        await f.page.getByRole("button", { name: "复制运行 ID", exact: true }).click();
         assert.equal(await f.page.evaluate(() => navigator.clipboard.readText()), "run-a");
         await f.page.getByLabel("输入消息").fill("已有草稿");
         await f.page.getByRole("button", { name: "恢复原问题到输入框" }).click();
@@ -88,7 +89,7 @@ try {
       await capture(f, `${mode}-${viewport.width}-${theme}`);
       if (mode === "empty") {
         await f.page.getByRole("button", { name: "查看执行记录", exact: true }).click();
-        await f.page.getByRole("dialog", { name: "执行详情" }).getByText("失败", { exact: true }).waitFor();
+        await f.page.getByRole("region", { name: "运行过程 run-a" }).waitFor();
         await capture(f, `details-${viewport.width}-${theme}`);
       }
       assert.equal(f.count(), 1);
@@ -116,7 +117,6 @@ try {
         await f.page.getByText(error.message, { exact: true }).waitFor();
         assert.ok(f.queries.slice(1).every((query) => query.includes("run_id=run-a")));
       } else if (mode === "recoverable" || mode === "approval") {
-        await f.page.getByRole("button", { name: mode === "approval" ? "查看并决定" : "查看详情", exact: true }).click();
         await f.page.getByRole("button", { name: mode === "approval" ? "批准并继续" : "恢复运行" }).click();
       } else {
         await f.page.getByRole("alert").waitFor();

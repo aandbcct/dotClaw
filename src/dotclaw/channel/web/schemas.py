@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -303,6 +303,18 @@ class ToolExecutionResponse(BaseModel):
     error: str = ""
 
 
+class RunStepResponse(BaseModel):
+    """按运行事件序号稳定关联的模型或工具步骤。"""
+
+    id: str
+    sequence: int
+    kind: Literal["model", "tool"]
+    status: Literal["running", "completed", "failed", "cancelled", "approval_required", "interrupted"]
+    started_at: str = ""
+    completed_at: str = ""
+    call_id: str | None = None
+
+
 class RunActivityResponse(BaseModel):
     """当前或指定运行的状态与工具执行过程。"""
 
@@ -312,6 +324,8 @@ class RunActivityResponse(BaseModel):
     child_run_id: str | None = None
     tools: list[ToolExecutionResponse]
     error: RunError | None = None
+    steps: list[RunStepResponse] = Field(default_factory=list)
+    event_sequence: int = 0
 
 
 @dataclass(frozen=True)

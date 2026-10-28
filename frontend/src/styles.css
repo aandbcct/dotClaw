@@ -58,8 +58,6 @@ a { color:var(--accent); text-underline-offset:3px; }
 .header-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:12px; text-align:center; }
 .icon-button { width:44px; height:44px; flex:0 0 auto; font-size:20px; }
 .menu-button { display:none; min-height:44px; min-width:44px; }
-.run-state { color:var(--muted); font-size:12px; flex:0 0 auto; }
-.run-state--failed { color:var(--danger); }
 .conversation { min-height:0; overflow:auto; scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
 .message-column { width:min(760px,calc(100% - 48px)); margin:0 auto; padding:24px 0 32px; }
 .message { min-width:0; margin-bottom:32px; border-radius:12px; }
@@ -125,11 +123,6 @@ a { color:var(--accent); text-underline-offset:3px; }
 .error-actions { display:flex; gap:8px; flex-wrap:wrap; }
 .error-actions button,.error-run-id button { min-height:44px; padding:8px; }
 .empty-answer { color:var(--muted); font-size:14px; }
-.accepted-run-id { display:flex; align-items:center; flex-wrap:wrap; gap:8px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
-.accepted-run-id button { min-height:44px; padding:8px; }
-.run-summary { display:flex; align-items:center; gap:12px; margin:16px 0; padding:8px 0; border-top:1px solid var(--line); color:var(--muted); font-size:12px; }
-.run-summary button { min-height:44px; color:var(--accent); }
-.run-summary--approval { padding:12px 16px; border:1px solid var(--accent); border-radius:8px; background:var(--accent-soft); color:var(--text); font-size:14px; }
 .activity-dot { display:inline-block; width:6px; height:6px; flex:0 0 auto; border-radius:50%; background:var(--accent); }
 .modal { color:var(--text); background:var(--raised); border:1px solid var(--line); border-radius:16px; width:min(480px,calc(100vw - 32px)); max-height:calc(100dvh - 64px); padding:24px; box-shadow:0 16px 64px #0002; overflow:auto; }
 .modal::backdrop { background:#10171366; }
@@ -197,15 +190,10 @@ a { color:var(--accent); text-underline-offset:3px; }
 .mcp-summary button { min-height:44px; padding:8px 12px; border:1px solid var(--line); }
 .settings-empty,.settings-loading { padding:48px 0; text-align:center; color:var(--muted); font-size:14px; }
 .settings-error { color:var(--danger); }
-.execution-drawer { position:fixed; margin:0 0 0 auto; height:100dvh; max-height:100dvh; width:360px; max-width:100vw; border-radius:0; padding:24px; animation:drawer-in 180ms ease-out; }
 .run-activity { font-size:14px; }
-.activity-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; }
-.activity-heading code { color:var(--muted); font-size:12px; }
-.tool-step { padding:12px 0; border-bottom:1px solid var(--line); }
 .tool-step-heading { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .tool-step-heading strong { flex:1; min-width:0; overflow-wrap:anywhere; }
 .tool-time { color:var(--muted); font-size:12px; margin:8px 0; }
-.tool-step pre { max-height:360px; overflow:auto; padding:12px; font-size:12px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface); border-radius:8px; }
 .run-id { display:flex; flex-direction:column; gap:8px; margin-top:32px; color:var(--muted); font-size:12px; }
 .run-id code { overflow-wrap:anywhere; }
 .run-id button { align-self:start; min-height:44px; }
@@ -218,11 +206,6 @@ a { color:var(--accent); text-underline-offset:3px; }
 .toggle-copy[open] .toggle-description { display:none; }
 .toggle-copy p { margin:8px 0; color:var(--muted); font-size:12px; }
 .settings-filter { width:100%; }
-.tool-step summary { display:flex; align-items:center; flex-wrap:wrap; gap:8px; cursor:pointer; min-height:44px; }
-.tool-step summary strong { flex:1; min-width:0; font-size:14px; overflow-wrap:anywhere; }
-.tool-step summary > span { font-size:12px; color:var(--muted); }
-.tool-status { width:6px; height:6px; border-radius:50%; background:var(--accent); }
-.tool-status--failed { background:var(--danger); }
 .tool-detail { margin-top:12px; }
 .tool-detail h4 { font-size:12px; color:var(--muted); margin:12px 0 8px; }
 .tool-detail pre { padding:12px; max-height:360px; overflow:auto; font-size:12px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface); border-radius:8px; }
@@ -238,7 +221,6 @@ a { color:var(--accent); text-underline-offset:3px; }
 .search-sources a span,.search-sources a p { color:var(--muted); display:block; margin:4px 0 0; font-size:12px; line-height:1.5; }
 .hljs-keyword,.hljs-selector-tag,.hljs-literal { color:var(--accent); }
 .hljs-string,.hljs-attr { color:var(--muted); }
-@keyframes drawer-in { from { transform:translateX(16px); opacity:0; } to { transform:none; opacity:1; } }
 @media (min-width:768px) and (max-width:1023px) {
   .app-shell { grid-template-columns:56px minmax(0,1fr); }
   .app-shell:not(.sidebar-collapsed) .sidebar { position:absolute; z-index:10; inset:0 auto 0 0; width:248px; box-shadow:var(--shadow); }
@@ -255,7 +237,6 @@ a { color:var(--accent); text-underline-offset:3px; }
   .model-selector { max-width:170px; font-size:14px; }
   .header-title { display:none; }
   .model-context { flex:1; }
-  .run-state { max-width:64px; }
   .message-column { width:calc(100% - 32px); padding:16px 0 24px; }
   .composer-region { padding:8px 16px max(12px,env(safe-area-inset-bottom)); }
   .composer-hint > span:first-child { display:none; }
@@ -272,6 +253,32 @@ a { color:var(--accent); text-underline-offset:3px; }
   .settings-layout nav { display:flex; overflow:auto; padding:8px 12px; }
   .settings-layout nav button { flex:0 0 auto; width:auto; }
   .settings-content { padding:24px 16px; }
-  .execution-drawer { width:100%; padding:16px; }
 }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; } }
+
+/* 过程属于助手消息，辅助层级低于正文；异常和审批保持明显。 */
+.message-execution { width:100%; min-width:0; }
+.execution-status { display:flex; align-items:center; flex-wrap:wrap; gap:8px; color:var(--muted); font-size:13px; min-height:44px; }
+.execution-status > button { margin-left:auto; min-height:44px; padding:8px; color:var(--muted); font-size:12px; }
+.execution-spinner { width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:execution-spin .9s linear infinite; flex-shrink:0; }
+.execution-process { border-left:1px solid var(--line); padding-left:18px; margin:0 0 20px 7px; color:var(--muted); font-size:13px; }
+.execution-process .reasoning { margin:0 0 12px; }
+.execution-steps { list-style:none; padding:0; margin:0; }
+.execution-step { position:relative; padding:12px 0; border-bottom:1px solid var(--line); }
+.execution-step::before { content:""; position:absolute; left:-23px; top:19px; width:7px; height:7px; border-radius:50%; background:var(--muted); border:2px solid var(--canvas); }
+.execution-step--running::before { background:var(--accent); }
+.execution-step--failed::before { background:var(--danger); }
+.execution-step .tool-step-heading strong { font-weight:500; color:var(--text); }
+.execution-step .tool-step-heading > span { font-size:12px; }
+.execution-step pre { max-height:280px; overflow:auto; padding:12px; background:var(--surface); white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
+.execution-step summary { cursor:pointer; min-height:44px; display:flex; align-items:center; }
+.execution-process .run-id { margin:8px 0 16px; flex-direction:row; flex-wrap:wrap; align-items:center; gap:8px; overflow-wrap:anywhere; }
+.execution-process .run-id button { min-height:44px; padding:8px; }
+.execution-feedback { padding:12px 16px; margin-top:16px; border-left:2px solid var(--danger); background:var(--danger-surface); font-size:13px; color:var(--danger); overflow-wrap:anywhere; }
+.execution-feedback--unknown { border-left-color:var(--line); background:var(--surface); color:var(--text); }
+.execution-feedback p { margin:0 0 8px; }
+.execution-feedback .error-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.execution-feedback button { min-height:44px; padding:8px; }
+@keyframes execution-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .execution-spinner { animation:none; border-style:dotted; } }
+@media (max-width:767px) { .execution-process { padding-left:14px; } .execution-step::before { left:-19px; } .execution-feedback { padding:12px; } }

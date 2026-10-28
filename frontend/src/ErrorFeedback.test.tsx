@@ -2,7 +2,7 @@ import { act, render, renderHook, screen, waitFor, within } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { ApiError, submitMessage } from "./api";
+import { ApiError, getRunActivity, resumeRun, submitMessage } from "./api";
 import { useSessionWorkspace } from "./useSessionWorkspace";
 import type { SessionSummary } from "./types";
 
@@ -32,7 +32,9 @@ it("空输出显示结构化错误、运行入口，恢复问题追加而不覆�
   await user.click(screen.getByRole("button", { name: "发送消息" }));
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toContain(emptyError.message);
-  expect(alert.textContent).toContain("empty-run");
+  await user.click(within(alert).getByRole("button", { name: "查看执行记录" }));
+  expect(screen.getByText("运行 ID：empty-run")).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "执行详情" })).toBeNull();
   expect(within(alert).getByRole("button", { name: "查看执行记录" })).toBeTruthy();
   await user.type(screen.getByLabelText("输入消息"), "尚未发送的草稿");
   await user.click(screen.getByRole("button", { name: "恢复原问题到输入框" }));
@@ -239,4 +241,163 @@ it("旧服务可直接从发送进入生成，空增量不能提前进入生成�
   await act(async () => { stream.push("message.delta", { run_id: "legacy", content: "旧服务正文", kind: "response_delta" }); });
   expect(result.current.views.a.submissionStage).toBe("streaming");
   await act(async () => { stream.push("run.cancelled", { run_id: "legacy" }); stream.close(); await sending; });
+});
+
+const modelStep = (sequence: number, status = "running") => ({ id: `r:${sequence}`, sequence, kind: "model", status, started_at: "t", completed_at: "", call_id: null });
+
+it("完成刷新按运行合并配对，保留思考、过程和错误，连续相同提问仍是独立消息", async () => {
+  const stream = controlledResponse();
+  let saved = false;
+  setup((url) => {
+    if (url.endsWith("/messages")) return stream.response();
+    if (url.endsWith("/a")) return json({ ...a, messages: saved ? [
+      { id: "persisted", role: "user", content: "同一个问题", created_at: a.created_at },
+      { id: "persisted:assistant", role: "assistant", content: "正文", run_ids: ["r"], created_at: a.created_at },
+    ] : [] });
+    if (url.includes("run_id=r")) return json({ run_id: "r", status: saved ? "completed" : "running", event_sequence: 2, steps: [modelStep(1, "completed")], tools: [] });
+    return undefined;
+  });
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "同一个问题"); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "r" }); stream.push("message.delta", { run_id: "r", kind: "reasoning_delta", content: "真实思考" }); await result.current.checkRunStatus("a"); });
+  const original = result.current.views.a.activeMessageId;
+  await act(async () => { stream.push("message.delta", { run_id: "r", content: "正文" }); saved = true; stream.push("run.completed", { run_id: "r" }); stream.close(); await sending; await result.current.refresh("a"); });
+  expect(result.current.views.a.messages).toHaveLength(2);
+  expect(result.current.views.a.activeMessageId).toBe("persisted:assistant");
+  expect(result.current.views.a.messages[1]).toMatchObject({ reasoning: "真实思考", execution: { stage: "completed" } });
+  expect(result.current.views.a.activitiesByRunId.r.steps).toHaveLength(1);
+  expect(original).not.toBe(result.current.views.a.activeMessageId);
+  const next = controlledResponse();
+  setup((url) => url.endsWith("/messages") ? next.response() : url.endsWith("/a") ? json({ ...a, messages: [] }) : undefined);
+  await act(async () => { sending = result.current.send("a", "同一个问题"); });
+  await act(async () => { next.push("run.accepted", { session_id: "a", run_id: "r2" }); next.push("run.failed", { run_id: "r2", error: emptyError }); next.close(); await sending; });
+  expect(result.current.views.a.messages).toHaveLength(4);
+  expect(result.current.views.a.messages[1].run_ids).toEqual(["r"]);
+  expect(result.current.views.a.messages[3]).toMatchObject({ run_ids: ["r2"], execution: { stage: "failed", error: emptyError } });
+});
+
+it("迟到查询不回退新正文，旧事件序号不覆盖步骤，同序号可更新恢复状态", async () => {
+  const stream = controlledResponse();
+  let response: (value: Response) => void = () => undefined;
+  let pending = false;
+  let activity = { run_id: "r", status: "running", tools: [], steps: [modelStep(1)], event_sequence: 1 };
+  setup((url) => url.endsWith("/messages") ? stream.response() : url.includes("run_id=r") ? pending ? new Promise<Response>((resolve) => { response = resolve; }) : json(activity) : undefined);
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>, query: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "问题"); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "r" }); });
+  await act(async () => { await result.current.checkRunStatus("a"); });
+  pending = true;
+  await act(async () => { query = result.current.checkRunStatus("a"); });
+  await act(async () => { stream.push("message.delta", { run_id: "r", content: "新正文" }); });
+  activity = { ...activity, steps: [modelStep(1, "completed"), modelStep(4)], event_sequence: 4 };
+  await act(async () => { response(json(activity)); await query; });
+  expect(result.current.views.a.messages.at(-1)?.execution?.stage).toBe("responding");
+  pending = false;
+  activity = { ...activity, steps: [modelStep(1)], event_sequence: 1 };
+  await act(async () => { await result.current.checkRunStatus("a"); });
+  expect(result.current.views.a.activitiesByRunId.r.event_sequence).toBe(4);
+  activity = { ...activity, steps: [modelStep(4)], event_sequence: 4, status: "recoverable" };
+  await act(async () => { stream.close(); await sending; });
+  expect(result.current.views.a.messages.at(-1)?.execution?.stage).toBe("recoverable");
+});
+
+it("历史运行查询及查询失败只更新所属消息，不影响当前运行和错误", async () => {
+  const stream = controlledResponse();
+  let historyFails = false;
+  setup((url) => url.endsWith("/messages") ? stream.response() : url.endsWith("/a") ? json({ ...a, messages: [{ id: "old", role: "assistant", content: "旧回答", run_ids: ["old-run"], created_at: a.created_at }] }) : url.includes("run_id=old-run") ? historyFails ? Promise.reject(new Error("历史查询失败")) : json({ run_id: "old-run", status: "completed", tools: [], steps: [], event_sequence: 2 }) : undefined);
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "新问题"); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "r" }); await result.current.loadRunActivity("a", "old-run"); });
+  const activeId = result.current.views.a.activeMessageId;
+  historyFails = true;
+  await act(async () => { await result.current.checkRunStatus("a", "old-run"); });
+  expect(result.current.views.a).toMatchObject({ runId: "r", activeMessageId: activeId, phase: "running", statusError: "" });
+  expect(result.current.views.a.messages[0].execution?.statusError).toContain("历史查询失败");
+  await act(async () => { stream.push("run.cancelled", { run_id: "r" }); stream.close(); await sending; });
+});
+
+it("恢复复用原助手消息，保留旧思考但等待新增量才显示思考阶段", async () => {
+  const stream = controlledResponse();
+  let recoverable = false;
+  setup((url) => url.endsWith("/messages") ? stream.response() : url.includes("run_id=r") ? json({ run_id: "r", status: recoverable ? "recoverable" : "running", tools: [], event_sequence: 2 }) : undefined);
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "问题"); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "r" }); stream.push("message.delta", { run_id: "r", kind: "reasoning_delta", content: "之前的思考" }); recoverable = true; stream.close(); await sending; });
+  const original = result.current.views.a.activeMessageId!;
+  const next = controlledResponse();
+  let resumed: Promise<void>;
+  await act(async () => { resumed = result.current.control("a", original, "r", (callback, signal) => { vi.stubGlobal("fetch", vi.fn(async () => next.response())); return resumeRun("r", callback, signal); }); });
+  expect(result.current.views.a.messages).toHaveLength(2);
+  expect(result.current.views.a.messages[1]).toMatchObject({ id: original, reasoning: "之前的思考", execution: { stage: "processing" } });
+  await act(async () => { next.push("run.cancelled", { run_id: "r" }); next.close(); await resumed; });
+  expect(result.current.views.a.activeMessageId).toBe(original);
+});
+
+it.each([{ event_sequence: -1 }, { event_sequence: "2" }, { steps: [{}] }, { steps: [{ ...modelStep(1), kind: "invented" }] }])("活动新增字段格式错误显示查询错误：%j", async (invalid) => {
+  vi.stubGlobal("fetch", vi.fn(async () => json({ run_id: "r", status: "running", tools: [], ...invalid })));
+  await expect(getRunActivity("a", "r")).rejects.toMatchObject({ code: "invalid_activity" });
+});
+
+it("停止失败恢复原阶段，但迟到停止错误不能撤销终态", async () => {
+  const stream = controlledResponse();
+  let rejectStop: (reason: Error) => void = () => undefined;
+  setup((url) => url.endsWith("/messages") ? stream.response() : url.endsWith("/cancel") ? new Promise<Response>((_, reject) => { rejectStop = reject; }) : undefined);
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>, stopping: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "问题"); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "r" }); stream.push("message.delta", { run_id: "r", kind: "reasoning_delta", content: "真实思考" }); });
+  await act(async () => { stopping = result.current.stop("a"); });
+  expect(result.current.views.a.messages.at(-1)?.execution?.stage).toBe("stopping");
+  await act(async () => { rejectStop(new Error("停止连接错误")); await stopping; });
+  expect(result.current.views.a.messages.at(-1)?.execution?.stage).toBe("thinking");
+  await act(async () => { stopping = result.current.stop("a"); });
+  await act(async () => { stream.push("run.cancelled", { run_id: "r" }); stream.close(); await sending; rejectStop(new Error("迟到错误")); await stopping; });
+  expect(result.current.views.a.messages.at(-1)?.execution).toMatchObject({ stage: "cancelled", statusError: expect.stringContaining("迟到错误") });
+});
+
+it("迟到运行中查询不能撤销 SSE 审批，原运行的审批 ID 和入口保留", async () => {
+  const stream = controlledResponse();
+  let response: (value: Response) => void = () => undefined;
+  let pending = true;
+  setup((url) => url.endsWith("/messages") ? stream.response() : url.includes("run_id=r") ? pending ? new Promise<Response>((resolve) => { response = resolve; }) : json(null) : undefined);
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>, query: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "问题"); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "r" }); });
+  await act(async () => { query = result.current.checkRunStatus("a"); });
+  await act(async () => { stream.push("run.suspended", { run_id: "r", status: "waiting_approval", approval_id: "approval-r" }); });
+  await act(async () => { response(json({ run_id: "r", status: "running", tools: [], event_sequence: 0 })); await query; });
+  expect(result.current.views.a).toMatchObject({ phase: "suspended", activeMessageId: result.current.views.a.messages[1].id });
+  expect(result.current.views.a.activitiesByRunId.r).toMatchObject({ status: "waiting_approval", approval_id: "approval-r" });
+  expect(result.current.views.a.messages[1].execution?.stage).toBe("waiting_approval");
+  pending = false;
+  await act(async () => { stream.close(); await sending; });
+});
+
+it.each(["completed", "failed"])("迟到快照不能回退已确认 %s，未闭合步骤不伪造成功", async (outcome) => {
+  const stream = controlledResponse();
+  let resolveActivity: (value: Response) => void = () => undefined;
+  const pendingActivity = new Promise<Response>((resolve) => { resolveActivity = resolve; });
+  setup((url) => url.endsWith("/messages") ? stream.response() : url.includes("run_id=r") ? pendingActivity.then((response) => response.clone()) : undefined);
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>, query: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "问题"); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "r" }); stream.push("message.delta", { run_id: "r", kind: "reasoning_delta", content: "真实思考" }); });
+  await act(async () => { query = result.current.checkRunStatus("a"); });
+  await act(async () => { stream.push(`run.${outcome}`, { run_id: "r", error: outcome === "failed" ? emptyError : undefined, final_message: { content: "正文" } }); resolveActivity(json({ run_id: "r", status: "running", tools: [], steps: [modelStep(1)], event_sequence: 1 })); await query; stream.close(); await sending; });
+  expect(result.current.views.a.phase).toBe(outcome);
+  expect(result.current.views.a.activitiesByRunId.r.steps?.[0].status).toBe(outcome === "completed" ? "interrupted" : "failed");
+  expect(result.current.views.a.messages[1]).toMatchObject({ reasoning: "真实思考", execution: { stage: outcome } });
+  if (outcome === "failed") expect(result.current.views.a.messages[1].execution?.error).toEqual(emptyError);
 });

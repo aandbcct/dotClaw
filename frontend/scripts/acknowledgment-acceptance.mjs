@@ -60,13 +60,13 @@ try {
     await capture("sending");
     await page.evaluate(() => window.__ackFixture.accept());
     await push("run.accepted", { session_id: session.id, run_id: "p1-confirmed-run" });
-    await page.getByRole("status").filter({ hasText: "已接收，正在处理" }).waitFor();
+    await page.getByRole("status").filter({ hasText: "处理中" }).waitFor();
     await page.getByText("运行 ID：p1-confirmed-run", { exact: true }).waitFor();
     await capture("accepted");
     await push("message.delta", { session_id: session.id, run_id: "p1-confirmed-run", kind: "response_delta", content: "这是隔离夹具提供的部分正文。" });
     await page.getByText("这是隔离夹具提供的部分正文。", { exact: true }).waitFor();
     await push("run.accepted", { session_id: session.id, run_id: "p1-confirmed-run" });
-    assert.equal(await page.getByText("已接收，正在处理", { exact: true }).count(), 0);
+    assert.equal(await page.getByText("处理中", { exact: true }).count(), 0);
     await capture("streaming");
     if (outcome === "failed") {
       await push("run.failed", { run_id: "p1-confirmed-run", error: { code: "empty_model_response", message: "模型未返回有效回答，请查看执行记录或稍后重新发送。", retryable: false } });

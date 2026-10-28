@@ -149,7 +149,7 @@ describe("对话工作区", () => {
   it("加载已保存消息并正确处理成功流的最终正文", async () => {
     let completed = false;
     setup((url) => {
-      if (url.endsWith("/session-1")) return json({ ...session, messages: completed ? [{ id: "persisted", role: "assistant", content: "最终回答", created_at: session.updated_at }] : [] });
+      if (url.endsWith("/session-1")) return json({ ...session, messages: completed ? [{ id: "persisted", role: "assistant", content: "最终回答", run_ids: ["run-1"], created_at: session.updated_at }] : [] });
       if (url.endsWith("/messages")) { completed = true; return stream([event("message.delta", { kind: "response_delta", content: "最终" }), event("message.delta", { kind: "response_delta", content: "回答" }), event("run.completed", { run_id: "run-1", final_message: { content: "最终回答" } })]); }
     });
     const user = userEvent.setup(); render(<App />);
@@ -158,4 +158,18 @@ describe("对话工作区", () => {
     await user.click(screen.getByRole("button", { name: "发送消息" }));
     await waitFor(() => expect(screen.getAllByText("最终回答")).toHaveLength(1));
   });
+});
+
+it("首次创建尚未完成时消息区立即显示发送提示，创建失败保留草稿", async () => {
+  let rejectCreation: (reason: Error) => void = () => undefined;
+  setup((url, init) => url.endsWith("/sessions") && init?.method === "POST" ? new Promise<Response>((_, reject) => { rejectCreation = reject; }) : undefined, []);
+  const user = userEvent.setup(); render(<App />);
+  await screen.findByText("有什么可以帮你？");
+  await user.type(screen.getByLabelText("输入消息"), "创建期间的原问题");
+  await user.click(screen.getByRole("button", { name: "发送消息" }));
+  expect((await screen.findByText("正在发送")).closest("article")).toBeTruthy();
+  expect(document.querySelector(".workspace-header [role=status]")).toBeNull();
+  rejectCreation(new Error("隔离创建失败"));
+  await screen.findByText("隔离创建失败");
+  expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("创建期间的原问题");
 });

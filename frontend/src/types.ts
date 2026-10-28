@@ -40,6 +40,26 @@ export interface SessionDetail extends SessionSummary {
 export interface DisplayMessage extends SessionMessage {
   reasoning?: string;
   pending?: boolean;
+  execution?: MessageExecution;
+  requestId?: string;
+}
+
+/** 本页消息的执行展示，不作为历史思考持久化。 */
+export interface MessageExecution {
+  stage: "sending" | "processing" | "thinking" | "responding" | "tool_running" | "stopping" | "completed" | "failed" | "cancelled" | "waiting_approval" | "waiting_delegation" | "recoverable" | "unknown";
+  error: ErrorEnvelope["error"] | null;
+  statusError: string;
+  submittedText: string;
+}
+
+export interface RunStep {
+  id: string;
+  sequence: number;
+  kind: "model" | "tool";
+  status: "running" | "completed" | "failed" | "cancelled" | "approval_required" | "interrupted";
+  started_at: string;
+  completed_at: string;
+  call_id: string | null;
 }
 
 export interface ErrorEnvelope {
@@ -91,6 +111,8 @@ export interface RunActivity {
   child_run_id: string | null;
   tools: ToolExecution[];
   error?: ErrorEnvelope["error"] | null;
+  steps?: RunStep[];
+  event_sequence?: number;
 }
 
 export interface ModelSetting {

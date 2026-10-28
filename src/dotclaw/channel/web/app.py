@@ -31,6 +31,7 @@ from .schemas import (
     AgentOptionResponse,
     ResolveApprovalRequest,
     RunActivityResponse,
+    RunStepResponse,
     RuntimeSettingsResponse,
     GeneralSettingResponse,
     McpServerSettingResponse,
@@ -680,7 +681,7 @@ def _run_activity(
         if message.kind is RunMessageKind.TOOL_RESULT and message.tool_call_id
     }
     steps: dict[str, ToolExecutionResponse] = {}
-    for event in events:
+    for event in sorted(events, key=lambda item: item.sequence):
         if event.event_type not in {
             RunEventType.TOOL_STARTED,
             RunEventType.TOOL_COMPLETED,
@@ -731,7 +732,49 @@ def _run_activity(
         child_run_id=child_run_id,
         tools=list(steps.values()),
         error=run.error,
+        steps=_run_steps(run, events),
+        event_sequence=max((event.sequence for event in events), default=0),
     )
+
+
+def _run_steps(run: AgentRun, events: tuple[RunEvent, ...]) -> list[RunStepResponse]:
+    """只投影允许展示的步骤事实，保留并行工具及不完整历史的真实状态。"""
+    steps: list[RunStepResponse] = []
+    models: list[RunStepResponse] = []
+    tools: dict[str, RunStepResponse] = {}
+    seen: set[int] = set()
+    for event in sorted(events, key=lambda item: item.sequence):
+        if event.sequence in seen:
+            continue
+        seen.add(event.sequence)
+        if event.event_type not in {RunEventType.LLM_STARTED, RunEventType.LLM_COMPLETED, RunEventType.TOOL_STARTED, RunEventType.TOOL_COMPLETED}:
+            continue
+        is_model = event.event_type in {RunEventType.LLM_STARTED, RunEventType.LLM_COMPLETED}
+        started = event.event_type in {RunEventType.LLM_STARTED, RunEventType.TOOL_STARTED}
+        call_id = None if is_model else str(event.data.get("call_id", ""))
+        if not is_model and not call_id:
+            continue
+        current = None if started else (models.pop(0) if is_model and models else tools.get(call_id or ""))
+        if current is None:
+            current = RunStepResponse(id=f"{run.run_id}:{event.sequence}", sequence=event.sequence, kind="model" if is_model else "tool", status="running", started_at=event.occurred_at if started else "", call_id=call_id)
+            steps.append(current)
+        if started:
+            if is_model:
+                models.append(current)
+            else:
+                tools[call_id or ""] = current
+        else:
+            current.completed_at = event.occurred_at
+            value = str(event.data.get("status", "completed"))
+            current.status = value if value in {"completed", "failed", "cancelled", "approval_required"} else "interrupted"
+            if not is_model:
+                tools.pop(call_id or "", None)
+    if run.state.is_ended():
+        outcome = run.state.outcome()
+        for step in steps:
+            if step.status == "running":
+                step.status = "failed" if outcome is RunOutcome.FAILED else "cancelled" if outcome is RunOutcome.CANCELLED else "interrupted"
+    return steps
 
 
 def _result_event(session_id: str, result: RunResult) -> SSEEvent:

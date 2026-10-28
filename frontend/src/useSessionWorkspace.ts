@@ -1,15 +1,38 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, cancelSession, getRunActivity, getSession, listSessions, submitMessage } from "./api";
 import { readPreference, writePreference } from "./preferences";
-import type { DisplayMessage, RunAcceptedData, RunActivity, RunPhase, SessionSummary, StreamEvent } from "./types";
+import type { DisplayMessage, MessageExecution, RunAcceptedData, RunActivity, RunPhase, SessionSummary, StreamEvent } from "./types";
 
 export interface ConversationView {
   messages: DisplayMessage[]; phase: RunPhase; activity: RunActivity | null;
   runId: string | null; error: string; loading: boolean; detached: boolean;
   errorCode: string; retryable: boolean; lastSubmittedText: string; statusError: string;
   submissionStage: "idle" | "sending" | "accepted" | "streaming";
+  activeMessageId: string | null;
+  activitiesByRunId: Record<string, RunActivity>;
 }
-const emptyView = (): ConversationView => ({ messages: [], phase: "idle", activity: null, runId: null, error: "", loading: false, detached: false, errorCode: "", retryable: false, lastSubmittedText: "", statusError: "", submissionStage: "idle" });
+const emptyView = (): ConversationView => ({ messages: [], phase: "idle", activity: null, runId: null, error: "", loading: false, detached: false, errorCode: "", retryable: false, lastSubmittedText: "", statusError: "", submissionStage: "idle", activeMessageId: null, activitiesByRunId: {} });
+const newExecution = (submittedText = ""): MessageExecution => ({ stage: "processing", error: null, statusError: "", submittedText });
+const finalStages = new Set(["completed", "failed", "cancelled"]);
+
+/** 控制字段与当前消息在同一次状态替换中更新，旧消息不读取当前运行状态。 */
+function patchMessageExecution(view: ConversationView): ConversationView {
+  if (!view.activeMessageId) return view;
+  return { ...view, messages: view.messages.map((message) => {
+    if (message.id !== view.activeMessageId) return message;
+    const execution = message.execution || newExecution(view.lastSubmittedText);
+    let stage = execution.stage;
+    if (view.detached) stage = "unknown";
+    else if (view.phase === "stopping") stage = "stopping";
+    else if (view.phase === "suspended") stage = view.activity?.status === "waiting_delegation" ? "waiting_delegation" : "waiting_approval";
+    else if (view.phase === "recoverable") stage = "recoverable";
+    else if (["completed", "failed", "cancelled"].includes(view.phase)) stage = view.phase as MessageExecution["stage"];
+    else if (view.submissionStage === "sending") stage = "sending";
+    else if (view.submissionStage === "accepted" && !["thinking", "responding", "tool_running"].includes(stage)) stage = "processing";
+    return { ...message, run_ids: view.runId ? Array.from(new Set([...(message.run_ids || []), view.runId])) : message.run_ids,
+      execution: { ...execution, stage, error: view.error ? { code: view.errorCode, message: view.error, retryable: view.retryable } : null, statusError: view.statusError } };
+  }) };
+}
 const terminalEvents = new Set(["run.completed", "run.failed", "run.cancelled", "run.suspended", "stream.error"]);
 const activePhase = (phase: RunPhase) => ["running", "stopping", "suspended", "recoverable"].includes(phase);
 export function phaseLabel(phase: RunPhase): string {
@@ -36,14 +59,16 @@ export function useSessionWorkspace() {
   const polling = useRef(new Set<string>());
   const terminal = useRef(new Set<string>());
   const revisions = useRef(new Map<string, number>());
+  const deltaVersions = useRef(new Map<string, number>());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const alive = useRef(true);
 
-  function patch(id: string, change: Partial<ConversationView> | ((current: ConversationView) => ConversationView)): void {
+  function patch(id: string, change: Partial<ConversationView> | ((current: ConversationView) => ConversationView), syncExecution = true): void {
     if (!alive.current) return;
     const current = viewsRef.current[id] || emptyView();
-    const next = typeof change === "function" ? change(current) : { ...current, ...change };
+    const changed = typeof change === "function" ? change(current) : { ...current, ...change };
+    const next = syncExecution ? patchMessageExecution(changed) : changed;
     viewsRef.current = { ...viewsRef.current, [id]: next };
     setViews(viewsRef.current);
   }
@@ -57,38 +82,96 @@ export function useSessionWorkspace() {
     const detail = await getSession(id);
     if (!alive.current) return;
     upsert(detail);
-    patch(id, (current) => ({ ...current, messages: detail.messages, detached: false, loading: false }));
+    patch(id, (current) => {
+      const mergedRequests = new Set<string>();
+      const mergedIds = new Map<string, string>();
+      const messages: DisplayMessage[] = detail.messages.map((saved) => {
+        if (saved.role !== "assistant") return saved;
+        const local = current.messages.find((item) => item.role === "assistant" && (item.id === saved.id || item.run_ids?.some((runId) => saved.run_ids?.includes(runId))));
+        if (!local) return saved;
+        mergedIds.set(local.id, saved.id);
+        if (local.requestId) mergedRequests.add(local.requestId);
+        return { ...saved, reasoning: local.reasoning, execution: local.execution, requestId: local.requestId, pending: local.pending };
+      });
+      // 只删除已按运行标识确认入库的本地配对，不按相同文本猜测消息身份。
+      for (let index = 0; index < current.messages.length; index++) {
+        const item = current.messages[index];
+        if (!item.id.startsWith("local-") || mergedIds.has(item.id) || (item.requestId && mergedRequests.has(item.requestId))) continue;
+        const following = current.messages.slice(index + 1).find((candidate) => mergedIds.has(candidate.id));
+        const anchor = following && messages.findIndex((candidate) => candidate.id === mergedIds.get(following.id));
+        // 未入库的失败请求仍留在随后已入库请求之前，不能因刷新被搬到末尾。
+        const insertAt = typeof anchor === "number" && anchor >= 0 ? (messages[anchor - 1]?.role === "user" ? anchor - 1 : anchor) : messages.length;
+        messages.splice(insertAt, 0, item);
+      }
+      return { ...current, messages, activeMessageId: mergedIds.get(current.activeMessageId || "") || current.activeMessageId, loading: false };
+    });
   }
-  async function readActivity(id: string, runId?: string): Promise<void> {
+  async function readActivity(id: string, runId?: string, historyOnly = false): Promise<void> {
     const revision = revisions.current.get(id) || 0;
     const knownRunId = runId || viewsRef.current[id]?.runId || undefined;
+    const targetId = viewsRef.current[id]?.messages.find((message) => message.run_ids?.includes(knownRunId || ""))?.id || viewsRef.current[id]?.activeMessageId;
+    const version = deltaVersions.current.get(`${id}:${targetId}`) || 0;
+    const statusError = (text: string) => {
+      if (!historyOnly) patch(id, { statusError: text });
+      else patch(id, (view) => ({ ...view, messages: view.messages.map((message) => message.run_ids?.includes(knownRunId || "") ? { ...message, execution: { ...(message.execution || { ...newExecution(), stage: "completed" }), statusError: text } } : message) }), false);
+    };
     let activity: RunActivity | null;
     try { activity = await getRunActivity(id, knownRunId); }
     catch (error) {
-      if (revision === (revisions.current.get(id) || 0)) patch(id, { statusError: "状态查询失败：" + errorText(error) });
+      if (historyOnly || revision === (revisions.current.get(id) || 0)) statusError("状态查询失败：" + errorText(error));
       return;
     }
-    if (!alive.current || revision !== (revisions.current.get(id) || 0)) return;
+    if (!alive.current || (!historyOnly && revision !== (revisions.current.get(id) || 0))) return;
     const expectedRunId = knownRunId || viewsRef.current[id]?.runId;
     if (activity && expectedRunId && activity.run_id !== expectedRunId) {
-      patch(id, { statusError: "状态查询失败：返回的运行与本次请求不一致" }); return;
+      statusError("状态查询失败：返回的运行与本次请求不一致"); return;
     }
-    patch(id, { statusError: "" });
+    statusError("");
     // 无活动运行不等于本次请求未执行，尤其在接收运行 ID 之前断线时。
-    if (!activity) return;
+    if (!activity) { if (historyOnly) statusError("该运行记录不存在或不属于此会话"); return; }
+    const current = viewsRef.current[id] || emptyView();
+    const cached = current.activitiesByRunId[activity.run_id];
+    if ((activity.event_sequence || 0) < (cached?.event_sequence || 0)) return;
+    const settled = terminal.current.has(activity.run_id) || (cached && ["completed", "failed", "cancelled", "abandoned"].includes(cached.status) && !cached.error?.retryable);
+    if (settled && activePhase(phaseFor(activity))) {
+      const activityRunId = activity.run_id;
+      const messageStage = current.messages.find((message) => message.run_ids?.includes(activityRunId))?.execution?.stage;
+      const confirmedStatus = cached?.status && !activePhase(phaseFor(cached)) ? cached.status : messageStage && finalStages.has(messageStage) ? messageStage : current.phase;
+      // 迟到的运行中快照不能撤销 SSE 终态；没有完成证据的开放步骤只标记中断。
+      activity = { ...activity, status: confirmedStatus, steps: activity.steps?.map((step) => step.status !== "running" ? step : { ...step, status: confirmedStatus === "failed" ? "failed" : confirmedStatus === "cancelled" ? "cancelled" : "interrupted" }) };
+    }
+    if (activity.status === "running" && current.runId === activity.run_id && ["suspended", "recoverable"].includes(current.phase)) {
+      // 只有显式控制入口会解除等待态，迟到的普通轮询不能撤销审批或恢复入口。
+      activity = { ...activity, status: current.activity?.status || cached?.status || "recoverable", approval_id: current.activity?.approval_id || null, child_run_id: current.activity?.child_run_id || null };
+    }
+    const acceptedActivity = activity;
+    patch(id, (view) => ({ ...view, activitiesByRunId: { ...view.activitiesByRunId, [acceptedActivity.run_id]: acceptedActivity } }), false);
+    if (historyOnly) return;
     if (!knownRunId && ["completed", "failed", "cancelled", "abandoned"].includes(activity.status)) return;
-    if (terminal.current.has(activity.run_id) && activePhase(phaseFor(activity))) return;
-    const current = viewsRef.current[id];
     // 新请求尚未取得运行标识时，最近活动运行可能属于其他请求，不能冒充确认。
     if (streams.current.has(id) && current?.submissionStage === "sending" && !current.runId) return;
     if (streams.current.has(id) && activity.status !== "running") return;
     const resolvedError = activity.error ? { error: activity.error.message, errorCode: activity.error.code, retryable: activity.error.retryable === true }
       : activity.status === "failed" ? { error: current?.error && !current.detached ? current.error : "运行失败，请查看执行记录", errorCode: current?.errorCode && !current.detached ? current.errorCode : "run_failed", retryable: current?.retryable || false }
       : current?.detached && activity.status !== "running" ? { error: "", errorCode: "", retryable: false } : {};
-    patch(id, { activity, runId: activity.run_id, phase: current?.phase === "stopping" && activity.status === "running" ? "stopping" : phaseFor(activity), detached: activity.status === "running" && (!streams.current.has(id) || current?.errorCode === "invalid_run_accepted"),
+    let message = current.messages.find((item) => item.run_ids?.includes(activity.run_id));
+    if (!message) message = current.messages.find((item) => item.id === current.activeMessageId && !item.run_ids?.length);
+    const messageId = message?.id || `local-run-${activity.run_id}`;
+    const model = activity.steps?.filter((step) => step.kind === "model").at(-1);
+    const previousModel = cached?.steps?.filter((step) => step.kind === "model").at(-1);
+    const noNewText = version === (deltaVersions.current.get(`${id}:${messageId}`) || 0);
+    let stage = message?.execution?.stage || "processing";
+    if (noNewText && activity.status === "running" && !finalStages.has(stage) && !["unknown", "stopping"].includes(stage)) {
+      if (activity.steps?.some((step) => step.kind === "tool" && step.status === "running") || (!activity.steps && activity.tools.some((tool) => tool.status === "running"))) stage = "tool_running";
+      else if (model?.status === "running" && previousModel && model.id !== previousModel.id) stage = "processing";
+    }
+    patch(id, { activity, runId: activity.run_id, activeMessageId: messageId,
+      messages: message ? current.messages.map((item) => item.id === messageId ? { ...item, execution: { ...(item.execution || newExecution()), stage } } : item) : [...current.messages, { id: messageId, role: "assistant", content: "", created_at: "", run_ids: [activity.run_id], execution: newExecution() }],
+      phase: current?.phase === "stopping" && activity.status === "running" ? "stopping" : phaseFor(activity), detached: activity.status === "running" && (!streams.current.has(id) || current?.errorCode === "invalid_run_accepted"),
       ...resolvedError,
       ...(activity.status !== "running" ? { submissionStage: "idle" as const } : {}),
     });
+    if (["completed", "failed", "cancelled", "abandoned"].includes(activity.status) && !activity.error?.retryable) terminal.current.add(activity.run_id);
     if (activity.status === "completed") {
       terminal.current.add(activity.run_id);
       try { await refresh(id); } catch (error) { patch(id, { statusError: "状态查询失败：完成记录读取失败，" + errorText(error) }); }
@@ -152,9 +235,14 @@ export function useSessionWorkspace() {
       protocolError(); return;
     }
     if (runId) patch(id, { runId });
+    if (runId && terminal.current.has(runId)) return;
     if (event.event === "message.delta") {
       const content = field(event.data, "content");
-      patch(id, (view) => ({ ...view, submissionStage: content && !view.detached ? "streaming" : view.submissionStage, messages: view.messages.map((message) => message.id !== messageId ? message : field(event.data, "kind") === "reasoning_delta" ? { ...message, reasoning: (message.reasoning || "") + content } : { ...message, content: message.content + content }) }));
+      if (content) deltaVersions.current.set(`${id}:${messageId}`, (deltaVersions.current.get(`${id}:${messageId}`) || 0) + 1);
+      patch(id, (view) => ({ ...view, submissionStage: content && !view.detached ? "streaming" : view.submissionStage, messages: view.messages.map((message) => message.id !== messageId ? message : {
+        ...message, execution: { ...(message.execution || newExecution()), stage: content ? field(event.data, "kind") === "reasoning_delta" ? "thinking" : "responding" : message.execution?.stage || "processing" },
+        ...(field(event.data, "kind") === "reasoning_delta" ? { reasoning: (message.reasoning || "") + content } : { content: message.content + content }),
+      }) }));
       return;
     }
     const completed = event.event === "run.completed";
@@ -167,13 +255,18 @@ export function useSessionWorkspace() {
     const retryable = Boolean(rawError && typeof rawError === "object" && "retryable" in rawError && rawError.retryable === true);
     const unknown = event.event === "stream.error";
     if (runId && phase !== "suspended" && !unknown && !retryable) terminal.current.add(runId);
-    patch(id, (view) => ({
-      ...view, phase: unknown ? "running" : phase, detached: unknown, submissionStage: "idle",
-      activity: view.activity ? { ...view.activity, status: phase === "suspended" || unknown ? view.activity.status : phase } : null,
+    patch(id, (view) => {
+      const prior = runId ? view.activitiesByRunId[runId] : null;
+      const activity: RunActivity | null = runId && !unknown ? { ...prior, run_id: runId, tools: prior?.tools || [], status: phase === "suspended" ? field(event.data, "status") || "waiting_approval" : phase,
+        approval_id: field(event.data, "approval_id") || null, child_run_id: field(event.data, "child_run_id") || null,
+        error: phase === "failed" ? { code, message: message || "运行失败，请查看执行记录", retryable } : null } : view.activity;
+      return {
+      ...view, phase: unknown ? "running" : phase, detached: unknown, submissionStage: "idle", activity,
+      activitiesByRunId: activity ? { ...view.activitiesByRunId, [activity.run_id]: activity } : view.activitiesByRunId,
       error: unknown ? (message || "消息连接异常") + "；结果待确认，请查询运行状态，不要重复发送。" : phase === "failed" ? message || "运行失败，请查看执行记录" : "",
       errorCode: code, retryable, statusError: "",
-      messages: view.messages.map((item) => item.id === messageId ? { ...item, pending: false, content: item.content || finalText, run_ids: runId ? [runId] : item.run_ids } : item),
-    }));
+      messages: view.messages.map((item) => item.id === messageId ? { ...item, pending: false, content: item.content || finalText, run_ids: runId ? Array.from(new Set([...(item.run_ids || []), runId])) : item.run_ids } : item),
+    }; });
   }
   async function runStream(id: string, messageId: string, operation: (onEvent: (event: StreamEvent) => void, signal: AbortSignal) => Promise<void>): Promise<void> {
     if (streams.current.has(id)) return;
@@ -223,27 +316,40 @@ export function useSessionWorkspace() {
     revisions.current.set(id, (revisions.current.get(id) || 0) + 1);
     const createdAt = new Date().toISOString();
     const messageId = `local-assistant-${crypto.randomUUID()}`;
-    patch(id, (view) => ({ ...view, activity: null, runId: null, submissionStage: "sending", lastSubmittedText: content, messages: [
+    const requestId = crypto.randomUUID();
+    patch(id, (view) => ({ ...view, activity: null, runId: null, activeMessageId: messageId, submissionStage: "sending", lastSubmittedText: content, error: "", errorCode: "", retryable: false, statusError: "", detached: false, phase: "running", messages: [
       ...view.messages,
-      { id: `local-user-${crypto.randomUUID()}`, role: "user", content, created_at: createdAt },
-      { id: messageId, role: "assistant", content: "", reasoning: "", created_at: createdAt, pending: true },
+      { id: `local-user-${crypto.randomUUID()}`, requestId, role: "user", content, created_at: createdAt },
+      { id: messageId, requestId, role: "assistant", content: "", reasoning: "", created_at: createdAt, pending: true, execution: { ...newExecution(content), stage: "sending" } },
     ] }));
     await runStream(id, messageId, (callback, signal) => submitMessage(id, content, callback, signal));
   }
-  async function control(id: string, operation: (callback: (event: StreamEvent) => void, signal: AbortSignal) => Promise<void>): Promise<void> {
-    if (streams.current.has(id)) return;
+  async function control(id: string, targetMessageId: string, runId: string, operation: (callback: (event: StreamEvent) => void, signal: AbortSignal) => Promise<void>): Promise<void> {
+    if (streams.current.has(id) || viewsRef.current[id]?.runId !== runId || !["suspended", "recoverable"].includes(viewsRef.current[id]?.phase)) return;
     revisions.current.set(id, (revisions.current.get(id) || 0) + 1);
-    const messageId = `local-control-${crypto.randomUUID()}`;
-    patch(id, (view) => ({ ...view, submissionStage: "idle", messages: [...view.messages, { id: messageId, role: "assistant", content: "", created_at: new Date().toISOString(), pending: true }] }));
+    const messages = viewsRef.current[id]?.messages || [];
+    const messageId = (messages.find((message) => message.id === targetMessageId && message.run_ids?.includes(runId)) || messages.find((message) => message.role === "assistant" && message.run_ids?.includes(runId)))?.id || `local-run-${runId}`;
+    patch(id, (view) => ({ ...view, activeMessageId: messageId, submissionStage: "idle", phase: "running", detached: false, error: "", statusError: "", messages: view.messages.some((message) => message.id === messageId) ? view.messages.map((message) => message.id === messageId ? { ...message, pending: true, execution: { ...(message.execution || newExecution()), stage: "processing" } } : message) : [...view.messages, { id: messageId, role: "assistant", content: "", run_ids: [runId], created_at: "", pending: true, execution: newExecution() }] }));
     await runStream(id, messageId, operation);
   }
   async function stop(id: string): Promise<void> {
     const previousPhase = viewsRef.current[id]?.phase || "running";
+    const messageId = viewsRef.current[id]?.activeMessageId;
+    const previousStage = viewsRef.current[id]?.messages.find((message) => message.id === messageId)?.execution?.stage;
     patch(id, { phase: "stopping" });
-    try { await cancelSession(id); } catch (error) { patch(id, { phase: previousPhase, statusError: "停止请求失败：" + errorText(error) }); }
+    try { await cancelSession(id); } catch (error) {
+      const text = "停止请求失败：" + errorText(error);
+      patch(id, (view) => ({ ...view,
+        ...(view.activeMessageId === messageId ? { statusError: text, phase: view.phase === "stopping" ? previousPhase : view.phase } : {}),
+        messages: view.messages.map((message) => message.id === messageId && message.execution ? { ...message, execution: { ...message.execution, statusError: text, stage: view.phase === "stopping" && view.activeMessageId === messageId ? previousStage || "processing" : message.execution.stage } } : message),
+      }));
+    }
   }
-  async function checkRunStatus(id: string): Promise<void> {
-    await readActivity(id, viewsRef.current[id]?.runId || undefined);
+  async function checkRunStatus(id: string, runId?: string): Promise<void> {
+    await readActivity(id, runId || viewsRef.current[id]?.runId || undefined, Boolean(runId && runId !== viewsRef.current[id]?.runId));
+  }
+  async function loadRunActivity(id: string, runId: string): Promise<void> {
+    await readActivity(id, runId, true);
   }
   function remove(id: string): void {
     setSessions((current) => current.filter((session) => session.id !== id));
@@ -253,5 +359,5 @@ export function useSessionWorkspace() {
   return { sessions, selectedId, selected: sessions.find((session) => session.id === selectedId) || null,
     views, view: selectedId ? views[selectedId] || emptyView() : emptyView(), loading, loadError,
     isStreaming: (id: string | null) => Boolean(id && streams.current.has(id)),
-    open, startNew, upsert, refresh, send, control, stop, checkRunStatus, patch, remove };
+    open, startNew, upsert, refresh, send, control, stop, checkRunStatus, loadRunActivity, patch, remove };
 }

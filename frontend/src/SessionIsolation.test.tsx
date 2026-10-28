@@ -30,7 +30,7 @@ it("两会话流、错误、停止和完成回填相互隔离，不抢走当前�
       controllers.get("b")!.close();
       return json({ run_id: "rb" });
     }
-    if (url.endsWith("/a")) return json({ ...a, messages: aDone ? [{ id: "saved-a", role: "assistant", content: "A 最终回答", created_at: a.updated_at }] : [] });
+    if (url.endsWith("/a")) return json({ ...a, messages: aDone ? [{ id: "saved-a", run_ids: ["ra"], role: "assistant", content: "A 最终回答", created_at: a.updated_at }] : [] });
     return json({ ...b, messages: [] });
   }));
   const user = userEvent.setup(); render(<App />);
@@ -39,7 +39,7 @@ it("两会话流、错误、停止和完成回填相互隔离，不抢走当前�
   await user.click(screen.getByRole("button", { name: "发送消息" }));
   expect(await screen.findByText("正在发送", { exact: true })).toBeTruthy();
   await act(async () => { controllers.get("a")!.enqueue(block("run.accepted", { session_id: "a", run_id: "ra" })); });
-  expect(await screen.findByText("已接收，正在处理", { exact: true })).toBeTruthy();
+  expect(await screen.findByText("处理中", { exact: true })).toBeTruthy();
   await act(async () => { controllers.get("a")!.enqueue(block("message.delta", { run_id: "ra", content: "A 部分", kind: "response_delta" })); });
   await screen.findByText("A 部分");
   await user.click(screen.getByRole("button", { name: "会话 B" }));
@@ -49,7 +49,7 @@ it("两会话流、错误、停止和完成回填相互隔离，不抢走当前�
   expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("B 草稿");
   await user.click(screen.getByRole("button", { name: "发送消息" }));
   await act(async () => { controllers.get("b")!.enqueue(block("run.accepted", { session_id: "b", run_id: "rb" })); });
-  expect(await screen.findByText("已接收，正在处理", { exact: true })).toBeTruthy();
+  expect(await screen.findByText("处理中", { exact: true })).toBeTruthy();
   expect(screen.queryByText("运行 ID：ra")).toBeNull();
   expect(screen.getByText("运行 ID：rb")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "停止运行" }));
@@ -97,7 +97,7 @@ it("刷新后只轮询已知运行并回填最终结果，不重复发送", asyn
     return json({ ...a, messages: done ? [{ id: "saved", role: "assistant", content: "后台最终结果", created_at: a.updated_at }] : [] });
   });
   vi.stubGlobal("fetch", mock); render(<App />);
-  await screen.findByText(/任务仍在运行，完成后显示结果/);
+  await screen.findByText("结果待确认", { exact: true });
   done = true;
   await screen.findByText("后台最终结果", {}, { timeout: 2500 });
   expect(mock.mock.calls.some(([input]) => String(input).endsWith("/messages"))).toBe(false);
@@ -113,7 +113,7 @@ it("待审批入口显式展示，展开参数后才能决定并继续消费恢�
     return json({ ...a, messages: [] });
   }));
   const user = userEvent.setup(); render(<App />);
-  await user.click(await screen.findByRole("button", { name: "查看并决定" }));
+  await screen.findByRole("group", { name: "工具审批" });
   await user.click(screen.getByText("参数", { selector: "summary" }));
   expect(screen.getByText(/demo.txt/)).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "批准并继续" }));
@@ -136,7 +136,7 @@ it("恢复检查点调用原运行接口，失败消息只显示在所属会话"
     return json({ ...(url.endsWith("/b") ? b : a), messages: [] });
   }));
   const user = userEvent.setup(); render(<App />);
-  await user.click(await screen.findByRole("button", { name: "查看详情" }));
+  await screen.findByRole("button", { name: "恢复运行" });
   await user.click(screen.getByRole("button", { name: "恢复运行" }));
   await screen.findByText("A 恢复失败");
   await user.keyboard("{Escape}");

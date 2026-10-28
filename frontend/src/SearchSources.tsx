@@ -20,7 +20,7 @@ export function parseSearchSources(activities: RunActivity[]): SearchSource[] {
         seen.add(url.href);
         sources.push({ title: item.title, url: url.href, snippet: typeof item.snippet === "string" ? item.snippet : "", domain: url.hostname });
       }
-    } catch { /* 非结构化结果保留在执行详情，不影响正文。 */ }
+    } catch { /* 非结构化结果保留在消息执行过程，不影响正文。 */ }
   }
   return sources;
 }
@@ -38,7 +38,7 @@ export function SearchSources({ sessionId, runIds }: { sessionId: string; runIds
     return () => { active = false; };
   }, [sessionId, key]);
   const sources = parseSearchSources(activities);
-  if (!sources.length) return error ? <p className="muted">搜索记录读取失败，可在执行详情中重试查看。</p> : null;
+  if (!sources.length) return error ? <p className="muted">搜索记录读取失败，可在消息执行过程中重试查看。</p> : null;
   return <details className="search-sources"><summary>搜索结果 · {sources.length} 条</summary>
     {sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noopener noreferrer"><strong>{source.title}</strong><span>{source.domain}</span>{source.snippet && <p>{source.snippet}</p>}</a>)}
     <p className="muted">来自该轮已执行的搜索；来源列表不代表答案已经逐句验证。</p>

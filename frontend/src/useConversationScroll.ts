@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { DisplayMessage } from "./types";
 
 /** 只在用户仍停留底部时跟随流式输出，回看历史时保留阅读位置。 */
@@ -34,6 +34,16 @@ export function useConversationScroll(sessionId: string | undefined, messages: D
     if (following.current) scrollToBottom();
     else setHasNewContent(true);
   }, [sessionId, messages]);
+
+  useEffect(() => {
+    const element = conversationRef.current;
+    if (!element) return;
+    // 过程展开、思考折叠和步骤增长也遵循原本的阅读位置，不强制滚到底部。
+    const changed = () => { if (following.current) element.scrollTop = element.scrollHeight; else setHasNewContent(true); };
+    const observer = new MutationObserver(changed);
+    observer.observe(element, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["open"] });
+    return () => observer.disconnect();
+  }, [sessionId]);
 
   return { conversationRef, onScroll, scrollToBottom, awayFromBottom, hasNewContent };
 }

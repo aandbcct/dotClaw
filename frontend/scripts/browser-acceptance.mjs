@@ -38,7 +38,7 @@ async function fixture(viewport, theme, scenario = "chat") {
     } else if (p.endsWith("/messages")) {
       sends++;
       const question = request.postDataJSON().content;
-      history = [...history, { id: "c2", role: "user", content: question, created_at: a.created_at }, { id: "c2:assistant", role: "assistant", content: "已完成的夹具回答", created_at: a.created_at, run_ids: [] }];
+      history = [...history, { id: "c2", role: "user", content: question, created_at: a.created_at }, { id: "c2:assistant", role: "assistant", content: "已完成的夹具回答", created_at: a.created_at, run_ids: ["run-new"] }];
       return route.fulfill({ contentType: "text/event-stream", body: 'event: message.delta\ndata: {"kind":"response_delta","content":"已完成的夹具回答","run_id":"run-new"}\n\nevent: run.completed\ndata: {"run_id":"run-new","final_message":{"content":"已完成的夹具回答"}}\n\n' });
     } else if (request.method() === "DELETE") {
       sessions = sessions.filter((item) => !p.endsWith(item.id));
@@ -91,7 +91,7 @@ try {
     await capture(f, "settings-tools-" + suffix);
     await f.page.keyboard.press("Escape");
     await f.page.getByRole("button", { name: "执行记录", exact: true }).click();
-    await f.page.getByText("参数", { exact: true }).click();
+    await f.page.getByText("参数", { exact: true }).first().click();
     await capture(f, "execution-" + suffix);
     await f.page.keyboard.press("Escape");
     await f.nav("搜索对话");
@@ -104,9 +104,9 @@ try {
     await capture(f, "new-" + suffix);
     await f.context.close();
     f = await fixture(viewport, theme, "approval");
-    await f.page.getByRole("button", { name: "查看并决定" }).waitFor();
+    await f.page.getByRole("group", { name: "工具审批" }).waitFor();
     await capture(f, "approval-" + suffix);
-    await f.page.getByRole("button", { name: "查看并决定" }).click();
+    await f.page.locator("article.message--assistant").last().getByText("参数", { exact: true }).click();
     await capture(f, "approval-detail-" + suffix);
     await f.context.close();
     f = await fixture(viewport, theme, "model-error");
@@ -116,7 +116,7 @@ try {
     await capture(f, "model-error-" + suffix);
     await f.context.close();
     f = await fixture(viewport, theme, "generating");
-    await f.page.getByText(/任务仍在运行/).waitFor();
+    await f.page.getByText("结果待确认", { exact: true }).waitFor();
     await capture(f, "generating-" + suffix);
     await f.context.close();
   }
