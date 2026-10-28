@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -31,6 +32,9 @@ from dotclaw.session.session import Session
 from dotclaw.channel.web.app import create_app
 from dotclaw.channel.web.schemas import SSEEvent
 from dotclaw.channel.web.sse import SSEOutputAdapter, encode_sse_event
+from dotclaw.runtime.adapters.llm_proxy_adapter import LLMProxyAdapter
+from tests.llm.test_empty_model_response import _proxy
+from tests.runtime_v2.test_runtime_engine import _engine, _request
 
 
 @dataclass(frozen=True)
@@ -508,3 +512,48 @@ async def test_different_sessions_are_not_serialized_by_web_layer() -> None:
         await asyncio.gather(first, second)
 
     assert interaction.max_active_submissions == 2
+
+
+@pytest.mark.asyncio
+async def test_empty_response_crosses_proxy_engine_and_sse_without_success(tmp_path, caplog) -> None:
+    """真实代理/适配器/引擎的空输出失败沿用现有 SSE 契约。"""
+    engine = _engine(tmp_path)
+    proxy, _, _ = _proxy([])
+    engine._llm_port = LLMProxyAdapter(proxy)
+    result = await engine.execute(_request("session-empty"))
+    host, _ = _host(result, "session-empty")
+    logger = logging.getLogger("dotclaw.channel.web")
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger=logger.name):
+            async with _client(host) as client:
+                response = await client.post("/api/v1/sessions/session-empty/messages", json={"content": "SECRET_USER_PROMPT"})
+        events = _parse_sse(response.text)
+        assert [event.event for event in events] == ["run.failed"]
+        assert events[0].data["error"] == {"code": "empty_model_response", "message": "模型未返回有效回答，请查看执行记录或稍后重新发送。", "retryable": False}
+        assert events[0].data["run_id"] == result.run_id
+        assert "web.message.received" in caplog.text
+        assert "web.run.result" in caplog.text and "empty_model_response" in caplog.text
+        assert "SECRET_USER_PROMPT" not in caplog.text
+    finally:
+        logger.removeHandler(caplog.handler)
+
+
+@pytest.mark.asyncio
+async def test_web_exception_logs_locations_and_chain_without_body(caplog) -> None:
+    """异常日志有调用位置和类型，但不输出原始第三方错误文本。"""
+    result = RunResult("r", AgentRunState(mode=Ended(RunOutcome.FAILED)))
+    host, interaction = _host(result, "s")
+    interaction.submit_error = RuntimeError("Authorization=SECRET_KEY raw_response=PRIVATE")
+    logger = logging.getLogger("dotclaw.channel.web")
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.ERROR, logger=logger.name):
+            async with _client(host) as client:
+                response = await client.post("/api/v1/sessions/s/messages", json={"content": "PRIVATE_PROMPT"})
+        assert _parse_sse(response.text)[0].event == "stream.error"
+        assert "web.run.exception" in caplog.text and "RuntimeError" in caplog.text
+        assert "app.py:" in caplog.text
+        assert "SECRET_KEY" not in caplog.text and "PRIVATE" not in caplog.text
+    finally:
+        logger.removeHandler(caplog.handler)

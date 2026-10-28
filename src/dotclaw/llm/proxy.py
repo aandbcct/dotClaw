@@ -7,11 +7,14 @@ Proxy 只管重试编排 + 流式保护 + Journal 追踪。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
-from .base import ChatChunk, LLMClient, Message, ToolDefinition
+from .base import ChatChunk, EmptyModelResponseError, LLMClient, Message, TextDeltaKind, ToolDefinition
+from ..common.logging_setup import exception_diagnostic
 
 if TYPE_CHECKING:
     from dotclaw.config.settings import RouterConfig
@@ -22,8 +25,7 @@ logger = logging.getLogger("dotclaw.llm")
 
 def _format_exception(error: BaseException) -> str:
     """格式化异常；无文本异常必须保留类型，避免产生空白日志。"""
-    detail = str(error).strip()
-    return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+    return type(error).__name__
 
 
 # ============================================================
@@ -153,12 +155,20 @@ class LLMProxy:
                 try:
                     provider_attempted = False
                     for attempt in range(max_retries):
+                        attempt_start: float | None = None
+                        attempt_end: float | None = None
+                        response_chars = 0
+                        tool_call_count = 0
+                        finish_reason: str | None = None
+                        call_error: BaseException | None = None
                         try:
                             # 限流令牌获取（timeout=100ms）
                             await self._router.try_acquire(provider, timeout=0.1)
 
                             # 调用 client.chat()
                             provider_attempted = True
+                            attempt_start = time.perf_counter()
+                            logger.info("llm.call.started %s", json.dumps({"provider": provider, "model": model_name, "attempt": attempt + 1}))
                             client_options: dict[str, float | int] = {}
                             if timeout_seconds is not None:
                                 client_options["timeout_seconds"] = timeout_seconds
@@ -170,7 +180,11 @@ class LLMProxy:
                             visible_output_started = False
 
                             # 尝取第一个 chunk（区分 CallSetupError vs 流式异常）
-                            first_chunk = await anext(chat_iter)
+                            has_response_text = False
+                            has_tool_calls = False
+                            first_chunk = await anext(chat_iter, None)
+                            if first_chunk is None:
+                                raise EmptyModelResponseError()
 
                             # 第一个 chunk 成功
                             if first_chunk_ts is None:
@@ -183,15 +197,28 @@ class LLMProxy:
                             # 即视为“已输出”，此后流异常不得重试或降级（设计 §7）。
                             if first_chunk.text_deltas:
                                 visible_output_started = True
+                            has_response_text = any(delta.kind is TextDeltaKind.RESPONSE and delta.content.strip() for delta in first_chunk.text_deltas)
+                            has_tool_calls = bool(first_chunk.tool_calls)
+                            response_chars += sum(len(delta.content) for delta in first_chunk.text_deltas if delta.kind is TextDeltaKind.RESPONSE)
+                            tool_call_count += len(first_chunk.tool_calls)
+                            finish_reason = first_chunk.finish_reason if first_chunk.finish_reason is not None else finish_reason
+                            if first_chunk.usage is not None:
+                                input_tokens = first_chunk.usage.input_tokens
+                                output_tokens = first_chunk.usage.output_tokens
                             yield first_chunk
                             try:
                                 async for chunk in chat_iter:
+                                    has_response_text |= any(delta.kind is TextDeltaKind.RESPONSE and delta.content.strip() for delta in chunk.text_deltas)
+                                    has_tool_calls |= bool(chunk.tool_calls)
+                                    response_chars += sum(len(delta.content) for delta in chunk.text_deltas if delta.kind is TextDeltaKind.RESPONSE)
+                                    tool_call_count += len(chunk.tool_calls)
+                                    finish_reason = chunk.finish_reason if chunk.finish_reason is not None else finish_reason
                                     if chunk.text_deltas:
                                         visible_output_started = True
                                         output_token_count += sum(
                                             len(delta.content) for delta in chunk.text_deltas
                                         )
-                                    if chunk.finish_reason is not None and chunk.usage is not None:
+                                    if chunk.usage is not None:
                                         input_tokens = chunk.usage.input_tokens
                                         output_tokens = chunk.usage.output_tokens
                                     yield chunk
@@ -209,26 +236,36 @@ class LLMProxy:
                                     f"流开始但未产生可见输出即中断 ({model_name}): {e}"
                                 ) from e
 
-                            # 成功 → 上报
+                            if not has_response_text and not has_tool_calls:
+                                raise EmptyModelResponseError()
+                            # 有效输出完成后才能记成功。
                             self._router.report_success(model_name)
                             return
 
-                        except asyncio.CancelledError:
+                        except asyncio.CancelledError as error:
+                            call_error = error
+                            attempt_end = time.perf_counter()
                             # 取消不计作 Provider 失败，也不进入退避或候选降级。
                             cancel_call = getattr(self._router, "cancel_call", None)
                             if cancel_call is not None:
                                 cancel_call(model_name, breaker_state)
                             raise
-                        except NonRetryableStreamError:
+                        except EmptyModelResponseError as error:
+                            call_error = error
+                            attempt_end = time.perf_counter()
+                            # 确定无效输出只计一次失败，不重试也不进入候选降级。
+                            self._router.report_failure(model_name)
+                            raise
+                        except NonRetryableStreamError as error:
+                            call_error = error
+                            attempt_end = time.perf_counter()
                             # 已有可见输出时禁止重试或降级，但传输失败仍计一次逻辑失败。
                             self._router.report_failure(model_name)
                             raise
 
-                        except StopAsyncIteration:
-                            self._router.report_success(model_name)
-                            return  # 正常空响应
-
                         except RateLimitTimeout as e:
+                            call_error = e
+                            attempt_end = time.perf_counter()
                             # 限流超时 → 降级到下一个候选
                             cancel_call = getattr(self._router, "cancel_call", None)
                             if cancel_call is not None:
@@ -240,11 +277,15 @@ class LLMProxy:
                             raise CallSetupError(str(e)) from e
 
                         except CallSetupError as e:
+                            call_error = e
+                            attempt_end = time.perf_counter()
                             # 构造错误 → 降级
                             last_error = e
                             raise  # 抛给外层 except 处理
 
                         except Exception as e:
+                            call_error = e
+                            attempt_end = time.perf_counter()
                             # 未知异常 → 指数退避重试
                             last_error = e
                             if attempt < max_retries - 1:
@@ -269,6 +310,30 @@ class LLMProxy:
                                     f"模型 {model_name} 调用失败（{max_retries} 次重试后）: "
                                     f"{_format_exception(e)}"
                                 ) from e
+                        finally:
+                            if attempt_start is not None:
+                                fields: dict[str, str | int | float | None] = {
+                                    "provider": provider, "model": model_name, "attempt": attempt + 1,
+                                    "elapsed_ms": round(((attempt_end if attempt_end is not None else time.perf_counter()) - attempt_start) * 1000, 2),
+                                    "finish_reason": finish_reason, "response_chars": response_chars,
+                                    "tool_call_count": tool_call_count,
+                                    "error_type": type(call_error).__name__ if call_error is not None else None,
+                                    "http_status": None, "request_id": None,
+                                }
+                                cause = call_error
+                                for _ in range(4):
+                                    if cause is None:
+                                        break
+                                    status_code = getattr(cause, "status_code", None)
+                                    request_id = getattr(cause, "request_id", None)
+                                    if isinstance(status_code, int) and 100 <= status_code <= 599:
+                                        fields["http_status"] = status_code
+                                    if isinstance(request_id, str) and re.fullmatch(r"[\w-]{1,128}", request_id):
+                                        fields["request_id"] = request_id
+                                    cause = cause.__cause__
+                                if call_error is not None:
+                                    fields["diagnostic"] = exception_diagnostic(call_error)
+                                logger.log(logging.INFO if call_error is None else logging.WARNING, "%s %s", "llm.call.finished" if call_error is None else "llm.call.failed", json.dumps(fields, ensure_ascii=False))
 
                 except CallSetupError:
                     # 当前模型最终失败 → 尝试下一个候选

@@ -14,12 +14,14 @@ const API_ROOT = "/api/v1";
 export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
+  readonly retryable: boolean;
 
-  constructor(message: string, code: string, status: number) {
+  constructor(message: string, code: string, status: number, retryable = false) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
+    this.retryable = retryable;
   }
 }
 
@@ -41,9 +43,10 @@ async function responseError(response: Response): Promise<ApiError> {
       payload.error.message,
       payload.error.code,
       response.status,
+      payload.error.retryable === true,
     );
   } catch {
-    return new ApiError("请求失败，请稍后重试", "network_error", response.status);
+    return new ApiError(`服务器返回 HTTP ${response.status}，请查看运行状态`, "http_error", response.status);
   }
 }
 
@@ -201,6 +204,9 @@ async function streamRequest(
   const response = await fetch(url, { ...init, signal });
   if (!response.ok) {
     throw await responseError(response);
+  }
+  if (response.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "text/event-stream") {
+    throw new ApiError("服务器未返回正确的消息流，结果待确认", "invalid_stream_type", response.status);
   }
   if (response.body === null) {
     throw new ApiError("服务器未返回消息流", "missing_stream", response.status);

@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { cancelSession, getRunActivity, getSession, listSessions, submitMessage } from "./api";
+import { ApiError, cancelSession, getRunActivity, getSession, listSessions, submitMessage } from "./api";
 import { readPreference, writePreference } from "./preferences";
 import type { DisplayMessage, RunActivity, RunPhase, SessionSummary, StreamEvent } from "./types";
 
 export interface ConversationView {
   messages: DisplayMessage[]; phase: RunPhase; activity: RunActivity | null;
   runId: string | null; error: string; loading: boolean; detached: boolean;
+  errorCode: string; retryable: boolean; lastSubmittedText: string; statusError: string;
 }
-const emptyView = (): ConversationView => ({ messages: [], phase: "idle", activity: null, runId: null, error: "", loading: false, detached: false });
+const emptyView = (): ConversationView => ({ messages: [], phase: "idle", activity: null, runId: null, error: "", loading: false, detached: false, errorCode: "", retryable: false, lastSubmittedText: "", statusError: "" });
+const terminalEvents = new Set(["run.completed", "run.failed", "run.cancelled", "run.suspended", "stream.error"]);
 const activePhase = (phase: RunPhase) => ["running", "stopping", "suspended", "recoverable"].includes(phase);
 export function phaseLabel(phase: RunPhase): string {
   return ({ idle: "", running: "正在生成", stopping: "正在停止", suspended: "等待处理", recoverable: "可恢复", completed: "已完成", cancelled: "已停止", failed: "运行异常" })[phase];
@@ -55,15 +57,34 @@ export function useSessionWorkspace() {
   }
   async function readActivity(id: string, runId?: string): Promise<void> {
     const revision = revisions.current.get(id) || 0;
-    const activity = await getRunActivity(id, runId);
-    if (!activity || !alive.current || revision !== (revisions.current.get(id) || 0)) return;
+    const knownRunId = runId || viewsRef.current[id]?.runId || undefined;
+    let activity: RunActivity | null;
+    try { activity = await getRunActivity(id, knownRunId); }
+    catch (error) {
+      if (revision === (revisions.current.get(id) || 0)) patch(id, { statusError: "状态查询失败：" + errorText(error) });
+      return;
+    }
+    if (!alive.current || revision !== (revisions.current.get(id) || 0)) return;
+    const expectedRunId = knownRunId || viewsRef.current[id]?.runId;
+    if (activity && expectedRunId && activity.run_id !== expectedRunId) {
+      patch(id, { statusError: "状态查询失败：返回的运行与本次请求不一致" }); return;
+    }
+    patch(id, { statusError: "" });
+    // 无活动运行不等于本次请求未执行，尤其在接收运行 ID 之前断线时。
+    if (!activity) return;
+    if (!knownRunId && ["completed", "failed", "cancelled", "abandoned"].includes(activity.status)) return;
     if (terminal.current.has(activity.run_id) && activePhase(phaseFor(activity))) return;
     const current = viewsRef.current[id];
     if (streams.current.has(id) && activity.status !== "running") return;
-    patch(id, { activity, runId: activity.run_id, phase: current?.phase === "stopping" && activity.status === "running" ? "stopping" : phaseFor(activity) });
+    const resolvedError = activity.error ? { error: activity.error.message, errorCode: activity.error.code, retryable: activity.error.retryable === true }
+      : activity.status === "failed" ? { error: current?.error && !current.detached ? current.error : "运行失败，请查看执行记录", errorCode: current?.errorCode && !current.detached ? current.errorCode : "run_failed", retryable: current?.retryable || false }
+      : current?.detached && activity.status !== "running" ? { error: "", errorCode: "", retryable: false } : {};
+    patch(id, { activity, runId: activity.run_id, phase: current?.phase === "stopping" && activity.status === "running" ? "stopping" : phaseFor(activity), detached: activity.status === "running" && !streams.current.has(id),
+      ...resolvedError,
+    });
     if (activity.status === "completed") {
       terminal.current.add(activity.run_id);
-      await refresh(id);
+      try { await refresh(id); } catch (error) { patch(id, { statusError: "状态查询失败：完成记录读取失败，" + errorText(error) }); }
     }
   }
   async function open(session: SessionSummary): Promise<void> {
@@ -90,9 +111,9 @@ export function useSessionWorkspace() {
       .finally(() => { if (alive.current) setLoading(false); });
     const timer = window.setInterval(() => {
       for (const [id, view] of Object.entries(viewsRef.current)) {
-        if (!activePhase(view.phase) || polling.current.has(id)) continue;
+        if ((!activePhase(view.phase) && !view.detached) || polling.current.has(id)) continue;
         polling.current.add(id);
-        void readActivity(id, view.runId || undefined).catch(() => undefined).finally(() => polling.current.delete(id));
+        void readActivity(id, view.runId || undefined).finally(() => polling.current.delete(id));
       }
     }, 800);
     return () => {
@@ -108,6 +129,7 @@ export function useSessionWorkspace() {
     writePreference("dotclaw.last-session.v1", null);
   }
   function receive(id: string, messageId: string, event: StreamEvent): void {
+    if (event.event !== "message.delta" && !terminalEvents.has(event.event)) return;
     const runId = field(event.data, "run_id");
     if (runId) patch(id, { runId });
     if (event.event === "message.delta") {
@@ -117,15 +139,19 @@ export function useSessionWorkspace() {
     }
     const completed = event.event === "run.completed";
     const phase: RunPhase = completed ? "completed" : event.event === "run.cancelled" ? "cancelled" : event.event === "run.suspended" ? "suspended" : "failed";
-    if (runId && phase !== "suspended") terminal.current.add(runId);
     const final = event.data.final_message;
     const finalText = final && typeof final === "object" && "content" in final && typeof final.content === "string" ? final.content : "";
     const rawError = event.data.error;
     const message = rawError && typeof rawError === "object" && "message" in rawError ? String(rawError.message) : "";
+    const code = rawError && typeof rawError === "object" && "code" in rawError ? String(rawError.code) : "";
+    const retryable = Boolean(rawError && typeof rawError === "object" && "retryable" in rawError && rawError.retryable === true);
+    const unknown = event.event === "stream.error";
+    if (runId && phase !== "suspended" && !unknown && !retryable) terminal.current.add(runId);
     patch(id, (view) => ({
-      ...view, phase, detached: false,
-      activity: view.activity ? { ...view.activity, status: phase === "suspended" ? view.activity.status : phase } : null,
-      error: phase === "failed" ? message || "运行失败，请查看执行记录" : "",
+      ...view, phase: unknown ? "running" : phase, detached: unknown,
+      activity: view.activity ? { ...view.activity, status: phase === "suspended" || unknown ? view.activity.status : phase } : null,
+      error: unknown ? (message || "消息连接异常") + "；结果待确认，请查询运行状态，不要重复发送。" : phase === "failed" ? message || "运行失败，请查看执行记录" : "",
+      errorCode: code, retryable, statusError: "",
       messages: view.messages.map((item) => item.id === messageId ? { ...item, pending: false, content: item.content || finalText, run_ids: runId ? [runId] : item.run_ids } : item),
     }));
   }
@@ -133,29 +159,39 @@ export function useSessionWorkspace() {
     if (streams.current.has(id)) return;
     const controller = new AbortController();
     streams.current.set(id, controller);
-    patch(id, { phase: "running", error: "", detached: false });
+    patch(id, { phase: "running", error: "", errorCode: "", retryable: false, statusError: "", detached: false });
     let receivedTerminal = false;
     let completed = false;
+    let queryStatus = false;
     try {
       await operation((event) => {
-        receivedTerminal ||= event.event !== "message.delta";
+        receivedTerminal ||= terminalEvents.has(event.event);
         completed ||= event.event === "run.completed";
         receive(id, messageId, event);
       }, controller.signal);
-      if (!receivedTerminal) patch(id, { phase: "running", detached: true, error: "消息连接已结束，结果尚未确认。请查看运行状态，不要重复发送。" });
-      if (completed) await refresh(id);
+      if (!receivedTerminal) patch(id, { phase: "running", detached: true, errorCode: "result_unknown", error: "消息连接已结束，结果待确认。请查询运行状态，不要重复发送。" });
+      queryStatus = !receivedTerminal || completed || viewsRef.current[id]?.detached || viewsRef.current[id]?.retryable || viewsRef.current[id]?.phase === "suspended";
+      if (completed) {
+        try { await refresh(id); }
+        catch (error) { patch(id, { statusError: "状态查询失败：完成记录读取失败，" + errorText(error) }); }
+      }
     } catch (error) {
       if (!controller.signal.aborted) {
-        patch(id, { error: errorText(error) + "；结果尚未确认，请查看运行状态，不要自动重发。", detached: true, phase: "running" });
-        try {
-          const activity = await getRunActivity(id);
-          if (!activity) patch(id, { phase: "failed", detached: false });
-        } catch { /* 保留未知运行状态，避免误判后重复发送。 */ }
+        if (receivedTerminal && !viewsRef.current[id]?.detached) {
+          // 已确认业务终态不能被随后连接或查询错误改写。
+          patch(id, { statusError: "消息连接结束异常，已保留确认的运行结果" });
+        } else if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
+          patch(id, { error: error.message, errorCode: error.code, retryable: error.retryable, detached: false, phase: "failed" });
+          queryStatus = error.status === 409 || error.retryable;
+        } else {
+          patch(id, { error: (error instanceof ApiError ? error.message : "消息连接中断") + "；结果待确认，请查询运行状态，不要重复发送。", errorCode: error instanceof ApiError ? error.code : "result_unknown", retryable: error instanceof ApiError ? error.retryable : false, detached: true, phase: "running" });
+          queryStatus = true;
+        }
       }
     } finally {
       if (streams.current.get(id) === controller) streams.current.delete(id);
       patch(id, (view) => ({ ...view, messages: view.messages.map((message) => message.id === messageId ? { ...message, pending: false } : message) }));
-      try { await readActivity(id, viewsRef.current[id]?.runId || undefined); } catch { /* 现有正文和终态不因记录读取失败而丢失。 */ }
+      if (queryStatus) await readActivity(id, viewsRef.current[id]?.runId || undefined);
     }
   }
   async function send(id: string, content: string): Promise<void> {
@@ -163,7 +199,7 @@ export function useSessionWorkspace() {
     revisions.current.set(id, (revisions.current.get(id) || 0) + 1);
     const createdAt = new Date().toISOString();
     const messageId = `local-assistant-${crypto.randomUUID()}`;
-    patch(id, (view) => ({ ...view, activity: null, runId: null, messages: [
+    patch(id, (view) => ({ ...view, activity: null, runId: null, lastSubmittedText: content, messages: [
       ...view.messages,
       { id: `local-user-${crypto.randomUUID()}`, role: "user", content, created_at: createdAt },
       { id: messageId, role: "assistant", content: "", reasoning: "", created_at: createdAt, pending: true },
@@ -178,8 +214,12 @@ export function useSessionWorkspace() {
     await runStream(id, messageId, operation);
   }
   async function stop(id: string): Promise<void> {
-    patch(id, { phase: "stopping", error: "" });
-    try { await cancelSession(id); } catch (error) { patch(id, { phase: "running", error: errorText(error) }); }
+    const previousPhase = viewsRef.current[id]?.phase || "running";
+    patch(id, { phase: "stopping" });
+    try { await cancelSession(id); } catch (error) { patch(id, { phase: previousPhase, statusError: "停止请求失败：" + errorText(error) }); }
+  }
+  async function checkRunStatus(id: string): Promise<void> {
+    await readActivity(id, viewsRef.current[id]?.runId || undefined);
   }
   function remove(id: string): void {
     setSessions((current) => current.filter((session) => session.id !== id));
@@ -189,5 +229,5 @@ export function useSessionWorkspace() {
   return { sessions, selectedId, selected: sessions.find((session) => session.id === selectedId) || null,
     views, view: selectedId ? views[selectedId] || emptyView() : emptyView(), loading, loadError,
     isStreaming: (id: string | null) => Boolean(id && streams.current.has(id)),
-    open, startNew, upsert, refresh, send, control, stop, patch, remove };
+    open, startNew, upsert, refresh, send, control, stop, checkRunStatus, patch, remove };
 }

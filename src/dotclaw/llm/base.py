@@ -8,6 +8,13 @@ from enum import StrEnum
 from typing import AsyncIterator, Literal
 
 
+class EmptyModelResponseError(RuntimeError):
+    """模型没有有效正文或工具调用，不携带请求及原始响应。"""
+
+    def __init__(self) -> None:
+        super().__init__("模型未返回有效回答，请查看执行记录或稍后重新发送。")
+
+
 class LLMUsage(StrEnum):
     """模型路由用途。"""
     CHAT = "chat"

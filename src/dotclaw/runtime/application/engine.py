@@ -92,7 +92,7 @@ from .dto import (
     ToolResultStatus,
 )
 from .history_compaction import ConversationBatch, HistoryCompactorUnavailable, compact_in_batches, select_oldest_conversations
-from .ports import CheckpointRepository, ContextPort, DelegationPort, HistoryCompactorPort, LLMPort, LLMOutputPort, LLMUnavailableError, RunPolicyPort, RunRepository, TokenCounterPort, ToolPort
+from .ports import CheckpointRepository, ContextPort, DelegationPort, HistoryCompactorPort, InvalidLLMResponseError, LLMPort, LLMOutputPort, LLMUnavailableError, RunPolicyPort, RunRepository, TokenCounterPort, ToolPort
 
 
 class ContextBudgetRejected(RuntimeError):
@@ -906,6 +906,10 @@ class RuntimeEngine:
         await self._checkpoint_repository.save(replace(checkpoint, event_sequence=event_number))
         try:
             response = await self._llm_port.complete(context, execution.view(), output_port)
+        except InvalidLLMResponseError:
+            if execution.cancellation.cancelled:
+                return run, sequence, event_number, (), await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
+            return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, "模型未返回有效回答，请查看执行记录或稍后重新发送。", RunErrorCode.EMPTY_MODEL_RESPONSE)
         except LLMUnavailableError as error:
             return run, sequence, event_number, (), await self._suspend_on_unavailable(execution, run, tuple(messages), event_number, str(error))
         except Exception as error:
@@ -920,6 +924,8 @@ class RuntimeEngine:
                 event_number,
                 execution.cancellation.reason,
             )
+        if not response.content.strip() and not response.tool_calls:
+            return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, "模型未返回有效回答，请查看执行记录或稍后重新发送。", RunErrorCode.EMPTY_MODEL_RESPONSE)
         sequence += 1
         run = _with_llm_statistics(run, response)
         final: bool = not response.tool_calls

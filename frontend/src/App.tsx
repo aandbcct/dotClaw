@@ -35,7 +35,7 @@ export function App() {
   const [actionError, setActionError] = useState("");
   const [creating, setCreating] = useState(false);
   const [newError, setNewError] = useState("");
-  const submitting = useRef(false);
+  const submitting = useRef(new Set<string>());
   const composing = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -84,8 +84,9 @@ export function App() {
   async function submit(event?: FormEvent): Promise<void> {
     event?.preventDefault();
     const content = draft.trim();
-    if (!content || busy || submitting.current) return;
-    submitting.current = true;
+    const submissionKey = selectedId || "new";
+    if (!content || busy || submitting.current.has(submissionKey)) return;
+    submitting.current.add(submissionKey);
     let id = selectedId;
     setNewError("");
     try {
@@ -101,13 +102,21 @@ export function App() {
       }
       setDraft("", id);
       scrollToBottom();
-      void workspace.send(id, content);
-    } catch (error) { setNewError(errorText(error)); }
-    finally { submitting.current = false; setCreating(false); }
+      await workspace.send(id, content);
+    } catch (error) {
+      if (id) workspace.patch(id, { error: errorText(error) });
+      else setNewError(errorText(error));
+    }
+    finally { submitting.current.delete(submissionKey); if (submissionKey === "new") setCreating(false); }
   }
   function keyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
     if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); }
+  }
+  function restoreQuestion(): void {
+    if (!view.lastSubmittedText) return;
+    setDraft(draft.trim() ? draft + "\n\n" + view.lastSubmittedText : view.lastSubmittedText);
+    inputRef.current?.focus();
   }
   async function requestAdvanced(): Promise<void> {
     try { await loadOptions(); setAdvanced(true); } catch (error) { setNewError(errorText(error)); }
@@ -202,7 +211,7 @@ export function App() {
           {modelError && !modelOpen && <span className="inline-error" role="alert">{modelError}</span>}
         </div>
         <span className="header-title" title={selected?.title}>{selected?.title || "新对话"}</span>
-        {["running", "stopping", "suspended", "recoverable", "failed"].includes(view.phase) && <span className={`run-state run-state--${view.phase}`}>{phaseLabel(view.phase)}</span>}
+        {["running", "stopping", "suspended", "recoverable", "failed"].includes(view.phase) && <span className={`run-state run-state--${view.phase}`}>{view.detached && !view.activity ? "结果待确认" : phaseLabel(view.phase)}</span>}
         <button className="icon-button theme-button" type="button" aria-label={theme === "light" ? "切换深色外观" : "切换浅色外观"} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? "☾" : "☀"}</button>
         {selected && <button className="icon-button" type="button" aria-label="当前会话更多操作" onClick={() => { setMenu(selected); setActionError(""); }}>⋯</button>}
       </header>
@@ -213,7 +222,7 @@ export function App() {
             <span className="sr-only">{message.role === "user" ? "你" : "dotClaw"}</span>
             <div className="message-body" title={message.created_at}>
               {message.reasoning && <details className="reasoning"><summary>思考过程</summary><p>{message.reasoning}</p></details>}
-              <div className="message-content">{message.role === "assistant" ? <MessageContent content={message.content} /> : message.content}</div>
+              <div className="message-content">{message.role === "assistant" ? !message.pending && !message.content.trim() ? <p className="empty-answer">{message.id.startsWith("local-") ? "本次未获得有效回答" : "该次回答为空"}</p> : <MessageContent content={message.content} /> : message.content}</div>
               {message.pending && <span className="stream-cursor" aria-label="正在生成" />}
             </div>
             {message.role === "assistant" && !message.pending && <div className="message-actions">
@@ -223,7 +232,7 @@ export function App() {
             </div>}
             {message.role === "assistant" && !message.pending && Boolean(message.run_ids?.length) && selectedId && <SearchSources sessionId={selectedId} runIds={message.run_ids!} />}
           </article>)}
-          {view.detached && <p className="status-note">任务仍在运行，完成后显示结果。当前连接没有可恢复的逐字增量。</p>}
+          {view.detached && <p className="status-note">{view.activity?.status === "running" ? "任务仍在运行，完成后显示结果。" : "结果待确认，请查询运行状态。"}当前连接没有可恢复的逐字增量。</p>}
           {view.activity && <div className={`run-summary ${view.activity.status === "waiting_approval" ? "run-summary--approval" : ""}`}>
             <span>{view.activity.status === "waiting_approval" ? "需要你的批准" : `执行记录 · ${phaseLabel(view.phase)} · ${view.activity.tools.length} 个工具`}</span>
             <button type="button" onClick={() => selectedId && void showRun(selectedId, [view.activity!.run_id])}>{view.activity.status === "waiting_approval" ? "查看并决定" : "查看详情"}</button>
@@ -231,11 +240,20 @@ export function App() {
         </div>}
       </section>
       <div className="composer-region">
-        {(view.error || newError || workspace.loadError) && <p className="error-strip" role="alert">{view.error || newError || workspace.loadError}</p>}
+        {(view.error || newError || workspace.loadError || view.statusError) && <div className={`error-strip ${view.detached ? "error-strip--unknown" : ""}`} role="alert">
+          {(view.error || newError || workspace.loadError) && <p>{view.error || newError || workspace.loadError}</p>}
+          {view.statusError && <p>{view.statusError}</p>}
+          {view.runId && <div className="error-run-id"><span>运行 ID：{view.runId}</span><CopyButton label="复制错误运行 ID" getText={() => view.runId || ""} /></div>}
+          <div className="error-actions">
+            {view.runId && selectedId && <button type="button" onClick={() => void showRun(selectedId, [view.runId!])}>查看执行记录</button>}
+            {view.lastSubmittedText && <button type="button" onClick={restoreQuestion}>恢复原问题到输入框</button>}
+            {selectedId && <button type="button" onClick={() => void workspace.checkRunStatus(selectedId)}>查询运行状态</button>}
+          </div>
+        </div>}
         <form className="composer" onSubmit={(event) => void submit(event)}>
           <label className="sr-only" htmlFor="message-input">输入消息</label>
           <textarea ref={inputRef} id="message-input" value={draft} placeholder="输入消息…" rows={2} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} />
-          {["running", "stopping"].includes(view.phase) ? <button className="composer-action" type="button" aria-label="停止运行" disabled={view.phase === "stopping"} onClick={() => selectedId && void workspace.stop(selectedId)}>■</button> : <button className="composer-action" aria-label="发送消息" type="submit" disabled={!draft.trim() || busy || creating}>↑</button>}
+          {["running", "stopping"].includes(view.phase) && (!view.detached || view.activity?.status === "running") ? <button className="composer-action" type="button" aria-label="停止运行" disabled={view.phase === "stopping"} onClick={() => selectedId && void workspace.stop(selectedId)}>■</button> : <button className="composer-action" aria-label="发送消息" type="submit" disabled={!draft.trim() || busy || (creating && !selectedId)}>↑</button>}
         </form>
         <div className="composer-hint"><span>Enter 发送 · Shift + Enter 换行</span>{!selected && <button type="button" onClick={() => void requestAdvanced()}>智能体与模型</button>}{storageFailed && <span role="alert">草稿保存失败</span>}</div>
       </div>

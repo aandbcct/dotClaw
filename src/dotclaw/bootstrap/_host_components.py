@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
+from ..common.logging_setup import exception_diagnostic
 
 if TYPE_CHECKING:
     from dotclaw.channel.base import Channel
@@ -43,7 +44,7 @@ def _init_sync(
     except Exception as e:
         if on_fail == CRITICAL:
             raise
-        logger.warning("%s 初始化失败（已降级）: %s", name, e)
+        logger.warning("%s 初始化失败（已降级）: %s", name, exception_diagnostic(e))
         return None
 
 
@@ -58,7 +59,7 @@ async def _init_async(
     except Exception as e:
         if on_fail == CRITICAL:
             raise
-        logger.warning("%s 初始化失败（已降级）: %s", name, e)
+        logger.warning("%s 初始化失败（已降级）: %s", name, exception_diagnostic(e))
         return None
 
 
@@ -141,7 +142,7 @@ def _build_http_client() -> "HttpClient | None":
     try:
         return HttpxHttpClient()
     except Exception as e:  # 极少发生（构造期仅创建 AsyncClient）
-        logger.warning("受控 HTTP 客户端初始化失败（已降级）: %s", e)
+        logger.warning("受控 HTTP 客户端初始化失败（已降级）: %s", exception_diagnostic(e))
         return None
 
 
@@ -322,7 +323,7 @@ def _build_mcp(config: Config, tool_executor):
             tool_names = await provider.start()
             logger.info("已加载 %d 个 MCP 工具", len(tool_names))
         except Exception as e:
-            logger.warning("MCP 首次发现失败（已降级）: %s", e)
+            logger.warning("MCP 首次发现失败（已降级）: %s", exception_diagnostic(e))
             return None
         return provider
 

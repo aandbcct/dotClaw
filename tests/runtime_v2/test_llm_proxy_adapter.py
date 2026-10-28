@@ -201,7 +201,7 @@ class ParameterRecordingClient:
     ) -> AsyncIterator[ChatChunk]:
         self.timeout_seconds = timeout_seconds
         self.retry_count = retry_count
-        yield ChatChunk(finish_reason="stop", usage=TokenUsage(1, 1))
+        yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "正常回答"),), finish_reason="stop", usage=TokenUsage(1, 1))
 
 
 class ParameterRecordingRouter:

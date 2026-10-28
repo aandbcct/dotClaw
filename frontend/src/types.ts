@@ -46,6 +46,7 @@ export interface ErrorEnvelope {
   error: {
     code: string;
     message: string;
+    retryable?: boolean;
   };
 }
 
@@ -84,6 +85,7 @@ export interface RunActivity {
   approval_id: string | null;
   child_run_id: string | null;
   tools: ToolExecution[];
+  error?: ErrorEnvelope["error"] | null;
 }
 
 export interface ModelSetting {

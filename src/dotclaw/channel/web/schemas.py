@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ...runtime.domain.facts import JSONMap, MessageRole
+from ...runtime.domain.facts import JSONMap, MessageRole, RunError
 
 
 class SSEEventType(StrEnum):
@@ -310,6 +310,7 @@ class RunActivityResponse(BaseModel):
     approval_id: str | None = None
     child_run_id: str | None = None
     tools: list[ToolExecutionResponse]
+    error: RunError | None = None
 
 
 @dataclass(frozen=True)

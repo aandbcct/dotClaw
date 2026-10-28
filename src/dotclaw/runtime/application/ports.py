@@ -25,6 +25,10 @@ class LLMUnavailableError(RuntimeError):
     """业务模型代理重试耗尽后的可恢复外部错误。"""
 
 
+class InvalidLLMResponseError(RuntimeError):
+    """模型正常结束却既无有效正文也无工具调用，不支持原检查点恢复。"""
+
+
 class LLMOutputPort(Protocol):
     """接收一次 LLM 调用产生的有序增量输出事件的应用协议。
 

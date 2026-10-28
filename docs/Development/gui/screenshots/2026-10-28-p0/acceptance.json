@@ -1,0 +1,29 @@
+{
+  "results": [
+    "empty-1440-light",
+    "details-1440-light",
+    "network-1440-light",
+    "rejected-1440-light",
+    "empty-1440-dark",
+    "details-1440-dark",
+    "network-1440-dark",
+    "rejected-1440-dark",
+    "empty-390-light",
+    "details-390-light",
+    "network-390-light",
+    "rejected-390-light",
+    "http500",
+    "protocol",
+    "unknown-event",
+    "query-failure",
+    "historical-empty",
+    "recoverable",
+    "approval",
+    "partial",
+    "concurrent"
+  ],
+  "passed": true,
+  "realProviderCalls": 0,
+  "realSessionMutations": 0,
+  "note": "浏览器隔离 HTTP/SSE 夹具；真实上游空输出原因未验证"
+}

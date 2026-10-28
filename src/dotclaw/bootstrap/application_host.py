@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.logging_setup import configure_logging
+
 from ._host_components import (
     CRITICAL,
     _build_http_client,
@@ -96,6 +98,7 @@ class ApplicationHost:
         """按关键/可降级策略装配全部基础设施与 Runtime（总体设计 §5.3）。"""
         config = self._config
         root = self._project_root
+        configure_logging(config.debug.level, config.debug.log_file, root)
 
         # ── 关键组件 ──
         self._llm_proxy = _build_llm(config, root)

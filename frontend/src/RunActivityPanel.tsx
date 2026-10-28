@@ -15,6 +15,7 @@ const STATUS_LABELS: Record<string, string> = {
 export function RunActivityPanel({ activity, busy, onApprove, onResumeDelegation, onResumeRun }: RunActivityPanelProps) {
   return <aside className="run-activity" aria-label="运行过程">
     <div className="activity-heading"><strong>{STATUS_LABELS[activity.status] || activity.status}</strong><span className="muted">{activity.tools.length} 个工具</span></div>
+    {activity.error && <p className="inline-error">{activity.error.message}</p>}
     {!activity.tools.length && <p className="muted">此运行没有工具调用记录。</p>}
     {activity.tools.map((tool, index) => <section className="tool-step" key={tool.call_id}>
       <div className="tool-step-heading"><span className={`tool-status tool-status--${tool.status}`} aria-hidden="true" /><strong>{index + 1}. {tool.name}</strong><span className="muted">{STATUS_LABELS[tool.status] || tool.status}</span></div>

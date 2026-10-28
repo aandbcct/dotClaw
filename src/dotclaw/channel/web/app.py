@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ...bootstrap.application_host import ApplicationHost
 from ...bootstrap.session_interaction import SessionDeletionRejected, UnknownIdentityError
+from ...common.logging_setup import exception_diagnostic
 from ...runtime.application.session_run_coordinator import SessionBusyError
 from ...runtime.application.dto import RunResult
 from ...runtime.domain.events import RunEvent, RunEventType
@@ -301,6 +302,7 @@ def create_app(
     ) -> StreamingResponse | JSONResponse:
         """提交一条消息，并以 SSE 返回模型增量与唯一终态。"""
         host = _host(request)
+        logger.info("web.message.received content_length=%d", len(payload.content), extra={"session_id": session_id})
         if not host.session_manager.exists(session_id):
             return _session_not_found()
 
@@ -592,12 +594,13 @@ def _run_stream(
             if not result_session_id and result.run_id:
                 run = await _host(request).session_interaction.get_run_by_id(result.run_id)
                 result_session_id = "" if run is None else run.session_id
+            logger.log(logging.INFO if result.error is None else logging.WARNING, "web.run.result outcome=%s error_code=%s", result.state.outcome().value if result.state.outcome() is not None else "suspended", result.error.code.value if result.error is not None else "null", extra={"session_id": result_session_id or "-", "run_id": result.run_id or "-"})
             await adapter.finish(_result_event(result_session_id, result))
         except Exception as error:
             logger.error(
-                "Web 运行流执行失败：session_id=%s error_type=%s",
+                "web.run.exception session_id=%s diagnostic=%s",
                 session_id,
-                type(error).__name__,
+                exception_diagnostic(error),
             )
             await adapter.finish(_stream_error_event(session_id))
 
@@ -727,6 +730,7 @@ def _run_activity(
         approval_id=approval_id,
         child_run_id=child_run_id,
         tools=list(steps.values()),
+        error=run.error,
     )
 
 

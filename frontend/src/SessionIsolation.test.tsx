@@ -9,6 +9,7 @@ const b = { ...a, id: "b", title: "会话 B" };
 const encoder = new TextEncoder();
 const block = (name: string, data: Record<string, unknown>) => encoder.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
 const json = (data: unknown) => new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } });
+const sse = (body: BodyInit) => new Response(body, { headers: { "Content-Type": "text/event-stream" } });
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear(); });
 
 it("两会话流、错误、停止和完成回填相互隔离，不抢走当前焦点", async () => {
@@ -21,7 +22,7 @@ it("两会话流、错误、停止和完成回填相互隔离，不抢走当前�
     if (url.includes("/activity")) return json(null);
     if (url.endsWith("/messages")) {
       const id = url.includes("/a/") ? "a" : "b";
-      return new Response(new ReadableStream<Uint8Array>({ start(controller) { controllers.set(id, controller); } }));
+      return sse(new ReadableStream<Uint8Array>({ start(controller) { controllers.set(id, controller); } }));
     }
     if (url.endsWith("/cancel")) {
       cancelled.push(url);
@@ -64,7 +65,7 @@ it("上翻阅读不跟随流更新，回到底部后继续跟随", async () => {
     const url = String(input);
     if (url.endsWith("/sessions")) return json([a]);
     if (url.includes("/activity")) return json(null);
-    if (url.endsWith("/messages")) return new Response(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }));
+    if (url.endsWith("/messages")) return sse(new ReadableStream<Uint8Array>({ start(value) { controller = value; } }));
     return json({ ...a, messages: [] });
   }));
   const user = userEvent.setup(); render(<App />);
@@ -101,7 +102,7 @@ it("待审批入口显式展示，展开参数后才能决定并继续消费恢�
     const url = String(input);
     if (url.endsWith("/sessions")) return json([a]);
     if (url.includes("/activity")) return json({ run_id: "ra", status: resolved ? "cancelled" : "waiting_approval", approval_id: "approve-a", child_run_id: null, tools: [{ call_id: "c", name: "write", status: "approval_required", arguments: { path: "demo.txt" }, result: "", error: "", started_at: "", completed_at: "" }] });
-    if (url.includes("/approvals/")) { resolved = true; return new Response(block("run.cancelled", { run_id: "ra" })); }
+    if (url.includes("/approvals/")) { resolved = true; return sse(block("run.cancelled", { run_id: "ra" })); }
     return json({ ...a, messages: [] });
   }));
   const user = userEvent.setup(); render(<App />);
@@ -123,7 +124,7 @@ it("恢复检查点调用原运行接口，失败消息只显示在所属会话"
     if (url.includes("/activity")) return json({ run_id: "ra", status: restored ? "failed" : "recoverable", tools: [], approval_id: null, child_run_id: null });
     if (url.endsWith("/runs/ra/resume")) {
       restored = true;
-      return new Response(block("run.failed", { run_id: "ra", error: { message: "A 恢复失败" } }));
+      return sse(block("run.failed", { run_id: "ra", error: { message: "A 恢复失败" } }));
     }
     return json({ ...(url.endsWith("/b") ? b : a), messages: [] });
   }));
@@ -149,7 +150,7 @@ it("终态历史尚未回填时保留下一条草稿，不静默吞掉提交", a
     if (url.includes("/activity")) return json(null);
     if (url.endsWith("/messages")) {
       sends++;
-      return new Response(block(sends === 1 ? "run.completed" : "run.cancelled", { run_id: "r" + sends, final_message: { content: "首轮完成" } }));
+      return sse(block(sends === 1 ? "run.completed" : "run.cancelled", { run_id: "r" + sends, final_message: { content: "首轮完成" } }));
     }
     if (++reads === 2) return new Promise<Response>((resolve) => { finishHistory = resolve; });
     return json({ ...a, messages: [] });
