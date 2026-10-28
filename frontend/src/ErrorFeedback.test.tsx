@@ -25,7 +25,7 @@ function setup(operation: (url: string, init?: RequestInit) => Response | Promis
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear(); });
 
 it("空输出显示结构化错误、运行入口，恢复问题追加而不覆盖草稿", async () => {
-  const mock = setup((url) => url.endsWith("/messages") ? sse(event("run.failed", { run_id: "empty-run", error: emptyError })) : undefined);
+  const mock = setup((url) => url.endsWith("/messages") ? sse(event("run.accepted", { session_id: "a", run_id: "empty-run" }) + event("run.failed", { run_id: "empty-run", error: emptyError })) : undefined);
   const user = userEvent.setup(); render(<App />);
   await screen.findByRole("button", { name: "当前会话更多操作" });
   await user.type(screen.getByLabelText("输入消息"), "原始问题");
@@ -147,4 +147,96 @@ it("其他运行的查询结果不能覆盖当前失败和运行 ID", async () =
 it("HTTP 错误的可恢复标识来自响应而非状态码猜测", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => json({ error: { code: "service_unavailable", message: "服务暂不可用", retryable: true } }, 503)));
   await expect(submitMessage("a", "问题", () => undefined, new AbortController().signal)).rejects.toMatchObject({ status: 503, retryable: true });
+});
+
+function controlledResponse() {
+  let controller: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+  return {
+    response: () => new Response(stream, { headers: { "Content-Type": "text/event-stream" } }),
+    push: (name: string, data: Record<string, unknown>) => controller.enqueue(new TextEncoder().encode(event(name, data))),
+    close: () => controller.close(),
+  };
+}
+
+it("首个模型增量前已经接收确认，确认不是终态且重复确认不降级阶段", async () => {
+  const stream = controlledResponse();
+  setup((url) => url.endsWith("/messages") ? stream.response() : undefined);
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let finished = false;
+  let sending: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "问题").then(() => { finished = true; }); });
+  expect(result.current.views.a.submissionStage).toBe("sending");
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "accepted-r" }); });
+  expect(result.current.views.a).toMatchObject({ phase: "running", submissionStage: "accepted", runId: "accepted-r" });
+  expect(finished).toBe(false);
+  expect(result.current.views.a.messages.at(-1)?.content).toBe("");
+  await act(async () => { stream.push("message.delta", { run_id: "accepted-r", kind: "response_delta", content: "" }); });
+  expect(result.current.views.a.submissionStage).toBe("accepted");
+  await act(async () => { stream.push("message.delta", { run_id: "accepted-r", kind: "reasoning_delta", content: "思考" }); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "accepted-r" }); });
+  expect(result.current.views.a.submissionStage).toBe("streaming");
+  await act(async () => { stream.push("run.cancelled", { run_id: "accepted-r" }); stream.close(); await sending; });
+  expect(result.current.views.a.submissionStage).toBe("idle");
+});
+
+it.each([
+  { session_id: "b", run_id: "other" },
+  { session_id: "a", run_id: "other" },
+  { session_id: "a", run_id: " " },
+  { session_id: "a", run_id: 123 },
+  { run_id: "other" },
+])("错误确认不能覆盖正确 ID：%j", async (badData) => {
+  const stream = controlledResponse();
+  setup((url) => url.endsWith("/messages") ? stream.response() : url.includes("run_id=correct") ? json({ run_id: "correct", status: "running", tools: [] }) : undefined);
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "问题"); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "correct" }); stream.push("run.accepted", badData); });
+  expect(result.current.views.a).toMatchObject({ runId: "correct", detached: true, errorCode: "invalid_run_accepted", submissionStage: "idle" });
+  expect(result.current.views.b).toBeUndefined();
+  await act(async () => { await result.current.checkRunStatus("a"); });
+  expect(result.current.views.a.detached).toBe(true);
+  await act(async () => { stream.push("run.completed", { run_id: "other", final_message: { content: "错误运行正文" } }); });
+  expect(result.current.views.a.runId).toBe("correct");
+  await act(async () => { stream.close(); await sending; });
+  expect(result.current.views.a.runId).toBe("correct");
+  expect(result.current.views.a.detached).toBe(true);
+});
+
+it("确认后断流按确认 ID 查询，查询失败和恢复不触发第二次发送", async () => {
+  const stream = controlledResponse();
+  let queryFailed = true;
+  const mock = setup((url) => {
+    if (url.endsWith("/messages")) return stream.response();
+    if (url.includes("run_id=accepted-r")) return queryFailed ? Promise.reject(new Error("查询中断")) : json({ run_id: "accepted-r", status: "failed", tools: [], error: emptyError });
+    return undefined;
+  });
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "问题"); });
+  await act(async () => { stream.push("run.accepted", { session_id: "a", run_id: "accepted-r" }); stream.close(); await sending; });
+  expect(result.current.views.a).toMatchObject({ detached: true, runId: "accepted-r", submissionStage: "idle" });
+  expect(result.current.views.a.statusError).toContain("状态查询失败");
+  queryFailed = false;
+  await act(async () => { await result.current.checkRunStatus("a"); });
+  expect(result.current.views.a).toMatchObject({ phase: "failed", detached: false, errorCode: "empty_model_response", runId: "accepted-r" });
+  expect(mock.mock.calls.filter(([url]) => String(url).endsWith("/messages"))).toHaveLength(1);
+});
+
+it("旧服务可直接从发送进入生成，空增量不能提前进入生成阶段", async () => {
+  const stream = controlledResponse();
+  setup((url) => url.endsWith("/messages") ? stream.response() : undefined);
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let sending: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "问题"); });
+  await act(async () => { stream.push("message.delta", { run_id: "legacy", content: "", kind: "response_delta" }); });
+  expect(result.current.views.a.submissionStage).toBe("sending");
+  await act(async () => { stream.push("message.delta", { run_id: "legacy", content: "旧服务正文", kind: "response_delta" }); });
+  expect(result.current.views.a.submissionStage).toBe("streaming");
+  await act(async () => { stream.push("run.cancelled", { run_id: "legacy" }); stream.close(); await sending; });
 });

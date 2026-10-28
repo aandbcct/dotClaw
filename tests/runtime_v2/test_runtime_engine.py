@@ -7,6 +7,7 @@ from dotclaw.runtime.domain.events import RunEventType
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter
@@ -18,7 +19,7 @@ from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordi
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.dto import (
     ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot,
-    ContextRefreshSignal, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
+    ContextRefreshSignal, LLMOutputEvent, LLMOutputKind, RunAcceptedEvent, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, ToolCall,
@@ -108,6 +109,42 @@ class ToolFake(ToolPort):
         """测试替身无需远程取消。"""
 
 
+class BlockedLLM(FinalLLM):
+    """手动释放首个输出，供引擎及真实 HTTP 测试观察确认时序。"""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled: list[str] = []
+
+    async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
+        self.started.set()
+        await self.release.wait()
+        if output_port is not None:
+            await output_port.emit(LLMOutputEvent(execution.session_id, execution.run_id, LLMOutputKind.RESPONSE_DELTA, "请补充信息"))
+        return await super().complete(context, execution, output_port)
+
+    async def cancel(self, run_id: str) -> None:
+        self.cancelled.append(run_id)
+        self.release.set()
+
+
+class AcceptedOutput:
+    """将确认和模型输出分别收集，以事件而非固定等待验证先后。"""
+
+    def __init__(self) -> None:
+        self.accepted: list[RunAcceptedEvent] = []
+        self.deltas: list[LLMOutputEvent] = []
+        self.notified = asyncio.Event()
+
+    async def on_run_accepted(self, event: RunAcceptedEvent) -> None:
+        self.accepted.append(event)
+        self.notified.set()
+
+    async def emit(self, event: LLMOutputEvent) -> None:
+        self.deltas.append(event)
+
+
 def _request(session_id: str) -> RunRequest:
     """构造一条普通用户请求。"""
     user = ConversationMessage("user-1", MessageRole.USER, "我需要帮助", "2026-07-17T00:00:00+00:00")
@@ -158,6 +195,61 @@ async def test_engine_completes_clarification_as_normal_conversation(tmp_path: P
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     conversation = await run_repository.load_conversation("session-1")
     assert conversation[0].content == "请补充信息"
+
+
+async def test_acceptance_is_persisted_before_blocked_model_output(tmp_path: Path) -> None:
+    """模型未释放时确认已送达，且确认 ID 已可在仓储读取。"""
+    engine, output, model = _engine(tmp_path), AcceptedOutput(), BlockedLLM()
+    engine._llm_port = model
+    task = asyncio.create_task(engine.execute(_request("accepted-session"), output))
+    try:
+        await asyncio.wait_for(output.notified.wait(), 2)
+        await asyncio.wait_for(model.started.wait(), 2)
+        assert not task.done() and not model.release.is_set() and output.deltas == []
+        accepted = output.accepted[0]
+        run = await RunRepositoryAdapter(tmp_path).load_run(accepted.session_id, accepted.run_id)
+        assert run is not None and run.run_id == accepted.run_id
+        model.release.set()
+        result = await asyncio.wait_for(task, 2)
+        assert result.run_id == accepted.run_id and len(output.accepted) == 1
+    finally:
+        model.release.set()
+        await task
+
+
+async def test_create_failure_does_not_send_acceptance(tmp_path: Path) -> None:
+    engine, output = _engine(tmp_path), AcceptedOutput()
+    engine._run_repository.create_run = AsyncMock(side_effect=OSError("隔离存储失败"))
+    with pytest.raises(OSError):
+        await engine.execute(_request("create-failure"), output)
+    assert output.accepted == []
+
+
+async def test_acceptance_notification_failure_does_not_abandon_run(tmp_path: Path) -> None:
+    engine, output = _engine(tmp_path), AcceptedOutput()
+    output.on_run_accepted = AsyncMock(side_effect=RuntimeError("PRIVATE_BODY"))
+    result = await engine.execute(_request("notify-failure"), output)
+    assert result.state.outcome() is RunOutcome.COMPLETED
+    assert len(await RunRepositoryAdapter(tmp_path).load_conversation("notify-failure")) == 1
+
+
+async def test_acceptance_callback_cancellation_propagates_and_unregisters_token(tmp_path: Path) -> None:
+    engine, output = _engine(tmp_path), AcceptedOutput()
+    output.on_run_accepted = AsyncMock(side_effect=asyncio.CancelledError())
+    request = _request("notify-cancel")
+    with pytest.raises(asyncio.CancelledError):
+        await engine.execute(request, output)
+    run = (await engine._run_repository.list_active_runs("notify-cancel"))[0]
+    assert not engine._cancellation_service.request(run.run_id, "已释放")
+
+
+async def test_approval_resume_keeps_id_without_second_acceptance(tmp_path: Path) -> None:
+    engine, output = _engine(tmp_path), AcceptedOutput()
+    engine._llm_port, engine._tool_port = ApprovalLLM(), ApprovalTool()
+    waiting = await engine.execute(_request("approval-confirm"), output)
+    resumed = await engine.resolve_approval("approval-1", True, output)
+    assert resumed.run_id == waiting.run_id and resumed.state.outcome() is RunOutcome.COMPLETED
+    assert [event.run_id for event in output.accepted] == [waiting.run_id]
 
 
 async def test_engine_releases_run_scope_only_after_terminal_result(tmp_path: Path) -> None:

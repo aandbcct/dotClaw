@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.runtime_v2.test_runtime_engine import AcceptedOutput
+
 from dotclaw.runtime.adapters import (
     ApprovalRepositoryAdapter,
     CheckpointRepositoryAdapter,
@@ -211,7 +213,10 @@ async def test_execute_tools_recovery_replays_tools_not_llm(tmp_path: Path) -> N
     resume_llm = _FinalOnlyLLM()
     resume_tool = _RecordingTool()
     resume_engine = _engine(tmp_path, resume_llm, resume_tool)
-    result = await resume_engine.resume_run(tool.run_id, None)
+    output = AcceptedOutput()
+    result = await resume_engine.resume_run(tool.run_id, output)
+    assert result.run_id == tool.run_id
+    assert output.accepted == []
 
     assert result.state.outcome() is RunOutcome.COMPLETED, f"恢复后应完成，实际 {result.state.outcome()}"
     # 关键证明：工具被重放执行（一次），而不是因为退化回重调 LLM 而丢失工具轮。

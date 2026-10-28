@@ -125,6 +125,8 @@ a { color:var(--accent); text-underline-offset:3px; }
 .error-actions { display:flex; gap:8px; flex-wrap:wrap; }
 .error-actions button,.error-run-id button { min-height:44px; padding:8px; }
 .empty-answer { color:var(--muted); font-size:14px; }
+.accepted-run-id { display:flex; align-items:center; flex-wrap:wrap; gap:8px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+.accepted-run-id button { min-height:44px; padding:8px; }
 .run-summary { display:flex; align-items:center; gap:12px; margin:16px 0; padding:8px 0; border-top:1px solid var(--line); color:var(--muted); font-size:12px; }
 .run-summary button { min-height:44px; color:var(--accent); }
 .run-summary--approval { padding:12px 16px; border:1px solid var(--accent); border-radius:8px; background:var(--accent-soft); color:var(--text); font-size:14px; }

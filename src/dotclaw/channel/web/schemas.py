@@ -14,6 +14,7 @@ from ...runtime.domain.facts import JSONMap, MessageRole, RunError
 class SSEEventType(StrEnum):
     """Web 消息流允许发送的事件类型。"""
 
+    RUN_ACCEPTED = "run.accepted"
     MESSAGE_DELTA = "message.delta"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"

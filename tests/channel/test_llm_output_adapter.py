@@ -14,7 +14,7 @@ import pytest
 
 from dotclaw.channel.base import Channel
 from dotclaw.channel.runtime_llm_output import ChannelLLMOutputAdapter
-from dotclaw.runtime.application.dto import LLMOutputEvent, LLMOutputKind
+from dotclaw.runtime.application.dto import LLMOutputEvent, LLMOutputKind, RunAcceptedEvent
 
 
 class CollectingChannel(Channel):
@@ -59,6 +59,8 @@ async def test_response_only_prints_single_answer_header() -> None:
     """response-only：首个 response 前打印一次「回答：」，连续同类不重复。"""
     ch = CollectingChannel()
     adapter = ChannelLLMOutputAdapter(ch)
+    await adapter.on_run_accepted(RunAcceptedEvent("s", "r1"))
+    assert ch.chunks == []
     await adapter.emit(_event("r1", LLMOutputKind.RESPONSE_DELTA, "你好"))
     await adapter.emit(_event("r1", LLMOutputKind.RESPONSE_DELTA, "世界"))
     assert ch.chunks == ["\n回答：\n", "你好", "世界"]

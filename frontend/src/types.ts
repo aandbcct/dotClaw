@@ -55,6 +55,11 @@ export interface StreamEvent {
   data: Record<string, unknown>;
 }
 
+export interface RunAcceptedData {
+  session_id: string;
+  run_id: string;
+}
+
 export interface AgentOption {
   id: string;
   name: string;

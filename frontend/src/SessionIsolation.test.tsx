@@ -37,6 +37,9 @@ it("两会话流、错误、停止和完成回填相互隔离，不抢走当前�
   await screen.findByRole("button", { name: "当前会话更多操作" });
   await user.type(screen.getByLabelText("输入消息"), "A 问题");
   await user.click(screen.getByRole("button", { name: "发送消息" }));
+  expect(await screen.findByText("正在发送", { exact: true })).toBeTruthy();
+  await act(async () => { controllers.get("a")!.enqueue(block("run.accepted", { session_id: "a", run_id: "ra" })); });
+  expect(await screen.findByText("已接收，正在处理", { exact: true })).toBeTruthy();
   await act(async () => { controllers.get("a")!.enqueue(block("message.delta", { run_id: "ra", content: "A 部分", kind: "response_delta" })); });
   await screen.findByText("A 部分");
   await user.click(screen.getByRole("button", { name: "会话 B" }));
@@ -45,6 +48,10 @@ it("两会话流、错误、停止和完成回填相互隔离，不抢走当前�
   expect(screen.queryByText("A 部分继续")).toBeNull();
   expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("B 草稿");
   await user.click(screen.getByRole("button", { name: "发送消息" }));
+  await act(async () => { controllers.get("b")!.enqueue(block("run.accepted", { session_id: "b", run_id: "rb" })); });
+  expect(await screen.findByText("已接收，正在处理", { exact: true })).toBeTruthy();
+  expect(screen.queryByText("运行 ID：ra")).toBeNull();
+  expect(screen.getByText("运行 ID：rb")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "停止运行" }));
   await waitFor(() => expect(cancelled).toEqual(["/api/v1/sessions/b/cancel"]));
   expect(screen.getByRole("button", { name: "会话 B" }).getAttribute("aria-current")).toBe("page");

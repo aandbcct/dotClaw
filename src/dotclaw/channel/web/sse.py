@@ -7,7 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from enum import StrEnum
 
-from ...runtime.application.dto import LLMOutputEvent
+from ...runtime.application.dto import LLMOutputEvent, RunAcceptedEvent
 from ...runtime.application.ports import LLMOutputPort
 from .schemas import SSEEvent, SSEEventType
 
@@ -40,6 +40,23 @@ class SSEOutputAdapter(LLMOutputPort):
         )
         self._disconnected: bool = False
         self._finished: bool = False
+        self._accepted_run_id: str | None = None
+
+    async def on_run_accepted(self, event: RunAcceptedEvent) -> None:
+        """在原有有界队列内发送一次接收确认，断连只丢弃通知。"""
+        if not event.session_id.strip() or not event.run_id.strip():
+            raise ValueError("运行接收确认的会话 ID 和运行 ID 不能为空")
+        if self._disconnected or self._finished:
+            return
+        if self._accepted_run_id is not None:
+            if self._accepted_run_id != event.run_id:
+                raise RuntimeError("同一 SSE 订阅不能确认不同运行")
+            return
+        await self._queue.put(SSEEvent(
+            event=SSEEventType.RUN_ACCEPTED,
+            data={"session_id": event.session_id, "run_id": event.run_id},
+        ))
+        self._accepted_run_id = event.run_id
 
     async def emit(self, event: LLMOutputEvent) -> None:
         """按 Runtime 交付顺序发送非空模型增量。"""

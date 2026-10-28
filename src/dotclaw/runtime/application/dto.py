@@ -113,6 +113,14 @@ class RunResult:
         }
 
 
+@dataclass(frozen=True)
+class RunAcceptedEvent:
+    """新运行持久化后的接收确认，不代表供应商已接收请求。"""
+
+    session_id: str
+    run_id: str
+
+
 class LLMOutputKind(StrEnum):
     """LLM 增量输出的语义类别，由 Runtime 解释并交付入口层。"""
 

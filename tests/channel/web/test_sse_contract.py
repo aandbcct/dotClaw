@@ -5,18 +5,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import httpx
 import pytest
+import uvicorn
 
 from dotclaw.runtime.application.dto import (
     ConversationMessage,
     LLMOutputEvent,
     LLMOutputKind,
     RunResult,
+    RunAcceptedEvent,
 )
 from dotclaw.runtime.application.ports import LLMOutputPort
 from dotclaw.runtime.domain.facts import MessageRole, RunError, RunErrorCode
@@ -33,8 +36,9 @@ from dotclaw.channel.web.app import create_app
 from dotclaw.channel.web.schemas import SSEEvent
 from dotclaw.channel.web.sse import SSEOutputAdapter, encode_sse_event
 from dotclaw.runtime.adapters.llm_proxy_adapter import LLMProxyAdapter
+from dotclaw.runtime.adapters.run_repository import RunRepositoryAdapter
 from tests.llm.test_empty_model_response import _proxy
-from tests.runtime_v2.test_runtime_engine import _engine, _request
+from tests.runtime_v2.test_runtime_engine import BlockedLLM, _engine, _request
 
 
 @dataclass(frozen=True)
@@ -94,7 +98,8 @@ class _FakeSessionInteraction:
         output_port: LLMOutputPort | None = None,
     ) -> RunResult:
         """按顺序发送预设增量，并返回预设终态。"""
-        del session, user_message
+        session_id = session if isinstance(session, str) else session.id
+        del user_message
         self.active_submissions += 1
         self.max_active_submissions = max(
             self.max_active_submissions,
@@ -105,6 +110,8 @@ class _FakeSessionInteraction:
             if self.submit_error is not None:
                 raise self.submit_error
             if output_port is not None:
+                if self.result.run_id and (self.result.error is None or self.result.error.code is not RunErrorCode.SESSION_BUSY):
+                    await output_port.on_run_accepted(RunAcceptedEvent(session_id, self.result.run_id))
                 for event in self.output_events:
                     await output_port.emit(event)
             if self.block_before_finish:
@@ -309,8 +316,20 @@ async def test_adapter_rejects_a_second_terminal_event() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_id,content,status", [("missing", "问题", 404), ("session-1", "", 422), ("session-1", "   ", 422)])
+async def test_rejected_message_has_no_acceptance(session_id, content, status) -> None:
+    """入口拒绝时不启动运行，也不发送接收确认。"""
+    host, interaction = _host(_completed_result(), "session-1")
+    async with _client(host) as client:
+        response = await client.post(f"/api/v1/sessions/{session_id}/messages", json={"content": content})
+    assert response.status_code == status
+    assert "run.accepted" not in response.text
+    assert not interaction.submit_started.is_set()
+
+
+@pytest.mark.asyncio
 async def test_message_endpoint_streams_deltas_then_one_completed_terminal() -> None:
-    """成功请求先输出增量，最后输出一个完成事件。"""
+    """成功请求先确认，再输出增量，最后输出一个完成事件。"""
     host, interaction = _host(_completed_result(), "session-1")
     interaction.output_events = (
         LLMOutputEvent("session-1", "run-1", LLMOutputKind.REASONING_DELTA, "想"),
@@ -327,6 +346,7 @@ async def test_message_endpoint_streams_deltas_then_one_completed_terminal() -> 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     assert [event.event for event in events] == [
+        "run.accepted",
         "message.delta",
         "message.delta",
         "run.completed",
@@ -442,10 +462,9 @@ async def test_non_success_results_have_normalized_terminal_events(
         )
 
     events = _parse_sse(response.text)
-    assert len(events) == 1
-    assert events[0].event == expected_event
-    assert events[0].data["status"] == expected_status
-    assert events[0].data["run_id"] == result.run_id
+    assert [event.event for event in events] == ["run.accepted", expected_event]
+    assert events[-1].data["status"] == expected_status
+    assert events[-1].data["run_id"] == result.run_id
 
 
 @pytest.mark.asyncio
@@ -529,9 +548,9 @@ async def test_empty_response_crosses_proxy_engine_and_sse_without_success(tmp_p
             async with _client(host) as client:
                 response = await client.post("/api/v1/sessions/session-empty/messages", json={"content": "SECRET_USER_PROMPT"})
         events = _parse_sse(response.text)
-        assert [event.event for event in events] == ["run.failed"]
-        assert events[0].data["error"] == {"code": "empty_model_response", "message": "模型未返回有效回答，请查看执行记录或稍后重新发送。", "retryable": False}
-        assert events[0].data["run_id"] == result.run_id
+        assert [event.event for event in events] == ["run.accepted", "run.failed"]
+        assert events[-1].data["error"] == {"code": "empty_model_response", "message": "模型未返回有效回答，请查看执行记录或稍后重新发送。", "retryable": False}
+        assert events[-1].data["run_id"] == result.run_id
         assert "web.message.received" in caplog.text
         assert "web.run.result" in caplog.text and "empty_model_response" in caplog.text
         assert "SECRET_USER_PROMPT" not in caplog.text
@@ -557,3 +576,126 @@ async def test_web_exception_logs_locations_and_chain_without_body(caplog) -> No
         assert "SECRET_KEY" not in caplog.text and "PRIVATE" not in caplog.text
     finally:
         logger.removeHandler(caplog.handler)
+
+
+@pytest.mark.asyncio
+async def test_acceptance_is_idempotent_and_not_a_terminal_event() -> None:
+    adapter = SSEOutputAdapter()
+    await adapter.on_run_accepted(RunAcceptedEvent("s", "r"))
+    await adapter.on_run_accepted(RunAcceptedEvent("s", "r"))
+    with pytest.raises(RuntimeError, match="不同运行"):
+        await adapter.on_run_accepted(RunAcceptedEvent("other", "other-run"))
+    with pytest.raises(ValueError, match="不能为空"):
+        await adapter.on_run_accepted(RunAcceptedEvent("", "r"))
+    await adapter.finish(SSEEvent("run.failed", {"run_id": "r"}))
+    await adapter.on_run_accepted(RunAcceptedEvent("s", "late-run"))
+    events = _parse_sse("".join([part async for part in adapter.stream()]))
+    assert [event.event for event in events] == ["run.accepted", "run.failed"]
+    assert events[0].data == {"session_id": "s", "run_id": "r"}
+
+
+class _EngineInteraction(_FakeSessionInteraction):
+    """HTTP 流测试使用真实引擎和文件仓储，仅模型端口为可控替身。"""
+
+    def __init__(self, engine, root) -> None:
+        super().__init__(_completed_result())
+        self.engine = engine
+        self.repository = RunRepositoryAdapter(root)
+        self.executing = False
+
+    async def submit(self, session, user_message, output_port=None) -> RunResult:
+        self.executing = True
+        try:
+            self.result = await self.engine.execute(_request(session), output_port)
+            return self.result
+        finally:
+            self.executing = False
+            self.completed.set()
+
+    async def get_run(self, session_id, run_id=None):
+        return await self.repository.load_run(session_id, run_id) if run_id else await self.engine.active_run(session_id)
+
+    async def get_run_evidence(self, session_id, run_id):
+        return await self.repository.load_events(session_id, run_id), await self.repository.load_messages(session_id, run_id)
+
+    async def is_session_executing(self, session_id):
+        return self.executing
+
+    async def cancel_session(self, session_id, reason):
+        run = await self.engine.active_run(session_id)
+        if run is None:
+            return None
+        await self.engine.cancel(run.run_id, reason)
+        return run.run_id
+
+
+@asynccontextmanager
+async def _live_http_client(host, model_release: asyncio.Event):
+    """临时回环端口提供不缓存完整响应的真实 HTTP 流，结束后关闭服务。"""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    app = create_app(host_factory=lambda: _ready_host(host))
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", access_log=False))
+    task = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        async with asyncio.timeout(5):
+            while not server.started:
+                if task.done():
+                    await task
+                await asyncio.sleep(0)
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=5, trust_env=False) as client:
+            yield client
+    finally:
+        # 断言失败也先释放假模型，避免服务关闭等待掩盖原始失败。
+        model_release.set()
+        server.should_exit = True
+        try:
+            await asyncio.wait_for(task, 5)
+        finally:
+            listener.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disconnect,stop", [(False, False), (True, False), (True, True)])
+async def test_real_http_accepts_before_model_tokens_and_survives_disconnect(tmp_path, disconnect, stop) -> None:
+    engine, model = _engine(tmp_path), BlockedLLM()
+    engine._llm_port = model
+    interaction = _EngineInteraction(engine, tmp_path)
+    host = _FakeHost(_FakeSessionManager(("session-live",)), interaction)
+    try:
+        async with _live_http_client(host, model.release) as client:
+            async with client.stream("POST", "/api/v1/sessions/session-live/messages", json={"content": "隔离问题"}) as response:
+                lines, first_block = response.aiter_lines(), []
+                async with asyncio.timeout(3):
+                    async for line in lines:
+                        if not line:
+                            break
+                        first_block.append(line)
+                accepted = _parse_sse("\n".join(first_block))[0]
+                assert accepted.event == "run.accepted"
+                run_id = accepted.data["run_id"]
+                assert not model.release.is_set() and not interaction.completed.is_set()
+                assert await interaction.repository.load_run("session-live", run_id) is not None
+                activity = await client.get(f"/api/v1/sessions/session-live/activity?run_id={run_id}")
+                assert activity.json()["run_id"] == run_id and activity.json()["status"] == "running"
+                if not disconnect:
+                    model.release.set()
+                    remainder = [line async for line in lines]
+                    events = _parse_sse("\n".join(remainder))
+                    assert [event.event for event in events] == ["message.delta", "run.completed"]
+            if disconnect:
+                await asyncio.wait_for(model.started.wait(), 2)
+                assert not interaction.completed.is_set() and model.cancelled == []
+                if stop:
+                    stopped = await client.post("/api/v1/sessions/session-live/cancel", json={"reason": "显式停止"})
+                    assert stopped.json()["run_id"] == run_id
+                else:
+                    model.release.set()
+                await asyncio.wait_for(interaction.completed.wait(), 3)
+                persisted = await interaction.repository.load_run("session-live", run_id)
+                assert persisted.state.outcome() is (RunOutcome.CANCELLED if stop else RunOutcome.COMPLETED)
+                assert model.cancelled == ([run_id] if stop else [])
+    finally:
+        model.release.set()

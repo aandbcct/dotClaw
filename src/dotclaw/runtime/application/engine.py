@@ -8,6 +8,8 @@ import uuid
 from dataclasses import dataclass, replace
 from hashlib import sha256
 
+from ...common.logging_setup import exception_diagnostic
+
 logger = logging.getLogger(__name__)
 
 from ..domain.events import (
@@ -86,6 +88,7 @@ from .dto import (
     DelegationResult,
     DelegationSubmission,
     RunRequest,
+    RunAcceptedEvent,
     RunResult,
     ToolInvocation,
     ToolResult,
@@ -181,6 +184,12 @@ class RuntimeEngine:
         await self._run_repository.create_run(run)
         self._cancellation_service.register(run_id, execution.cancellation)
         try:
+            if output_port is not None:
+                try:
+                    await output_port.on_run_accepted(RunAcceptedEvent(request.session_id, run_id))
+                except Exception as error:
+                    # 通知失败不能遗留已持久化运行；任务取消异常仍向外传播。
+                    logger.warning("run.accepted.notify_failed diagnostic=%s", exception_diagnostic(error), extra={"session_id": request.session_id, "run_id": run_id})
             result: RunResult = await self._drive(execution, run, (), (), output_port=output_port)
             await self._release_run_context_if_terminal(result)
             return result

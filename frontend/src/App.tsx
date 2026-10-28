@@ -49,6 +49,7 @@ export function App() {
   const [highlight, setHighlight] = useState<string | null>(null);
   const { conversationRef, onScroll, scrollToBottom, awayFromBottom, hasNewContent } = useConversationScroll(selectedId || undefined, view.messages);
   const busy = workspace.isStreaming(selectedId) || ["running", "stopping", "suspended", "recoverable"].includes(view.phase);
+  const runLabel = view.detached ? "结果待确认" : view.phase !== "running" ? phaseLabel(view.phase) : view.error ? "运行异常" : view.submissionStage === "sending" ? "正在发送" : view.submissionStage === "accepted" ? "已接收，正在处理" : phaseLabel(view.phase);
   useEffect(() => { try { localStorage.setItem("dotclaw.theme", theme); } catch { /* 外观仍在本页生效。 */ } }, [theme]);
   useEffect(() => { writePreference("dotclaw.sidebar.v1", collapsed); }, [collapsed]);
   useEffect(() => { writePreference("dotclaw.pins.v1", pinned); }, [pinned]);
@@ -211,7 +212,7 @@ export function App() {
           {modelError && !modelOpen && <span className="inline-error" role="alert">{modelError}</span>}
         </div>
         <span className="header-title" title={selected?.title}>{selected?.title || "新对话"}</span>
-        {["running", "stopping", "suspended", "recoverable", "failed"].includes(view.phase) && <span className={`run-state run-state--${view.phase}`}>{view.detached && !view.activity ? "结果待确认" : phaseLabel(view.phase)}</span>}
+        {["running", "stopping", "suspended", "recoverable", "failed"].includes(view.phase) && <span className={`run-state run-state--${view.phase}`} role="status">{runLabel}</span>}
         <button className="icon-button theme-button" type="button" aria-label={theme === "light" ? "切换深色外观" : "切换浅色外观"} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? "☾" : "☀"}</button>
         {selected && <button className="icon-button" type="button" aria-label="当前会话更多操作" onClick={() => { setMenu(selected); setActionError(""); }}>⋯</button>}
       </header>
@@ -233,6 +234,7 @@ export function App() {
             {message.role === "assistant" && !message.pending && Boolean(message.run_ids?.length) && selectedId && <SearchSources sessionId={selectedId} runIds={message.run_ids!} />}
           </article>)}
           {view.detached && <p className="status-note">{view.activity?.status === "running" ? "任务仍在运行，完成后显示结果。" : "结果待确认，请查询运行状态。"}当前连接没有可恢复的逐字增量。</p>}
+          {view.runId && !view.detached && !view.error && view.phase === "running" && ["accepted", "streaming"].includes(view.submissionStage) && <div className="accepted-run-id"><span>运行 ID：{view.runId}</span><CopyButton label="复制当前运行 ID" getText={() => view.runId || ""} /></div>}
           {view.activity && <div className={`run-summary ${view.activity.status === "waiting_approval" ? "run-summary--approval" : ""}`}>
             <span>{view.activity.status === "waiting_approval" ? "需要你的批准" : `执行记录 · ${phaseLabel(view.phase)} · ${view.activity.tools.length} 个工具`}</span>
             <button type="button" onClick={() => selectedId && void showRun(selectedId, [view.activity!.run_id])}>{view.activity.status === "waiting_approval" ? "查看并决定" : "查看详情"}</button>

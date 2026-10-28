@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "results": [
+    "sending-disconnected-1440-light",
+    "accepted-disconnected-1440-light",
+    "streaming-disconnected-1440-light",
+    "disconnected-disconnected-1440-light",
+    "sending-failed-1440-light",
+    "accepted-failed-1440-light",
+    "streaming-failed-1440-light",
+    "failed-failed-1440-light",
+    "sending-disconnected-1440-dark",
+    "accepted-disconnected-1440-dark",
+    "streaming-disconnected-1440-dark",
+    "disconnected-disconnected-1440-dark",
+    "sending-failed-1440-dark",
+    "accepted-failed-1440-dark",
+    "streaming-failed-1440-dark",
+    "failed-failed-1440-dark",
+    "sending-disconnected-390-light",
+    "accepted-disconnected-390-light",
+    "streaming-disconnected-390-light",
+    "disconnected-disconnected-390-light",
+    "sending-failed-390-light",
+    "accepted-failed-390-light",
+    "streaming-failed-390-light",
+    "failed-failed-390-light"
+  ],
+  "realProviderCalls": 0,
+  "realSessionMutations": 0,
+  "note": "浏览器可控流验证；真实 HTTP 首包由 test_sse_contract.py 验证"
+}
