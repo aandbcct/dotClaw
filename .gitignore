@@ -34,6 +34,10 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/coverage/
+*.tsbuildinfo
 /.learnings/ERRORS.md
 /.learnings/FEATURE_REQUESTS.md
 /.learnings/LEARNINGS.md

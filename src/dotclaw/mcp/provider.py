@@ -59,6 +59,7 @@ class MCPToolProvider(ToolProvider):
         self._failed_servers: dict[str, str] = {}
         self._pending_servers: dict[str, str] = {}
         self._started = False
+        self._registered_tools: set[str] = set()
 
     @property
     def clients(self) -> dict[str, McpClient]:
@@ -98,6 +99,7 @@ class MCPToolProvider(ToolProvider):
                 registered_tools.extend(result)
 
         logger.info(f"MCP 已加载 {len(registered_tools)} 个工具")
+        self._registered_tools.update(registered_tools)
         return registered_tools
 
     def _make_client(self, cfg) -> McpClient:
@@ -175,9 +177,18 @@ class MCPToolProvider(ToolProvider):
         """关闭所有 MCP servers。"""
         for client in self._clients.values():
             await client.shutdown()
+        for tool_name in self._registered_tools:
+            self._registry.unregister(tool_name)
+        self._registered_tools.clear()
         self._clients.clear()
         self._pending_servers.clear()
         self._started = False
+
+    async def reconnect(self) -> list[str]:
+        """关闭现有连接后重新发现全部已配置 server。"""
+        await self.shutdown()
+        self._failed_servers.clear()
+        return await self.start()
 
     def get_server_states(self) -> dict[str, tuple[McpClientState, str]]:
         """获取所有 servers 的状态（含 pending）。"""

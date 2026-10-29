@@ -14,18 +14,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("./data/dotclaw.log", encoding="utf-8"),
-    ],
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-
 from dotclaw.channel.cli import CLIChannel
 from dotclaw.channel.runtime_llm_output import ChannelLLMOutputAdapter
 from dotclaw.eval.draft_service import EvalCaseDraftService
@@ -36,7 +24,7 @@ from dotclaw.bootstrap.session_interaction import (
     SessionInteractionService,
     format_run_result,
 )
-from dotclaw.cli.banner import build_banner, console as rich_console
+from dotclaw.channel.cli.banner import build_banner, console as rich_console
 from dotclaw.mcp.provider import MCPToolProvider
 from dotclaw.memory.dream import DeepDream
 from dotclaw.skills.registry import SkillRegistry
@@ -56,7 +44,6 @@ async def _run_cli(show_reasoning: bool = True) -> None:
     host: ApplicationHost = await ApplicationHost.build(channel=channel)
     try:
         config = host.config
-        logging.getLogger().setLevel(config.debug.level)
 
         service: SessionInteractionService = host.session_interaction
         session_mgr: SessionManager = host.session_manager

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -33,6 +34,7 @@ from dotclaw.runtime.domain.state import (
     Running,
 )
 from dotclaw.session.session import SessionManager
+from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator, RuntimeControlPort
 
 
 def _registry() -> AgentRegistry:
@@ -54,7 +56,7 @@ def _service(
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=_registry(),
-        coordinator=None,  # type: ignore[arg-type]
+        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort)),
         run_repository=run_repository,
         approval_repository=approval_repository,
         context_port=context_port,  # type: ignore[arg-type]

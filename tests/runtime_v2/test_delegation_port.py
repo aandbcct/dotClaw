@@ -560,7 +560,10 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
     coordinator = SessionRunCoordinator(engine)
     adapter.bind_coordinator(coordinator)
 
-    result: RunResult = await coordinator.submit(_request())
+    from tests.runtime_v2.test_runtime_engine import AcceptedOutput
+
+    output = AcceptedOutput()
+    result: RunResult = await coordinator.submit(_request(), output)
     parent_run = await repository.load_run("parent-session", result.run_id)
     # 阶段3：提交即挂起返回，不再内联等待子运行。
     assert result.state.is_waiting_delegation()
@@ -579,8 +582,9 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
 
     # 子运行完成后经 resume_delegation 恢复父运行至 COMPLETED；回灌子结果时经适配器
     # finish 将 Task 收口为 COMPLETED（阶段3 提交即挂起，故 Task 完成发生在 resume 之后）。
-    resumed: RunResult = await coordinator.resume_delegation(child_run_id)
+    resumed: RunResult = await coordinator.resume_delegation(child_run_id, output)
     assert resumed.state.outcome() is RunOutcome.COMPLETED
+    assert [(event.session_id, event.run_id) for event in output.accepted] == [("parent-session", result.run_id)]
     task = await dispatcher.broker.latest_task_for_source("parent-session")
     assert task is not None
     assert task.status is TaskStatus.COMPLETED

@@ -6,14 +6,16 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from ...llm.base import ChatChunk
+from ...common.logging_setup import bind_log_context
+
+from ...llm.base import ChatChunk, EmptyModelResponseError
 from ...llm.base import TextDeltaKind
 from ...llm.base import Message as LegacyMessage
 from ...llm.base import ToolCall as LegacyToolCall
 from ...llm.base import ToolDefinition as LegacyToolDefinition
 from ...llm.proxy import LLMProxy
 from ..application.dto import ContextBundle, LLMOutputEvent, LLMOutputKind
-from ..application.ports import LLMPort, LLMOutputPort, LLMUnavailableError
+from ..application.ports import InvalidLLMResponseError, LLMPort, LLMOutputPort, LLMUnavailableError
 from dotclaw.runtime.application.execution import RunExecutionView
 from ..domain.facts import MessageRole, RunMessage, RunMessageKind, ToolCall
 
@@ -75,6 +77,8 @@ class LLMProxyAdapter(LLMPort):
             stream=True,
             **proxy_options,
         )
+        log_context = bind_log_context(execution.session_id, execution.run_id)
+        log_context.__enter__()
         try:
             async for chunk in response:
                 for delta in chunk.text_deltas:
@@ -104,15 +108,18 @@ class LLMProxyAdapter(LLMPort):
                         content_parts.append(delta.content)
                 if chunk.tool_calls:
                     tool_calls.extend(_tool_call_from_legacy(tc) for tc in chunk.tool_calls)
-                if chunk.finish_reason is not None and chunk.usage is not None:
+                if chunk.usage is not None:
                     input_tokens = chunk.usage.input_tokens
                     output_tokens = chunk.usage.output_tokens
         except asyncio.CancelledError:
             # 保留取消语义给 Runtime；Proxy/客户端 finally 会关闭对应 HTTP 流。
             raise
+        except EmptyModelResponseError as error:
+            raise InvalidLLMResponseError(str(error)) from error
         except Exception as error:
             raise LLMUnavailableError("业务模型服务不可用") from error
         finally:
+            log_context.__exit__(None, None, None)
             if self._active_calls.get(execution.run_id) is current_task:
                 self._active_calls.pop(execution.run_id, None)
         return RunMessage(

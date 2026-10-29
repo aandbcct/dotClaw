@@ -20,7 +20,8 @@ from ..runtime.application.ports import ContextPort, LLMOutputPort
 from ..runtime.application.request_factory import create_run_request
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.domain.context import ContextOwner
-from ..runtime.domain.facts import RunErrorCode
+from ..runtime.domain.events import RunEvent
+from ..runtime.domain.facts import AgentRun, RunErrorCode, RunMessage
 from ..session.session import Session, SessionManager
 
 
@@ -82,20 +83,45 @@ class SessionInteractionService:
             return identities[0].agent_id
         raise UnknownIdentityError("无法确定默认 Identity，请显式指定 agent_id")
 
-    async def create_session(self, agent_id: str | None = None, title: str = "新对话") -> Session:
+    async def create_session(
+        self,
+        agent_id: str | None = None,
+        title: str = "新对话",
+        model: str | None = None,
+    ) -> Session:
         """创建绑定显式 Identity 的 Session；未指定时使用默认 Identity 并落盘。"""
         resolved: str = agent_id or self._resolve_default_agent_id()
         if self._agent_registry.get(resolved) is None:
             raise UnknownIdentityError(f"未知 Identity: {resolved}")
-        if not self._preferred_model:
+        selected_model: str = model or self._preferred_model
+        if not selected_model:
             raise ValueError("创建 Session 前必须配置 chat 用途的首选模型")
+        if selected_model not in self._chat_models:
+            raise ValueError(f"模型不存在或未启用: {selected_model}")
         return await self._session_manager.create(
             agent_id=resolved,
             title=title,
-            model=self._preferred_model,
+            model=selected_model,
         )
 
     # ── 路由 ──
+
+    async def update_session(
+        self, session_id: str, *, title: str | None = None, archived: bool | None = None,
+    ) -> Session:
+        """更新标题或归档标记，租约内重读避免覆盖最新对话投影。"""
+        if title is not None and not title.strip():
+            raise ValueError("标题不能为空")
+        async with self._coordinator.edit_session(session_id):
+            session: Session | None = await self._session_manager.load(session_id)
+            if session is None:
+                raise LookupError("会话不存在")
+            if title is not None:
+                session.title = title.strip()
+            if archived is not None:
+                session.archived = archived
+            await self._session_manager.save(session)
+            return session
 
     def _require_identity(self, session: Session) -> AgentIdentity:
         """校验 ``session.agent_id`` 为已注册 Identity；未知或空必须明确报错。"""
@@ -116,21 +142,25 @@ class SessionInteractionService:
         """返回可供 Session 绑定的全部 chat active 模型。"""
         return self._chat_models
 
+    @property
+    def default_agent_id(self) -> str:
+        """返回当前可用的默认 Agent 标识。"""
+        return self._resolve_default_agent_id()
+
     async def switch_model(self, session: Session | str, model: str) -> Session:
         """校验并持久化 Session 的模型绑定，仅影响后续新 Run。"""
         if model not in self._chat_models:
             raise ValueError(f"模型不存在或未启用: {model}")
-        if isinstance(session, str):
-            loaded = await self._session_manager.load(session)
+        session_id = session if isinstance(session, str) else session.id
+        async with self._coordinator.edit_session(session_id):
+            loaded = await self._session_manager.load(session_id)
             if loaded is None:
-                raise ValueError(f"Session 不存在: {session}")
-            session = loaded
-        self._require_identity(session)
-        if session.model == model:
-            return session
-        session.model = model
-        await self._session_manager.save(session)
-        return session
+                raise LookupError(f"Session 不存在: {session_id}")
+            self._require_identity(loaded)
+            if loaded.model != model:
+                loaded.model = model
+                await self._session_manager.save(loaded)
+            return loaded
 
     # ── 提交与控制 ──
 
@@ -142,12 +172,7 @@ class SessionInteractionService:
         （见 ``submit_prepared``），避免入口持有的旧对象遗漏上一轮成功投影。
         """
         session_id: str = session if isinstance(session, str) else session.id
-        initial_session: Session | None = await self._session_manager.load(session_id)
-        if initial_session is None:
-            raise UnknownIdentityError(f"Session 不存在: {session_id}")
-        # 保留入口快速拒绝契约；租约内仍会再次校验，防止两次读取之间绑定发生变化。
-        self._require_identity(initial_session)
-
+        # 文件读取也属于会话租约，避免 Windows 上读取句柄与完整目录删除相撞。
         async def _make_request() -> RunRequest:
             latest_session: Session | None = await self._session_manager.load(session_id)
             if latest_session is None:
@@ -174,17 +199,73 @@ class SessionInteractionService:
         """将取消请求交由运行协调器处理。"""
         await self._coordinator.cancel(run_id, reason)
 
+    async def cancel_session(self, session_id: str, reason: str) -> str | None:
+        """按 Session 取消唯一活动 Run，并返回其标识。
+
+        GUI 只持有当前 Session，不应读取 Runtime 私有仓储或猜测 ``run_id``。
+        当前 Session 串行契约要求最多存在一个活动 Run；若持久化事实违反该
+        不变量则明确失败，避免取消错误目标。
+        """
+        if self._run_repository is None:
+            raise RuntimeError("按 Session 取消需要运行仓储")
+        active_runs = await self._run_repository.list_active_runs(session_id)
+        if not active_runs:
+            return None
+        if len(active_runs) != 1:
+            raise RuntimeError(f"Session {session_id} 存在多个活动 Run，拒绝猜测取消目标")
+        run_id: str = active_runs[0].run_id
+        await self.cancel(run_id, reason)
+        return run_id
+
     async def resume_run(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
         """恢复未结束 Run，并返回结构化结果；透传运行级输出端口。"""
         return await self._coordinator.resume_run(run_id, output_port)
 
-    async def abandon_run(self, run_id: str) -> RunResult:
+    async def abandon_run(self, run_id: str, *, only_recoverable: bool = False) -> RunResult:
         """显式放弃未结束 Run，并返回结构化结果。"""
-        return await self._coordinator.abandon_run(run_id)
+        return await self._coordinator.abandon_run(run_id, only_recoverable=only_recoverable)
+
+    async def get_run(self, session_id: str, run_id: str | None = None) -> AgentRun | None:
+        """读取指定运行；未给标识时返回该 Session 的唯一活动运行。"""
+        if self._run_repository is None:
+            return None
+        if run_id is None:
+            active_runs = await self._run_repository.list_active_runs(session_id)
+            if len(active_runs) > 1:
+                raise RuntimeError(f"Session {session_id} 存在多个活动 Run")
+            return active_runs[0] if active_runs else None
+        run = await self._run_repository.load_run(session_id, run_id)
+        return run if run is not None and run.session_id == session_id else None
+
+    async def get_run_by_id(self, run_id: str) -> AgentRun | None:
+        """跨 Session 定位运行，供控制结果恢复所属会话。"""
+        if self._run_repository is None:
+            return None
+        return await self._run_repository.find_run(run_id)
+
+    async def get_run_evidence(
+        self, session_id: str, run_id: str,
+    ) -> tuple[tuple[RunEvent, ...], tuple[RunMessage, ...]]:
+        """读取工具过程展示所需的权威事件与运行消息。"""
+        if self._run_repository is None:
+            return (), ()
+        return (
+            await self._run_repository.load_events(session_id, run_id),
+            await self._run_repository.load_messages(session_id, run_id),
+        )
+
+    async def is_session_executing(self, session_id: str) -> bool:
+        """判断运行是否仍由当前进程执行，用于区分运行中与可恢复。"""
+        return await self._coordinator.is_session_executing(session_id)
 
     # ── 删除协调 ──
 
     async def delete_session(self, session_id: str) -> None:
+        """与提交共用租约，租约内确认活动状态后完成清理。"""
+        async with self._coordinator.edit_session(session_id):
+            await self._delete_session_locked(session_id)
+
+    async def _delete_session_locked(self, session_id: str) -> None:
         """应用级 Session 删除协调流程（开发计划阶段 5 + 总体设计 §5.2）。
 
         删除是应用级流程，不是只删单个 JSON 文件：

@@ -6,7 +6,7 @@ import types
 
 import pytest
 
-import dotclaw.channel.cli as cli_module
+import dotclaw.channel.cli.terminal as cli_module
 from dotclaw.channel.cli import CLIChannel
 
 

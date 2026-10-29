@@ -18,19 +18,26 @@ from ..domain.facts import (
 from .context_budget import TokenCountRequest, TokenCountResult
 from .context_compaction import ContextCompactionRequest, ContextCompactionResult
 from .history_compaction import HistoryCompactionRequest, HistoryCompactionResult
-from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, LLMOutputEvent, RunRequest, ToolInvocation, ToolResult
+from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, LLMOutputEvent, RunAcceptedEvent, RunRequest, ToolInvocation, ToolResult
 
 
 class LLMUnavailableError(RuntimeError):
     """业务模型代理重试耗尽后的可恢复外部错误。"""
 
 
+class InvalidLLMResponseError(RuntimeError):
+    """模型正常结束却既无有效正文也无工具调用，不支持原检查点恢复。"""
+
+
 class LLMOutputPort(Protocol):
-    """接收一次 LLM 调用产生的有序增量输出事件的应用协议。
+    """承载运行接收确认与模型有序增量的应用协议。
 
     事件按语义分为 reasoning 与 response（见 ``LLMOutputEvent``）；入口层
     据此决定如何分区展示，但本端口不关心展示细节。
     """
+
+    async def on_run_accepted(self, event: RunAcceptedEvent) -> None:
+        """通知新运行已经持久化；不是终态，也不代表供应商已接收请求。"""
 
     async def emit(self, event: LLMOutputEvent) -> None:
         """输出一条语义化增量事件（reasoning 或 response）。"""

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import types
+from unittest.mock import Mock
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from dotclaw.bootstrap.session_interaction import (
 )
 from dotclaw.orchestration.registry import AgentRegistry
 from dotclaw.session.session import SessionManager
+from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator, RuntimeControlPort
 
 
 @pytest.fixture
@@ -43,7 +45,7 @@ def _build_service(
     return SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
-        coordinator=coordinator,
+        coordinator=coordinator or SessionRunCoordinator(Mock(spec=RuntimeControlPort)),
         preferred_model="test-model",
         chat_models=("test-model", "other-model"),
     )
@@ -112,8 +114,8 @@ async def test_switch_model_updates_session_and_persists(
 
     switched = await service.switch_model(session, "other-model")
 
-    assert switched is session
-    assert session.model == "other-model"
+    assert switched.id == session.id
+    assert switched.model == "other-model"
     reloaded = await session_manager.load(session.id)
     assert reloaded is not None and reloaded.model == "other-model"
 

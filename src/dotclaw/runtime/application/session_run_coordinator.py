@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Protocol
 
 from ..domain.facts import AgentRun, RunError, RunErrorCode
@@ -53,6 +54,14 @@ class RuntimeControlPort(RuntimeExecutionPort, Protocol):
         """显式放弃未结束 Run。"""
 
 
+class SessionBusyError(ValueError):
+    """会话执行租约已被占用，编辑操作不得排队覆盖运行结果。"""
+
+
+class RunNotRecoverableError(ValueError):
+    """目标不是当前可恢复运行，拒绝严格放弃。"""
+
+
 class SessionRunCoordinator:
     """同一 Session FIFO、不同 Session 可并行的轻量租约协调器。"""
 
@@ -61,6 +70,20 @@ class SessionRunCoordinator:
         self._engine: RuntimeControlPort = engine
         self._locks: dict[str, asyncio.Lock] = {}
         self._locks_guard: asyncio.Lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def edit_session(self, session_id: str) -> AsyncIterator[None]:
+        """在执行租约内编辑会话元数据，运行中立即拒绝而不排队等待。"""
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        if lock.locked():
+            raise SessionBusyError("会话正在运行，请结束后再修改")
+        async with lock:
+            yield
+
+    async def is_session_executing(self, session_id: str) -> bool:
+        """判断当前进程是否正持有 Session 执行租约。"""
+        lock: asyncio.Lock = await self._get_lock(session_id)
+        return lock.locked()
 
     async def submit(self, request: RunRequest, output_port: LLMOutputPort | None = None) -> RunResult:
         """按 Session 获取 FIFO 租约后执行请求；output_port 为本提交运行级端口。"""
@@ -124,13 +147,21 @@ class SessionRunCoordinator:
         async with lock:
             return await self._engine.resume_run(run_id, output_port)
 
-    async def abandon_run(self, run_id: str) -> RunResult:
+    async def abandon_run(self, run_id: str, *, only_recoverable: bool = False) -> RunResult:
         """在所属 Session 锁内显式放弃未结束 Run。"""
         session_id: str | None = await self._engine.get_run_session_id(run_id)
         if session_id is None:
+            if only_recoverable:
+                raise RunNotRecoverableError("运行不存在或不可恢复")
             return await self._engine.abandon_run(run_id)
         lock: asyncio.Lock = await self._get_lock(session_id)
+        if only_recoverable and lock.locked():
+            raise SessionBusyError("会话正在运行，不能放弃")
         async with lock:
+            if only_recoverable:
+                active = await self._engine.active_run(session_id)
+                if active is None or active.run_id != run_id or active.state.is_ended() or active.state.is_waiting_approval() or active.state.is_waiting_delegation():
+                    raise RunNotRecoverableError("只能放弃当前可恢复运行")
             return await self._engine.abandon_run(run_id)
 
     async def _prepare_new_request(self, session_id: str) -> RunResult | None:

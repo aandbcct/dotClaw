@@ -51,6 +51,7 @@ class RunErrorCode(StrEnum):
     """运行失败的标准化错误类别。"""
 
     LLM_FAILURE = "llm_failure"
+    EMPTY_MODEL_RESPONSE = "empty_model_response"
     TOOL_FAILURE = "tool_failure"
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"

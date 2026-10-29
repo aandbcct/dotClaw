@@ -124,7 +124,7 @@ flowchart TB
 | 组件 | 核心代码 | 核心对象 | 职责 |
 |---|---|---|---|
 | 通道契约 | `channel/base.py` | `Channel` | 定义 `receive`、`send`、`stream`、`ask_user` 和展示接口 |
-| CLI 通道实现 | `channel/cli.py` | `CLIChannel` | 使用 Rich 实现命令行输入、Markdown 输出和流式渲染 |
+| CLI 通道实现 | `channel/cli/channel.py` | `CLIChannel` | 使用 Rich 实现命令行输入、Markdown 输出和流式渲染 |
 | Runtime 输出适配 | `channel/runtime_text_stream.py` | `ChannelTextStreamAdapter` | 将 Runtime 的 `TextStreamPort.emit` 转发到当前 Channel |
 | 结果与审批渲染 | 当前位于 `main.py` | `_render_result`、`_resolve_pending_approvals` | 将结构化 `RunResult` 呈现给用户，并把审批选择提交给应用服务 |
 

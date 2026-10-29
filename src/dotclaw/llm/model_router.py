@@ -54,6 +54,11 @@ class ModelRouter:
     # 公共 API
     # ============================================================
 
+    @property
+    def config(self) -> RouterConfig:
+        """返回当前已校验的路由配置，供诊断界面只读展示。"""
+        return self._config
+
     def preferred_model(self, purpose: str = "chat") -> str:
         """返回指定用途静态优先级最高的 active 模型。"""
         models = self.models_for_purpose(purpose)

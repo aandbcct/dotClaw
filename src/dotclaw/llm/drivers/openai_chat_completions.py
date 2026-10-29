@@ -22,6 +22,8 @@ from typing import Any, AsyncIterator, Iterator
 import httpx
 from openai import AsyncOpenAI
 
+from ...common.logging_setup import exception_diagnostic
+
 from ..base import (
     ChatChunk,
     ChatTextDelta,
@@ -48,7 +50,8 @@ class _StreamParseState:
 
     def __init__(self) -> None:
         self.pending_tool_calls: dict[int, dict] = {}  # index → {id, name, arguments}
-        self.finish_reason: str = "stop"
+        self.finish_reason: str | None = None
+        self.usage: TokenUsage | None = None
         self.input_tokens: int = 0
         self.output_tokens: int = 0
 
@@ -202,12 +205,17 @@ class OpenAIChatCompletionsClient(LLMClient):
                 else None
             )
             try:
+                stream_exhausted = False
                 # usage-only 空包不能解除首包等待；首个可交付 ChatChunk 才算首包到达。
                 async with asyncio.timeout(
                     request_timeout * self._FIRST_CHUNK_TIMEOUT_RATIO
                 ):
                     while True:
-                        chunk = await anext(response)
+                        try:
+                            chunk = await anext(response)
+                        except StopAsyncIteration:
+                            stream_exhausted = True
+                            break
                         emitted = False
                         for sub in self._parse_response_chunk(
                             chunk,
@@ -219,7 +227,7 @@ class OpenAIChatCompletionsClient(LLMClient):
                             yield sub
                         if emitted:
                             break
-                while True:
+                while not stream_exhausted:
                     try:
                         chunk = await asyncio.wait_for(
                             anext(response),
@@ -238,23 +246,9 @@ class OpenAIChatCompletionsClient(LLMClient):
                 if parser is not None:
                     for delta in parser.flush():
                         yield ChatChunk(text_deltas=(delta,))
-                # 统一 yield 最终的结束包（携带 token 用量与结束原因，作为平行字段）
-                yield ChatChunk(
-                    finish_reason=state.finish_reason,
-                    usage=TokenUsage(
-                        input_tokens=state.input_tokens,
-                        output_tokens=state.output_tokens,
-                    ),
-                )
-            except StopAsyncIteration:
-                # 空流也是合法完成，仍返回最终用量包以保持既有统一契约。
-                yield ChatChunk(
-                    finish_reason=state.finish_reason,
-                    usage=TokenUsage(
-                        input_tokens=state.input_tokens,
-                        output_tokens=state.output_tokens,
-                    ),
-                )
+                # 仅投影真实结束信息，完全空流由代理统一判定无效。
+                if state.finish_reason is not None or state.usage is not None:
+                    yield ChatChunk(finish_reason=state.finish_reason, usage=state.usage)
             finally:
                 await self._close_stream(stream_response)
         else:
@@ -271,12 +265,15 @@ class OpenAIChatCompletionsClient(LLMClient):
             else:
                 deltas = self._extract_text_deltas(content, reasoning_content, None)
             usage = getattr(response, "usage", None)
-            in_tok = usage.prompt_tokens if usage else 0
-            out_tok = usage.completion_tokens if usage else 0
+            tool_calls = tuple(
+                ToolCall(call.id, wire_to_tool_name.get(call.function.name, call.function.name), call.function.arguments)
+                for call in (getattr(message, "tool_calls", None) or ())
+            )
             yield ChatChunk(
                 text_deltas=tuple(deltas),
-                finish_reason="stop",
-                usage=TokenUsage(input_tokens=in_tok, output_tokens=out_tok),
+                tool_calls=tool_calls,
+                finish_reason=getattr(choice, "finish_reason", None),
+                usage=TokenUsage(usage.prompt_tokens or 0, usage.completion_tokens or 0) if usage is not None else None,
             )
 
     def _resolve_timeout_seconds(self, timeout_seconds: float | None) -> float:
@@ -298,6 +295,7 @@ class OpenAIChatCompletionsClient(LLMClient):
         if getattr(chunk, "usage", None):
             state.input_tokens = chunk.usage.prompt_tokens or 0
             state.output_tokens = chunk.usage.completion_tokens or 0
+            state.usage = TokenUsage(state.input_tokens, state.output_tokens)
         yield from self._parse_stream_chunk(
             chunk,
             state,
@@ -314,8 +312,8 @@ class OpenAIChatCompletionsClient(LLMClient):
             result = close()
             if inspect.isawaitable(result):
                 await result
-        except Exception:
-            logging.getLogger("dotclaw.llm").warning("关闭 LLM SDK stream 失败", exc_info=True)
+        except Exception as error:
+            logging.getLogger("dotclaw.llm").warning("关闭 LLM SDK stream 失败 diagnostic=%s", exception_diagnostic(error))
 
     # ---- 消息格式转换 ----
 

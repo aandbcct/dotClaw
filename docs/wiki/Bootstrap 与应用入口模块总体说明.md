@@ -8,6 +8,8 @@
 
 **快速导航**
 
+> **2026-10-23 `feat/gui` 补充：** 下文保留上述 master 扫描基准。当前分支的 `SessionInteractionService`（会话交互服务）在切模型和完整删除时使用会话编辑租约，重读后执行业务操作；普通提交在运行租约内准备会话，避免与删除竞态。Web 层负责参数/响应转换，未直接操作会话文件；设置读取、工具/技能开关和 MCP 重连复用现有模块。详见[前端实施与验收记录](../Development/gui/前端与ChatGPT差距及补齐建议.md#9-实施结果与验收记录2026-10-23)，不要把历史 master 文档当作当前 GUI 路由清单。
+
 | 需要回答的问题 | 阅读位置 |
 |---|---|
 | Bootstrap 为什么存在、与 Runtime/CLI 如何分工 | 第 1～2 节 |
@@ -2374,7 +2376,9 @@ src/dotclaw/
 |---|---|
 | `main.py` | 命令入口、CLI 循环、审批和结果展示 |
 | `channel/base.py` | 通用 Channel 输入输出协议 |
-| `channel/cli.py` | Rich CLI 实现 |
+| `channel/cli/channel.py` | Rich CLI 交互实现 |
+| `channel/cli/banner.py` | Rich CLI 横幅与样式 |
+| `channel/web/` | FastAPI HTTP/SSE 交互适配 |
 | `channel/runtime_llm_output.py` | Runtime LLMOutputPort 到 Channel 的运行级适配 |
 
 ### 9.4 配置与 Identity

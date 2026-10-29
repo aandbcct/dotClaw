@@ -97,7 +97,8 @@ def _fake_config(session_dir: str) -> types.SimpleNamespace:
     session = types.SimpleNamespace(directory=session_dir)
     memory = None
     llm = types.SimpleNamespace()
-    return types.SimpleNamespace(session=session, skills=skills, tools=tools, memory=memory, llm=llm)
+    debug = types.SimpleNamespace(level="INFO", log_file="logs/test.log")
+    return types.SimpleNamespace(session=session, skills=skills, tools=tools, memory=memory, llm=llm, debug=debug)
 
 
 def _patch_registry(identities: list[AgentIdentity]):

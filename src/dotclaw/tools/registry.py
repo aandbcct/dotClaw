@@ -35,6 +35,7 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._handlers: dict[str, ToolHandler] = {}
+        self._disabled: set[str] = set()
 
     def register(self, handler: ToolHandler) -> None:
         """注册工具。同名冲突必须使初始化失败，绝不静默覆盖。"""
@@ -58,6 +59,8 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolHandler | None:
         """按名称获取工具 Handler。"""
+        if name in self._disabled:
+            return None
         return self._handlers.get(name)
 
     def get_definitions(self) -> list[ToolDefinition]:
@@ -70,7 +73,29 @@ class ToolRegistry:
         每个定义都是深拷贝；后续对 Registry 的增删或原 Handler 的修改都不会
         影响已取出的快照，满足 Run 级快照隔离需求（总体设计 §9）。
         """
-        return tuple(copy.deepcopy(h.definition()) for h in self._handlers.values())
+        return tuple(
+            copy.deepcopy(handler.definition())
+            for name, handler in self._handlers.items()
+            if name not in self._disabled
+        )
+
+    def catalog_snapshot(self) -> tuple[ToolDefinition, ...]:
+        """返回包含已停用工具的完整定义快照。"""
+        return tuple(copy.deepcopy(handler.definition()) for handler in self._handlers.values())
+
+    def set_enabled(self, name: str, enabled: bool) -> bool:
+        """切换已注册工具是否进入后续运行快照。"""
+        if name not in self._handlers:
+            return False
+        if enabled:
+            self._disabled.discard(name)
+        else:
+            self._disabled.add(name)
+        return True
+
+    def is_enabled(self, name: str) -> bool:
+        """返回工具是否已注册且当前启用。"""
+        return name in self._handlers and name not in self._disabled
 
     def list_by_source(self, source: ToolSource) -> list[ToolHandler]:
         """按来源列举工具 Handler。"""
@@ -85,3 +110,4 @@ class ToolRegistry:
     def clear(self) -> None:
         """清空注册表（主要用于测试）。"""
         self._handlers.clear()
+        self._disabled.clear()

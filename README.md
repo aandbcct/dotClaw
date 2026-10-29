@@ -513,6 +513,26 @@ dotclaw --hide-thinking
 
 ---
 
+### 4. 启动本地 Web 工作区（feat/gui）
+
+已安装项目及 `gui` 可选依赖后，在仓库根目录打开两个 PowerShell 终端：
+
+```powershell
+# 终端一：只监听本机 8765。
+.venv\Scripts\python.exe -c "from dotclaw.channel.web.app import main; main()"
+```
+
+```powershell
+# 终端二：Vite 将 /api 代理至 8765。
+Set-Location frontend
+npm install
+npm run dev
+```
+
+访问 `http://127.0.0.1:5173/`。首次发送才创建会话，支持切换已配置模型、搜索历史、逐轮执行详情、Markdown 导出和本机置顶。设置中模型/运行参数只读，已有工具/技能开关与 MCP 重连可用。刷新运行中的页面只恢复状态及最终结果，不重放逐字增量。
+
+实施范围、测试、前后截图及限制见[前端补齐与视觉改造开发说明](docs/Development/gui/前端与ChatGPT差距及补齐建议.md#9-实施结果与验收记录2026-10-23)。当前入口面向本地使用。
+
 ## CLI 命令
 
 | 命令 | 作用 |

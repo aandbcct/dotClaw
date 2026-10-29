@@ -7,7 +7,7 @@ import asyncio
 from rich.console import Console
 from rich.markdown import Markdown
 
-from .base import Channel
+from ..base import Channel
 
 
 console = Console()

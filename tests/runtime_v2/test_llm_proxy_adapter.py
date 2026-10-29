@@ -10,7 +10,7 @@ import pytest
 from dotclaw.llm.base import ChatChunk, ChatTextDelta, TextDeltaKind, TokenUsage, ToolCall as LegacyToolCall
 from dotclaw.llm.proxy import LLMProxy
 from dotclaw.runtime.adapters import LLMProxyAdapter
-from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, LLMOutputEvent, LLMOutputKind, ToolDefinition
+from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, LLMOutputEvent, LLMOutputKind, RunAcceptedEvent, ToolDefinition
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
@@ -57,6 +57,11 @@ class CollectingLLMOutputPort:
 
     def __init__(self) -> None:
         self.events: list[LLMOutputEvent] = []
+        self.accepted: list[RunAcceptedEvent] = []
+
+    async def on_run_accepted(self, event: RunAcceptedEvent) -> None:
+        """将接收确认与文本增量分别保存。"""
+        self.accepted.append(event)
 
     async def emit(self, event: LLMOutputEvent) -> None:
         """记录转发的增量事件。"""
@@ -201,7 +206,7 @@ class ParameterRecordingClient:
     ) -> AsyncIterator[ChatChunk]:
         self.timeout_seconds = timeout_seconds
         self.retry_count = retry_count
-        yield ChatChunk(finish_reason="stop", usage=TokenUsage(1, 1))
+        yield ChatChunk(text_deltas=(ChatTextDelta(TextDeltaKind.RESPONSE, "正常回答"),), finish_reason="stop", usage=TokenUsage(1, 1))
 
 
 class ParameterRecordingRouter:

@@ -1,0 +1,402 @@
+{
+  "capturedAt": "2026-10-23T01:10:20.106Z",
+  "results": [
+    {
+      "file": "chat-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-tools-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "execution-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "search-empty-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "new-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-detail-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "model-error-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "generating-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "chat-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-tools-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "execution-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "search-empty-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "new-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-detail-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "model-error-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "generating-1440-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "chat-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-tools-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "execution-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "search-empty-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "new-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-detail-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "model-error-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "generating-1280-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "chat-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-tools-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "execution-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "search-empty-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "new-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-detail-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "model-error-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "generating-1280-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "chat-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-tools-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "execution-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "search-empty-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "new-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-detail-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "model-error-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "generating-390-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "chat-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "settings-tools-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "execution-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "search-empty-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "new-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "approval-detail-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "model-error-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "generating-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "zoom-equivalent-200-percent.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "reading-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "image-preview-1440-light.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "reading-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    },
+    {
+      "file": "image-preview-390-dark.png",
+      "overflow": false,
+      "dialogOverflow": false,
+      "inputVisible": true
+    }
+  ],
+  "workflow": "passed",
+  "keyboard": "passed",
+  "realProviderCalls": 0,
+  "limitations": [
+    "手机软键盘与真实中文输入法候选窗需要真机验收",
+    "200% 使用等效 CSS 视口，不代表真实浏览器缩放手势"
+  ]
+}

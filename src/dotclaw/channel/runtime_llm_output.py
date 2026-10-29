@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..runtime.application.dto import LLMOutputEvent, LLMOutputKind
+from ..runtime.application.dto import LLMOutputEvent, LLMOutputKind, RunAcceptedEvent
 from ..runtime.application.ports import LLMOutputPort
 from .base import Channel
 
@@ -24,6 +24,9 @@ class ChannelLLMOutputAdapter:
         self._show_reasoning: bool = show_reasoning
         # 每个运行单独记忆上次展示语义，避免不同 Run 的标题状态互相污染。
         self._last_kind: dict[str, LLMOutputKind | None] = {}
+
+    async def on_run_accepted(self, event: RunAcceptedEvent) -> None:
+        """CLI 保持原有展示，不额外打印运行接收确认。"""
 
     async def emit(self, event: LLMOutputEvent) -> None:
         """按语义分区转发增量；空文本不展示、不打标题。
