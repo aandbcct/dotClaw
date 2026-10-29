@@ -45,6 +45,8 @@ class WebErrorCode(StrEnum):
     SESSION_CREATION_FAILED = "session_creation_failed"
     SESSION_NOT_FOUND = "session_not_found"
     NO_ACTIVE_RUN = "no_active_run"
+    RUN_NOT_FOUND = "run_not_found"
+    RUN_NOT_RECOVERABLE = "run_not_recoverable"
     SESSION_BUSY = "session_busy"
     INTERNAL_ERROR = "internal_error"
 
@@ -321,6 +323,7 @@ class RunActivityResponse(BaseModel):
     run_id: str
     status: str
     approval_id: str | None = None
+    approval_call_id: str | None = None
     child_run_id: str | None = None
     tools: list[ToolExecutionResponse]
     error: RunError | None = None

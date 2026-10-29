@@ -108,14 +108,14 @@ it("待审批入口显式展示，展开参数后才能决定并继续消费恢�
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.endsWith("/sessions")) return json([a]);
-    if (url.includes("/activity")) return json({ run_id: "ra", status: resolved ? "cancelled" : "waiting_approval", approval_id: "approve-a", child_run_id: null, tools: [{ call_id: "c", name: "write", status: "approval_required", arguments: { path: "demo.txt" }, result: "", error: "", started_at: "", completed_at: "" }] });
+    if (url.includes("/activity")) return json({ run_id: "ra", status: resolved ? "cancelled" : "waiting_approval", approval_id: "approve-a", approval_call_id: "c", child_run_id: null, tools: [{ call_id: "c", name: "write", status: "approval_required", arguments: { path: "demo.txt" }, result: "", error: "", started_at: "", completed_at: "" }] });
     if (url.includes("/approvals/")) { resolved = true; return sse(block("run.cancelled", { run_id: "ra" })); }
     return json({ ...a, messages: [] });
   }));
   const user = userEvent.setup(); render(<App />);
   await screen.findByRole("group", { name: "工具审批" });
   await user.click(screen.getByText("参数", { selector: "summary" }));
-  expect(screen.getByText(/demo.txt/)).toBeTruthy();
+  expect(screen.getAllByText(/demo.txt/).length).toBeGreaterThan(0);
   await user.click(screen.getByRole("button", { name: "批准并继续" }));
   await waitFor(() => expect(screen.queryByRole("button", { name: "批准并继续" })).toBeNull());
   expect(resolved).toBe(true);

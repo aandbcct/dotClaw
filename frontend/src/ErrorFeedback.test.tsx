@@ -401,3 +401,93 @@ it.each(["completed", "failed"])("迟到快照不能回退已确认 %s，未闭�
   expect(result.current.views.a.messages[1]).toMatchObject({ reasoning: "真实思考", execution: { stage: outcome } });
   if (outcome === "failed") expect(result.current.views.a.messages[1].execution?.error).toEqual(emptyError);
 });
+
+it("放弃仅提交一次，互斥本会话操作，其他会话可发送，成功保留原消息过程并释放发送", async () => {
+  const existing = { run_id: "r", status: "recoverable", tools: [], steps: [modelStep(1, "interrupted")], event_sequence: 2 };
+  let resolveAbandon: (value: Response) => void = () => undefined;
+  const mock = setup((url) => {
+    if (url.endsWith("/abandon")) return new Promise<Response>((resolve) => { resolveAbandon = resolve; });
+    if (url.endsWith("/messages")) return sse(event("run.cancelled", { run_id: url.includes("/b/") ? "b-r" : "new-r" }));
+    if (url.includes("/b/activity")) return json(null);
+    if (url.includes("/activity")) return json(existing);
+    return undefined;
+  });
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.views.a?.phase).toBe("recoverable"));
+  const messageId = result.current.views.a.activeMessageId!;
+  await act(async () => { result.current.patch("a", (view) => ({ ...view, messages: view.messages.map((message) => ({ ...message, reasoning: "保留的真实思考", content: "已有正文" })) })); });
+  let abandoning: Promise<void>;
+  const resumed = vi.fn();
+  await act(async () => { abandoning = result.current.abandon("a", messageId, "r"); });
+  expect(result.current.views.a.abandoningRunId).toBe("r");
+  expect(result.current.views.a.messages[0].execution?.stage).toBe("recoverable");
+  await act(async () => { await result.current.abandon("a", messageId, "r"); await result.current.control("a", messageId, "r", resumed); await result.current.send("a", "不得并发"); await result.current.open(b); await result.current.send("b", "B 可以发送"); });
+  expect(resumed).not.toHaveBeenCalled();
+  await act(async () => { resolveAbandon(json({ ...existing, status: "abandoned", error: { code: "cancelled", message: "用户放弃运行" } })); await abandoning; });
+  expect(result.current.views.a).toMatchObject({ phase: "cancelled", abandoningRunId: null, error: "", detached: false });
+  expect(result.current.views.a.messages).toHaveLength(1);
+  expect(result.current.views.a.messages[0]).toMatchObject({ id: messageId, content: "已有正文", reasoning: "保留的真实思考", execution: { stage: "abandoned", error: null } });
+  expect(result.current.views.a.activitiesByRunId.r.steps).toHaveLength(1);
+  expect(result.current.selectedId).toBe("b");
+  expect(mock.mock.calls.filter(([url]) => String(url).endsWith("/abandon"))).toHaveLength(1);
+  expect(mock.mock.calls.filter(([url]) => String(url).includes("/a/messages"))).toHaveLength(0);
+  await act(async () => { await result.current.send("a", "新问题"); });
+  expect(result.current.views.a.messages).toHaveLength(3);
+  expect(result.current.views.a.messages[0].execution?.stage).toBe("abandoned");
+});
+
+it.each(["conflict", "network", "http500"])("放弃 %s 后仅查询同一运行，不自动重发，未知结果不标为模型失败", async (mode) => {
+  let queried = false;
+  const mock = setup((url) => {
+    if (url.endsWith("/abandon")) { queried = true; return mode === "conflict" ? json({ error: { code: "run_not_recoverable", message: "运行状态已变化" } }, 409) : mode === "http500" ? new Response("error", { status: 500 }) : Promise.reject(new Error("网络中断")); }
+    if (url.includes("/activity")) return json({ run_id: "r", status: queried ? "abandoned" : "recoverable", tools: [], error: queried ? { code: "cancelled", message: "用户放弃" } : null });
+    return undefined;
+  });
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.views.a?.phase).toBe("recoverable"));
+  const messageId = result.current.views.a.activeMessageId!;
+  await act(async () => { await result.current.abandon("a", messageId, "r"); });
+  expect(result.current.views.a.messages).toHaveLength(1);
+  expect(result.current.views.a.messages[0].execution).toMatchObject({ stage: "abandoned", error: null });
+  expect(result.current.views.a.abandoningRunId).toBeNull();
+  expect(mock.mock.calls.filter(([url]) => String(url).endsWith("/abandon"))).toHaveLength(1);
+  expect(mock.mock.calls.some(([url]) => String(url).includes("activity?run_id=r"))).toBe(true);
+});
+
+it("放弃与查询均断开时保留待确认提示、原消息和可恢复状态，不产生新请求", async () => {
+  let failed = false;
+  const mock = setup((url) => {
+    if (url.endsWith("/abandon")) { failed = true; return Promise.reject(new Error("连接丢失")); }
+    if (url.includes("/activity")) return failed ? Promise.reject(new Error("查询断开")) : json({ run_id: "r", status: "recoverable", tools: [] });
+    return undefined;
+  });
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.views.a?.phase).toBe("recoverable"));
+  const messageId = result.current.views.a.activeMessageId!;
+  await act(async () => { await result.current.abandon("a", messageId, "r"); });
+  expect(result.current.views.a).toMatchObject({ phase: "recoverable", abandoningRunId: null });
+  expect(result.current.views.a.messages[0].execution?.statusError).toContain("放弃结果待确认");
+  expect(result.current.views.a.messages[0].execution?.statusError).toContain("状态查询失败");
+  expect(mock.mock.calls.filter(([url]) => String(url).endsWith("/abandon"))).toHaveLength(1);
+});
+
+it("活动审批关联字段只允许字符串或 null", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => json({ run_id: "r", status: "waiting_approval", tools: [], approval_call_id: 123 })));
+  await expect(getRunActivity("a", "r")).rejects.toMatchObject({ code: "invalid_activity" });
+});
+
+it("放弃返回会话忙时按原 ID 查询执行状态，移除过期恢复入口", async () => {
+  let posted = false;
+  const mock = setup((url) => {
+    if (url.endsWith("/abandon")) { posted = true; return json({ error: { code: "session_busy", message: "会话正在执行" } }, 409); }
+    if (url.includes("/activity")) return json({ run_id: "r", status: posted ? "running" : "recoverable", tools: [] });
+    return undefined;
+  });
+  const { result } = renderHook(useSessionWorkspace);
+  await waitFor(() => expect(result.current.views.a?.phase).toBe("recoverable"));
+  await act(async () => { await result.current.abandon("a", result.current.views.a.activeMessageId!, "r"); });
+  expect(result.current.views.a).toMatchObject({ phase: "running", detached: true, abandoningRunId: null });
+  expect(result.current.views.a.activity?.status).toBe("running");
+  expect(result.current.views.a.messages[0].execution?.stage).toBe("unknown");
+  expect(mock.mock.calls.filter(([url]) => String(url).endsWith("/abandon"))).toHaveLength(1);
+});

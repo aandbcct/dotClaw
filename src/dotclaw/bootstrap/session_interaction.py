@@ -221,9 +221,9 @@ class SessionInteractionService:
         """恢复未结束 Run，并返回结构化结果；透传运行级输出端口。"""
         return await self._coordinator.resume_run(run_id, output_port)
 
-    async def abandon_run(self, run_id: str) -> RunResult:
+    async def abandon_run(self, run_id: str, *, only_recoverable: bool = False) -> RunResult:
         """显式放弃未结束 Run，并返回结构化结果。"""
-        return await self._coordinator.abandon_run(run_id)
+        return await self._coordinator.abandon_run(run_id, only_recoverable=only_recoverable)
 
     async def get_run(self, session_id: str, run_id: str | None = None) -> AgentRun | None:
         """读取指定运行；未给标识时返回该 Session 的唯一活动运行。"""

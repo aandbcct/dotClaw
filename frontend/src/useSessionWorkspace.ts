@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, cancelSession, getRunActivity, getSession, listSessions, submitMessage } from "./api";
+import { abandonRun, ApiError, cancelSession, getRunActivity, getSession, listSessions, submitMessage } from "./api";
 import { readPreference, writePreference } from "./preferences";
 import type { DisplayMessage, MessageExecution, RunAcceptedData, RunActivity, RunPhase, SessionSummary, StreamEvent } from "./types";
 
@@ -10,10 +10,11 @@ export interface ConversationView {
   submissionStage: "idle" | "sending" | "accepted" | "streaming";
   activeMessageId: string | null;
   activitiesByRunId: Record<string, RunActivity>;
+  abandoningRunId: string | null;
 }
-const emptyView = (): ConversationView => ({ messages: [], phase: "idle", activity: null, runId: null, error: "", loading: false, detached: false, errorCode: "", retryable: false, lastSubmittedText: "", statusError: "", submissionStage: "idle", activeMessageId: null, activitiesByRunId: {} });
+const emptyView = (): ConversationView => ({ messages: [], phase: "idle", activity: null, runId: null, error: "", loading: false, detached: false, errorCode: "", retryable: false, lastSubmittedText: "", statusError: "", submissionStage: "idle", activeMessageId: null, activitiesByRunId: {}, abandoningRunId: null });
 const newExecution = (submittedText = ""): MessageExecution => ({ stage: "processing", error: null, statusError: "", submittedText });
-const finalStages = new Set(["completed", "failed", "cancelled"]);
+const finalStages = new Set(["completed", "failed", "cancelled", "abandoned"]);
 
 /** 控制字段与当前消息在同一次状态替换中更新，旧消息不读取当前运行状态。 */
 function patchMessageExecution(view: ConversationView): ConversationView {
@@ -22,7 +23,8 @@ function patchMessageExecution(view: ConversationView): ConversationView {
     if (message.id !== view.activeMessageId) return message;
     const execution = message.execution || newExecution(view.lastSubmittedText);
     let stage = execution.stage;
-    if (view.detached) stage = "unknown";
+    if (view.activity?.status === "abandoned") stage = "abandoned";
+    else if (view.detached) stage = "unknown";
     else if (view.phase === "stopping") stage = "stopping";
     else if (view.phase === "suspended") stage = view.activity?.status === "waiting_delegation" ? "waiting_delegation" : "waiting_approval";
     else if (view.phase === "recoverable") stage = "recoverable";
@@ -30,7 +32,7 @@ function patchMessageExecution(view: ConversationView): ConversationView {
     else if (view.submissionStage === "sending") stage = "sending";
     else if (view.submissionStage === "accepted" && !["thinking", "responding", "tool_running"].includes(stage)) stage = "processing";
     return { ...message, run_ids: view.runId ? Array.from(new Set([...(message.run_ids || []), view.runId])) : message.run_ids,
-      execution: { ...execution, stage, error: view.error ? { code: view.errorCode, message: view.error, retryable: view.retryable } : null, statusError: view.statusError } };
+      execution: { ...execution, stage, error: stage === "abandoned" ? null : view.error ? { code: view.errorCode, message: view.error, retryable: view.retryable } : null, statusError: view.statusError } };
   }) };
 }
 const terminalEvents = new Set(["run.completed", "run.failed", "run.cancelled", "run.suspended", "stream.error"]);
@@ -142,7 +144,7 @@ export function useSessionWorkspace() {
     }
     if (activity.status === "running" && current.runId === activity.run_id && ["suspended", "recoverable"].includes(current.phase)) {
       // 只有显式控制入口会解除等待态，迟到的普通轮询不能撤销审批或恢复入口。
-      activity = { ...activity, status: current.activity?.status || cached?.status || "recoverable", approval_id: current.activity?.approval_id || null, child_run_id: current.activity?.child_run_id || null };
+      activity = { ...activity, status: current.activity?.status || cached?.status || "recoverable", approval_id: current.activity?.approval_id || null, approval_call_id: current.activity?.approval_call_id || null, child_run_id: current.activity?.child_run_id || null };
     }
     const acceptedActivity = activity;
     patch(id, (view) => ({ ...view, activitiesByRunId: { ...view.activitiesByRunId, [acceptedActivity.run_id]: acceptedActivity } }), false);
@@ -151,7 +153,7 @@ export function useSessionWorkspace() {
     // 新请求尚未取得运行标识时，最近活动运行可能属于其他请求，不能冒充确认。
     if (streams.current.has(id) && current?.submissionStage === "sending" && !current.runId) return;
     if (streams.current.has(id) && activity.status !== "running") return;
-    const resolvedError = activity.error ? { error: activity.error.message, errorCode: activity.error.code, retryable: activity.error.retryable === true }
+    const resolvedError = activity.status === "abandoned" ? { error: "", errorCode: "", retryable: false } : activity.error ? { error: activity.error.message, errorCode: activity.error.code, retryable: activity.error.retryable === true }
       : activity.status === "failed" ? { error: current?.error && !current.detached ? current.error : "运行失败，请查看执行记录", errorCode: current?.errorCode && !current.detached ? current.errorCode : "run_failed", retryable: current?.retryable || false }
       : current?.detached && activity.status !== "running" ? { error: "", errorCode: "", retryable: false } : {};
     let message = current.messages.find((item) => item.run_ids?.includes(activity.run_id));
@@ -258,7 +260,7 @@ export function useSessionWorkspace() {
     patch(id, (view) => {
       const prior = runId ? view.activitiesByRunId[runId] : null;
       const activity: RunActivity | null = runId && !unknown ? { ...prior, run_id: runId, tools: prior?.tools || [], status: phase === "suspended" ? field(event.data, "status") || "waiting_approval" : phase,
-        approval_id: field(event.data, "approval_id") || null, child_run_id: field(event.data, "child_run_id") || null,
+        approval_id: field(event.data, "approval_id") || null, approval_call_id: prior?.approval_id === field(event.data, "approval_id") ? prior.approval_call_id : null, child_run_id: field(event.data, "child_run_id") || null,
         error: phase === "failed" ? { code, message: message || "运行失败，请查看执行记录", retryable } : null } : view.activity;
       return {
       ...view, phase: unknown ? "running" : phase, detached: unknown, submissionStage: "idle", activity,
@@ -312,7 +314,7 @@ export function useSessionWorkspace() {
     }
   }
   async function send(id: string, content: string): Promise<void> {
-    if (activePhase(viewsRef.current[id]?.phase || "idle") || streams.current.has(id)) return;
+    if (activePhase(viewsRef.current[id]?.phase || "idle") || streams.current.has(id) || viewsRef.current[id]?.abandoningRunId) return;
     revisions.current.set(id, (revisions.current.get(id) || 0) + 1);
     const createdAt = new Date().toISOString();
     const messageId = `local-assistant-${crypto.randomUUID()}`;
@@ -325,7 +327,7 @@ export function useSessionWorkspace() {
     await runStream(id, messageId, (callback, signal) => submitMessage(id, content, callback, signal));
   }
   async function control(id: string, targetMessageId: string, runId: string, operation: (callback: (event: StreamEvent) => void, signal: AbortSignal) => Promise<void>): Promise<void> {
-    if (streams.current.has(id) || viewsRef.current[id]?.runId !== runId || !["suspended", "recoverable"].includes(viewsRef.current[id]?.phase)) return;
+    if (streams.current.has(id) || viewsRef.current[id]?.abandoningRunId || viewsRef.current[id]?.runId !== runId || !["suspended", "recoverable"].includes(viewsRef.current[id]?.phase)) return;
     revisions.current.set(id, (revisions.current.get(id) || 0) + 1);
     const messages = viewsRef.current[id]?.messages || [];
     const messageId = (messages.find((message) => message.id === targetMessageId && message.run_ids?.includes(runId)) || messages.find((message) => message.role === "assistant" && message.run_ids?.includes(runId)))?.id || `local-run-${runId}`;
@@ -351,6 +353,32 @@ export function useSessionWorkspace() {
   async function loadRunActivity(id: string, runId: string): Promise<void> {
     await readActivity(id, runId, true);
   }
+  async function abandon(id: string, messageId: string, runId: string): Promise<void> {
+    const view = viewsRef.current[id];
+    if (!view || view.abandoningRunId || streams.current.has(id) || view.runId !== runId || view.activeMessageId !== messageId || view.activity?.status !== "recoverable" || !view.messages.some((message) => message.id === messageId && message.run_ids?.includes(runId))) return;
+    // 忙标记先同步落入引用，连续点击和同会话恢复不能越过此边界。
+    revisions.current.set(id, (revisions.current.get(id) || 0) + 1);
+    patch(id, { abandoningRunId: runId, statusError: "" });
+    try {
+      const activity = await abandonRun(id, runId);
+      if (activity.run_id !== runId || activity.status !== "abandoned") throw new Error("放弃响应与目标运行不一致");
+      terminal.current.add(runId);
+      patch(id, (current) => ({ ...current, activity, activitiesByRunId: { ...current.activitiesByRunId, [runId]: activity }, phase: "cancelled", detached: false, submissionStage: "idle", error: "", errorCode: "", retryable: false, statusError: "" }));
+    } catch (error) {
+      const uncertain = !(error instanceof ApiError && error.status >= 400 && error.status < 500);
+      const text = uncertain ? "放弃结果待确认，请查询运行状态，不要重复提交。" : errorText(error);
+      patch(id, { statusError: text });
+      if (error instanceof ApiError && error.code === "session_busy") patch(id, { phase: "running", detached: true });
+      if (uncertain || (error instanceof ApiError && error.status === 409)) await readActivity(id, runId);
+      // 查询不能确定结果时保留操作提示；不把放弃网络异常当作模型失败。
+      if (viewsRef.current[id]?.activity?.status === "recoverable") {
+        const queryError = viewsRef.current[id]?.statusError || "";
+        patch(id, { statusError: text + (queryError.startsWith("状态查询失败") ? "\n" + queryError : "") });
+      }
+    } finally {
+      patch(id, { abandoningRunId: null });
+    }
+  }
   function remove(id: string): void {
     setSessions((current) => current.filter((session) => session.id !== id));
     const next = { ...viewsRef.current }; delete next[id]; viewsRef.current = next; setViews(next);
@@ -359,5 +387,5 @@ export function useSessionWorkspace() {
   return { sessions, selectedId, selected: sessions.find((session) => session.id === selectedId) || null,
     views, view: selectedId ? views[selectedId] || emptyView() : emptyView(), loading, loadError,
     isStreaming: (id: string | null) => Boolean(id && streams.current.has(id)),
-    open, startNew, upsert, refresh, send, control, stop, checkRunStatus, loadRunActivity, patch, remove };
+    open, startNew, upsert, refresh, send, control, stop, checkRunStatus, loadRunActivity, abandon, patch, remove };
 }

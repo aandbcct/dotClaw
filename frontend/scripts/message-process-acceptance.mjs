@@ -65,7 +65,7 @@ async function fixture(width = 1440, theme = "light", creating = false) {
 const model = (sequence, status) => ({ id: `inline-run:${sequence}`, sequence, kind: "model", status, started_at: "2026-10-28T08:00:01Z", completed_at: status === "completed" ? "2026-10-28T08:00:02Z" : "", call_id: null });
 const tool = (status) => ({ call_id: "read-1", name: "builtin.files.read_text", status, started_at: "2026-10-28T08:00:03Z", completed_at: status === "running" ? "" : "2026-10-28T08:00:04Z", arguments: { path: "demo.md" }, result: status === "completed" ? "隔离示例文件内容" : "", error: status === "failed" ? "示例文件读取失败" : "" });
 const toolStep = (status) => ({ id: "inline-run:3", sequence: 3, kind: "tool", status, started_at: "2026-10-28T08:00:03Z", completed_at: "", call_id: "read-1" });
-const activity = (status = "running", steps = [model(1, "running")], tools = [], event_sequence = 1) => ({ run_id: "inline-run", status, steps, tools, event_sequence, approval_id: status === "waiting_approval" ? "inline-approval" : null, child_run_id: null });
+const activity = (status = "running", steps = [model(1, "running")], tools = [], event_sequence = 1) => ({ run_id: "inline-run", status, steps, tools, event_sequence, approval_id: status === "waiting_approval" ? "inline-approval" : null, approval_call_id: status === "waiting_approval" ? "read-1" : null, child_run_id: null });
 try {
   for (const [width, theme] of [[1440, "light"], [1440, "dark"], [390, "light"]]) {
     const f = await fixture(width, theme);

@@ -45,7 +45,7 @@ async function fixture(mode, viewport = { width: 1440, height: 900 }, theme = "l
       if (queryFails) return route.fulfill({ status: 503, json: { error: { code: "query_failed", message: "状态接口暂时不可用" } } });
       if (!url.searchParams.get("run_id") || (mode === "partial" && !completed)) return route.fulfill({ json: null });
       const status = mode === "recoverable" ? "recoverable" : mode === "approval" ? "waiting_approval" : mode === "partial" ? "completed" : "failed";
-      return route.fulfill({ json: { run_id: "run-a", status, tools: [], approval_id: status === "waiting_approval" ? "approval-a" : null, error: status === "failed" ? error : null } });
+      return route.fulfill({ json: { run_id: "run-a", status, tools: status === "waiting_approval" ? [{ call_id: "approval-tool", name: "unknown", arguments: {}, result: "", error: "", status: "approval_required", started_at: "", completed_at: "" }] : [], approval_id: status === "waiting_approval" ? "approval-a" : null, approval_call_id: status === "waiting_approval" ? "approval-tool" : null, error: status === "failed" ? error : null } });
     }
     if (p.includes("/resume") || p.includes("/approvals/")) return route.fulfill({ contentType: "text/event-stream", body: event("run.cancelled", { run_id: "run-a" }) });
     if (p.endsWith("/sessions")) return route.fulfill({ json: [a, b] });

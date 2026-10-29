@@ -132,15 +132,24 @@ export async function getRunActivity(
     `${API_ROOT}/sessions/${sessionId}/activity${query}`,
   );
   if (activity === null) return null;
+  return validateRunActivity(activity);
+}
+
+function validateRunActivity(activity: RunActivity): RunActivity {
   if (!isRecord(activity) || !Array.isArray(activity.tools)) {
     throw new ApiError("运行状态数据格式无效", "invalid_activity", 200);
   }
+  if (activity.approval_call_id !== undefined && activity.approval_call_id !== null && typeof activity.approval_call_id !== "string") throw new ApiError("审批关联数据格式无效", "invalid_activity", 200);
   if ((activity.event_sequence !== undefined && (!Number.isInteger(activity.event_sequence) || activity.event_sequence < 0)) || (activity.steps !== undefined && (!Array.isArray(activity.steps) || !activity.steps.every((step) =>
     isRecord(step) && typeof step.id === "string" && Boolean(step.id) && Number.isInteger(step.sequence) && step.sequence >= 0 &&
     ["model", "tool"].includes(step.kind) && ["running", "completed", "failed", "cancelled", "approval_required", "interrupted"].includes(step.status) &&
     typeof step.started_at === "string" && typeof step.completed_at === "string" && (step.call_id === null || typeof step.call_id === "string")
   )))) throw new ApiError("运行步骤数据格式无效", "invalid_activity", 200);
   return activity;
+}
+
+export async function abandonRun(sessionId: string, runId: string): Promise<RunActivity> {
+  return validateRunActivity(await requestJson<RunActivity>(`${API_ROOT}/sessions/${sessionId}/runs/${runId}/abandon`, { method: "POST" }));
 }
 
 export async function cancelSession(sessionId: string): Promise<void> {

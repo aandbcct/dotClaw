@@ -46,7 +46,7 @@ export interface DisplayMessage extends SessionMessage {
 
 /** 本页消息的执行展示，不作为历史思考持久化。 */
 export interface MessageExecution {
-  stage: "sending" | "processing" | "thinking" | "responding" | "tool_running" | "stopping" | "completed" | "failed" | "cancelled" | "waiting_approval" | "waiting_delegation" | "recoverable" | "unknown";
+  stage: "sending" | "processing" | "thinking" | "responding" | "tool_running" | "stopping" | "completed" | "failed" | "cancelled" | "abandoned" | "waiting_approval" | "waiting_delegation" | "recoverable" | "unknown";
   error: ErrorEnvelope["error"] | null;
   statusError: string;
   submittedText: string;
@@ -108,6 +108,7 @@ export interface RunActivity {
   run_id: string;
   status: string;
   approval_id: string | null;
+  approval_call_id?: string | null;
   child_run_id: string | null;
   tools: ToolExecution[];
   error?: ErrorEnvelope["error"] | null;

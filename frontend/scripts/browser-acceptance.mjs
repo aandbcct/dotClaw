@@ -49,7 +49,7 @@ async function fixture(viewport, theme, scenario = "chat") {
     } else if (p.endsWith("/activity")) {
       const id = url.searchParams.get("run_id");
       if (id) data = { ...activity, run_id: id };
-      else if (scenario === "approval") data = { ...activity, run_id: "run-live", status: "waiting_approval", approval_id: "approval-a", tools: [{ ...activity.tools[0], name: "builtin.files.write_text", status: "approval_required", result: "", arguments: { path: "demo.txt", content: "待审内容" } }] };
+      else if (scenario === "approval") data = { ...activity, run_id: "run-live", status: "waiting_approval", approval_id: "approval-a", approval_call_id: "tool-a", tools: [{ ...activity.tools[0], name: "builtin.files.write_text", status: "approval_required", result: "", arguments: { path: "demo.txt", content: "待审内容" } }] };
       else if (scenario === "generating") data = { ...activity, status: "running" };
       else data = null;
     } else if (request.method() === "PATCH") {

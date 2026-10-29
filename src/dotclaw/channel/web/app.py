@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from ...bootstrap.application_host import ApplicationHost
 from ...bootstrap.session_interaction import SessionDeletionRejected, UnknownIdentityError
 from ...common.logging_setup import exception_diagnostic
-from ...runtime.application.session_run_coordinator import SessionBusyError
+from ...runtime.application.session_run_coordinator import RunNotRecoverableError, SessionBusyError
 from ...runtime.application.dto import RunResult
 from ...runtime.domain.events import RunEvent, RunEventType
 from ...runtime.domain.facts import AgentRun, JSONMap, MessageRole, RunError, RunErrorCode, RunMessage, RunMessageKind
@@ -336,6 +336,28 @@ def create_app(
         )
         executing = await host.session_interaction.is_session_executing(session_id)
         return _run_activity(run, events, messages, executing)
+
+    @app.post("/api/v1/sessions/{session_id}/runs/{run_id}/abandon", response_model=RunActivityResponse)
+    async def abandon_run(session_id: str, run_id: str, request: Request) -> RunActivityResponse | JSONResponse:
+        """严格放弃可恢复运行；归属预检后，协调器在同一租约内重新校验并执行。"""
+        host = _host(request)
+        if await host.session_manager.load(session_id) is None:
+            return _session_not_found()
+        if await host.session_interaction.get_run(session_id, run_id) is None:
+            return _error_response(status.HTTP_404_NOT_FOUND, WebErrorCode.RUN_NOT_FOUND, "运行不存在或不属于此会话")
+        try:
+            result = await host.session_interaction.abandon_run(run_id, only_recoverable=True)
+        except SessionBusyError:
+            return _error_response(status.HTTP_409_CONFLICT, WebErrorCode.SESSION_BUSY, "会话正在运行，不能放弃")
+        except RunNotRecoverableError:
+            return _error_response(status.HTTP_409_CONFLICT, WebErrorCode.RUN_NOT_RECOVERABLE, "只能放弃当前可恢复运行")
+        if result.state.outcome() is not RunOutcome.ABANDONED:
+            return _error_response(status.HTTP_409_CONFLICT, WebErrorCode.RUN_NOT_RECOVERABLE, "运行未被放弃，请查询状态")
+        run = await host.session_interaction.get_run(session_id, run_id)
+        if run is None:
+            return _error_response(status.HTTP_404_NOT_FOUND, WebErrorCode.RUN_NOT_FOUND, "运行记录不存在")
+        events, messages = await host.session_interaction.get_run_evidence(session_id, run_id)
+        return _run_activity(run, events, messages, False)
 
     @app.post("/api/v1/approvals/{approval_id}", response_model=None)
     async def resolve_approval(
@@ -711,10 +733,15 @@ def _run_activity(
             current.error = str(event.data.get("error_summary", ""))
 
     approval_id: str | None = None
+    approval_call_id: str | None = None
     child_run_id: str | None = None
     if run.state.is_waiting_approval() and isinstance(run.state.mode, Suspended):
         status_value = WebRunStatus.WAITING_APPROVAL.value
         approval_id = run.state.mode.control_id
+        for event in sorted(events, key=lambda item: item.sequence):
+            if event.event_type is RunEventType.WAITING_APPROVAL and event.data.get("approval_id") == approval_id:
+                value = event.data.get("call_id")
+                approval_call_id = value if isinstance(value, str) and value else None
     elif run.state.is_waiting_delegation() and isinstance(run.state.mode, Suspended):
         status_value = WebRunStatus.WAITING_DELEGATION.value
         child_run_id = run.state.mode.control_id
@@ -729,6 +756,7 @@ def _run_activity(
         run_id=run.run_id,
         status=status_value,
         approval_id=approval_id,
+        approval_call_id=approval_call_id,
         child_run_id=child_run_id,
         tools=list(steps.values()),
         error=run.error,

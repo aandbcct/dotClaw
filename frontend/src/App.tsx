@@ -46,7 +46,7 @@ export function App() {
   const [targetMessage, setTargetMessage] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<string | null>(null);
   const { conversationRef, onScroll, scrollToBottom, awayFromBottom, hasNewContent } = useConversationScroll(selectedId || undefined, view.messages);
-  const busy = workspace.isStreaming(selectedId) || ["running", "stopping", "suspended", "recoverable"].includes(view.phase);
+  const busy = Boolean(view.abandoningRunId) || workspace.isStreaming(selectedId) || ["running", "stopping", "suspended", "recoverable"].includes(view.phase);
   useEffect(() => { try { localStorage.setItem("dotclaw.theme", theme); } catch { /* 外观仍在本页生效。 */ } }, [theme]);
   useEffect(() => { writePreference("dotclaw.sidebar.v1", collapsed); }, [collapsed]);
   useEffect(() => { writePreference("dotclaw.pins.v1", pinned); }, [pinned]);
@@ -207,7 +207,7 @@ export function App() {
           {view.messages.map((message) => <article id={`message-${message.id}`} className={`message message--${message.role} ${highlight === message.id ? "message--highlight" : ""}`} key={message.id}>
             <span className="sr-only">{message.role === "user" ? "你" : "dotClaw"}</span>
             <div className="message-body" title={message.created_at}>
-              {message.role === "assistant" ? <RunActivityPanel message={message} activities={(message.run_ids || []).map((id) => view.activitiesByRunId[id]).filter((activity) => Boolean(activity))} canControl={view.activeMessageId === message.id && !workspace.isStreaming(selectedId) && ["suspended", "recoverable"].includes(view.phase)}
+              {message.role === "assistant" ? <RunActivityPanel message={message} activities={(message.run_ids || []).map((id) => view.activitiesByRunId[id]).filter((activity) => Boolean(activity))} canControl={view.activeMessageId === message.id && !view.abandoningRunId && !workspace.isStreaming(selectedId) && ["suspended", "recoverable"].includes(view.phase)} abandoningRunId={view.abandoningRunId} onAbandon={(runId) => selectedId && void workspace.abandon(selectedId, message.id, runId)}
                 onLoadRun={(runId) => selectedId && void workspace.loadRunActivity(selectedId, runId)} onCheckStatus={(runId) => selectedId && void workspace.checkRunStatus(selectedId, runId)} onRestoreInput={() => restoreQuestion(message.execution?.submittedText || "")}
                 onApprove={(runId, approved) => selectedId && controlRun(selectedId, message.id, runId, approved ? "approve" : "reject")}
                 onResumeDelegation={(runId) => selectedId && controlRun(selectedId, message.id, runId, "delegation")} onResumeRun={(runId) => selectedId && controlRun(selectedId, message.id, runId, "resume")}>

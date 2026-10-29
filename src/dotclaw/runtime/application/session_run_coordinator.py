@@ -58,6 +58,10 @@ class SessionBusyError(ValueError):
     """会话执行租约已被占用，编辑操作不得排队覆盖运行结果。"""
 
 
+class RunNotRecoverableError(ValueError):
+    """目标不是当前可恢复运行，拒绝严格放弃。"""
+
+
 class SessionRunCoordinator:
     """同一 Session FIFO、不同 Session 可并行的轻量租约协调器。"""
 
@@ -143,13 +147,21 @@ class SessionRunCoordinator:
         async with lock:
             return await self._engine.resume_run(run_id, output_port)
 
-    async def abandon_run(self, run_id: str) -> RunResult:
+    async def abandon_run(self, run_id: str, *, only_recoverable: bool = False) -> RunResult:
         """在所属 Session 锁内显式放弃未结束 Run。"""
         session_id: str | None = await self._engine.get_run_session_id(run_id)
         if session_id is None:
+            if only_recoverable:
+                raise RunNotRecoverableError("运行不存在或不可恢复")
             return await self._engine.abandon_run(run_id)
         lock: asyncio.Lock = await self._get_lock(session_id)
+        if only_recoverable and lock.locked():
+            raise SessionBusyError("会话正在运行，不能放弃")
         async with lock:
+            if only_recoverable:
+                active = await self._engine.active_run(session_id)
+                if active is None or active.run_id != run_id or active.state.is_ended() or active.state.is_waiting_approval() or active.state.is_waiting_delegation():
+                    raise RunNotRecoverableError("只能放弃当前可恢复运行")
             return await self._engine.abandon_run(run_id)
 
     async def _prepare_new_request(self, session_id: str) -> RunResult | None:

@@ -282,3 +282,14 @@ a { color:var(--accent); text-underline-offset:3px; }
 @keyframes execution-spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .execution-spinner { animation:none; border-style:dotted; } }
 @media (max-width:767px) { .execution-process { padding-left:14px; } .execution-step::before { left:-19px; } .execution-feedback { padding:12px; } }
+
+/* 工具数据均为既有文本，长内容局部滚动，不挤出审批按钮。 */
+.tool-output,.approval-summary { min-width:0; width:100%; margin:12px 0; }
+.tool-output-heading { display:flex; gap:8px; align-items:center; justify-content:space-between; flex-wrap:wrap; font-size:12px; }
+.tool-output button,.approval-summary button,.abandon-confirm button { min-height:44px; padding:8px 12px; }
+.tool-output pre,.approval-summary pre { max-height:320px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface); padding:12px; border-radius:8px; font:12px/1.6 Consolas,monospace; }
+.tool-preview-actions { display:flex; gap:8px; align-items:center; justify-content:space-between; flex-wrap:wrap; font-size:12px; color:var(--muted); }
+.approval-summary > p { white-space:pre-wrap; overflow-wrap:anywhere; }
+.abandon-confirm { border-top:1px solid var(--line); padding-top:8px; }
+.abandon-confirm p { font-size:13px; }
+.abandon-confirm button:last-child { color:var(--danger); }
