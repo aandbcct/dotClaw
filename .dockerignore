@@ -1,0 +1,20 @@
+# 只发送构建所需内容，私人配置、密钥、会话和宿主机依赖不进入上下文。
+**
+!Dockerfile
+!pyproject.toml
+!README.md
+!src/
+!src/**
+!frontend/
+!frontend/**
+!docker/
+!docker/*.py
+!docker/*.example.yaml
+**/__pycache__/
+**/*.pyc
+**/node_modules/
+**/dist/
+**/*.tsbuildinfo
+**/.env*
+**/*.local.yaml
+src/dotclaw/data/

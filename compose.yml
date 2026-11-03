@@ -1,0 +1,34 @@
+name: dotclaw
+services:
+  dotclaw:
+    build:
+      context: .
+      target: deployment
+    image: dotclaw:deployment
+    init: true
+    ports:
+      - "127.0.0.1:${DOTCLAW_PORT:-8765}:8765"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - type: bind
+        source: ${DOTCLAW_CONFIG:-./docker/config.example.yaml}
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOTCLAW_ROUTER_CONFIG:-./docker/model_router_config.example.yaml}
+        target: /app/model_router_config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./.dotclaw/agentConfig:/app/.dotclaw/agentConfig:ro
+      - ./skills:/app/skills:ro
+      - data:/app/data
+      - workspace:/workspace
+    stop_grace_period: 30s
+volumes:
+  data:
+  workspace:
