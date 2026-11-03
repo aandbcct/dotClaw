@@ -1,0 +1,27 @@
+# 默认不连接任何真实服务；配置提供商与密钥后才能对话。
+# 可复制为 model_router_config.local.yaml，使用现有模型路由模板的结构。
+defaults:
+  parameters:
+    temperature: 0.7
+    max_tokens: 4096
+  fallback_enabled: false
+providers:
+  local:
+    driver: openai_chat_completions
+    base_url: http://127.0.0.1:9/v1
+    api_key: not-configured
+    retry:
+      max_attempts: 1
+models:
+  default:
+    provider: local
+    model_id: not-configured
+    context_window: 32000
+    tokenizer_encoding: cl100k_base
+    capabilities: [chat, function_calling]
+    status: active
+purposes:
+  chat:
+    priority:
+      - model: default
+        priority: 1

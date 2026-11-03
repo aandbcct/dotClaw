@@ -1,0 +1,47 @@
+# 独立开发配置，直接用 -f 选择，不与 compose.yml 合并。
+name: dotclaw-dev
+services:
+  dotclaw:
+    build:
+      context: .
+      target: development
+    image: dotclaw:development
+    init: true
+    ports:
+      - "127.0.0.1:${DOTCLAW_DEV_PORT:-5173}:5173"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DOTCLAW_DEV: "1"
+      DOTCLAW_VITE_POLLING: "1"
+      # 若依赖环境提供 watchfiles，也强制使用轮询读取 Windows 挂载。
+      WATCHFILES_FORCE_POLLING: "true"
+    volumes:
+      - ./src:/app/src
+      - ./frontend:/app/frontend
+      - node_modules:/app/frontend/node_modules
+      - type: bind
+        source: ${DOTCLAW_CONFIG:-./docker/config.example.yaml}
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOTCLAW_ROUTER_CONFIG:-./docker/model_router_config.example.yaml}
+        target: /app/model_router_config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./.dotclaw/agentConfig:/app/.dotclaw/agentConfig:ro
+      - ./skills:/app/skills:ro
+      # 开发数据直接保存在宿主目录；不同实验可显式选择独立目录。
+      - type: bind
+        source: ${DOTCLAW_DATA_DIR:-./data}
+        target: /app/data
+      - type: bind
+        source: ${DOTCLAW_WORKSPACE_DIR:-./workspace}
+        target: /workspace
+    stop_grace_period: 30s
+volumes:
+  node_modules:

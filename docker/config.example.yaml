@@ -1,0 +1,23 @@
+# 容器专用配置；复制为 config.local.yaml 后按需修改。
+tools:
+  builtin_enabled: true
+  mcp_enabled: false
+  skill_enabled: true
+  policy:
+    workspace_root: /workspace
+    rules:
+      workspace.read: allow
+      workspace.write: ask
+      process.exec: ask
+      mcp.connect: ask
+      mcp.call: ask
+    denied_paths: [".env", ".git/**", "**/*.key"]
+skills:
+  directory: /app/skills
+memory:
+  workspace: /app/data
+session:
+  directory: /app/data/sessions
+debug:
+  level: INFO
+  log_file: /app/data/dotclaw.log
