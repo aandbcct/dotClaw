@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import asyncio
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -153,6 +155,7 @@ async def test_unknown_identity_submission_is_rejected(tmp_path: Path) -> None:
     在 AgentRegistry 中验证 Identity；未知或空 Identity 必须返回明确错误，
     不能回退到默认 Identity。
     """
+    notifier = RunChangeNotifier()
     from dotclaw.bootstrap.session_interaction import SessionInteractionService
 
     session_manager: SessionManager = SessionManager(tmp_path)
@@ -163,7 +166,7 @@ async def test_unknown_identity_submission_is_rejected(tmp_path: Path) -> None:
         session_manager=session_manager,
         agent_registry=registry,
         preferred_model="qwen3.7-max",
-        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort, active_run=AsyncMock(return_value=None))),
+        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort, active_run=AsyncMock(return_value=None)), run_change_notifier=notifier),
     )
 
     # 创建绑定未知 Identity 的 Session。
@@ -342,6 +345,7 @@ async def test_active_session_deletion_is_rejected(tmp_path: Path) -> None:
     目标（开发计划阶段5 + 总体设计 §5.2）：删除是应用级流程，查询到有非终态
     Run 时拒绝删除，避免产生部分删除与孤儿数据。
     """
+    notifier = RunChangeNotifier()
     from dotclaw.bootstrap.session_interaction import (
         SessionDeletionRejected,
         SessionInteractionService,
@@ -356,7 +360,7 @@ async def test_active_session_deletion_is_rejected(tmp_path: Path) -> None:
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
-        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort, active_run=AsyncMock(return_value=None))),
+        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort, active_run=AsyncMock(return_value=None)), run_change_notifier=notifier),
         run_repository=run_repository,
     )
 
@@ -389,6 +393,7 @@ async def test_terminal_session_deletion_removes_session_directory_and_approvals
     并使该 Session 的待审批记录不可恢复。审批仓库根目录与 Host 同源（此处用 tmp_path），
     由 ApprovalRepositoryAdapter 独占文件布局，SessionManager 不直接了解。
     """
+    notifier = RunChangeNotifier()
     from dotclaw.bootstrap.session_interaction import SessionInteractionService
 
     session_manager: SessionManager = SessionManager(tmp_path)
@@ -402,7 +407,7 @@ async def test_terminal_session_deletion_removes_session_directory_and_approvals
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
-        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort, active_run=AsyncMock(return_value=None))),
+        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort, active_run=AsyncMock(return_value=None)), run_change_notifier=notifier),
         approval_repository=approval_repo,
     )
 

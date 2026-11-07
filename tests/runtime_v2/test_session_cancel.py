@@ -9,6 +9,7 @@ import pytest
 from dotclaw.agent.identity import AgentIdentity
 from dotclaw.bootstrap.session_interaction import SessionInteractionService
 from dotclaw.orchestration.registry import AgentRegistry
+from dotclaw.runtime.domain.cancellation import CancellationReceipt, CancellationDisposition
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun
 from dotclaw.runtime.domain.state import AgentRunState, RunStage, Running
 from dotclaw.session.session import SessionManager
@@ -31,9 +32,10 @@ class _FakeCoordinator:
     def __init__(self) -> None:
         self.cancel_calls: list[tuple[str, str]] = []
 
-    async def cancel(self, run_id: str, reason: str) -> None:
+    async def cancel(self, run_id: str, reason: str, *, origin=None, parent_request_id=None) -> None:
         """记录取消目标与原因。"""
         self.cancel_calls.append((run_id, reason))
+        return CancellationReceipt(run_id, CancellationDisposition.ACCEPTED, "request", 1, None, "2026-11-06T00:00:00+00:00")
 
 
 def _run(run_id: str, session_id: str = "session-1") -> AgentRun:

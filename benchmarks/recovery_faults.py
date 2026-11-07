@@ -159,13 +159,20 @@ class BoundaryDelegatingLLM(LLMPort):
 class BoundaryDelegation(DelegationPort):
     """仅提交子标识而不持久化子 Run，复现当前冷重建后无法回灌的边界。"""
 
-    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
+    async def prepare(self, request: DelegationRequest) -> DelegationSubmission:
         return DelegationSubmission("boundary-child", "boundary-task", "boundary-child-session")
+
+    async def start(self, child_run_id: str) -> None:
+        """负向边界故意缺少子事实，不启动真实业务。"""
+
+    async def wait_terminal(self, child_run_id: str) -> DelegationResult:
+        """仅提供冻结结果；仓储归属检查仍应拒绝缺失子事实。"""
+        return DelegationResult(child_run_id, RunOutcome.COMPLETED, "child")
 
     async def result(self, child_run_id: str) -> DelegationResult | None:
         return DelegationResult(child_run_id, RunOutcome.COMPLETED, "child")
 
-    async def cancel(self, child_run_id: str) -> None:
+    async def cancel(self, child_run_id: str, reason: str, parent_request_id: str | None) -> None:
         """边界审计不触发取消。"""
 
 

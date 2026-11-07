@@ -15,6 +15,7 @@ from dotclaw.tools.base import (
 from dotclaw.tools.decorator import get_tool_meta, tool
 from dotclaw.tools.function_handler import FunctionToolHandler
 from dotclaw.tools.schema import validate_args
+from dotclaw.common.resource_errors import ResourceCleanupError
 
 
 class AddArgs(BaseModel):
@@ -71,6 +72,23 @@ async def test_function_handler_business_exception_maps_to_execution_error() -> 
     assert result.is_error
     assert result.error_code == ToolErrorCode.EXECUTION_ERROR.value
     assert result.error_type == "execution"
+
+
+async def test_resource_cleanup_error_passes_through_handler_and_executor() -> None:
+    """资源仍存活不能被包装为普通工具失败或忽略。"""
+    from dotclaw.tools.executor import ToolExecutor
+    from dotclaw.tools.registry import ToolRegistry
+    @tool(name="demo.cleanup", args_model=AddArgs, description="清理失败")
+    async def cleanup(args: AddArgs) -> str:
+        raise ResourceCleanupError("process", "process_alive", "进程仍存活")
+    handler = FunctionToolHandler(cleanup, get_tool_meta(cleanup))
+    with pytest.raises(ResourceCleanupError, match="进程仍存活"):
+        await handler.execute(AddArgs(a=1, b=2), ToolExecutionContext())
+    registry = ToolRegistry()
+    registry.register(handler)
+    executor = ToolExecutor(registry)
+    with pytest.raises(ResourceCleanupError, match="进程仍存活"):
+        await executor.execute_approved("demo.cleanup", {"a": 1, "b": 2}, ToolExecutionContext())
 
 
 async def test_function_handler_injects_context_when_param_present() -> None:

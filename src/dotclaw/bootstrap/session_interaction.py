@@ -9,6 +9,8 @@ SessionInteractionService 是必要的最小 Session 入口，不是泛化的 Ch
 
 from __future__ import annotations
 
+from ..runtime.domain.cancellation import CancellationReceipt, CancellationDisposition, CancellationOrigin
+
 from pathlib import Path
 
 from ..agent.identity import AgentIdentity
@@ -195,9 +197,13 @@ class SessionInteractionService:
         """提交 delegation 子运行结果回灌并恢复父运行，返回结构化结果；透传运行级输出端口。"""
         return await self._coordinator.resume_delegation(child_run_id, output_port)
 
-    async def cancel(self, run_id: str, reason: str) -> None:
-        """将取消请求交由运行协调器处理。"""
-        await self._coordinator.cancel(run_id, reason)
+    async def cancel(self, run_id: str, reason: str, *, origin: CancellationOrigin = CancellationOrigin.USER, parent_request_id: str | None = None) -> CancellationReceipt:
+        """透传已持久化的取消回执和因果来源。"""
+        return await self._coordinator.cancel(run_id, reason, origin=origin, parent_request_id=parent_request_id)
+
+    async def confirm_cancellation_cleanup(self, run_id: str, reason: str) -> RunResult:
+        """仅供受信维护调用，不注册为普通 Agent 工具。"""
+        return await self._coordinator.confirm_cancellation_cleanup(run_id, reason)
 
     async def cancel_session(self, session_id: str, reason: str) -> str | None:
         """按 Session 取消唯一活动 Run，并返回其标识。
@@ -214,8 +220,13 @@ class SessionInteractionService:
         if len(active_runs) != 1:
             raise RuntimeError(f"Session {session_id} 存在多个活动 Run，拒绝猜测取消目标")
         run_id: str = active_runs[0].run_id
-        await self.cancel(run_id, reason)
-        return run_id
+        receipt = await self.cancel(run_id, reason)
+        # E 阶段将旧 Web 返回值改为完整回执；未受理时不能返回正常运行标识。
+        if receipt.disposition in (CancellationDisposition.ACCEPTED, CancellationDisposition.ALREADY_REQUESTED):
+            return run_id
+        if receipt.disposition in (CancellationDisposition.ALREADY_ENDED, CancellationDisposition.NOT_FOUND):
+            return None
+        raise ValueError("运行正在提交成功，不能取消")
 
     async def resume_run(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
         """恢复未结束 Run，并返回结构化结果；透传运行级输出端口。"""

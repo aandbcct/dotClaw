@@ -67,8 +67,6 @@ class FinalLLM(LLMPort):
         """返回最终回答。"""
         return RunMessage("final", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "本轮回答")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试没有远端模型调用需要取消。"""
 
 
 class NoTool(ToolPort):
@@ -78,8 +76,6 @@ class NoTool(ToolPort):
         """返回失败结果以暴露意外工具调用。"""
         return ToolResult(invocation.call.call_id, ToolResultStatus.FAILED)
 
-    async def cancel(self, run_id: str) -> None:
-        """测试没有工具调用需要取消。"""
 
 
 async def test_real_session_history_compression_commits_and_is_injected_on_next_request(tmp_path: Path) -> None:

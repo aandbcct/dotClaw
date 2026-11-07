@@ -57,8 +57,6 @@ class FakeLLMPort:
             content=context.messages[0].content,
         )
 
-    async def cancel(self, run_id: str) -> None:
-        """替身无需实际取消远程请求。"""
 
 
 class FakeToolPort:
@@ -68,8 +66,6 @@ class FakeToolPort:
         """返回成功的标准工具结果。"""
         return ToolResult(call_id=invocation.call.call_id, status=ToolResultStatus.COMPLETED)
 
-    async def cancel(self, run_id: str) -> None:
-        """替身无需实际取消工具进程。"""
 
 
 def _build_execution() -> RunExecution:
@@ -103,4 +99,5 @@ async def test_fake_ports_exchange_domain_types_only() -> None:
 
     assert context.messages[0].role is MessageRole.USER
     assert response.role is MessageRole.ASSISTANT
-    await tool_port.cancel(execution.run_id)
+    assert not hasattr(tool_port, "cancel")
+    assert not hasattr(llm_port, "cancel")

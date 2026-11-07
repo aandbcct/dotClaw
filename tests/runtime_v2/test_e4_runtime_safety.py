@@ -1,6 +1,8 @@
 """E4 LLM_STARTED 安全点、动态压缩与可恢复中断集成测试。"""
 
 from __future__ import annotations
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
 from pathlib import Path
@@ -67,8 +69,6 @@ class NoTool(ToolPort):
         """防止测试意外进入工具路径。"""
         return ToolResult(invocation.call.call_id, ToolResultStatus.FAILED)
 
-    async def cancel(self, run_id: str) -> None:
-        """测试没有远程工具调用。"""
 
 
 class ScriptedCounter:
@@ -156,8 +156,6 @@ class FinalLLM(LLMPort):
         """返回无工具调用的最终回答。"""
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "完成")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试没有可取消远端调用。"""
 
 
 class FlakyLLM(LLMPort):
@@ -173,8 +171,6 @@ class FlakyLLM(LLMPort):
             raise LLMUnavailableError("模型重试耗尽")
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "恢复完成")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试没有可取消远端调用。"""
 
 
 class WaitingApprovalLLM(LLMPort):
@@ -197,8 +193,6 @@ class WaitingApprovalLLM(LLMPort):
             )
         return RunMessage("approval-final", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "审批恢复完成")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试没有可取消远端调用。"""
 
 
 class WaitingApprovalTool(ToolPort):
@@ -214,8 +208,6 @@ class WaitingApprovalTool(ToolPort):
             return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-e4")
         return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已审批工具结果")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试没有可取消远端调用。"""
 
 
 def _request(history_count: int = 3) -> RunRequest:
@@ -237,6 +229,7 @@ def _engine(
     repository: InMemoryRunRepository | None = None,
     tool_port: ToolPort | None = None,
     policy_port: RunPolicyPort | None = None,
+    *, run_change_notifier: RunChangeNotifier | None = None,
 ) -> tuple[RuntimeEngine, InMemoryRunRepository]:
     """使用 E4 所有真实 Port 边界构造 Engine。"""
     run_repository = repository or InMemoryRunRepository()
@@ -251,6 +244,7 @@ def _engine(
         CancellationService(),
         token_counter=counter,
         history_compactor=compactor,
+        run_change_notifier=run_change_notifier,
     )
     return engine, run_repository
 
@@ -324,11 +318,12 @@ async def test_llm_unavailable_keeps_checkpoint_and_resume_reuses_context_versio
 
 async def test_new_request_returns_session_busy_when_active_run_exists(tmp_path: Path) -> None:
     """同 Session 新请求遇到未结束 Run 一律 SESSION_BUSY，不自动放弃。"""
+    notifier = RunChangeNotifier()
     counter = ScriptedCounter(10)
     compactor = ScriptedCompactor()
-    engine, repository = _engine(tmp_path, counter, compactor, FlakyLLM())
+    engine, repository = _engine(tmp_path, counter, compactor, FlakyLLM(), run_change_notifier=notifier)
     active = await engine.execute(_request(1))
-    coordinator = SessionRunCoordinator(engine)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     replacement = await coordinator.submit(_request(1))
     old_run = await repository.find_run(active.run_id)
 
@@ -457,9 +452,10 @@ async def test_invalid_context_window_fails_deterministically_without_checkpoint
 
 async def test_recovery_preserves_orphan_running_run_and_new_request_returns_busy(tmp_path: Path) -> None:
     """进程重启恢复入口保留遗留 RUNNING，新普通请求返回 SESSION_BUSY 而不自动放弃。"""
+    notifier = RunChangeNotifier()
     counter = ScriptedCounter(10)
     compactor = ScriptedCompactor()
-    engine, repository = _engine(tmp_path, counter, compactor, FinalLLM())
+    engine, repository = _engine(tmp_path, counter, compactor, FinalLLM(), run_change_notifier=notifier)
     policy = await BudgetPolicy().resolve(_request(1))
     orphan = AgentRun("orphan-run", "session-e4", "agent-e4", AgentRunState(mode=Running(RunStage.CALLING_LLM)), "", policy, "input-orphan")
     await repository.create_run(orphan)
@@ -476,7 +472,7 @@ async def test_recovery_preserves_orphan_running_run_and_new_request_returns_bus
     ))
     await engine.recover_session("session-e4")
     recovered = await repository.find_run(orphan.run_id)
-    coordinator = SessionRunCoordinator(engine)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
 
     new_request = await coordinator.submit(_request(1))
     after = await repository.find_run(orphan.run_id)
@@ -492,6 +488,7 @@ async def test_recovery_preserves_orphan_running_run_and_new_request_returns_bus
 
 async def test_waiting_approval_occupies_session_and_restores_prior_run_context(tmp_path: Path) -> None:
     """审批等待期间拒绝普通请求，获批后继续同一 Run 的消息与上下文版本。"""
+    notifier = RunChangeNotifier()
     counter: ScriptedCounter = ScriptedCounter(10)
     compactor: ScriptedCompactor = ScriptedCompactor()
     repository: InMemoryRunRepository = InMemoryRunRepository()
@@ -502,8 +499,9 @@ async def test_waiting_approval_occupies_session_and_restores_prior_run_context(
         WaitingApprovalLLM(),
         repository,
         WaitingApprovalTool(),
+        run_change_notifier=notifier,
     )
-    coordinator: SessionRunCoordinator = SessionRunCoordinator(engine)
+    coordinator: SessionRunCoordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
 
     waiting = await coordinator.submit(_request(1))
     busy = await coordinator.submit(_request(1))
@@ -522,11 +520,12 @@ async def test_waiting_approval_occupies_session_and_restores_prior_run_context(
 
 async def test_abandon_run_deletes_checkpoint_and_ends_run(tmp_path: Path) -> None:
     """显式放弃未结束 Run：删除 checkpoint、收口为 ABANDONED 并释放 Session 占用。"""
+    notifier = RunChangeNotifier()
     counter = ScriptedCounter(10)
     compactor = ScriptedCompactor()
-    engine, repository = _engine(tmp_path, counter, compactor, FlakyLLM())
+    engine, repository = _engine(tmp_path, counter, compactor, FlakyLLM(), run_change_notifier=notifier)
     active = await engine.execute(_request(1))  # 未结束（LLM 不可用）
-    coordinator = SessionRunCoordinator(engine)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     result = await coordinator.abandon_run(active.run_id)
     abandoned = await repository.find_run(active.run_id)
     checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-e4", active.run_id)

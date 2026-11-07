@@ -69,8 +69,6 @@ class _FailLLM(_FailIfCalled):
         self.core_calls += 1
         raise AssertionError("生产 LLM 被调用")
 
-    async def cancel(self, run_id):
-        self.lifecycle_calls += 1
 
 
 class _FailTool(_FailIfCalled):
@@ -78,8 +76,6 @@ class _FailTool(_FailIfCalled):
         self.core_calls += 1
         raise AssertionError("生产工具被调用")
 
-    async def cancel(self, run_id):
-        self.lifecycle_calls += 1
 
 
 class _FailContext(_FailIfCalled):
@@ -107,7 +103,7 @@ class _FailPolicy(_FailIfCalled):
 
 
 class _FailDelegation(_FailIfCalled):
-    async def submit(self, request):
+    async def prepare(self, request):
         self.core_calls += 1
         raise AssertionError("生产委派被调用")
 
@@ -115,7 +111,7 @@ class _FailDelegation(_FailIfCalled):
         self.core_calls += 1
         raise AssertionError("生产委派被调用")
 
-    async def cancel(self, child_run_id):
+    async def cancel(self, child_run_id, reason, parent_request_id):
         self.lifecycle_calls += 1
 
 

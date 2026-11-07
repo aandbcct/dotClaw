@@ -49,6 +49,37 @@ class TaskMessageBroker:
         self._conditions: DefaultDict[str, asyncio.Condition] = defaultdict(asyncio.Condition)
         self._lock: asyncio.Lock = asyncio.Lock()
 
+    async def restore_task(self, task: Task) -> Task:
+        """只恢复当前投影，不制造已丢失的历史 request/progress 消息。"""
+        async with self._lock:
+            existing = self._tasks.get(task.task_id)
+            if existing is not None:
+                if (existing.source, existing.target, existing.specification) != (task.source, task.target, task.specification):
+                    raise TaskStateError("恢复 Task 的端点或不可变契约冲突")
+                return existing
+            self._tasks[task.task_id] = task
+            self._cursors[(task.task_id, TaskEndpoint.SOURCE)] = 0
+            self._cursors[(task.task_id, TaskEndpoint.TARGET)] = 0
+        await self._notify(task.task_id)
+        return task
+
+    async def settle_task(self, task_id: str, target_run_id: str, status: TaskStatus, output: str) -> Task:
+        """按已确认结果结算，终态和消息由同一把锁一次推进。"""
+        if not status.is_terminal():
+            raise TaskStateError("Task 结算必须为终态")
+        async with self._lock:
+            task = self._get_task_locked(task_id)
+            if task.status.is_terminal():
+                if task.status is not status or task.result_message is None or task.result_message.sender_run_id != target_run_id or task.result_message.payload != output:
+                    raise TaskStateError("Task 已存在不同的终态投影")
+                return task
+            kind = {TaskStatus.COMPLETED: TaskMessageType.RESULT, TaskStatus.FAILED: TaskMessageType.FAILED,
+                TaskStatus.CANCELLED: TaskMessageType.CANCELLED}[status]
+            message = self._append_message_locked(task, TaskEndpoint.TARGET, TaskEndpoint.SOURCE, target_run_id, kind, output)
+            self._apply_message_state_locked(task, message)
+        await self._notify(task_id)
+        return task
+
     async def create_task(self, task: Task, source_run_id: str) -> None:
         """登记 Task 并原子写入首条 request 消息。"""
         async with self._lock:

@@ -159,6 +159,8 @@ class ApplicationHost:
         )
         # Host 启动时补偿未决成功提交（总体设计 §5.3）。
         await self._runtime_services.run_repository.recover_pending_success_commits()
+        await self._runtime_services.run_repository.recover_pending_cancellation_commits()
+        await self._runtime_services.coordinator.recover_cancellations()
         self._context_port = self._runtime_services.context_port
 
         # ── 交互入口 ──
@@ -299,10 +301,16 @@ class ApplicationHost:
     async def shutdown(self) -> None:
         """按依赖逆序关闭资源（总体设计 §5.3，启动就绪语义）。
 
-        顺序：关闭已完成首次发现的 MCP Provider → 释放 Context 缓存
+        顺序：拒绝新运行并等待取消 → 关闭 MCP Provider → 释放 Context 缓存
         → 释放其他可关闭资源。幂等：可重复调用，亦可在半初始化失败后回收部分资源。
         Agent 不参与资源关闭。
         """
+        # 运行控制先于共享能力关闭；未知资源保持未终态，不因宿主关闭伪造停止成功。
+        if self._runtime_services is not None:
+            try:
+                await self._runtime_services.coordinator.shutdown(5.0)
+            except Exception as error:
+                logger.error("运行关闭未完成: %s", error)
         # 1) 关闭 MCP Provider（首次发现已在启动时完成；MCP 为可降级依赖）
         if self._mcp_provider is not None:
             try:

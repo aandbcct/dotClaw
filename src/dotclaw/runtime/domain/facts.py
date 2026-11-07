@@ -252,6 +252,7 @@ class AgentRun:
     success_commit_intent: SuccessCommitIntent | None = None
     statistics: RunStatistics = field(default_factory=RunStatistics)
     error: RunError | None = None
+    delegation_task_id: str | None = None
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -261,6 +262,7 @@ class AgentRun:
             "agent_id": self.agent_id,
             "parent_run_id": self.parent_run_id,
             "root_run_id": self.root_run_id,
+            "delegation_task_id": self.delegation_task_id,
             "state": self.state.to_dict(),
             "started_at": self.started_at,
             "ended_at": self.ended_at,

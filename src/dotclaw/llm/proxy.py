@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from .base import ChatChunk, EmptyModelResponseError, LLMClient, Message, TextDeltaKind, ToolDefinition
 from ..common.logging_setup import exception_diagnostic
+from ..common.resource_errors import ResourceCleanupError
 
 if TYPE_CHECKING:
     from dotclaw.config.settings import RouterConfig
@@ -176,73 +177,85 @@ class LLMProxy:
                                 client_options["retry_count"] = retry_count
                             chat_iter = client.chat(messages, tools, stream, **client_options)
 
-                            # 可见输出边界：每次尝试重新计，避免跨重试误判
-                            visible_output_started = False
-
-                            # 尝取第一个 chunk（区分 CallSetupError vs 流式异常）
-                            has_response_text = False
-                            has_tool_calls = False
-                            first_chunk = await anext(chat_iter, None)
-                            if first_chunk is None:
-                                raise EmptyModelResponseError()
-
-                            # 第一个 chunk 成功
-                            if first_chunk_ts is None:
-                                first_chunk_ts = time.perf_counter()
-                                ttft_ms = (first_chunk_ts - call_start) * 1000
-                                if journal:
-                                    journal.llm_call_end()
-
-                            # 可见输出边界：只要交付过非空 reasoning/response delta，
-                            # 即视为“已输出”，此后流异常不得重试或降级（设计 §7）。
-                            if first_chunk.text_deltas:
-                                visible_output_started = True
-                            has_response_text = any(delta.kind is TextDeltaKind.RESPONSE and delta.content.strip() for delta in first_chunk.text_deltas)
-                            has_tool_calls = bool(first_chunk.tool_calls)
-                            response_chars += sum(len(delta.content) for delta in first_chunk.text_deltas if delta.kind is TextDeltaKind.RESPONSE)
-                            tool_call_count += len(first_chunk.tool_calls)
-                            finish_reason = first_chunk.finish_reason if first_chunk.finish_reason is not None else finish_reason
-                            if first_chunk.usage is not None:
-                                input_tokens = first_chunk.usage.input_tokens
-                                output_tokens = first_chunk.usage.output_tokens
-                            yield first_chunk
                             try:
-                                async for chunk in chat_iter:
-                                    has_response_text |= any(delta.kind is TextDeltaKind.RESPONSE and delta.content.strip() for delta in chunk.text_deltas)
-                                    has_tool_calls |= bool(chunk.tool_calls)
-                                    response_chars += sum(len(delta.content) for delta in chunk.text_deltas if delta.kind is TextDeltaKind.RESPONSE)
-                                    tool_call_count += len(chunk.tool_calls)
-                                    finish_reason = chunk.finish_reason if chunk.finish_reason is not None else finish_reason
-                                    if chunk.text_deltas:
-                                        visible_output_started = True
-                                        output_token_count += sum(
-                                            len(delta.content) for delta in chunk.text_deltas
-                                        )
-                                    if chunk.usage is not None:
-                                        input_tokens = chunk.usage.input_tokens
-                                        output_tokens = chunk.usage.output_tokens
-                                    yield chunk
-                            except asyncio.CancelledError:
-                                # 运行取消必须直达客户端 finally，绝不可重试或降级。
-                                raise
-                            except Exception as e:
-                                if visible_output_started:
-                                    # 已展示 reasoning/response：不可降级，直接向上抛出
-                                    raise NonRetryableStreamError(
-                                        f"流式响应中断 ({model_name}): {e}"
+                                # 可见输出边界：每次尝试重新计，避免跨重试误判
+                                visible_output_started = False
+
+                                # 尝取第一个 chunk（区分 CallSetupError vs 流式异常）
+                                has_response_text = False
+                                has_tool_calls = False
+                                first_chunk = await anext(chat_iter, None)
+                                if first_chunk is None:
+                                    raise EmptyModelResponseError()
+
+                                # 第一个 chunk 成功
+                                if first_chunk_ts is None:
+                                    first_chunk_ts = time.perf_counter()
+                                    ttft_ms = (first_chunk_ts - call_start) * 1000
+                                    if journal:
+                                        journal.llm_call_end()
+
+                                # 可见输出边界：只要交付过非空 reasoning/response delta，
+                                # 即视为“已输出”，此后流异常不得重试或降级（设计 §7）。
+                                if first_chunk.text_deltas:
+                                    visible_output_started = True
+                                has_response_text = any(delta.kind is TextDeltaKind.RESPONSE and delta.content.strip() for delta in first_chunk.text_deltas)
+                                has_tool_calls = bool(first_chunk.tool_calls)
+                                response_chars += sum(len(delta.content) for delta in first_chunk.text_deltas if delta.kind is TextDeltaKind.RESPONSE)
+                                tool_call_count += len(first_chunk.tool_calls)
+                                finish_reason = first_chunk.finish_reason if first_chunk.finish_reason is not None else finish_reason
+                                if first_chunk.usage is not None:
+                                    input_tokens = first_chunk.usage.input_tokens
+                                    output_tokens = first_chunk.usage.output_tokens
+                                yield first_chunk
+                                try:
+                                    async for chunk in chat_iter:
+                                        has_response_text |= any(delta.kind is TextDeltaKind.RESPONSE and delta.content.strip() for delta in chunk.text_deltas)
+                                        has_tool_calls |= bool(chunk.tool_calls)
+                                        response_chars += sum(len(delta.content) for delta in chunk.text_deltas if delta.kind is TextDeltaKind.RESPONSE)
+                                        tool_call_count += len(chunk.tool_calls)
+                                        finish_reason = chunk.finish_reason if chunk.finish_reason is not None else finish_reason
+                                        if chunk.text_deltas:
+                                            visible_output_started = True
+                                            output_token_count += sum(
+                                                len(delta.content) for delta in chunk.text_deltas
+                                            )
+                                        if chunk.usage is not None:
+                                            input_tokens = chunk.usage.input_tokens
+                                            output_tokens = chunk.usage.output_tokens
+                                        yield chunk
+                                except asyncio.CancelledError:
+                                    # 运行取消必须直达客户端 finally，绝不可重试或降级。
+                                    raise
+                                except ResourceCleanupError:
+                                    raise
+                                except Exception as e:
+                                    if visible_output_started:
+                                        # 已展示 reasoning/response：不可降级，直接向上抛出
+                                        raise NonRetryableStreamError(
+                                            f"流式响应中断 ({model_name}): {e}"
+                                        ) from e
+                                    # 尚未产生可见输出：允许既有重试与候选切换
+                                    raise CallSetupError(
+                                        f"流开始但未产生可见输出即中断 ({model_name}): {e}"
                                     ) from e
-                                # 尚未产生可见输出：允许既有重试与候选切换
-                                raise CallSetupError(
-                                    f"流开始但未产生可见输出即中断 ({model_name}): {e}"
-                                ) from e
 
-                            if not has_response_text and not has_tool_calls:
-                                raise EmptyModelResponseError()
-                            # 有效输出完成后才能记成功。
-                            self._router.report_success(model_name)
-                            return
+                                if not has_response_text and not has_tool_calls:
+                                    raise EmptyModelResponseError()
+                                # 有效输出完成后才能记成功。
+                                self._router.report_success(model_name)
+                                return
 
-                        except asyncio.CancelledError as error:
+                            finally:
+                                close = getattr(chat_iter, "aclose", None)
+                                if close is not None:
+                                    try:
+                                        await close()
+                                    except ResourceCleanupError:
+                                        raise
+                                    except Exception as error:
+                                        raise ResourceCleanupError("llm_stream", "llm_generator_close_failed", "模型生成器关闭失败") from error
+                        except (asyncio.CancelledError, GeneratorExit) as error:
                             call_error = error
                             attempt_end = time.perf_counter()
                             # 取消不计作 Provider 失败，也不进入退避或候选降级。
@@ -283,6 +296,13 @@ class LLMProxy:
                             last_error = e
                             raise  # 抛给外层 except 处理
 
+                        except ResourceCleanupError as error:
+                            call_error = error
+                            attempt_end = time.perf_counter()
+                            cancel_call = getattr(self._router, "cancel_call", None)
+                            if cancel_call is not None:
+                                cancel_call(model_name, breaker_state)
+                            raise
                         except Exception as e:
                             call_error = e
                             attempt_end = time.perf_counter()

@@ -74,7 +74,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """持有唯一 ApplicationHost，并在退出时等待提交后关闭资源。"""
+        """持有唯一 ApplicationHost，退出时先请求停止再有界等待提交。"""
         host = await factory()
         _load_runtime_preferences(host)
         app.state.host = host
@@ -82,10 +82,11 @@ def create_app(
         try:
             yield
         finally:
+            # 先让宿主拒绝新提交并请求停止，不能在此无限等待仍阻塞的生产者。
+            await host.shutdown()
             tasks = _submission_tasks(app)
             if tasks:
-                await asyncio.gather(*tuple(tasks), return_exceptions=True)
-            await host.shutdown()
+                await asyncio.wait(tuple(tasks), timeout=1.0)
 
     app = FastAPI(title="dotClaw GUI", version="0.1.0", lifespan=lifespan)
 

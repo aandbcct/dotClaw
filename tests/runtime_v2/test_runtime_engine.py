@@ -1,6 +1,8 @@
 """RuntimeEngine 的正常执行、审批恢复与取消验收测试。"""
 
 from __future__ import annotations
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 from dotclaw.runtime.domain.events import RunEventType
 
@@ -94,8 +96,6 @@ class FinalLLM(LLMPort):
         """返回不含工具调用的最终回复。"""
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "请补充信息")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 class ToolFake(ToolPort):
@@ -105,8 +105,6 @@ class ToolFake(ToolPort):
         """返回失败以防测试意外走入工具路径。"""
         return ToolResult(invocation.call.call_id, ToolResultStatus.FAILED, error=None)
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 class BlockedLLM(FinalLLM):
@@ -115,18 +113,22 @@ class BlockedLLM(FinalLLM):
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
-        self.cancelled: list[str] = []
+        self.cancel_observed = asyncio.Event()
+        self.cleanup_completed = asyncio.Event()
 
     async def complete(self, context: ContextBundle, execution: RunExecutionView, output_port: LLMOutputPort | None = None) -> RunMessage:
         self.started.set()
-        await self.release.wait()
-        if output_port is not None:
-            await output_port.emit(LLMOutputEvent(execution.session_id, execution.run_id, LLMOutputKind.RESPONSE_DELTA, "请补充信息"))
-        return await super().complete(context, execution, output_port)
+        try:
+            await self.release.wait()
+            if output_port is not None:
+                await output_port.emit(LLMOutputEvent(execution.session_id, execution.run_id, LLMOutputKind.RESPONSE_DELTA, "请补充信息"))
+            return await super().complete(context, execution, output_port)
+        except asyncio.CancelledError:
+            self.cancel_observed.set()
+            raise
+        finally:
+            self.cleanup_completed.set()
 
-    async def cancel(self, run_id: str) -> None:
-        self.cancelled.append(run_id)
-        self.release.set()
 
 
 class AcceptedOutput:
@@ -151,9 +153,9 @@ def _request(session_id: str) -> RunRequest:
     return RunRequest(session_id, f"lease-{session_id}", "agent-1", user, ConversationSnapshot(session_id, (), 0))
 
 
-def _engine(root: Path) -> RuntimeEngine:
+def _engine(root: Path, *, run_change_notifier: RunChangeNotifier | None = None) -> RuntimeEngine:
     """使用真实文件仓储和 fake 外部端口构造 Engine。"""
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(root)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(root, approval_repository=ApprovalRepositoryAdapter(root))
     approval_repository: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(root)
     return RuntimeEngine(
         run_repository,
@@ -166,6 +168,7 @@ def _engine(root: Path) -> RuntimeEngine:
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
         history_compactor=UnexpectedHistoryCompactor(),
+        run_change_notifier=run_change_notifier,
     )
 
 
@@ -173,7 +176,7 @@ def test_engine_rejects_missing_context_budget_ports(tmp_path: Path) -> None:
     """Engine 未装配精确计数和摘要 Port 时必须在启动前明确失败。"""
     with pytest.raises(ValueError, match="TokenCounterPort 和 HistoryCompactorPort"):
         RuntimeEngine(
-            RunRepositoryAdapter(tmp_path),
+            RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path)),
             CheckpointRepositoryAdapter(tmp_path),
             ContextFake(),
             FinalLLM(),
@@ -192,7 +195,7 @@ async def test_engine_completes_clarification_as_normal_conversation(tmp_path: P
     assert result.state.outcome().value == "completed"
     assert result.final_message is not None
     assert result.final_message.content == "请补充信息"
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
     conversation = await run_repository.load_conversation("session-1")
     assert conversation[0].content == "请补充信息"
 
@@ -207,7 +210,7 @@ async def test_acceptance_is_persisted_before_blocked_model_output(tmp_path: Pat
         await asyncio.wait_for(model.started.wait(), 2)
         assert not task.done() and not model.release.is_set() and output.deltas == []
         accepted = output.accepted[0]
-        run = await RunRepositoryAdapter(tmp_path).load_run(accepted.session_id, accepted.run_id)
+        run = await RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path)).load_run(accepted.session_id, accepted.run_id)
         assert run is not None and run.run_id == accepted.run_id
         model.release.set()
         result = await asyncio.wait_for(task, 2)
@@ -230,7 +233,7 @@ async def test_acceptance_notification_failure_does_not_abandon_run(tmp_path: Pa
     output.on_run_accepted = AsyncMock(side_effect=RuntimeError("PRIVATE_BODY"))
     result = await engine.execute(_request("notify-failure"), output)
     assert result.state.outcome() is RunOutcome.COMPLETED
-    assert len(await RunRepositoryAdapter(tmp_path).load_conversation("notify-failure")) == 1
+    assert len(await RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path)).load_conversation("notify-failure")) == 1
 
 
 async def test_acceptance_callback_cancellation_propagates_and_unregisters_token(tmp_path: Path) -> None:
@@ -240,7 +243,8 @@ async def test_acceptance_callback_cancellation_propagates_and_unregisters_token
     with pytest.raises(asyncio.CancelledError):
         await engine.execute(request, output)
     run = (await engine._run_repository.list_active_runs("notify-cancel"))[0]
-    assert not engine._cancellation_service.request(run.run_id, "已释放")
+    assert run.run_id not in engine._cancellation_service._drivers
+    assert run.run_id not in engine._cancellation_service._tokens
 
 
 async def test_approval_resume_keeps_id_without_second_acceptance(tmp_path: Path) -> None:
@@ -256,7 +260,7 @@ async def test_engine_releases_run_scope_only_after_terminal_result(tmp_path: Pa
     """Run 完成后 Engine 必须通过 ContextPort 释放对应 Run Owner 缓存。"""
     context_port = ContextFake()
     engine = RuntimeEngine(
-        RunRepositoryAdapter(tmp_path),
+        RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path)),
         CheckpointRepositoryAdapter(tmp_path),
         context_port,
         FinalLLM(),
@@ -299,8 +303,6 @@ class ApprovalLLM(LLMPort):
             return RunMessage("tool-request", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(ToolCall("call-1", "dangerous", {}),))
         return RunMessage("answer-after-approval", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "审批后完成")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 class ApprovalTool(ToolPort):
@@ -316,8 +318,6 @@ class ApprovalTool(ToolPort):
             return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-1")
         return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已执行")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 class ChangingSystemSlot:
@@ -387,7 +387,7 @@ def _changing_context_port(slot: ChangingSystemSlot) -> ContextProvider:
 
 async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: Path) -> None:
     """审批恢复继续原 run，完整记录审批决议和恢复事件。"""
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
     engine = RuntimeEngine(
         run_repository,
         CheckpointRepositoryAdapter(tmp_path),
@@ -417,7 +417,7 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
 
 async def test_approval_events_carry_structured_fields(tmp_path: Path) -> None:
     """等待审批与审批解决事件分别携带 approval_id/call_id 与 approved（7.4）。"""
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
     engine = RuntimeEngine(
         run_repository,
         CheckpointRepositoryAdapter(tmp_path),
@@ -446,7 +446,7 @@ async def test_approval_events_carry_structured_fields(tmp_path: Path) -> None:
 
 async def test_rejected_approval_event_marks_approved_false(tmp_path: Path) -> None:
     """审批拒绝时 APPROVAL_RESOLVED 事件携带 approved=false（7.4）。"""
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
     engine = RuntimeEngine(
         run_repository,
         CheckpointRepositoryAdapter(tmp_path),
@@ -493,8 +493,6 @@ class ReActLLM(LLMPort):
             )
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "两个来源均已查询。")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 class CompletedTool(ToolPort):
@@ -509,8 +507,6 @@ class CompletedTool(ToolPort):
         self.calls.append(invocation)
         return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=f"结果-{invocation.call.call_id}")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 def _request_with_history(session_id: str) -> RunRequest:
@@ -541,7 +537,7 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
     llm: ReActLLM = ReActLLM()
     tool_port: CompletedTool = CompletedTool()
     engine: RuntimeEngine = RuntimeEngine(
-        RunRepositoryAdapter(tmp_path),
+        RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path)),
         CheckpointRepositoryAdapter(tmp_path),
         build_context_provider(ContextDependencies()),
         llm,
@@ -576,7 +572,7 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
     """动态 Run Message 不改变快照版本，事件仍精确引用全部动态输入。"""
     llm: ReActLLM = ReActLLM()
     engine: RuntimeEngine = RuntimeEngine(
-        RunRepositoryAdapter(tmp_path),
+        RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path)),
         CheckpointRepositoryAdapter(tmp_path),
         build_context_provider(ContextDependencies()),
         llm,
@@ -641,10 +637,9 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
         f"tool-{result.run_id}-4",
     ]
     tool_events: list[JSONMap] = [event for event in events if event["event_type"] in {"tool_started", "tool_completed"}]
-    # 恢复边界（§92）：所有 tool_started 在 EXECUTE_TOOLS 恢复检查点落盘前写入，故整批工具的
-    # tool_started 先于 tool_completed（而非逐工具交错），以保证 checkpoint.event_sequence 与最后落盘事件连续。
-    assert [event["event_type"] for event in tool_events] == ["tool_started", "tool_started", "tool_completed", "tool_completed"]
-    assert [require_json_map(event["data"])["call_id"] for event in tool_events] == ["call-1", "call-2", "call-1", "call-2"]
+    # 每个真实开始的工具单独写开始事件和恢复检查点，后续未执行工具不能伪造开始事实。
+    assert [event["event_type"] for event in tool_events] == ["tool_started", "tool_completed", "tool_started", "tool_completed"]
+    assert [require_json_map(event["data"])["call_id"] for event in tool_events] == ["call-1", "call-1", "call-2", "call-2"]
     assert all(event["event_type"] != "context_built" for event in events)
 
 
@@ -653,7 +648,7 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
     llm: ReActLLM = ReActLLM()
     approval_tool: ApprovalTool = ApprovalTool()
     engine: RuntimeEngine = RuntimeEngine(
-        RunRepositoryAdapter(tmp_path),
+        RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path)),
         CheckpointRepositoryAdapter(tmp_path),
         build_context_provider(ContextDependencies()),
         llm,
@@ -689,7 +684,7 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
     llm: ReActLLM = ReActLLM()
     changing_slot: ChangingSystemSlot = ChangingSystemSlot()
     engine: RuntimeEngine = RuntimeEngine(
-        RunRepositoryAdapter(tmp_path),
+        RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path)),
         CheckpointRepositoryAdapter(tmp_path),
         _changing_context_port(changing_slot),
         llm,
@@ -712,7 +707,7 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
 
 async def test_rejected_approval_records_decision_and_cancels_without_conversation(tmp_path: Path) -> None:
     """拒绝审批应记录决议并结束原 Run，不投影 assistant Conversation。"""
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
     engine = RuntimeEngine(
         run_repository,
         CheckpointRepositoryAdapter(tmp_path),
@@ -743,7 +738,7 @@ async def test_rejected_approval_records_decision_and_cancels_without_conversati
 
 async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) -> None:
     """取消审批等待中的 run 会删除 checkpoint 且不投影 assistant 消息。"""
-    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
     engine = RuntimeEngine(
         run_repository,
         CheckpointRepositoryAdapter(tmp_path),
@@ -757,7 +752,8 @@ async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) ->
         history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-cancel"))
-    await engine.cancel(waiting.run_id, "用户取消")
+    await engine.request_cancel(waiting.run_id, "用户取消")
+    await engine.complete_cancellation(waiting.run_id)
 
     cancelled = await run_repository.load_run("session-cancel", waiting.run_id)
     assert cancelled is not None
@@ -798,8 +794,9 @@ class OrderedEngine:
 
 async def test_session_coordinator_serializes_same_session_fifo() -> None:
     """同 Session 请求严格串行，后请求不得在前请求完成前启动。"""
+    notifier = RunChangeNotifier()
     engine = OrderedEngine()
-    coordinator = SessionRunCoordinator(engine)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     first_request = _request("session-fifo")
     second_request = RunRequest("session-fifo", "lease-fifo-2", first_request.agent_id, first_request.user_message, first_request.conversation)
     first_request = RunRequest("session-fifo", "lease-fifo-1", first_request.agent_id, first_request.user_message, first_request.conversation)
@@ -862,8 +859,9 @@ class ControlOrderedEngine:
 
 async def test_session_coordinator_serializes_approval_resume_with_new_message() -> None:
     """审批恢复与新消息必须竞争同一 Session 租约，避免并发执行。"""
+    notifier = RunChangeNotifier()
     engine = ControlOrderedEngine()
-    coordinator = SessionRunCoordinator(engine)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     approval_task: asyncio.Task[RunResult] = asyncio.create_task(
         coordinator.resolve_approval("approval-control", True),
     )

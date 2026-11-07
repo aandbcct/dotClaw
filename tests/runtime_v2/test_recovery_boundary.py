@@ -95,8 +95,6 @@ class _ToolCallingLLM(LLMPort):
             )
         return RunMessage("resp-2", 3, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, "完成")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 class _FinalOnlyLLM(LLMPort):
@@ -109,8 +107,6 @@ class _FinalOnlyLLM(LLMPort):
         self.calls += 1
         return RunMessage("resp-final", 3, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, "完成")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 class _CrashingTool(ToolPort):
@@ -123,8 +119,6 @@ class _CrashingTool(ToolPort):
         self.run_id = execution.run_id
         raise _Crash("killed during tool execution")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 class _RecordingTool(ToolPort):
@@ -137,8 +131,6 @@ class _RecordingTool(ToolPort):
         self.calls += 1
         return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="ok")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身无需远程取消。"""
 
 
 def _engine(root: Path, llm: LLMPort, tool: ToolPort) -> RuntimeEngine:

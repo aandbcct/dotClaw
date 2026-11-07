@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from ..domain.cancellation import CancellationRequest
 from ..domain.control import AgentAction
 from ..domain.context import ContextVersion, StagedHistoryCompression
 from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage, ToolCall
@@ -60,10 +61,15 @@ class CancellationToken:
     cancelled: bool = False
     reason: str = ""
 
-    def request(self, reason: str) -> None:
-        """记录取消请求，供 Runtime 在安全点读取。"""
+    request_id: str | None = None
+
+    def request(self, request: CancellationRequest) -> None:
+        """首次持久化请求生效，重复信号不改原因和标识。"""
+        if self.cancelled:
+            return
         self.cancelled = True
-        self.reason = reason
+        self.reason = request.reason
+        self.request_id = request.request_id
 
 
 @dataclass(frozen=True)

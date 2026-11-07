@@ -14,6 +14,7 @@ from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, LLMO
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
+from dotclaw.runtime.domain.cancellation import CancellationEffect
 
 
 class StreamingProxy:
@@ -178,15 +179,15 @@ async def test_llm_proxy_adapter_cancel_only_stops_target_run() -> None:
 
     await proxy.started.get()
     await proxy.started.get()
-    await adapter.cancel("run-cancel-1")
+    first_task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await first_task
     assert not second_task.done()
-    await adapter.cancel("run-cancel-1")
+    assert not hasattr(adapter, "cancel")
     proxy.release["model-x"].set()
     await second_task
-    assert adapter._active_calls == {}
+    assert not hasattr(adapter, "_active_calls")
 
 
 class ParameterRecordingClient:
@@ -254,3 +255,36 @@ async def test_llm_proxy_adapter_passes_call_conditions_to_client() -> None:
 
     assert client.timeout_seconds == 0.25
     assert client.retry_count == 2
+
+
+@pytest.mark.parametrize("kind", ["llm", "context", "mcp.remote.wait", "third_party.unknown", "builtin.process.execute"])
+async def test_cancellation_effect_uses_resource_scope_and_survives_settlement(tmp_path, kind):
+    """外部停止未知不能降为本地证据；明确本地命令保留本地清理范围。"""
+    from types import SimpleNamespace
+    from tests.runtime_v2.test_runtime_engine import _engine, _request
+    from dotclaw.runtime.domain.facts import ToolCall
+    engine = _engine(tmp_path)
+    entered = asyncio.Event()
+    async def blocked(*args):
+        entered.set()
+        await asyncio.Event().wait()
+    if kind == "llm":
+        engine._llm_port = SimpleNamespace(complete=blocked)
+    elif kind == "context":
+        engine._context_port.build = blocked
+    else:
+        async def model(*args):
+            return RunMessage("call", 0, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+                tool_calls=(ToolCall("resource", kind, {}),))
+        engine._llm_port = SimpleNamespace(complete=model)
+        engine._tool_port = SimpleNamespace(execute=blocked)
+    driver = asyncio.create_task(engine.execute(_request("scope")))
+    await asyncio.wait_for(entered.wait(), 2)
+    run = await engine.active_run("scope")
+    await engine.request_cancel(run.run_id, "停止当前请求")
+    assert (await driver).state.outcome() is RunOutcome.CANCELLED
+    record = await engine._run_repository.load_cancellation("scope", run.run_id)
+    expected = CancellationEffect.LOCAL_ONLY if kind == "builtin.process.execute" else CancellationEffect.REMOTE_UNKNOWN
+    assert record.effect is expected
+    await engine.request_cancel(run.run_id, "再次停止")
+    assert (await engine._run_repository.load_cancellation("scope", run.run_id)).effect is expected

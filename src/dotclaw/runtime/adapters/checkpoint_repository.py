@@ -99,8 +99,50 @@ def _json_map_or_empty(value: JSONValue | None) -> JSONMap:
 
 def _validate_checkpoint_payload(checkpoint: RunCheckpoint) -> None:
     """确保检查点只保存最小控制状态，不夹带完整上下文或工具结果。"""
-    _validate_json_value(checkpoint.pending, "pending")
+    pending = dict(checkpoint.pending)
+    prepared = pending.pop("prepared_request", None)
+    if prepared is not None:
+        if pending:
+            raise ValueError("准备检查点只能保存冻结请求")
+        _validate_prepared_request(checkpoint, prepared)
+    _validate_json_value(pending, "pending")
     _validate_json_value(checkpoint.budget, "budget")
+
+
+def _validate_prepared_request(checkpoint: RunCheckpoint, value: JSONValue) -> None:
+    """准备期仅允许固定结构的冻结输入；Created 状态由 Engine 保存入口校验。"""
+    expected = {"session_id", "lease_id", "agent_id", "user_message", "conversation",
+                "parent_run_id", "root_run_id", "run_id", "model_id", "delegation_task_id"}
+    if (checkpoint.action is not AgentAction.INVOKE_LLM or checkpoint.active_context_version is not None
+            or not isinstance(value, dict) or set(value) != expected
+            or value.get("run_id") != checkpoint.run_id or value.get("session_id") != checkpoint.session_id):
+        raise ValueError("准备请求结构或运行归属不一致")
+    for key in ("session_id", "lease_id", "agent_id", "run_id", "model_id"):
+        if not isinstance(value[key], str):
+            raise ValueError("准备请求标识必须为字符串")
+    for key in ("parent_run_id", "root_run_id", "delegation_task_id"):
+        if value[key] is not None and not isinstance(value[key], str):
+            raise ValueError("准备请求可选标识必须为字符串或空")
+    conversation = value["conversation"]
+    if (not isinstance(conversation, dict)
+            or set(conversation) != {"session_id", "messages", "version", "compressed_history"}
+            or conversation["session_id"] != checkpoint.session_id
+            or not isinstance(conversation["version"], int)
+            or isinstance(conversation["version"], bool)
+            or not isinstance(conversation["messages"], list)):
+        raise ValueError("准备请求会话结构或归属不一致")
+    for message in [value["user_message"], *conversation["messages"]]:
+        if (not isinstance(message, dict) or set(message) != {"id", "role", "content", "created_at"}
+                or not all(isinstance(item, str) for item in message.values())
+                or message["role"] not in {"user", "assistant", "system", "tool"}):
+            raise ValueError("准备请求消息必须为固定输入结构")
+    history = conversation["compressed_history"]
+    if history is not None and (not isinstance(history, dict)
+            or set(history) != {"compression_version", "covered_through_conversation_id", "content", "content_hash"}
+            or not isinstance(history["compression_version"], int) or isinstance(history["compression_version"], bool)
+            or history["compression_version"] <= 0
+            or any(not isinstance(history[key], str) for key in ("covered_through_conversation_id", "content", "content_hash"))):
+        raise ValueError("准备请求压缩历史必须为固定输入结构")
 
 
 def _require_v4_format(data: JSONMap, file_name: str) -> None:

@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import types
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 from unittest.mock import Mock
 from pathlib import Path
 
@@ -42,10 +44,11 @@ def _build_service(
     registry: AgentRegistry,
     coordinator=None,
 ) -> SessionInteractionService:
+    notifier = RunChangeNotifier()
     return SessionInteractionService(
         session_manager=session_manager,
         agent_registry=registry,
-        coordinator=coordinator or SessionRunCoordinator(Mock(spec=RuntimeControlPort)),
+        coordinator=coordinator or SessionRunCoordinator(Mock(spec=RuntimeControlPort), run_change_notifier=notifier),
         preferred_model="test-model",
         chat_models=("test-model", "other-model"),
     )

@@ -1,5 +1,7 @@
 """用真实协调器和假模型验证严格放弃，不执行真实工具。"""
 
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 import asyncio
 from dataclasses import replace
 from unittest.mock import AsyncMock
@@ -15,8 +17,9 @@ from tests.runtime_v2.test_e4_runtime_safety import _engine, _request, FlakyLLM,
 
 
 async def _fixture(tmp_path):
-    engine, repository = _engine(tmp_path, ScriptedCounter(10), ScriptedCompactor(), FlakyLLM())
-    coordinator = SessionRunCoordinator(engine)
+    notifier = RunChangeNotifier()
+    engine, repository = _engine(tmp_path, ScriptedCounter(10), ScriptedCompactor(), FlakyLLM(), run_change_notifier=notifier)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     active = await coordinator.submit(_request(1))
     host, _ = _host(_session("session-e4"), _session("other"))
     host.session_interaction = SessionInteractionService(host.session_manager, host.agent_registry, coordinator, run_repository=repository)

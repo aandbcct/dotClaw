@@ -11,8 +11,12 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable
 import inspect
 import logging
+from ..common.resource_errors import ResourceCleanupError
+
 from typing import Any, Callable
 
 from pydantic import BaseModel
@@ -119,6 +123,8 @@ class FunctionToolHandler(ToolHandler):
             result = self._func(**kwargs)
             if inspect.isawaitable(result):
                 result = await result
+        except ResourceCleanupError:
+            raise
         except Exception as exc:  # 业务异常统一转为 EXECUTION_ERROR
             logger.exception("工具 %s 执行出错", self._meta.name)
             return ToolResult.from_error(
@@ -131,3 +137,24 @@ class FunctionToolHandler(ToolHandler):
         if isinstance(result, ToolResult):
             return result
         return ToolResult(output=str(result))
+
+
+async def _await_io_completion[T](operation: Awaitable[T]) -> T:
+    """不可强杀的本地 I/O 必须等真实工作和文件关闭完成，不能只取消包装 Future。"""
+    task = asyncio.ensure_future(operation)
+    interrupted = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise ResourceCleanupError("file_io", "io_worker_interrupted", "文件工作线程的收尾状态无法确认") from None
+            interrupted = True
+            continue
+        except Exception as error:
+            if interrupted:
+                raise asyncio.CancelledError() from error
+            raise
+        if interrupted:
+            raise asyncio.CancelledError()
+        return result

@@ -8,6 +8,7 @@ import pytest
 
 from dotclaw.llm.base import ChatChunk, ChatTextDelta, EmptyModelResponseError, Message, TextDeltaKind, TokenUsage, ToolCall
 from dotclaw.llm.proxy import LLMProxy
+from dotclaw.common.resource_errors import ResourceCleanupError
 from dotclaw.runtime.adapters.llm_proxy_adapter import LLMProxyAdapter
 from dotclaw.runtime.adapters.run_repository import RunRepositoryAdapter
 from dotclaw.runtime.application.ports import InvalidLLMResponseError
@@ -110,10 +111,26 @@ async def test_empty_engine_result_is_failed_without_success_projection(tmp_path
 async def test_cancel_wins_over_empty_response(tmp_path, raises) -> None:
     engine = _engine(tmp_path)
     async def complete(context, execution, output_port):
-        engine._cancellation_service.request(execution.run_id, "用户取消")
+        # 通过持久化入口请求；当前能力任务已实际返回时仍需由 Runtime 裁决取消。
+        await engine.request_cancel(execution.run_id, "用户取消")
         if raises:
             raise InvalidLLMResponseError("空输出")
         return RunMessage("empty", 0, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "")
     engine._llm_port.complete = complete
     result = await engine.execute(_request("session-cancel"))
     assert result.state.outcome().value == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_is_not_retried_or_mapped_to_unavailable() -> None:
+    """底层清理失败必须贯穿代理及适配器，不能重试或降级。"""
+    proxy, router, client = _proxy([])
+    async def broken(*args, **kwargs):
+        raise ResourceCleanupError("http", "connection_alive", "连接未释放")
+        yield
+    client.chat = Mock(side_effect=broken)
+    with pytest.raises(ResourceCleanupError):
+        await LLMProxyAdapter(proxy).complete(_make_context(), _make_execution("cleanup-run"))
+    client.chat.assert_called_once()
+    router.get_client.assert_called_once_with("primary")
+    router.report_failure.assert_not_called()

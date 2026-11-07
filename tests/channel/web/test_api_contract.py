@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -221,8 +223,9 @@ async def _ready_host(host: _FakeHost) -> _FakeHost:
 
 def _persistent_host(tmp_path: Path) -> tuple[_FakeHost, SessionRunCoordinator]:
     """使用真实持久化与会话租约，仅替换未执行的模型引擎。"""
+    notifier = RunChangeNotifier()
     manager = SessionManager(tmp_path)
-    coordinator = SessionRunCoordinator(Mock(spec=RuntimeControlPort))
+    coordinator = SessionRunCoordinator(Mock(spec=RuntimeControlPort), run_change_notifier=notifier)
     registry = AgentRegistry()
     registry.register(AgentIdentity("default", "默认助手"))
     interaction = SessionInteractionService(manager, registry, coordinator, preferred_model="chat-model", chat_models=("chat-model", "fast-model"))

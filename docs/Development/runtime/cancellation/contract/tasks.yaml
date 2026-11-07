@@ -1,0 +1,199 @@
+# 主代理独占维护。后续阶段派发前填写完整文件归属，禁止按简写自行开工。
+tasks:
+  - id: A-dev
+    phase_id: A
+    role: developer
+    agent_id: /root/cancellation_developer
+    model_requested: {model: gpt-6.1-sol, reasoning_effort: medium}
+    model_actual: null
+    status: accepted
+    contract: {path: contract.yaml, version: 2}
+    goal: 实现取消数据、文件/内存仓储协议与最小通知器，不接线驱动。
+    acceptance_ids: [A]
+    inputs: ['../总体设计.md §5、§7', '../开发计划.md §3']
+    workspace: 'D:\dev\dotClaw'
+    baseline: 479e3cbc8659ac45b4df38b62e006e022744589d
+    writable:
+      - src/dotclaw/runtime/domain/cancellation.py
+      - src/dotclaw/runtime/domain/events.py
+      - src/dotclaw/runtime/application/ports.py
+      - src/dotclaw/runtime/application/run_change_notifier.py
+      - src/dotclaw/runtime/adapters/run_repository.py
+      - src/dotclaw/runtime/adapters/in_memory_run_repository.py
+      - src/dotclaw/runtime/adapters/_file_support.py
+      - tests/runtime_v2/test_cancellation_persistence.py
+      - tests/runtime_v2/test_run_change_notifier.py
+    forbidden: [docs/, engine.py, cancellation_service.py, frontend/, 其他阶段生产代码]
+    constraints:
+      - 不是唯一工作者，不覆盖他人改动；中文注释。
+      - 仓储接口增量添加；模型工具cancel删除留B；委派接口变更留D。
+      - 不创建通用事务框架，不改变既有v4格式含义。
+      - 审批依赖构造参数可选兼容，但intent包含审批时不得静默忽略。
+      - 不运行PATH中的Python，不提交推送。
+    autonomy: [私有序列化辅助函数, 测试fixtures, 不改变公开契约的实现细节]
+    escalate: [公开签名或字段变化, 新依赖, 文件范围扩展, 契约不可实现或矛盾]
+    depends_on: []
+    ready_when: 版本2文档完成且模型设置确认
+    verify: [解释器核对, 新增测试, 既有仓储与成功补偿回归, git diff --check]
+    deliverables: [实际修改文件, 命令与测试结果, 未验证项, 供验证者复现的故障点]
+    progress: P1已修复并独立复验通过，主代理接受阶段A。最新开发定向77通过，独立34目标测试通过。
+    previous_agents: []
+    handoff:
+      completed: [版本2设计修订, 阶段A实现和开发自测]
+      remaining: []
+      blockers: []
+      evidence: ['开发报告：tests/runtime_v2 230 passed；尚未独立核实']
+      next_action: 阶段B接线复用A仓储协议
+  - id: A-verify
+    phase_id: A
+    role: verifier
+    agent_id: /root/cancellation_verifier
+    model_requested: {model: gpt-6.1-sol, reasoning_effort: medium}
+    model_actual: null
+    status: accepted
+    contract: {path: contract.yaml, version: 2}
+    goal: 独立验证阶段A数据与恢复协议，检查API契约及未覆盖失败窗口。
+    acceptance_ids: [A]
+    inputs: ['../总体设计.md §5与§7', '../开发计划.md §3', A-dev交付]
+    workspace: 'D:\dev\dotClaw'
+    baseline: 479e3cbc8659ac45b4df38b62e006e022744589d
+    writable: []
+    forbidden: [修改生产代码, 修改设计和契约, 提交推送]
+    constraints: [不是唯一工作者, 使用项目解释器且测试前打印路径, 不把代理交付状态当作通过]
+    autonomy: [只读审查, 运行相关测试, 临时目录中独立故障复现]
+    escalate: [实际缺陷, 契约矛盾, 测试阻塞]
+    depends_on: [A-dev]
+    ready_when: A-dev交付
+    verify: [字段和序列化, 首次和重复请求, revision冲突, 审批归属, 中途故障恢复, 事件幂等与冲突, 旧v4兼容, 通知无丢失]
+    deliverables: [pass/fail/not_run逐项结果, 命令和实际输出, 可复现问题及文件位置]
+    progress: 最终PASS，P1关闭；独立34目标测试通过，其余首次审查证据有效。
+    previous_agents: []
+    handoff: {completed: [阶段A独立审查, P1定向复验], remaining: [], blockers: [], evidence: ['独立34 passed in 2.41s，diff check通过'], next_action: 阶段B交付后复用本验证代理}
+  - id: B-dev
+    phase_id: B
+    role: developer
+    agent_id: /root/cancellation_developer
+    model_requested: {model: gpt-6.1-sol, reasoning_effort: medium}
+    model_actual: null
+    status: accepted
+    contract: {path: contract.yaml, version: 3}
+    goal: 接通统一任务所有权与取消受理/终态收尾，不改变工具安全链。
+    acceptance_ids: [B]
+    inputs: ['../总体设计.md §5、§6.1-6.3、§7', 阶段A已验收接口]
+    workspace: 'D:\dev\dotClaw'
+    baseline: 阶段A验收后的工作区
+    writable:
+      - src/dotclaw/runtime/application/
+      - src/dotclaw/runtime/adapters/llm_proxy_adapter.py
+      - src/dotclaw/runtime/adapters/tool_executor_adapter.py
+      - src/dotclaw/runtime/adapters/run_repository.py # 单Run意图接口补全
+      - src/dotclaw/runtime/adapters/in_memory_run_repository.py
+      - src/dotclaw/bootstrap/runtime_factory.py
+      - src/dotclaw/bootstrap/_host_components.py
+      - src/dotclaw/bootstrap/session_interaction.py
+      - src/dotclaw/common/resource_errors.py
+      - src/dotclaw/tools/function_handler.py
+      - src/dotclaw/tools/executor.py
+      - src/dotclaw/llm/proxy.py
+      - src/dotclaw/eval/environment.py
+      - src/dotclaw/eval/fixtures.py
+      - tests/runtime_v2/
+      - tests/eval/
+      - tests/tools/ # 仅资源清理异常透传回归，不提前实施C
+      - tests/llm/ # 仅资源清理异常透传回归
+      - tests/channel/web/test_sse_contract.py # 更新删除Engine.cancel后的真实入口替身
+    forbidden: [docs/, frontend/, 实际进程监管实现, 委派两阶段切换, SSE新接口, 自动提交推送]
+    constraints:
+      - 不是唯一工作者，不覆盖既有阶段A或用户改动；中文注释。
+      - CancellationService唯一拥有能力任务且不依赖仓储；Engine唯一业务写者。
+      - 工具校验资源权限审批链保持原顺序。
+      - Session锁后取gate；取消受理只取gate；gate内不得等待外部能力或子运行。
+      - 持久化请求后才signal；能力调用与磁盘提交不能一起取消。
+      - 创建/注册/销毁同一任务都在同一取消服务，不能另建runner。
+      - 协调器补收尾作业只接管无驱动或已退出运行，不抢占运行驱动。
+      - 现有委派调用签名在D前保留可运行；不得为此建立长期第二套取消实现。
+      - 构造依赖可选兼容时不得静默跳过新语义；缺失协议需明确失败。
+    autonomy: [私有辅助方法, 屏障测试组织, 保持契约的类型收窄]
+    escalate: [公共字段和签名变更, 文件扩展, 新依赖, 跨阶段设计冲突]
+    depends_on: [A-verify]
+    ready_when: 阶段A独立验收通过
+    verify: [解释器核对, 新任务取消屏障测试, Runtime完整回归, 受影响Eval和入口回归, git diff --check]
+    deliverables: [任务所有权链路, 修改文件, 实际测试结果, 暂留D阶段接口列表, 未验证项]
+    progress: B最终独立PASS，两个P1复现均关闭，41目标测试通过；主代理接受B，C已派发。
+    previous_agents: []
+    handoff: {completed: [阶段B主要实现, 开发报告920项通过], remaining: [Web替身兼容修复, B独立验收, C至F], blockers: [], evidence: ['工作区未提交修改保留；上次代理因usage limit中断'], next_action: 定向修复Web测试后交付B验证}
+  - {id: B-verify, phase_id: B, role: verifier, agent_id: /root/cancellation_verifier, status: accepted, depends_on: [B-dev], goal: 独立验证阶段B, writable: []}
+  - id: C-dev
+    phase_id: C
+    role: developer
+    agent_id: /root/cancellation_developer
+    model_requested: {model: gpt-6.1-sol, reasoning_effort: medium}
+    model_actual: null
+    status: accepted
+    contract: {path: contract.yaml, version: 3}
+    goal: 命令进程树和模型MCP请求的资源清理，不增加通用调度层。
+    acceptance_ids: [C]
+    inputs: ['../总体设计.md §6.3', '../开发计划.md §5', B阶段受控取消实现]
+    workspace: 'D:\dev\dotClaw'
+    baseline: 阶段B验收后的工作区
+    writable:
+      - src/dotclaw/tools/process_supervisor.py
+      - src/dotclaw/tools/builtin/exec_tool.py
+      - src/dotclaw/tools/function_handler.py
+      - src/dotclaw/tools/executor.py
+      - src/dotclaw/llm/proxy.py
+      - src/dotclaw/llm/drivers/openai_chat_completions.py
+      - src/dotclaw/runtime/adapters/llm_proxy_adapter.py
+      - src/dotclaw/mcp/client.py
+      - src/dotclaw/mcp/tool_adapter.py
+      - tests/tools/
+      - tests/llm/
+      - tests/runtime_v2/test_llm_proxy_adapter.py
+    forbidden: [docs/, 状态机重新设计, 新调度框架, 阶段D和E代码, 提交推送]
+    constraints:
+      - 不是唯一工作者；不覆盖阶段A/B或其他改动；中文注释。
+      - 本地资源由单次调用拥有，取消不关闭全局共享连接。
+      - Windows用作业对象先登记后恢复，POSIX用独立进程组。
+      - 创建过程取消仍需获得资源引用后清理，不遗失正在创建的进程。
+      - 取消和超时复用幂等清理；清理失败透传专用错误。
+      - 不以主shell退出代替进程树退出，不以线程任务取消代替线程停止。
+      - MCP按已安装SDK核实请求级取消，不猜测全局send_cancel。
+    autonomy: [私有平台系统调用封装, 测试fixture, 遵循字段与公开签名的实现细节]
+    escalate: [新依赖, 平台API限制, 接口变化, 必须修改其他内置工具]
+    depends_on: [B-verify]
+    ready_when: 阶段B独立验证通过
+    verify: [解释器核对, 父子孙进程及输出副作用, 创建/超时竞争, 模型流关闭, MCP并发隔离, Windows与可用Linux环境, diff检查]
+    deliverables: [实际平台测试证据, 不支持的平台与能力说明, 修改路径, 未回收资源为零的证据]
+    progress: C最终独立PASS；Windows36通过3跳过，Linux37通过2跳过；grace构造缺失已修，原replace失败定向84通过。
+    previous_agents: []
+    handoff: {completed: [], remaining: [阶段C实现与验证], blockers: [], evidence: [], next_action: B验收后派发}
+  - {id: C-verify, phase_id: C, role: verifier, agent_id: /root/cancellation_verifier, model_requested: {model: gpt-6.1-sol, reasoning_effort: medium}, model_actual: null, status: accepted, contract: {path: contract.yaml, version: 3}, depends_on: [C-dev], goal: 独立验证阶段C, writable: []}
+  - id: D-dev
+    phase_id: D
+    role: developer
+    agent_id: /root/cancellation_developer
+    model_requested: {model: gpt-6.1-sol, reasoning_effort: medium}
+    model_actual: null
+    status: accepted
+    contract: {path: contract.yaml, version: 3}
+    depends_on: [C-verify]
+    goal: 委派两阶段启动、持久子关联、取消树和宿主恢复关闭。
+    workspace: 'D:\dev\dotClaw'
+    baseline: C验收后的工作区
+    inputs: ['../总体设计.md §6.1、6.2、6.4、7.4', '../开发计划.md §6']
+    writable: [src/dotclaw/runtime/, src/dotclaw/orchestration/, src/dotclaw/bootstrap/, src/dotclaw/channel/web/app.py, src/dotclaw/eval/, tests/runtime_v2/, tests/benchmarks/, tests/channel/web/, tests/eval/]
+    forbidden: [docs/, frontend/, E阶段观察接口, 新消息持久化框架, 提交推送]
+    constraints: [不是唯一工作者且不覆盖既有改动, 中文注释, 公开接口和模型变更需主代理裁决, 保留唯一能力任务所有权, 不在gate内等待子运行退出, 不用Task异常代替Run终态, 不自动启动重启遗留Created子Run]
+    autonomy: [私有辅助函数, 测试fixture, 契约不变的实现细节]
+    escalate: [签名字段变化, 新依赖, 文件范围扩展, 契约矛盾]
+    acceptance_ids: [D]
+    ready_when: C独立验收通过
+    verify: [解释器核对, prepare与start各故障窗口, 父子孙取消及独立分支, 重启关系恢复, Task真实结算, Host关闭, diff检查]
+    deliverables: [修改文件和旧路径删除, 实际测试与故障证据, 未验证项]
+    progress: D最终独立PASS，两项P1已关闭；58项独立测试通过。
+    previous_agents: []
+    handoff: {completed: [], remaining: [D实现与独立验收], blockers: [], evidence: [], next_action: C验收后派发}
+  - {id: D-verify, phase_id: D, role: verifier, agent_id: /root/cancellation_verifier, status: accepted, depends_on: [D-dev], goal: 独立验证阶段D, writable: []}
+  - {id: E-dev, phase_id: E, role: developer, agent_id: null, status: pending, depends_on: [D-verify], goal: SSE和前端, ready_when: 阶段D验收通过且主代理补全派发单}
+  - {id: E-verify, phase_id: E, role: verifier, agent_id: null, status: pending, depends_on: [E-dev], goal: 独立验证阶段E, writable: []}
+  - {id: F-verify, phase_id: F, role: verifier, agent_id: null, status: pending, depends_on: [E-verify], goal: 最终集成与架构验收, writable: []}

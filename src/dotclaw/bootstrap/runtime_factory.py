@@ -28,6 +28,7 @@ from ..runtime.adapters import (
 from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.engine import RuntimeEngine
+from ..runtime.application.run_change_notifier import RunChangeNotifier
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.application.ports import ContextPort
 from ..session.session import SessionManager
@@ -82,18 +83,21 @@ def build_runtime_services(
         agent_registry=agent_registry,
         plan_configuration=build_context_plan_from_registry(agent_registry),
     ))
+    approval_repository: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(storage_root)
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(
         storage_root,
         SessionConversationProjector(session_manager),
+        approval_repository=approval_repository,
     )
-    approval_repository: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(storage_root)
     dispatcher: AgentDispatcher = AgentDispatcher(TaskMessageBroker())
     delegation_port: RuntimeDelegationAdapter = RuntimeDelegationAdapter(
         session_manager,
         agent_registry,
         dispatcher,
         preferred_model,
+        run_repository=run_repository,
     )
+    notifier = RunChangeNotifier()
     engine = RuntimeEngine(
         run_repository=run_repository,
         checkpoint_repository=CheckpointRepositoryAdapter(storage_root),
@@ -110,11 +114,12 @@ def build_runtime_services(
         ),
         approval_service=ApprovalService(approval_repository),
         cancellation_service=CancellationService(),
+        run_change_notifier=notifier,
         delegation_port=delegation_port,
         token_counter=TiktokenTokenCounter(),
         history_compactor=LLMContextCompactor(llm_proxy),
     )
-    coordinator: SessionRunCoordinator = SessionRunCoordinator(engine)
+    coordinator: SessionRunCoordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     delegation_port.bind_coordinator(coordinator)
     return RuntimeServices(
         engine=engine,

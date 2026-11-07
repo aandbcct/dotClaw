@@ -7,6 +7,8 @@ Run/Session 范围 Context 缓存释放。使用真实仓储与最小替身，�
 from __future__ import annotations
 
 import json
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -48,6 +50,7 @@ def _service(
     *,
     context_port: object | None = None,
 ) -> tuple[SessionManager, SessionInteractionService, RunRepositoryAdapter, ApprovalRepositoryAdapter]:
+    notifier = RunChangeNotifier()
     session_manager: SessionManager = SessionManager(tmp_path)
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(
         tmp_path, SessionConversationProjector(session_manager)
@@ -56,7 +59,7 @@ def _service(
     service = SessionInteractionService(
         session_manager=session_manager,
         agent_registry=_registry(),
-        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort)),
+        coordinator=SessionRunCoordinator(Mock(spec=RuntimeControlPort), run_change_notifier=notifier),
         run_repository=run_repository,
         approval_repository=approval_repository,
         context_port=context_port,  # type: ignore[arg-type]

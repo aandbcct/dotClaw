@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from contextlib import AsyncExitStack
+from ..common.resource_errors import ResourceCleanupError
 from enum import Enum
 from typing import Any, TYPE_CHECKING
 
@@ -154,7 +156,11 @@ class McpClient:
         self._config = server_config
         self._global = global_config
         self._session = None          # mcp.ClientSession
-        self._transport = None        # stdio or HTTP transport
+        self._transport = None        # 仅在连接保活任务中拥有的传输流对。
+        self._connection_task: asyncio.Task[None] | None = None
+        self._connection_stop: asyncio.Event | None = None
+        self._connection_ready: asyncio.Future[bool] | None = None
+        self._connection_lock = asyncio.Lock()
         self._state = McpClientState.STARTING
         self._failure_count = 0
         self._tools: list[McpToolInfo] = []
@@ -192,46 +198,58 @@ class McpClient:
     # ---- 连接管理 ----
 
     async def connect(self) -> bool:
-        """连接 MCP server：创建 transport → 握手 → 发现工具"""
-        # W1 修复：清理旧连接（重连场景防止资源泄漏）
-        await self._cleanup_old_connection()
+        """按已安装 SDK 的上下文协议连接，连接资源始终由同一任务进入和退出。"""
+        async with self._connection_lock:
+            await self._cleanup_old_connection()
+            self._state = McpClientState.STARTING
+            self._connection_stop = asyncio.Event()
+            self._connection_ready = asyncio.get_running_loop().create_future()
+            self._connection_task = asyncio.create_task(self._serve_connection())
+            try:
+                return await asyncio.wait_for(asyncio.shield(self._connection_ready), self.get_startup_timeout())
+            except asyncio.CancelledError:
+                await self._cleanup_old_connection()
+                raise
+            except Exception as error:
+                await self._cleanup_old_connection()
+                self._state = McpClientState.FAILED
+                logger.error("MCP server %s 启动失败: %s", self._config.name, type(error).__name__)
+                return False
 
+    async def _serve_connection(self) -> None:
+        """共享连接保活；Run 取消只打断 request await，不取消此任务。"""
         try:
             from mcp import ClientSession
-
-            if self._config.transport == "stdio":
-                from mcp.client.stdio import StdioClientTransport
-                self._transport = StdioClientTransport(
-                    command=self._config.command,
-                    args=self._config.args,
-                )
-            else:
-                from mcp.client.http import HttpClientTransport
-                self._transport = HttpClientTransport(
-                    url=self._config.url,
-                    headers=self._config.headers,
-                )
-
-            self._session = ClientSession(self._transport)
-            await asyncio.wait_for(
-                self._session.initialize(),
-                timeout=self.get_startup_timeout(),
-            )
-
-            await self._discover()
-
-            self._state = McpClientState.CONNECTED
-            self._failure_count = 0
-            return True
-
-        except asyncio.TimeoutError:
-            self._state = McpClientState.FAILED
-            logger.error(f"MCP server {self._config.name} 握手超时")
-            return False
-        except Exception as e:
-            self._state = McpClientState.FAILED
-            logger.error(f"MCP server {self._config.name} 启动失败: {e}")
-            return False
+            async with AsyncExitStack() as stack:
+                if self._config.transport == "stdio":
+                    from mcp.client.stdio import StdioServerParameters, stdio_client
+                    streams = await stack.enter_async_context(stdio_client(StdioServerParameters(
+                        command=self._config.command, args=self._config.args)))
+                else:
+                    from mcp.client.streamable_http import streamable_http_client
+                    from mcp.shared._httpx_utils import create_mcp_http_client
+                    http_client = await stack.enter_async_context(create_mcp_http_client(headers=self._config.headers))
+                    streams = await stack.enter_async_context(streamable_http_client(self._config.url, http_client=http_client))
+                self._transport = streams
+                self._session = await stack.enter_async_context(ClientSession(*streams))
+                await self._session.initialize()
+                await self._discover()
+                self._state = McpClientState.CONNECTED
+                self._failure_count = 0
+                self._connection_ready.set_result(True)
+                await self._connection_stop.wait()
+        except BaseException as error:
+            if not self._connection_ready.done():
+                self._connection_ready.set_exception(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                self._state = McpClientState.CRASHED
+                logger.error("MCP server %s 连接退出: %s", self._config.name, type(error).__name__)
+                raise ResourceCleanupError("mcp_connection", "mcp_connection_close_failed", "MCP连接清理失败") from error
+        finally:
+            self._session = None
+            self._transport = None
+            if self._connection_stop is not None and not self._connection_stop.is_set():
+                self._state = McpClientState.CRASHED
 
     async def _discover(self):
         """发现 tools/resources/prompts"""
@@ -266,8 +284,10 @@ class McpClient:
                 timeout=timeout_val,
             )
             return McpToolResult.from_mcp(result)
-        except asyncio.TimeoutError:
-            await self._send_cancel()
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            # SDK 2.0 根据当前请求 ID 发送取消通知并移除相应等待者；绝不猜测整连接取消。
+            raise
+        except ResourceCleanupError:
             raise
         except Exception as e:
             await self._handle_execution_error(e)
@@ -284,8 +304,10 @@ class McpClient:
                 timeout=timeout_val,
             )
             return McpToolResult.from_resource_result(result)
-        except asyncio.TimeoutError:
-            await self._send_cancel()
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            # SDK 2.0 根据当前请求 ID 发送取消通知并移除相应等待者；绝不猜测整连接取消。
+            raise
+        except ResourceCleanupError:
             raise
         except Exception as e:
             await self._handle_execution_error(e)
@@ -302,8 +324,10 @@ class McpClient:
                 timeout=timeout_val,
             )
             return McpToolResult.from_prompt_result(result)
-        except asyncio.TimeoutError:
-            await self._send_cancel()
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            # SDK 2.0 根据当前请求 ID 发送取消通知并移除相应等待者；绝不猜测整连接取消。
+            raise
+        except ResourceCleanupError:
             raise
         except Exception as e:
             await self._handle_execution_error(e)
@@ -329,46 +353,34 @@ class McpClient:
         if not success:
             self._state = McpClientState.CRASHED
 
-    async def _send_cancel(self):
-        """发送 cancel 通知（超时时调用）"""
-        if self._session:
-            try:
-                if hasattr(self._session, 'send_cancel'):
-                    await self._session.send_cancel()
-                elif hasattr(self._session, 'cancel'):
-                    await self._session.cancel()
-            except Exception:
-                logger.debug(f"MCP server {self._config.name} cancel 通知发送失败")
-
     async def shutdown(self):
-        """优雅关闭"""
-        if self._session:
-            try:
-                await self._session.shutdown()
-            except Exception:
-                pass
-            self._session = None
-        if self._transport:
-            if hasattr(self._transport, 'terminate'):
-                try:
-                    self._transport.terminate()
-                except Exception:
-                    pass
-            self._transport = None
-        self._state = McpClientState.SHUTDOWN
+        """只在宿主关闭时退出共享连接；重复调用幂等。"""
+        async with self._connection_lock:
+            await self._cleanup_old_connection()
+            self._state = McpClientState.SHUTDOWN
 
     async def _cleanup_old_connection(self):
-        """W1 修复：清理旧 transport/session（重连前调用）"""
-        if self._session:
+        """等待保活任务在自身上下文关闭 SDK 和传输，不跨任务退出取消作用域。"""
+        task = self._connection_task
+        if task is None:
+            return
+        if self._connection_stop is not None:
+            self._connection_stop.set()
+        if self._connection_ready is not None and not self._connection_ready.done() and not task.done():
+            task.cancel()
+        interrupted = False
+        while True:
             try:
-                await self._session.shutdown()
-            except Exception:
-                pass
-            self._session = None
-        if self._transport:
-            if hasattr(self._transport, 'terminate'):
-                try:
-                    self._transport.terminate()
-                except Exception:
-                    pass
-            self._transport = None
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    break
+                interrupted = True
+        if self._connection_ready is not None and self._connection_ready.done() and not self._connection_ready.cancelled():
+            self._connection_ready.exception()
+        self._connection_task = None
+        self._connection_stop = None
+        self._connection_ready = None
+        if interrupted:
+            raise asyncio.CancelledError()

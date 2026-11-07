@@ -23,8 +23,9 @@ from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, Cont
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
-from dotclaw.runtime.application.ports import ContextPort, LLMOutputPort, LLMPort, RunPolicyPort, ToolPort
+from dotclaw.runtime.application.ports import ContextPort, LLMOutputPort, LLMPort, LLMUnavailableError, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
 from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, MessageRole, RunMessage, RunMessageKind, ToolCall
 from dotclaw.session.session import SessionManager
@@ -131,6 +132,8 @@ class _DelegatingLLM(LLMPort):
                 raise RuntimeError("受控子 Run 失败")
             if self.outcome in (ChildOutcome.CANCELLED, ChildOutcome.ABANDONED):
                 await self.child_release.wait()
+                if self.outcome is ChildOutcome.ABANDONED:
+                    raise LLMUnavailableError("受控模型退出，供显式放弃验收")
         content = f"child:{request_id}" if execution.policy.agent_id == "target-agent" else f"parent:{request_id}"
         if output_port is not None:
             await output_port.emit(LLMOutputEvent(execution.session_id, execution.run_id, LLMOutputKind.RESPONSE_DELTA, content))
@@ -242,15 +245,16 @@ class _UnexpectedHistoryCompactor:
 
 async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, request_id: str, outcome: ChildOutcome) -> Mapping[str, object]:
     """执行真实委派链，并通过子 Run 终态驱动父侧回灌。"""
+    notifier = RunChangeNotifier()
     repository = RunRepositoryAdapter(root)
     registry = AgentRegistry()
     registry.register(AgentIdentity(agent_id="target-agent", agent_name="Benchmark Target"))
     dispatcher = AgentDispatcher(TaskMessageBroker())
-    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model")
+    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model", run_repository=repository)
     llm = _DelegatingLLM(request_id, config.fake_delay_ms, outcome)
     context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
-    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), context, llm, tools, _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor())
-    coordinator = SessionRunCoordinator(engine)
+    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), context, llm, tools, _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor(), run_change_notifier=notifier)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
     request = RunRequest(f"parent-{request_id}", f"lease-{request_id}", "parent-agent", ConversationMessage("input", MessageRole.USER, request_id, ""), ConversationSnapshot(f"parent-{request_id}", (), 0))
     started = time.perf_counter()
@@ -260,10 +264,10 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
         if outcome is ChildOutcome.CANCELLED:
             await coordinator.cancel(llm.child_run_id, "Benchmark 子 Run 取消")
         else:
-            # 子 Run 正在持有其 Session 协调锁；放弃入口直接走 Engine，避免测试编排
-            # 自身等待同一把锁，同时仍复用既有状态机与持久化语义。
-            await engine.abandon_run(llm.child_run_id)
+            # 先让能力真实退出和驱动释放租约，再经唯一协调入口显式放弃。
             llm.child_release.set()
+            await coordinator.start_prepared(llm.child_run_id)
+            await coordinator.abandon_run(llm.child_run_id)
         submitted = await asyncio.wait_for(submission_task, timeout=1.0)
     else:
         submitted = await coordinator.submit(request, output)
@@ -271,7 +275,7 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
     child_run_id = submitted.child_run_id
     if child_run_id is None:
         raise RuntimeError("委派 Fixture 未返回子 Run 标识")
-    await adapter.result(child_run_id)
+    await adapter.wait_terminal(child_run_id)
     await _wait_for_terminal(repository, child_run_id)
     resumed = await coordinator.resume_delegation(child_run_id)
     ended = time.perf_counter()
@@ -323,12 +327,13 @@ async def run_harness_delegations(
         raise ValueError("Harness 委派任务不能为空")
     if len({task.target_agent_id for task in tasks}) != len(tasks):
         raise ValueError("Harness 冻结子任务必须使用唯一目标 Agent，避免结果映射歧义")
+    notifier = RunChangeNotifier()
     repository = RunRepositoryAdapter(root)
     registry = AgentRegistry()
     for target_agent_id in dict.fromkeys(task.target_agent_id for task in tasks):
         registry.register(AgentIdentity(agent_id=target_agent_id, agent_name=f"Benchmark {target_agent_id}"))
     dispatcher = AgentDispatcher(TaskMessageBroker())
-    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model")
+    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model", run_repository=repository)
     context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
     engine = RuntimeEngine(
         repository,
@@ -342,8 +347,9 @@ async def run_harness_delegations(
         delegation_port=adapter,
         token_counter=_AlwaysWithinBudgetCounter(),
         history_compactor=_UnexpectedHistoryCompactor(),
+        run_change_notifier=notifier,
     )
-    coordinator = SessionRunCoordinator(engine)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
     session_id = f"parent-{request_id}"
     request = RunRequest(
@@ -361,7 +367,7 @@ async def run_harness_delegations(
     while current.child_run_id is not None:
         child_run_id = current.child_run_id
         child_run_ids.append(child_run_id)
-        await adapter.result(child_run_id)
+        await adapter.wait_terminal(child_run_id)
         child_run = await _wait_for_terminal(repository, child_run_id)
         child_outcomes.append(child_run.state.outcome().value)
         current = await coordinator.resume_delegation(child_run_id)
@@ -395,23 +401,23 @@ async def run_harness_delegations(
 
 async def run_concurrent_completed(root: Path, config: DelegationWorkloadConfig, attempt: int) -> tuple[Mapping[str, object], ...]:
     """在一套共享存储、Broker、Adapter 与协调器内并发执行多个父 Session。"""
+    notifier = RunChangeNotifier()
     repository = RunRepositoryAdapter(root)
     registry = AgentRegistry()
     registry.register(AgentIdentity(agent_id="target-agent", agent_name="Benchmark Target"))
     dispatcher = AgentDispatcher(TaskMessageBroker())
-    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model")
+    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model", run_repository=repository)
     context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
-    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), context, _DelegatingLLM("shared", config.fake_delay_ms, delegate_all_parents=True), tools, _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor())
-    coordinator = SessionRunCoordinator(engine)
+    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), context, _DelegatingLLM("shared", config.fake_delay_ms, delegate_all_parents=True), tools, _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor(), run_change_notifier=notifier)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
     request_ids = [chain_request_id(index, attempt) for index in range(config.concurrent_parents)]
     requests = [RunRequest(f"parent-{request_id}", f"lease-{request_id}", "parent-agent", ConversationMessage("input", MessageRole.USER, request_id, ""), ConversationSnapshot(f"parent-{request_id}", (), 0)) for request_id in request_ids]
     started = time.perf_counter()
     submitted = await asyncio.gather(*(coordinator.submit(request, output) for request in requests))
     suspended_at = time.perf_counter()
-    # 先并发等待适配器确认子执行任务已结束，再读取持久化事实。Repository 的
-    # 恢复扫描会遍历共享根；不能在子 Run 仍写入时并发触发该只读观察。
-    await asyncio.gather(*(adapter.result(result.child_run_id or "") for result in submitted))
+    # 事件驱动等待已提交子终态，再读取事实并回灌父运行。
+    await asyncio.gather(*(adapter.wait_terminal(result.child_run_id or "") for result in submitted))
     child_runs: list[AgentRun] = []
     for result in submitted:
         child_runs.append(await _wait_for_terminal(repository, result.child_run_id or ""))
@@ -438,14 +444,15 @@ async def run_concurrent_completed(root: Path, config: DelegationWorkloadConfig,
 
 async def run_parent_cancellation(root: Path, config: DelegationWorkloadConfig, request_id: str) -> Mapping[str, object]:
     """取消已委派父 Run，验证子取消、执行权释放与同 Session 后续请求。"""
+    notifier = RunChangeNotifier()
     repository = RunRepositoryAdapter(root)
     registry = AgentRegistry()
     registry.register(AgentIdentity(agent_id="target-agent", agent_name="Benchmark Target"))
     dispatcher = AgentDispatcher(TaskMessageBroker())
-    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model")
+    adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model", run_repository=repository)
     llm = _DelegatingLLM(request_id, config.fake_delay_ms, ChildOutcome.CANCELLED)
-    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), _FixedContext(), llm, _NoTools(), _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor())
-    coordinator = SessionRunCoordinator(engine)
+    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), _FixedContext(), llm, _NoTools(), _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor(), run_change_notifier=notifier)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
     session_id = f"parent-{request_id}"
     request = RunRequest(session_id, f"lease-{request_id}", "parent-agent", ConversationMessage("input", MessageRole.USER, request_id, ""), ConversationSnapshot(session_id, (), 0))

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 from pathlib import Path
 
 from dotclaw.agent.identity import AgentIdentity
@@ -49,6 +51,7 @@ from dotclaw.runtime.domain.facts import (
 from dotclaw.runtime.domain.state import (
     AgentRunState,
     Ended,
+    Created,
     RunOutcome,
     RunStage,
     Running,
@@ -122,8 +125,6 @@ class DelegatingLLM(LLMPort):
             )
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "已整合子运行结果")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身没有远程调用需要取消。"""
 
 
 class NoToolExecution(ToolPort):
@@ -133,8 +134,6 @@ class NoToolExecution(ToolPort):
         """若被调用则明确失败。"""
         return ToolResult(invocation.call.call_id, ToolResultStatus.FAILED)
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身没有工具调用需要取消。"""
 
 
 class FinalLLM(LLMPort):
@@ -144,8 +143,6 @@ class FinalLLM(LLMPort):
         """立即返回普通终态回答。"""
         return RunMessage("child-answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "子运行完成")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身没有远程调用需要取消。"""
 
 
 class ParentChildLLM(LLMPort):
@@ -173,8 +170,6 @@ class ParentChildLLM(LLMPort):
         content: str = "子运行完成" if execution.policy.agent_id == "target-agent" else "父运行已整合结果"
         return RunMessage("answer", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, content)
 
-    async def cancel(self, run_id: str) -> None:
-        """该端到端替身没有可中止的远程调用。"""
 
 
 class BlockingChildLLM(LLMPort):
@@ -207,10 +202,6 @@ class BlockingChildLLM(LLMPort):
             await self.child_release.wait()
         return RunMessage("answer", 1, RunMessageKind.FINAL_RESPONSE, MessageRole.ASSISTANT, "完成")
 
-    async def cancel(self, run_id: str) -> None:
-        """模拟远程模型收到取消后尽快结束调用。"""
-        self.cancelled_run_ids.append(run_id)
-        self.child_release.set()
 
 
 class CompletedDelegation(DelegationPort):
@@ -220,7 +211,7 @@ class CompletedDelegation(DelegationPort):
         self.request: DelegationRequest | None = None
         self.child_run_id: str = child_run_id
 
-    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
+    async def prepare(self, request: DelegationRequest) -> DelegationSubmission:
         """保存结构化请求并返回固定子运行标识。"""
         self.request = request
         return DelegationSubmission(self.child_run_id, f"task-{self.child_run_id}", "child-session")
@@ -229,7 +220,14 @@ class CompletedDelegation(DelegationPort):
         """返回成功子运行的标准化结果（阶段3：使用 RunOutcome 而非旧状态枚举）。"""
         return DelegationResult(child_run_id, RunOutcome.COMPLETED, "子运行输出")
 
-    async def cancel(self, child_run_id: str) -> None:
+    async def start(self, child_run_id: str) -> None:
+        """测试冻结子运行已经具有结果。"""
+
+    async def wait_terminal(self, child_run_id: str) -> DelegationResult:
+        """返回测试冻结终态。"""
+        return await self.result(child_run_id)
+
+    async def cancel(self, child_run_id: str, reason: str, parent_request_id: str | None) -> None:
         """测试不需要取消子运行。"""
 
 
@@ -240,7 +238,7 @@ class OutcomeDelegation(DelegationPort):
         self.child_run_id: str = child_run_id
         self.outcome: RunOutcome = outcome
 
-    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
+    async def prepare(self, request: DelegationRequest) -> DelegationSubmission:
         """保存结构化请求并返回固定子运行标识。"""
         return DelegationSubmission(self.child_run_id, f"task-{self.child_run_id}", "child-session")
 
@@ -248,7 +246,14 @@ class OutcomeDelegation(DelegationPort):
         """返回指定结局的子运行标准化结果。"""
         return DelegationResult(child_run_id, self.outcome, f"子运行结局：{self.outcome.value}")
 
-    async def cancel(self, child_run_id: str) -> None:
+    async def start(self, child_run_id: str) -> None:
+        """测试冻结子运行已经具有结果。"""
+
+    async def wait_terminal(self, child_run_id: str) -> DelegationResult:
+        """返回测试冻结终态。"""
+        return await self.result(child_run_id)
+
+    async def cancel(self, child_run_id: str, reason: str, parent_request_id: str | None) -> None:
         """测试不需要取消子运行。"""
 
 
@@ -316,12 +321,13 @@ async def test_engine_submits_delegation_and_suspends_parent(tmp_path: Path) -> 
 
 async def test_engine_resume_delegation_backfills_once_when_repeated(tmp_path: Path) -> None:
     """重复回灌同一子 Run 时拒绝第二次恢复，且不新增消息、事件或子 Run。"""
+    notifier = RunChangeNotifier()
     target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent")
     registry: AgentRegistry = AgentRegistry()
     registry.register(target)
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     dispatcher = _dispatcher()
-    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model")
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model", run_repository=repository)
     engine = RuntimeEngine(
         repository,
         CheckpointRepositoryAdapter(tmp_path),
@@ -334,8 +340,9 @@ async def test_engine_resume_delegation_backfills_once_when_repeated(tmp_path: P
         delegation_port=adapter,
         token_counter=AlwaysWithinBudgetCounter(),
         history_compactor=UnexpectedHistoryCompactor(),
+        run_change_notifier=notifier,
     )
-    coordinator = SessionRunCoordinator(engine)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
 
     # 阶段1：提交即挂起，返回 WAITING_DELEGATION 与子运行标识。
@@ -345,6 +352,7 @@ async def test_engine_resume_delegation_backfills_once_when_repeated(tmp_path: P
     assert child_run_id
 
     # 阶段2：子运行完成后经 resume_delegation 回灌并恢复父运行。
+    await adapter.wait_terminal(child_run_id)
     resumed: RunResult = await coordinator.resume_delegation(child_run_id)
     assert resumed.state.outcome() is RunOutcome.COMPLETED
     events_path: Path = tmp_path / "parent-session" / "agent_runs" / submit_result.run_id / "events.jsonl"
@@ -491,59 +499,49 @@ async def test_engine_resume_delegation_with_cancelled_child_writes_result_messa
     assert result_messages[0]["metadata"]["child_run_id"] == "child-run"
 
 
-class RecordingCoordinator:
-    """记录适配器创建的子运行请求。"""
-
-    def __init__(self) -> None:
-        self.request: RunRequest | None = None
-        self.cancelled_run_id: str = ""
-
-    async def submit(self, request: RunRequest) -> RunResult:
-        """返回已完成的 child Run，并保留请求用于断言。"""
-        self.request = request
-        answer: ConversationMessage = ConversationMessage("child-answer", MessageRole.ASSISTANT, "目标完成", "")
-        return RunResult("child-run", AgentRunState(mode=Ended(RunOutcome.COMPLETED)), answer)
-
-    async def cancel(self, run_id: str, reason: str) -> None:
-        """记录取消请求。"""
-        self.cancelled_run_id = run_id
-
-
 async def test_runtime_delegation_adapter_creates_target_run_with_parent_and_root(tmp_path: Path) -> None:
-    """适配器创建独立 target Session，并保留 parent/root 运行关系。"""
-    target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent")
+    """真实准备保留父及根归属，启动前没有子能力调用。"""
+    notifier = RunChangeNotifier()
+    target = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent")
     registry = AgentRegistry()
     registry.register(target)
-    coordinator = RecordingCoordinator()
-    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, _dispatcher(), "model")
+    repository = RunRepositoryAdapter(tmp_path)
+    dispatcher = _dispatcher()
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model", run_repository=repository)
+    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(tmp_path), MinimalContext(), ParentChildLLM(),
+        NoToolExecution(), FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(tmp_path)), CancellationService(),
+        delegation_port=adapter, token_counter=AlwaysWithinBudgetCounter(),
+        history_compactor=UnexpectedHistoryCompactor(), run_change_notifier=notifier)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
-    request = DelegationRequest(
-        parent_run_id="parent-run",
-        root_run_id="root-run",
-        target_agent_id=target.agent_id,
+    parent_request = RunRequest("parent-session", "lease", "parent-agent", _request().user_message,
+        _request().conversation, root_run_id="root-run", run_id="parent-run")
+    await engine.prepare_run(parent_request)
+    request = DelegationRequest(parent_run_id="parent-run", root_run_id="root-run", target_agent_id=target.agent_id,
         input_message=ConversationMessage("delegation", MessageRole.USER, "执行子任务", ""),
-        source_agent_id="parent-agent",
-        source_session_id="parent-session",
-    )
-
-    submission: DelegationSubmission = await adapter.submit(request)
-    child_run_id: str = submission.child_run_id
-    result: DelegationResult | None = await adapter.result(child_run_id)
-    assert coordinator.request is not None
-    assert coordinator.request.parent_run_id == "parent-run"
-    assert coordinator.request.root_run_id == "root-run"
-    assert coordinator.request.agent_id == target.agent_id
-    assert result == DelegationResult("child-run", RunOutcome.COMPLETED, "目标完成")
+        source_agent_id="parent-agent", source_session_id="parent-session")
+    async with engine._cancellation_service.gate(parent_request.run_id):
+        submission = await adapter.prepare(request)
+    child = await repository.find_run(submission.child_run_id)
+    assert child is not None
+    assert isinstance(child.state.mode, Created)
+    assert (child.parent_run_id, child.root_run_id, child.agent_id) == ("parent-run", "root-run", target.agent_id)
+    assert await adapter.result(child.run_id) is None
+    await adapter.start(child.run_id)
+    result = await adapter.wait_terminal(child.run_id)
+    assert result.outcome is RunOutcome.COMPLETED
+    assert result.output == "子运行完成"
 
 
 async def test_runtime_delegation_adapter_executes_real_child_run_through_coordinator(tmp_path: Path) -> None:
     """真实适配器必须经协调器执行子 Run，而非仅使用伪协调器记录请求。"""
+    notifier = RunChangeNotifier()
     target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent")
     registry: AgentRegistry = AgentRegistry()
     registry.register(target)
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     dispatcher = _dispatcher()
-    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model")
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model", run_repository=repository)
     engine = RuntimeEngine(
         repository,
         CheckpointRepositoryAdapter(tmp_path),
@@ -556,8 +554,9 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
         delegation_port=adapter,
         token_counter=AlwaysWithinBudgetCounter(),
         history_compactor=UnexpectedHistoryCompactor(),
+        run_change_notifier=notifier,
     )
-    coordinator = SessionRunCoordinator(engine)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
 
     from tests.runtime_v2.test_runtime_engine import AcceptedOutput
@@ -582,6 +581,7 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
 
     # 子运行完成后经 resume_delegation 恢复父运行至 COMPLETED；回灌子结果时经适配器
     # finish 将 Task 收口为 COMPLETED（阶段3 提交即挂起，故 Task 完成发生在 resume 之后）。
+    await adapter.wait_terminal(child_run_id)
     resumed: RunResult = await coordinator.resume_delegation(child_run_id, output)
     assert resumed.state.outcome() is RunOutcome.COMPLETED
     assert [(event.session_id, event.run_id) for event in output.accepted] == [("parent-session", result.run_id)]
@@ -592,12 +592,13 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
 
 async def test_parent_cancellation_propagates_to_real_delegated_child_run(tmp_path: Path) -> None:
     """父运行取消必须通知子 Run，且父子均以取消终态收口。"""
+    notifier = RunChangeNotifier()
     target: AgentIdentity = AgentIdentity(agent_id="target-agent", agent_name="目标 Agent")
     registry: AgentRegistry = AgentRegistry()
     registry.register(target)
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     dispatcher = _dispatcher()
-    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model")
+    adapter = RuntimeDelegationAdapter(SessionManager(tmp_path), registry, dispatcher, "model", run_repository=repository)
     llm = BlockingChildLLM()
     engine = RuntimeEngine(
         repository,
@@ -611,21 +612,23 @@ async def test_parent_cancellation_propagates_to_real_delegated_child_run(tmp_pa
         delegation_port=adapter,
         token_counter=AlwaysWithinBudgetCounter(),
         history_compactor=UnexpectedHistoryCompactor(),
+        run_change_notifier=notifier,
     )
-    coordinator = SessionRunCoordinator(engine)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
 
     parent_task: asyncio.Task[RunResult] = asyncio.create_task(coordinator.submit(_request()))
     await asyncio.wait_for(llm.child_started.wait(), timeout=1.0)
     await coordinator.cancel(llm.parent_run_id, "用户取消委派")
     result: RunResult = await asyncio.wait_for(parent_task, timeout=1.0)
+    await asyncio.wait_for(asyncio.gather(*tuple(coordinator._cancellation_jobs.values())), timeout=2)
 
     # 阶段3：父运行提交即挂起返回，取消后将挂起的父运行收口为取消终态。
     assert result.state.is_waiting_delegation()
     parent_run = await repository.load_run("parent-session", llm.parent_run_id)
     assert parent_run is not None
     assert parent_run.state.outcome() is RunOutcome.CANCELLED
-    assert len(llm.cancelled_run_ids) >= 2
+    assert not engine._cancellation_service.pending_operations(llm.parent_run_id)
     child_run_files: list[Path] = list(tmp_path.glob("*/agent_runs/*/run.json"))
     child_statuses: list[str] = [
         AgentRunState.from_dict(json.loads(path.read_text(encoding="utf-8"))["state"]).outcome().value
@@ -662,6 +665,10 @@ async def test_child_run_persists_parent_and_root_relationship(tmp_path: Path) -
         parent_run_id="parent-run",
         root_run_id="root-run",
     )
+
+    await engine.prepare_run(RunRequest("parent-session", "parent-lease", "parent-agent",
+        ConversationMessage("parent-input", MessageRole.USER, "父任务", ""),
+        ConversationSnapshot("parent-session", (), 0), root_run_id="root-run", run_id="parent-run"))
 
     result: RunResult = await engine.execute(child_request)
     run = await repository.load_run("child-session", result.run_id)

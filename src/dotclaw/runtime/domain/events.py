@@ -28,6 +28,8 @@ class RunEventType(StrEnum):
     DELEGATION_COMPLETED = "delegation_completed"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
+    CANCELLATION_CLEANUP_CONFIRMED = "cancellation_cleanup_confirmed"
+    CANCEL_REQUESTED = "cancel_requested"
     RUN_CANCELLED = "run_cancelled"
     RUN_ABANDONED = "run_abandoned"
     # 状态机拒绝非法迁移时记录的审计事实：只保存当前 mode/detail、事件类型与安全原因，
@@ -40,6 +42,7 @@ class LLMCompletionKind(StrEnum):
 
     FINAL_RESPONSE = "final_response"
     TOOL_CALLS = "tool_calls"
+    CANCELLED = "cancelled"
     FAILED = "failed"
 
 

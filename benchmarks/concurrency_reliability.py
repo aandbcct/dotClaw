@@ -39,6 +39,7 @@ from dotclaw.runtime.application.dto import (
 )
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
 from dotclaw.runtime.domain.facts import MessageRole
 
 from .concurrency_assertions import (
@@ -154,6 +155,7 @@ def _build_engine(
     tool_port,
     delay_ms: int,
     context_port: FixedContext,
+    run_change_notifier: RunChangeNotifier,
 ) -> RuntimeEngine:
     """组装最小 Benchmark RuntimeEngine。"""
     return RuntimeEngine(
@@ -167,6 +169,7 @@ def _build_engine(
         cancellation_service=CancellationService(),
         token_counter=_AlwaysWithinBudgetCounter(),
         history_compactor=_UnexpectedHistoryCompactor(),
+        run_change_notifier=run_change_notifier,
     )
 
 
@@ -182,8 +185,9 @@ def _build_services(
     """
     root = Path(abs_data_dir)
     context_port = FixedContext()
-    engine: RuntimeEngine = _build_engine(root, llm_port, tool_port, delay_ms, context_port)
-    coordinator = SessionRunCoordinator(engine)
+    notifier = RunChangeNotifier()
+    engine: RuntimeEngine = _build_engine(root, llm_port, tool_port, delay_ms, context_port, notifier)
+    coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     repository = RunRepositoryAdapter(root)
     # SessionManager 需要相对路径，但我们直接用绝对路径创建 Session
     # 通过 monkey-patch data_dir 来绕过路径解析
