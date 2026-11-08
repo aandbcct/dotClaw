@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from ...common.utils import validate_path_segment
 
 from ..application.dto import ConversationMessage
-from ..application.ports import ApprovalRepository, CheckpointRepository
+from ..application.ports import ApprovalRepository, CheckpointRepository, RUN_SESSION_MISMATCH_REASON
 from ..domain.cancellation import CancellationCommitIntent, CancellationRecord, CancellationPhase
 from .run_repository import _validate_cancellation_revision, _validate_cancellation_intent, _validate_cancellation_events
 from ..domain.context import ContextVersion, StagedHistoryCompression, StagedHistoryCompressionStatus, SuccessCommitIntent
@@ -141,11 +142,21 @@ class InMemoryRunRepository:
             raise ValueError(f"运行 {run_id} 在多个 Session 中重复出现")
         return matches[0] if matches else None
 
+    async def load_run_snapshot(self, session_id: str, run_id: str) -> AgentRun | None:
+        """与文件仓储保持相同的纯读归属语义。"""
+        validate_path_segment(session_id, "session_id")
+        validate_path_segment(run_id, "run_id")
+        run = await self.find_run(run_id)
+        if run is not None and run.session_id != session_id:
+            raise PermissionError(RUN_SESSION_MISMATCH_REASON)
+        return run
+
     async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
-        """返回仍占用 Session 的非终态 Run。"""
+        """纯读未完整提交终态的占用，与文件仓储保持相同规则。"""
         return tuple(
             run for run in self._runs.values()
-            if run.session_id == session_id and not run.state.is_ended()
+            if run.session_id == session_id and (not run.state.is_ended() or run.success_commit_intent is not None
+                                                or (run.session_id, run.run_id) in self._cancellation_intents)
         )
 
     async def save_run(self, run: AgentRun) -> None:

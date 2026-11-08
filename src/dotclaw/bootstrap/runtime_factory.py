@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from ..agent.identity import AgentIdentity
 from ..config.settings import Config
@@ -29,6 +30,7 @@ from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.engine import RuntimeEngine
 from ..runtime.application.run_change_notifier import RunChangeNotifier
+from ..runtime.application.run_watch_service import RunWatchService
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.application.ports import ContextPort
 from ..session.session import SessionManager
@@ -58,6 +60,7 @@ class RuntimeServices:
     """应用级 Session 删除协调流程按 Session 清理审批记录所需。"""
     agent_registry: AgentRegistry
     """所有可用 Identity 的目录，供 SessionInteractionService 路由与校验。"""
+    run_watch_service: RunWatchService | None = None
 
 
 def build_runtime_services(
@@ -98,6 +101,8 @@ def build_runtime_services(
         run_repository=run_repository,
     )
     notifier = RunChangeNotifier()
+    cancellation_service = CancellationService()
+    watch_service = RunWatchService(run_repository, cancellation_service, notifier, uuid4().hex)
     engine = RuntimeEngine(
         run_repository=run_repository,
         checkpoint_repository=CheckpointRepositoryAdapter(storage_root),
@@ -113,7 +118,7 @@ def build_runtime_services(
             load_router_config(project_root / "model_router_config.yaml"),
         ),
         approval_service=ApprovalService(approval_repository),
-        cancellation_service=CancellationService(),
+        cancellation_service=cancellation_service,
         run_change_notifier=notifier,
         delegation_port=delegation_port,
         token_counter=TiktokenTokenCounter(),
@@ -128,6 +133,7 @@ def build_runtime_services(
         run_repository=run_repository,
         approval_repository=approval_repository,
         agent_registry=agent_registry,
+        run_watch_service=watch_service,
     )
 
 

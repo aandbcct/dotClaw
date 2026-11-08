@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..application.ports import RUN_SESSION_MISMATCH_REASON
+
 import asyncio
 import json
 import os
@@ -290,19 +292,20 @@ class RunRepositoryAdapter:
         """跨 Session 定位运行摘要，供取消和审批恢复使用。"""
         return await self._read_run_with_retry(self._find_run_sync, run_id)
 
+    async def load_run_snapshot(self, session_id: str, run_id: str) -> AgentRun | None:
+        """纯读指定归属，拒绝把其他Session中的同一运行当作不存在。"""
+        validate_path_segment(session_id, "session_id")
+        run = await self.find_run(run_id)
+        if run is not None and run.session_id != session_id:
+            raise PermissionError(RUN_SESSION_MISMATCH_REASON)
+        return run
+
     async def _read_run_with_retry(self, reader: Callable[..., AgentRun | None], *arguments: str) -> AgentRun | None:
-        """在 Windows 原子替换瞬间有限重试 run.json 读取，其他错误仍立即暴露。"""
-        for attempt in range(5):
-            try:
-                return await asyncio.to_thread(reader, *arguments)
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                await asyncio.sleep(0.005 * (attempt + 1))
-        raise AssertionError("run.json 读取重试循环未返回")
+        """JSON共享读取已在load_json_map统一有界重试，此层不叠加成25次。"""
+        return await asyncio.to_thread(reader, *arguments)
 
     async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
-        """扫描指定 Session 的 run.json，返回持久化的未终态占用。"""
+        """纯读未完整提交终态的占用，包括摘要Ended但意图仍在的运行。"""
         return await asyncio.to_thread(self._list_active_runs_sync, session_id)
 
     async def save_run(self, run: AgentRun) -> None:
@@ -721,7 +724,7 @@ class RunRepositoryAdapter:
         return result
 
     def _list_active_runs_sync(self, session_id: str) -> tuple[AgentRun, ...]:
-        """读取 Session 下的所有运行摘要并过滤终态。"""
+        """领域Ended与提交占用分开判断，不在查询中执行补偿。"""
         safe_session_id: str = validate_path_segment(session_id, "session_id")
         directory: Path = self._root_directory / safe_session_id / "agent_runs"
         if not directory.is_dir():
@@ -730,7 +733,11 @@ class RunRepositoryAdapter:
         path: Path
         for path in directory.glob(f"*/{RunStorageFileName.RUN.value}"):
             run: AgentRun = _agent_run_from_dict(load_json_map(path))
-            if not run.state.is_ended():
+            if (run.session_id, run.run_id) != (safe_session_id, path.parent.name):
+                raise ValueError("运行目录与归属不一致")
+            pending = (run.success_commit_intent is not None or self._success_commit_path(run.session_id, run.run_id).exists()
+                       or path.with_name(RunStorageFileName.CANCEL_COMMIT.value).exists())
+            if not run.state.is_ended() or pending:
                 runs.append(run)
         return tuple(runs)
 

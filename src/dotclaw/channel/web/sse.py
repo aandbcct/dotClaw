@@ -25,7 +25,8 @@ def encode_sse_event(event: SSEEvent) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    return f"event: {event.event.value}\ndata: {payload}\n\n"
+    identifier = f"id: {event.id}\n" if event.id is not None else ""
+    return f"{identifier}event: {event.event.value}\ndata: {payload}\n\n"
 
 
 class SSEOutputAdapter(LLMOutputPort):

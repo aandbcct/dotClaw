@@ -21,6 +21,9 @@ from .context_compaction import ContextCompactionRequest, ContextCompactionResul
 from .history_compaction import HistoryCompactionRequest, HistoryCompactionResult
 from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, LLMOutputEvent, RunAcceptedEvent, RunRequest, ToolInvocation, ToolResult
 
+RUN_SESSION_MISMATCH_REASON = "run_session_mismatch"
+"""仅用于完成读取后的归属拒绝，不与操作系统读盘权限错误混用。"""
+
 
 class LLMUnavailableError(RuntimeError):
     """业务模型代理重试耗尽后的可恢复外部错误。"""
@@ -123,11 +126,14 @@ class RunRepository(Protocol):
     async def load_run(self, session_id: str, run_id: str) -> AgentRun | None:
         """加载指定运行摘要。"""
 
+    async def load_run_snapshot(self, session_id: str, run_id: str) -> AgentRun | None:
+        """严格校验归属的纯读取，不触发任何提交恢复。"""
+
     async def find_run(self, run_id: str) -> AgentRun | None:
         """按运行标识定位摘要，供取消和审批恢复使用。"""
 
     async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
-        """读取指定 Session 的全部未终态 Run，作为串行占用的持久化真相。"""
+        """纯读未完整提交终态的Run：非Ended或仍有成功/取消意图，作为唯一占用规则。"""
 
     async def save_run(self, run: AgentRun) -> None:
         """原子更新运行摘要。"""

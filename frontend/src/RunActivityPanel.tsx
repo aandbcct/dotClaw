@@ -52,10 +52,13 @@ export function RunActivityPanel({ message, activities, canControl, onLoadRun, o
       {message.reasoning && <details className="reasoning" open={reasoningOpen} onToggle={(event) => setReasoningOpen(event.currentTarget.open)}><summary>思考过程</summary><p>{message.reasoning}</p></details>}
       {(message.run_ids || []).map((runId) => {
         const activity = activities.find((item) => item.run_id === runId);
-        const controllable = canControl && !abandoningRunId && runId === message.run_ids?.[0] && activity && ["waiting_approval", "waiting_delegation", "recoverable"].includes(activity.status);
+        const controllable = canControl && !abandoningRunId && runId === message.run_ids?.[0] && activity && !activity.committing && (!activity.cancellation || activity.cancellation.phase === "settled") && ["waiting_approval", "waiting_delegation", "recoverable"].includes(activity.status);
         const approvalTool = activity?.approval_call_id ? activity.tools.find((tool) => tool.call_id === activity.approval_call_id) : undefined;
         return <section className="run-activity" aria-label={`运行过程 ${runId}`} key={runId}>
           {!activity ? <p className="muted">执行记录尚未读取。<button type="button" onClick={() => onLoadRun(runId)}>读取执行记录</button></p> : <>
+            {activity.committing && !activity.cancellation && <p role="status">正在保存结果，请稍候。</p>}
+            {activity.cancellation?.phase === "blocked" && <p role="status">停止尚未完成：{activity.cancellation.pending_child_count ? "仍在等待子任务停止" : activity.cancellation.pending_operation_count ? "仍在等待执行中的操作结束" : "尚未确认外部操作是否已停止"}。</p>}
+            {activity.cancellation?.effect === "remote_unknown" && activity.cancellation.phase === "settled" && ["cancelled", "abandoned"].includes(activity.status) && <p className="muted">本地已停止，远端执行结果未确认。</p>}
             <ol className="execution-steps">
               {activity.steps ? activity.steps.map((step) => <li key={step.id} className={`execution-step execution-step--${step.status}`}>
                 {step.kind === "model" ? <><div className="tool-step-heading"><strong>模型调用</strong><span>{LABELS[step.status]}</span></div><StepTime start={step.started_at} end={step.completed_at} /></> : <ToolStep tool={activity.tools.find((tool) => tool.call_id === step.call_id)} status={step.status} />}

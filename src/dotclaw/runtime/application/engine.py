@@ -220,12 +220,16 @@ class RuntimeEngine:
         """启动已准备运行；登记、取消检查和首次迁移共享 gate。"""
         execution = None
         registered = False
+        committing_result: RunResult | None = None
         async with self._cancellation_service.gate(run_id):
             async def start():
-                nonlocal registered
+                nonlocal registered, committing_result
                 run = await self._run_repository.find_run(run_id)
                 if run is None:
                     raise ValueError("已准备运行不存在")
+                committing_result = await self._pending_success_result_locked(run)
+                if committing_result is not None:
+                    return run, None, (), 0
                 if run.state.is_ended():
                     return run, None, (), 0
                 record = await self._run_repository.load_cancellation(run.session_id, run_id)
@@ -257,6 +261,7 @@ class RuntimeEngine:
                 try:
                     run = replace(run, state=tr.state)
                     await self._run_repository.save_run(run)
+                    self._run_change_notifier.notify(run.run_id)
                     number = await self._event(run, checkpoint.event_sequence, RunEventType.RUN_STARTED, (run.input_message_id,))
                     await self._checkpoint_repository.save(replace(checkpoint, event_sequence=number, pending={}))
                     return run, execution, messages, number
@@ -270,6 +275,8 @@ class RuntimeEngine:
                 if registered:
                     self._cancellation_service.unregister_driver(run_id)
                 raise
+        if committing_result is not None:
+            return committing_result
         if execution is None:
             if run.state.is_ended():
                 return await self._result_from_run(run)
@@ -307,6 +314,14 @@ class RuntimeEngine:
             ConversationMessage(final.message_id, final.role, final.content, run.ended_at or "") if final else None,
             run.error, approval_id, child_id)
 
+    async def _pending_success_result_locked(self, run: AgentRun) -> RunResult | None:
+        """调用方持gate；既有成功意图保留提交权，业务恢复与放弃均不能覆盖。"""
+        if not await self._run_repository.has_pending_success_commit(run.session_id, run.run_id):
+            return None
+        state = AgentRunState(Running(RunStage.CALLING_LLM)) if run.state.is_ended() else run.state
+        return RunResult(run.run_id, state, error=RunError(RunErrorCode.PERSISTENCE_FAILURE,
+            "运行正在保存结果，暂不能恢复或放弃，请等待提交完成"))
+
     async def resolve_approval(
         self,
         approval_id: str,
@@ -317,13 +332,17 @@ class RuntimeEngine:
         pending_record: ApprovalRecord | None = await self._approval_service.find_pending(approval_id)
         if pending_record is None:
             return RunResult("", AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在或已消费"))
-        context_versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(
+        run: AgentRun | None = await self._run_repository.load_run_snapshot(
             pending_record.session_id,
             pending_record.run_id,
         )
-        run: AgentRun | None = await self._run_repository.load_run(
-            pending_record.session_id,
-            pending_record.run_id,
+        if run is not None:
+            async with self._cancellation_service.gate(run.run_id):
+                committing_result = await self._pending_success_result_locked(run)
+                if committing_result is not None:
+                    return committing_result
+        context_versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(
+            pending_record.session_id, pending_record.run_id,
         )
         if run is None or run.active_context_version is None:
             return RunResult(
@@ -342,6 +361,9 @@ class RuntimeEngine:
                 error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "Run 活动 Context Version 不存在"),
             )
         async with self._cancellation_service.gate(pending_record.run_id):
+            committing_result = await self._pending_success_result_locked(run)
+            if committing_result is not None:
+                return committing_result
             cancellation = await self._run_repository.load_cancellation(pending_record.session_id, pending_record.run_id)
             if cancellation is None:
                 blocked = self._resources_blocked_result_locked(run)
@@ -412,6 +434,7 @@ class RuntimeEngine:
                 resume_count=run.resume_count + 1,
             )
             await self._run_repository.save_run(resumed_run)
+            self._run_change_notifier.notify(resumed_run.run_id)
             event_sequence = await self._event(
                 resumed_run,
                 event_sequence,
@@ -455,6 +478,9 @@ class RuntimeEngine:
         if await self._run_repository.load_cancellation(parent_run.session_id, parent_run.run_id) is not None:
             return await self.complete_cancellation(parent_run.run_id)
         async with self._cancellation_service.gate(parent_run.run_id):
+            committing_result = await self._pending_success_result_locked(parent_run)
+            if committing_result is not None:
+                return committing_result
             blocked = self._resources_blocked_result_locked(parent_run)
         if blocked is not None:
             return blocked
@@ -557,6 +583,7 @@ class RuntimeEngine:
         )
         resumed_run: AgentRun = replace(parent_run, state=completion_transition.state, resume_count=parent_run.resume_count + 1)
         await self._run_repository.save_run(resumed_run)
+        self._run_change_notifier.notify(resumed_run.run_id)
         event_sequence = await self._event(resumed_run, event_sequence, RunEventType.RUN_RESUMED, (), "delegation 恢复运行")
         await self._register_driver(execution)
         try:
@@ -681,7 +708,7 @@ class RuntimeEngine:
         # 故意不改写领域状态：具体节点恢复继续委托 checkpoint/resume（见 resume_run）。
 
     async def active_run(self, session_id: str) -> AgentRun | None:
-        """返回当前占用 Session 的唯一非终态 Run。"""
+        """返回唯一未完整提交终态的占用Run，保留其原领域状态。"""
         runs: tuple[AgentRun, ...] = await self._run_repository.list_active_runs(session_id)
         if len(runs) > 1:
             raise RuntimeError("同一 Session 存在多个未终态 Run")
@@ -698,7 +725,13 @@ class RuntimeEngine:
         checkpoint/resume，不会产生新的初始 Context Version。
         """
         run: AgentRun | None = await self._run_repository.find_run(run_id)
-        if run is None or run.state.is_ended():
+        if run is None:
+            return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "Run 不存在或已结束，无法恢复"))
+        async with self._cancellation_service.gate(run_id):
+            committing_result = await self._pending_success_result_locked(run)
+            if committing_result is not None:
+                return committing_result
+        if run.state.is_ended():
             return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "Run 不存在或已结束，无法恢复"))
         if await self._run_repository.load_cancellation(run.session_id, run_id) is not None:
             return await self.complete_cancellation(run_id)
@@ -756,6 +789,7 @@ class RuntimeEngine:
             replay_active_context=True,
         )
         await self._run_repository.save_run(resumed)
+        self._run_change_notifier.notify(resumed.run_id)
         event_sequence: int = await self._event(resumed, checkpoint.event_sequence, RunEventType.RUN_RESUMED, (), "恢复未结束 Run")
         await self._register_driver(execution)
         try:
@@ -769,6 +803,10 @@ class RuntimeEngine:
         """终态决定与取消受理共享同一 gate。"""
         async with self._cancellation_service.gate(run_id):
             target = await _await_control(self._run_repository.find_run(run_id))
+            if target is not None:
+                committing_result = await self._pending_success_result_locked(target)
+                if committing_result is not None:
+                    return committing_result
             cancellation = await self._run_repository.load_cancellation(target.session_id, run_id) if target else None
             children = await self._run_repository.list_child_runs(run_id)
             if any(not child.state.is_ended() for child in children):
@@ -809,6 +847,7 @@ class RuntimeEngine:
             error=RunError(RunErrorCode.CANCELLED, "已被显式放弃"),
         )
         await self._run_repository.save_run(abandoned)
+        self._run_change_notifier.notify(abandoned.run_id)
         await self._checkpoint_repository.delete(run.session_id, run.run_id)
         await self._event(abandoned, event_sequence, RunEventType.RUN_ABANDONED, ())
         result: RunResult = RunResult(run.run_id, abandon_transition.state, error=abandoned.error)
@@ -828,10 +867,12 @@ class RuntimeEngine:
         async with self._cancellation_service.gate(execution.run_id):
             record = await self._run_repository.load_cancellation(execution.request.session_id, execution.run_id)
             self._cancellation_service.register_driver(execution.run_id, execution.cancellation, record.request if record else None)
+            self._run_change_notifier.notify(execution.run_id)
 
     async def _unregister_driver(self, run_id: str) -> None:
         async with self._cancellation_service.gate(run_id):
             self._cancellation_service.unregister_driver(run_id)
+            self._run_change_notifier.notify(run_id)
 
     async def request_cancel(self, run_id: str, reason: str, origin: CancellationOrigin = CancellationOrigin.USER,
                              parent_request_id: str | None = None) -> CancellationReceipt:
@@ -853,6 +894,13 @@ class RuntimeEngine:
         current = await self._run_repository.load_cancellation(run.session_id, run_id)
         if await self._run_repository.has_pending_success_commit(run.session_id, run_id):
             return CancellationReceipt(run_id, CancellationDisposition.COMMITTING_SUCCESS, None, 0, None, None)
+        if await self._run_repository.has_pending_cancellation_commit(run.session_id, run_id):
+            if current is None:
+                raise RuntimeError("取消提交意图缺少原请求记录，持久化事实不一致")
+            self._cancellation_service.signal(current.request)
+            self._run_change_notifier.notify(run_id)
+            return CancellationReceipt(run_id, CancellationDisposition.ALREADY_REQUESTED,
+                current.request.request_id, current.revision, None, current.request.requested_at)
         if run.state.is_ended():
             return CancellationReceipt(run_id, CancellationDisposition.ALREADY_ENDED,
                 current.request.request_id if current else None, current.revision if current else 0,
@@ -1225,6 +1273,7 @@ class RuntimeEngine:
             latest_checkpoint_id=checkpoint.checkpoint_id,
         )
         await self._run_repository.save_run(waiting_run)
+        self._run_change_notifier.notify(waiting_run.run_id)
         event_number = await self._event(
             run,
             event_number,
@@ -1606,6 +1655,7 @@ class RuntimeEngine:
                             latest_checkpoint_id=checkpoint.checkpoint_id,
                         )
                         await self._run_repository.save_run(suspended_run)
+                        self._run_change_notifier.notify(suspended_run.run_id)
                         return child_run_id, RunResult(run.run_id, submit_transition.state, child_run_id=child_run_id)
                     child_run_id, result = await _await_control(prepare_and_associate())
             if cancellation is not None:
@@ -1759,6 +1809,7 @@ class RuntimeEngine:
         failed_state: AgentRunState = fail_transition.state if fail_transition is not None else AgentRunState(mode=Ended(RunOutcome.FAILED))
         failed = replace(run, state=failed_state, ended_at=utc_now_iso(), error=error)
         await self._run_repository.save_run(failed)
+        self._run_change_notifier.notify(failed.run_id)
         await self._checkpoint_repository.delete(run.session_id, run.run_id)
         await self._event(run, event_sequence, RunEventType.RUN_FAILED, ())
         return RunResult(run.run_id, failed_state, error=error)
@@ -1786,6 +1837,7 @@ class RuntimeEngine:
         """
         persisted = replace(run, state=state)
         await self._run_repository.save_run(persisted)
+        self._run_change_notifier.notify(persisted.run_id)
         pending: JSONMap = (
             {"tool_calls": [call.to_dict() for call in pending_tool_calls]}
             if pending_tool_calls else {}

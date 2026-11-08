@@ -194,6 +194,32 @@ tasks:
     previous_agents: []
     handoff: {completed: [], remaining: [D实现与独立验收], blockers: [], evidence: [], next_action: C验收后派发}
   - {id: D-verify, phase_id: D, role: verifier, agent_id: /root/cancellation_verifier, status: accepted, depends_on: [D-dev], goal: 独立验证阶段D, writable: []}
-  - {id: E-dev, phase_id: E, role: developer, agent_id: null, status: pending, depends_on: [D-verify], goal: SSE和前端, ready_when: 阶段D验收通过且主代理补全派发单}
-  - {id: E-verify, phase_id: E, role: verifier, agent_id: null, status: pending, depends_on: [E-dev], goal: 独立验证阶段E, writable: []}
-  - {id: F-verify, phase_id: F, role: verifier, agent_id: null, status: pending, depends_on: [E-verify], goal: 最终集成与架构验收, writable: []}
+  - id: E-dev
+    phase_id: E
+    role: developer
+    agent_id: /root/cancellation_developer
+    model_requested: {model: gpt-6.1-sol, reasoning_effort: medium}
+    model_actual: null
+    status: accepted
+    contract: {path: contract.yaml, version: 3}
+    depends_on: [D-verify]
+    goal: 权威状态快照与SSE、精确取消目标和前端刷新重连。
+    workspace: 'D:\dev\dotClaw'
+    baseline: ca887f7
+    inputs: ['../总体设计.md §5.3与§8', '../开发计划.md §7', 本聊天已批准committing与纯快照读取接口]
+    writable: [src/dotclaw/runtime/application/, src/dotclaw/runtime/adapters/run_repository.py, src/dotclaw/runtime/adapters/in_memory_run_repository.py, src/dotclaw/bootstrap/, src/dotclaw/channel/web/, frontend/src/, tests/runtime_v2/, tests/channel/web/]
+    forbidden: [docs/, Git提交, 修改已验收资源与委派业务语义, 新框架或依赖]
+    constraints: [不是唯一工作者且不覆盖他人改动, 中文注释, 主代理决定公开接口模型, 快照纯读不隐式补偿, 提交后才能发布终态, 取消必须明确run_id, 观察断连不取消运行, 正常连接不轮询activity, 主代理独占Git提交]
+    autonomy: [私有辅助函数, 遵循既有样式的最小状态文案, 测试fixtures]
+    escalate: [公开字段签名变化, 必要文件扩展, 新依赖, 契约矛盾]
+    acceptance_ids: [E]
+    ready_when: D独立验收通过且A-D已存档
+    verify: [项目解释器核对, 后端观察与取消竞争, 真实HTTP断流重连, 前端测试及build, 正常无800ms轮询, diff检查]
+    deliverables: [实际测试证据, 修改与旧路径删除, 未测项, 集成风险]
+    progress: E最终独立PASS，后端128项和前端91项通过、build通过，相关集成架构PASS；详见验收记录。
+    previous_agents: []
+    handoff: {completed: [公开接口裁决], remaining: [], blockers: [], evidence: [], next_action: 主代理提交E存档}
+  - {id: E-verify, phase_id: E, role: verifier, agent_id: /root/e_verifier, status: accepted, depends_on: [E-dev], goal: 独立验证阶段E, writable: []}
+  - {id: F-verify, phase_id: F, role: verifier, agent_id: /root/e_verifier, status: accepted, depends_on: [E-verify], goal: 最终集成与架构验收, writable: []}
+
+# E执行基线 ca887f7；用户授权验收后提交，主代理独占Git提交。

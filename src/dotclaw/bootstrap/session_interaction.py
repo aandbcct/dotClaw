@@ -12,15 +12,17 @@ from __future__ import annotations
 from ..runtime.domain.cancellation import CancellationReceipt, CancellationDisposition, CancellationOrigin
 
 from pathlib import Path
+from collections.abc import AsyncIterator
 
 from ..agent.identity import AgentIdentity
 from ..orchestration.registry import AgentRegistry
 from ..runtime.adapters.approval_repository import ApprovalRepositoryAdapter
 from ..runtime.adapters.run_repository import RunRepositoryAdapter
 from ..runtime.application.dto import RunRequest, RunResult
-from ..runtime.application.ports import ContextPort, LLMOutputPort
+from ..runtime.application.ports import ContextPort, LLMOutputPort, RUN_SESSION_MISMATCH_REASON
 from ..runtime.application.request_factory import create_run_request
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
+from ..runtime.application.run_watch_service import RunWatchService, RunWatchCursor, RunObservation
 from ..runtime.domain.context import ContextOwner
 from ..runtime.domain.events import RunEvent
 from ..runtime.domain.facts import AgentRun, RunErrorCode, RunMessage
@@ -53,6 +55,7 @@ class SessionInteractionService:
         context_port: ContextPort | None = None,
         preferred_model: str = "",
         chat_models: tuple[str, ...] = (),
+        run_watch_service: RunWatchService | None = None,
     ) -> None:
         """绑定路由所需的会话管理与身份目录。
 
@@ -63,6 +66,7 @@ class SessionInteractionService:
         self._session_manager: SessionManager = session_manager
         self._agent_registry: AgentRegistry = agent_registry
         self._coordinator: SessionRunCoordinator = coordinator
+        self._run_watch_service = run_watch_service
         self._default_agent_id: str | None = default_agent_id
         self._run_repository: RunRepositoryAdapter | None = run_repository
         self._approval_repository: ApprovalRepositoryAdapter | None = approval_repository
@@ -205,28 +209,26 @@ class SessionInteractionService:
         """仅供受信维护调用，不注册为普通 Agent 工具。"""
         return await self._coordinator.confirm_cancellation_cleanup(run_id, reason)
 
-    async def cancel_session(self, session_id: str, reason: str) -> str | None:
-        """按 Session 取消唯一活动 Run，并返回其标识。
-
-        GUI 只持有当前 Session，不应读取 Runtime 私有仓储或猜测 ``run_id``。
-        当前 Session 串行契约要求最多存在一个活动 Run；若持久化事实违反该
-        不变量则明确失败，避免取消错误目标。
-        """
+    async def cancel_session(self, session_id: str, reason: str, *, expected_run_id: str) -> CancellationReceipt:
+        """只请求明确目标，旧页面绝不能取消同Session新运行。"""
         if self._run_repository is None:
-            raise RuntimeError("按 Session 取消需要运行仓储")
-        active_runs = await self._run_repository.list_active_runs(session_id)
-        if not active_runs:
-            return None
-        if len(active_runs) != 1:
-            raise RuntimeError(f"Session {session_id} 存在多个活动 Run，拒绝猜测取消目标")
-        run_id: str = active_runs[0].run_id
-        receipt = await self.cancel(run_id, reason)
-        # E 阶段将旧 Web 返回值改为完整回执；未受理时不能返回正常运行标识。
-        if receipt.disposition in (CancellationDisposition.ACCEPTED, CancellationDisposition.ALREADY_REQUESTED):
-            return run_id
-        if receipt.disposition in (CancellationDisposition.ALREADY_ENDED, CancellationDisposition.NOT_FOUND):
-            return None
-        raise ValueError("运行正在提交成功，不能取消")
+            raise RuntimeError("按Session取消需要运行仓储")
+        run = await self._run_repository.load_run_snapshot(session_id, expected_run_id)
+        if run is None:
+            return CancellationReceipt(expected_run_id, CancellationDisposition.NOT_FOUND, None, 0, None, None)
+        return await self.cancel(expected_run_id, reason)
+
+    async def snapshot_run(self, session_id: str, run_id: str) -> RunObservation:
+        """读取目标运行的一致纯快照。"""
+        if self._run_watch_service is None:
+            raise RuntimeError("运行观察服务未装配")
+        return await self._run_watch_service.snapshot(session_id, run_id)
+
+    def watch_run(self, session_id: str, run_id: str, cursor: RunWatchCursor | None = None) -> AsyncIterator[RunObservation]:
+        """订阅只拥有观察生命周期，不拥有业务驱动。"""
+        if self._run_watch_service is None:
+            raise RuntimeError("运行观察服务未装配")
+        return self._run_watch_service.watch(session_id, run_id, cursor)
 
     async def resume_run(self, run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
         """恢复未结束 Run，并返回结构化结果；透传运行级输出端口。"""
@@ -245,7 +247,12 @@ class SessionInteractionService:
             if len(active_runs) > 1:
                 raise RuntimeError(f"Session {session_id} 存在多个活动 Run")
             return active_runs[0] if active_runs else None
-        run = await self._run_repository.load_run(session_id, run_id)
+        try:
+            run = await self._run_repository.load_run_snapshot(session_id, run_id)
+        except PermissionError as error:
+            if error.args == (RUN_SESSION_MISMATCH_REASON,):
+                return None
+            raise
         return run if run is not None and run.session_id == session_id else None
 
     async def get_run_by_id(self, run_id: str) -> AgentRun | None:

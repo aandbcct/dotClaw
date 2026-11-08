@@ -21,9 +21,11 @@ class _FakeRunRepository:
     def __init__(self, runs: tuple[AgentRun, ...]) -> None:
         self.runs: tuple[AgentRun, ...] = runs
 
-    async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
-        """只返回属于目标 Session 的预设活动运行。"""
-        return tuple(run for run in self.runs if run.session_id == session_id)
+    async def load_run_snapshot(self, session_id, run_id):
+        run = next((run for run in self.runs if run.run_id == run_id), None)
+        if run and run.session_id != session_id:
+            raise ValueError("归属错误")
+        return run
 
 
 class _FakeCoordinator:
@@ -69,36 +71,35 @@ def _service(
 
 
 @pytest.mark.asyncio
-async def test_cancel_session_cancels_the_only_active_run(tmp_path: Path) -> None:
-    """唯一活动 Run 必须被准确取消并返回标识。"""
+async def test_cancel_session_returns_receipt_for_explicit_target(tmp_path: Path) -> None:
+    """明确目标Run必须被准确取消并返回持久化回执。"""
     service, coordinator = _service(tmp_path, (_run("run-1"),))
 
-    run_id = await service.cancel_session("session-1", "用户停止")
+    run_id = await service.cancel_session("session-1", "用户停止", expected_run_id="run-1")
 
-    assert run_id == "run-1"
+    assert run_id.run_id == "run-1" and run_id.disposition is CancellationDisposition.ACCEPTED
     assert coordinator.cancel_calls == [("run-1", "用户停止")]
 
 
 @pytest.mark.asyncio
-async def test_cancel_session_returns_none_without_active_run(tmp_path: Path) -> None:
-    """没有活动 Run 时返回 None，不伪造取消调用。"""
+async def test_cancel_session_returns_not_found_receipt(tmp_path: Path) -> None:
+    """明确目标不存在时返回not_found回执，不伪造取消调用。"""
     service, coordinator = _service(tmp_path, ())
 
-    run_id = await service.cancel_session("session-1", "用户停止")
+    run_id = await service.cancel_session("session-1", "用户停止", expected_run_id="run-1")
 
-    assert run_id is None
+    assert run_id.disposition is CancellationDisposition.NOT_FOUND
     assert coordinator.cancel_calls == []
 
 
 @pytest.mark.asyncio
-async def test_cancel_session_rejects_multiple_active_runs(tmp_path: Path) -> None:
-    """持久化事实违反单 Session 单活动 Run 不变量时必须拒绝猜测。"""
+async def test_cancel_session_never_guesses_between_two_runs(tmp_path: Path) -> None:
+    """即使存在两个Run，也只取消请求中明确的目标。"""
     service, coordinator = _service(
         tmp_path,
         (_run("run-1"), _run("run-2")),
     )
 
-    with pytest.raises(RuntimeError, match="多个活动 Run"):
-        await service.cancel_session("session-1", "用户停止")
-
-    assert coordinator.cancel_calls == []
+    receipt = await service.cancel_session("session-1", "用户停止", expected_run_id="run-2")
+    assert receipt.run_id == "run-2"
+    assert coordinator.cancel_calls == [("run-2", "用户停止")]

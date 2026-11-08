@@ -174,6 +174,7 @@ class ApplicationHost:
             context_port=self._context_port,
             preferred_model=preferred_model,
             chat_models=chat_models,
+            run_watch_service=self._runtime_services.run_watch_service,
         )
         # ── 评测 Draft 服务（PR5：TraceToEvalCaseDraft 与目录 Dataset）──
         # 兼容测试以 SimpleNamespace 注入配置的场景：缺省回退到默认 Dataset 目录。

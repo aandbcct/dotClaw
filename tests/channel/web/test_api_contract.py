@@ -5,6 +5,9 @@
 """
 
 from __future__ import annotations
+from dotclaw.runtime.application.run_watch_service import RunObservation, RunWatchCursor
+from dotclaw.runtime.domain.cancellation import CancellationReceipt, CancellationDisposition
+
 
 import asyncio
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
@@ -95,10 +98,18 @@ class _FakeSessionInteraction:
         self._manager.sessions[session.id] = session
         return session
 
-    async def cancel_session(self, session_id: str, reason: str) -> str | None:
-        """返回预设活动 Run，并记录显式取消原因。"""
+    async def cancel_session(self, session_id: str, reason: str, *, expected_run_id: str) -> CancellationReceipt:
+        """只对明确目标返回预设回执。"""
         self.cancel_calls.append((session_id, reason))
-        return self.cancelled_run_id
+        return CancellationReceipt(expected_run_id, CancellationDisposition.ACCEPTED if self.cancelled_run_id else CancellationDisposition.NOT_FOUND,
+            "request" if self.cancelled_run_id else None, 1 if self.cancelled_run_id else 0, None, None)
+
+    async def snapshot_run(self, session_id, run_id):
+        run = await self.get_run(session_id, run_id)
+        if run is None:
+            raise FileNotFoundError("测试运行不存在")
+        return RunObservation(run, self.activity_events, self.activity_messages, None,
+            RunWatchCursor(max((event.sequence for event in self.activity_events), default=0), 0), self.executing, "test-host")
 
     async def get_run(self, session_id: str, run_id: str | None = None) -> AgentRun | None:
         """返回预设运行，同时校验 Session 与可选运行标识。"""
@@ -668,7 +679,7 @@ async def test_history_runs_are_per_round_and_cannot_cross_session_boundaries() 
         assert messages[3]["run_ids"] == ["r2"]
         assert messages[5]["run_ids"] == []
         foreign = await client.get("/api/v1/sessions/session-1/activity", params={"run_id": "foreign"})
-        assert foreign.json() is None
+        assert foreign.status_code == 404 and foreign.json()["error"]["code"] == "run_not_found"
 
 
 @pytest.mark.asyncio
@@ -795,26 +806,27 @@ async def test_empty_message_uses_common_422_envelope(content: str) -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_session_returns_accepted_run_reference() -> None:
-    """显式停止按 Session 定位活动 Run，并返回正在取消状态。"""
+    """显式停止携带目标Run，并返回受理回执和正在取消状态。"""
     host, interaction = _host(_session("session-1"))
 
     async with _client(host) as client:
         response = await client.post(
             "/api/v1/sessions/session-1/cancel",
-            json={"reason": "用户点击停止"},
+            json={"run_id": "run-active", "reason": "用户点击停止"},
         )
 
     assert response.status_code == 202
     assert response.json() == {
         "session_id": "session-1",
         "run_id": "run-active",
-        "status": "cancelling",
+        "status": "cancelling", "disposition": "accepted", "request_id": "request",
+        "control_revision": 1, "outcome": None, "requested_at": None,
     }
     assert interaction.cancel_calls == [("session-1", "用户点击停止")]
 
 
 @pytest.mark.asyncio
-async def test_cancel_without_active_run_returns_409() -> None:
+async def test_cancel_unknown_target_returns_404() -> None:
     """没有活动 Run 时不得伪造取消成功。"""
     host, interaction = _host(_session("session-1"))
     interaction.cancelled_run_id = None
@@ -822,12 +834,12 @@ async def test_cancel_without_active_run_returns_409() -> None:
     async with _client(host) as client:
         response = await client.post(
             "/api/v1/sessions/session-1/cancel",
-            json={},
+            json={"run_id": "missing"},
         )
 
-    assert response.status_code == 409
+    assert response.status_code == 404
     assert response.json() == {
-        "error": {"code": "no_active_run", "message": "Session 没有活动 Run"}
+        "error": {"code": "run_not_found", "message": "运行不存在"}
     }
     assert interaction.cancel_calls == [
         ("session-1", "用户从 GUI 停止运行"),
@@ -842,7 +854,7 @@ async def test_cancel_missing_session_returns_404_without_calling_service() -> N
     async with _client(host) as client:
         response = await client.post(
             "/api/v1/sessions/missing/cancel",
-            json={},
+            json={"run_id": "missing"},
         )
 
     assert response.status_code == 404

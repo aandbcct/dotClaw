@@ -1,6 +1,10 @@
 """GUI v0.1 SSE 消息流契约测试。"""
 
 from __future__ import annotations
+from dotclaw.runtime.application.run_watch_service import RunObservation, RunWatchCursor, RunWatchService
+from dotclaw.runtime.application.ports import RUN_SESSION_MISMATCH_REASON
+from dotclaw.runtime.domain.facts import AgentRun, AgentPolicySnapshot
+
 
 import asyncio
 import json
@@ -94,6 +98,11 @@ class _FakeSessionInteraction:
         self.completed: asyncio.Event = asyncio.Event()
         self.active_submissions: int = 0
         self.max_active_submissions: int = 0
+
+    async def snapshot_run(self, session_id, run_id):
+        """消息流替身以预设结果构造不含未决意图的事实。"""
+        run = AgentRun(run_id, session_id, "default", self.result.state, "test", AgentPolicySnapshot("default", "v", "model", 10), "input")
+        return RunObservation(run, (), (), None, RunWatchCursor(), False, "test-host")
 
     async def submit(
         self,
@@ -628,6 +637,7 @@ class _EngineInteraction(_FakeSessionInteraction):
         self.engine = engine
         self.coordinator = SessionRunCoordinator(engine, run_change_notifier=run_change_notifier)
         self.repository = RunRepositoryAdapter(root)
+        self.watcher = RunWatchService(self.repository, engine._cancellation_service, run_change_notifier, "test-host")
         self.executing = False
 
     async def submit(self, session, user_message, output_port=None) -> RunResult:
@@ -640,7 +650,12 @@ class _EngineInteraction(_FakeSessionInteraction):
             self.completed.set()
 
     async def get_run(self, session_id, run_id=None):
-        return await self.repository.load_run(session_id, run_id) if run_id else await self.engine.active_run(session_id)
+        try:
+            return await self.repository.load_run_snapshot(session_id, run_id) if run_id else await self.engine.active_run(session_id)
+        except PermissionError as error:
+            if error.args == (RUN_SESSION_MISMATCH_REASON,):
+                return None
+            raise
 
     async def get_run_evidence(self, session_id, run_id):
         return await self.repository.load_events(session_id, run_id), await self.repository.load_messages(session_id, run_id)
@@ -648,13 +663,15 @@ class _EngineInteraction(_FakeSessionInteraction):
     async def is_session_executing(self, session_id):
         return self.executing
 
-    async def cancel_session(self, session_id, reason):
-        run = await self.engine.active_run(session_id)
-        if run is None:
-            return None
-        receipt = await self.coordinator.cancel(run.run_id, reason)
-        assert receipt.disposition in (CancellationDisposition.ACCEPTED, CancellationDisposition.ALREADY_REQUESTED)
-        return receipt.run_id
+    async def snapshot_run(self, session_id, run_id):
+        return await self.watcher.snapshot(session_id, run_id)
+
+    def watch_run(self, session_id, run_id, cursor=None):
+        return self.watcher.watch(session_id, run_id, cursor)
+
+    async def cancel_session(self, session_id, reason, *, expected_run_id):
+        await self.repository.load_run_snapshot(session_id, expected_run_id)
+        return await self.coordinator.cancel(expected_run_id, reason)
 
 
 @asynccontextmanager
@@ -719,7 +736,7 @@ async def test_real_http_accepts_before_model_tokens_and_survives_disconnect(tmp
                 assert not interaction.completed.is_set()
                 assert not model.cancel_observed.is_set() and not model.cleanup_completed.is_set()
                 if stop:
-                    stopped = await client.post("/api/v1/sessions/session-live/cancel", json={"reason": "显式停止"})
+                    stopped = await client.post("/api/v1/sessions/session-live/cancel", json={"run_id": run_id, "reason": "显式停止"})
                     assert stopped.json()["run_id"] == run_id
                 else:
                     model.release.set()

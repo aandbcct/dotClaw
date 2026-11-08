@@ -1,6 +1,6 @@
 id: cancellation-lifecycle
 version: 3
-status: development
+status: completed
 coordination:
   owner_session: null # 工具未提供可信会话标识
   owner_agent: /root
