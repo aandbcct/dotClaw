@@ -5,8 +5,13 @@
 """
 
 from __future__ import annotations
+from dotclaw.runtime.application.run_watch_service import RunObservation, RunWatchCursor
+from dotclaw.runtime.domain.cancellation import CancellationReceipt, CancellationDisposition
+
 
 import asyncio
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -93,10 +98,18 @@ class _FakeSessionInteraction:
         self._manager.sessions[session.id] = session
         return session
 
-    async def cancel_session(self, session_id: str, reason: str) -> str | None:
-        """返回预设活动 Run，并记录显式取消原因。"""
+    async def cancel_session(self, session_id: str, reason: str, *, expected_run_id: str) -> CancellationReceipt:
+        """只对明确目标返回预设回执。"""
         self.cancel_calls.append((session_id, reason))
-        return self.cancelled_run_id
+        return CancellationReceipt(expected_run_id, CancellationDisposition.ACCEPTED if self.cancelled_run_id else CancellationDisposition.NOT_FOUND,
+            "request" if self.cancelled_run_id else None, 1 if self.cancelled_run_id else 0, None, None)
+
+    async def snapshot_run(self, session_id, run_id):
+        run = await self.get_run(session_id, run_id)
+        if run is None:
+            raise FileNotFoundError("测试运行不存在")
+        return RunObservation(run, self.activity_events, self.activity_messages, None,
+            RunWatchCursor(max((event.sequence for event in self.activity_events), default=0), 0), self.executing, "test-host")
 
     async def get_run(self, session_id: str, run_id: str | None = None) -> AgentRun | None:
         """返回预设运行，同时校验 Session 与可选运行标识。"""
@@ -108,18 +121,6 @@ class _FakeSessionInteraction:
     async def get_run_by_id(self, run_id: str) -> AgentRun | None:
         """按标识返回预设运行。"""
         return self.activity_run if self.activity_run and self.activity_run.run_id == run_id else None
-
-    async def get_run_evidence(
-        self, session_id: str, run_id: str,
-    ) -> tuple[tuple[RunEvent, ...], tuple[RunMessage, ...]]:
-        """返回预设工具执行证据。"""
-        del session_id, run_id
-        return self.activity_events, self.activity_messages
-
-    async def is_session_executing(self, session_id: str) -> bool:
-        """返回当前进程是否正在执行预设运行。"""
-        del session_id
-        return self.executing
 
     async def resolve_approval(
         self, approval_id: str, approved: bool, output_port=None,
@@ -221,8 +222,9 @@ async def _ready_host(host: _FakeHost) -> _FakeHost:
 
 def _persistent_host(tmp_path: Path) -> tuple[_FakeHost, SessionRunCoordinator]:
     """使用真实持久化与会话租约，仅替换未执行的模型引擎。"""
+    notifier = RunChangeNotifier()
     manager = SessionManager(tmp_path)
-    coordinator = SessionRunCoordinator(Mock(spec=RuntimeControlPort))
+    coordinator = SessionRunCoordinator(Mock(spec=RuntimeControlPort), run_change_notifier=notifier)
     registry = AgentRegistry()
     registry.register(AgentIdentity("default", "默认助手"))
     interaction = SessionInteractionService(manager, registry, coordinator, preferred_model="chat-model", chat_models=("chat-model", "fast-model"))
@@ -308,7 +310,6 @@ async def test_completion_and_model_edit_share_the_same_execution_lease(tmp_path
     """用真实并发任务冻结旧模型，完成投影后再切换不会丢历史。"""
     host, coordinator = _persistent_host(tmp_path)
     engine = coordinator._engine
-    engine.recover_session = AsyncMock()
     engine.active_run = AsyncMock(return_value=None)
     entered, release = asyncio.Event(), asyncio.Event()
     frozen_models: list[str] = []
@@ -344,7 +345,6 @@ async def test_submit_waits_for_delete_and_does_not_recreate_deleted_session(tmp
     """删除已取得租约时，新提交在删除后重读失败，不产生孤儿运行。"""
     host, coordinator = _persistent_host(tmp_path)
     engine = coordinator._engine
-    engine.recover_session = AsyncMock()
     engine.active_run = AsyncMock(return_value=None)
     engine.execute = AsyncMock()
     repository = Mock()
@@ -665,7 +665,7 @@ async def test_history_runs_are_per_round_and_cannot_cross_session_boundaries() 
         assert messages[3]["run_ids"] == ["r2"]
         assert messages[5]["run_ids"] == []
         foreign = await client.get("/api/v1/sessions/session-1/activity", params={"run_id": "foreign"})
-        assert foreign.json() is None
+        assert foreign.status_code == 404 and foreign.json()["error"]["code"] == "run_not_found"
 
 
 @pytest.mark.asyncio
@@ -792,26 +792,27 @@ async def test_empty_message_uses_common_422_envelope(content: str) -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_session_returns_accepted_run_reference() -> None:
-    """显式停止按 Session 定位活动 Run，并返回正在取消状态。"""
+    """显式停止携带目标Run，并返回受理回执和正在取消状态。"""
     host, interaction = _host(_session("session-1"))
 
     async with _client(host) as client:
         response = await client.post(
             "/api/v1/sessions/session-1/cancel",
-            json={"reason": "用户点击停止"},
+            json={"run_id": "run-active", "reason": "用户点击停止"},
         )
 
     assert response.status_code == 202
     assert response.json() == {
         "session_id": "session-1",
         "run_id": "run-active",
-        "status": "cancelling",
+        "status": "cancelling", "disposition": "accepted", "request_id": "request",
+        "control_revision": 1, "outcome": None, "requested_at": None,
     }
     assert interaction.cancel_calls == [("session-1", "用户点击停止")]
 
 
 @pytest.mark.asyncio
-async def test_cancel_without_active_run_returns_409() -> None:
+async def test_cancel_unknown_target_returns_404() -> None:
     """没有活动 Run 时不得伪造取消成功。"""
     host, interaction = _host(_session("session-1"))
     interaction.cancelled_run_id = None
@@ -819,12 +820,12 @@ async def test_cancel_without_active_run_returns_409() -> None:
     async with _client(host) as client:
         response = await client.post(
             "/api/v1/sessions/session-1/cancel",
-            json={},
+            json={"run_id": "missing"},
         )
 
-    assert response.status_code == 409
+    assert response.status_code == 404
     assert response.json() == {
-        "error": {"code": "no_active_run", "message": "Session 没有活动 Run"}
+        "error": {"code": "run_not_found", "message": "运行不存在"}
     }
     assert interaction.cancel_calls == [
         ("session-1", "用户从 GUI 停止运行"),
@@ -839,7 +840,7 @@ async def test_cancel_missing_session_returns_404_without_calling_service() -> N
     async with _client(host) as client:
         response = await client.post(
             "/api/v1/sessions/missing/cancel",
-            json={},
+            json={"run_id": "missing"},
         )
 
     assert response.status_code == 404

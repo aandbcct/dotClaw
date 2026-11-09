@@ -113,7 +113,6 @@ class Task:
     status: TaskStatus = TaskStatus.SUBMITTED
     result_message: TaskMessage | None = None
     error: str = ""
-    cancellation_requested: bool = False
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 

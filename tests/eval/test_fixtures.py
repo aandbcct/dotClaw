@@ -238,9 +238,9 @@ async def test_delegation_strict_order() -> None:
         delegation_fixture("d1", "agent-b", "child-1"),
         delegation_fixture("d2", "agent-c", "child-2"),
     ), STRICT)
-    sub = await port.submit(_delegation_request("agent-b"))
+    sub = await port.prepare(_delegation_request("agent-b"))
     assert sub.child_run_id == "child-1"
-    sub2 = await port.submit(_delegation_request("agent-c"))
+    sub2 = await port.prepare(_delegation_request("agent-c"))
     assert sub2.child_run_id == "child-2"
 
 
@@ -248,7 +248,7 @@ async def test_delegation_strict_target_mismatch_rejected() -> None:
     """STRICT 委派目标顺序不符必须拒绝。"""
     port = FixtureDelegationPort((delegation_fixture("d1", "agent-b", "child-1"),), STRICT)
     try:
-        await port.submit(_delegation_request("agent-x"))
+        await port.prepare(_delegation_request("agent-x"))
         raise AssertionError("委派目标不符应当被拒绝")
     except FixtureConfigurationError:
         pass
@@ -267,7 +267,7 @@ async def test_delegation_result_unknown_child_rejected() -> None:
 async def test_delegation_normal_matches_by_target() -> None:
     """NORMAL 按目标 Agent 匹配委派。"""
     port = FixtureDelegationPort((delegation_fixture("d1", "agent-b", "child-1"),), NORMAL)
-    sub = await port.submit(_delegation_request("agent-b"))
+    sub = await port.prepare(_delegation_request("agent-b"))
     assert sub.child_run_id == "child-1"
 
 

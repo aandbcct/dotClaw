@@ -52,13 +52,13 @@ def test_rejects_cross_session_access_and_post_terminal_messages() -> None:
     asyncio.run(scenario())
 
 
-def test_cancel_writes_terminal_message_and_state() -> None:
-    """取消必须同时生成终态消息并更新 Task 状态。"""
+def test_cancelled_run_settles_terminal_message_and_state() -> None:
+    """真实取消结算同时生成终态消息并更新 Task 状态。"""
     async def scenario() -> None:
         broker: TaskMessageBroker = TaskMessageBroker()
         await broker.create_task(_task(), "source-run")
         await broker.mark_target_running("task-1")
-        task: Task = await broker.cancel_task("task-1", "source", "source-session", "source-run", "用户取消")
+        task: Task = await broker.settle_task("task-1", "target-run", TaskStatus.CANCELLED, "用户取消")
         assert task.status is TaskStatus.CANCELLED
         assert task.result_message is not None
         assert task.result_message.message_type is TaskMessageType.CANCELLED

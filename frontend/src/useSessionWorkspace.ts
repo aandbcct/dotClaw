@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { abandonRun, ApiError, cancelSession, getRunActivity, getSession, listSessions, submitMessage } from "./api";
+import { abandonRun, ApiError, cancelSession, getRunActivity, getSession, listSessions, submitMessage, watchRunActivity } from "./api";
 import { readPreference, writePreference } from "./preferences";
 import type { DisplayMessage, MessageExecution, RunAcceptedData, RunActivity, RunPhase, SessionSummary, StreamEvent } from "./types";
 
@@ -24,8 +24,8 @@ function patchMessageExecution(view: ConversationView): ConversationView {
     const execution = message.execution || newExecution(view.lastSubmittedText);
     let stage = execution.stage;
     if (view.activity?.status === "abandoned") stage = "abandoned";
-    else if (view.detached) stage = "unknown";
     else if (view.phase === "stopping") stage = "stopping";
+    else if (view.detached) stage = "unknown";
     else if (view.phase === "suspended") stage = view.activity?.status === "waiting_delegation" ? "waiting_delegation" : "waiting_approval";
     else if (view.phase === "recoverable") stage = "recoverable";
     else if (["completed", "failed", "cancelled"].includes(view.phase)) stage = view.phase as MessageExecution["stage"];
@@ -41,6 +41,8 @@ export function phaseLabel(phase: RunPhase): string {
   return ({ idle: "", running: "正在生成", stopping: "正在停止", suspended: "等待处理", recoverable: "可恢复", completed: "已完成", cancelled: "已停止", failed: "运行异常" })[phase];
 }
 function phaseFor(activity: RunActivity): RunPhase {
+  if (activity.status === "cancelling") return "stopping";
+  if (activity.committing) return "running";
   if (activity.status.startsWith("waiting_")) return "suspended";
   if (activity.status === "abandoned") return "cancelled";
   return (["running", "completed", "failed", "cancelled", "recoverable"].includes(activity.status) ? activity.status : "idle") as RunPhase;
@@ -58,9 +60,11 @@ export function useSessionWorkspace() {
   const [views, setViews] = useState<Record<string, ConversationView>>({});
   const viewsRef = useRef(views);
   const streams = useRef(new Map<string, AbortController>());
-  const polling = useRef(new Set<string>());
+  const observers = useRef(new Map<string, { runId: string; controller: AbortController; timer?: number; attempt: number }>());
+  const selectedRef = useRef<string | null>(null);
   const terminal = useRef(new Set<string>());
   const revisions = useRef(new Map<string, number>());
+  const factVersions = useRef(new Map<string, number>());
   const deltaVersions = useRef(new Map<string, number>());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -108,9 +112,49 @@ export function useSessionWorkspace() {
       return { ...current, messages, activeMessageId: mergedIds.get(current.activeMessageId || "") || current.activeMessageId, loading: false };
     });
   }
-  async function readActivity(id: string, runId?: string, historyOnly = false): Promise<void> {
+  function stopObservation(id: string): void {
+    const state = observers.current.get(id);
+    if (!state) return;
+    observers.current.delete(id);
+    if (state.timer !== undefined) window.clearTimeout(state.timer);
+    state.controller.abort();
+  }
+  function ensureObservation(id: string, runId: string): void {
+    if (!alive.current || selectedRef.current !== id || terminal.current.has(runId)) return;
+    const previous = observers.current.get(id);
+    if (previous?.runId === runId) return;
+    stopObservation(id);
+    const state = { runId, controller: new AbortController(), timer: undefined as number | undefined, attempt: 0 };
+    observers.current.set(id, state);
+    async function connect(): Promise<void> {
+      if (observers.current.get(id) !== state || !alive.current) return;
+      const controller = new AbortController();
+      state.controller = controller;
+      const cached = viewsRef.current[id]?.activitiesByRunId[runId];
+      const cursor = cached?.generation ? `e${cached.event_sequence || 0}-c${cached.control_revision || 0}` : undefined;
+      try {
+        if (runId) await watchRunActivity(id, runId, (activity) => {
+          if (observers.current.get(id) !== state || state.controller !== controller || controller.signal.aborted) return;
+          state.attempt = 0;
+          void readActivity(id, runId, false, activity, state, controller);
+        }, controller.signal, cursor);
+      } catch {
+        // 观察断流只触发事实对账，不把业务判为失败，也不停止后台运行。
+      }
+      if (observers.current.get(id) !== state || controller.signal.aborted || !alive.current) return;
+      await readActivity(id, runId || undefined, false, undefined, state, controller);
+      if (observers.current.get(id) !== state || !alive.current) return;
+      const delay = Math.min(8000, 1000 * 2 ** Math.min(state.attempt++, 3));
+      state.timer = window.setTimeout(() => { state.timer = undefined; void connect(); }, Math.min(8000, delay * (0.9 + Math.random() * 0.2)));
+    }
+    void connect();
+  }
+  async function readActivity(id: string, runId?: string, historyOnly = false, supplied?: RunActivity,
+    owner?: { runId: string; controller: AbortController }, controller?: AbortController): Promise<void> {
     const revision = revisions.current.get(id) || 0;
+    const factVersion = factVersions.current.get(id) || 0;
     const knownRunId = runId || viewsRef.current[id]?.runId || undefined;
+    const requestedGeneration = knownRunId ? viewsRef.current[id]?.activitiesByRunId[knownRunId]?.generation || "" : "";
     const targetId = viewsRef.current[id]?.messages.find((message) => message.run_ids?.includes(knownRunId || ""))?.id || viewsRef.current[id]?.activeMessageId;
     const version = deltaVersions.current.get(`${id}:${targetId}`) || 0;
     const statusError = (text: string) => {
@@ -118,22 +162,33 @@ export function useSessionWorkspace() {
       else patch(id, (view) => ({ ...view, messages: view.messages.map((message) => message.run_ids?.includes(knownRunId || "") ? { ...message, execution: { ...(message.execution || { ...newExecution(), stage: "completed" }), statusError: text } } : message) }), false);
     };
     let activity: RunActivity | null;
-    try { activity = await getRunActivity(id, knownRunId); }
+    try { activity = supplied || await getRunActivity(id, knownRunId); }
     catch (error) {
+      if (owner && (observers.current.get(id) !== owner || (controller && owner.controller !== controller))) return;
+      if (knownRunId && requestedGeneration !== (viewsRef.current[id]?.activitiesByRunId[knownRunId]?.generation || "")) return;
       if (historyOnly || revision === (revisions.current.get(id) || 0)) statusError("状态查询失败：" + errorText(error));
       return;
     }
     if (!alive.current || (!historyOnly && revision !== (revisions.current.get(id) || 0))) return;
+    if (owner && (observers.current.get(id) !== owner || (controller && owner.controller !== controller))) return;
+    if (!supplied && knownRunId && requestedGeneration !== (viewsRef.current[id]?.activitiesByRunId[knownRunId]?.generation || "")) return;
+    if (!supplied && factVersion !== (factVersions.current.get(id) || 0) && !(knownRunId && terminal.current.has(knownRunId))) return;
     const expectedRunId = knownRunId || viewsRef.current[id]?.runId;
     if (activity && expectedRunId && activity.run_id !== expectedRunId) {
       statusError("状态查询失败：返回的运行与本次请求不一致"); return;
     }
     statusError("");
     // 无活动运行不等于本次请求未执行，尤其在接收运行 ID 之前断线时。
-    if (!activity) { if (historyOnly) statusError("该运行记录不存在或不属于此会话"); return; }
+    if (!activity) {
+      if (historyOnly) statusError("该运行记录不存在或不属于此会话");
+      else if (!knownRunId && viewsRef.current[id]?.detached) ensureObservation(id, "");
+      return;
+    }
     const current = viewsRef.current[id] || emptyView();
     const cached = current.activitiesByRunId[activity.run_id];
-    if ((activity.event_sequence || 0) < (cached?.event_sequence || 0)) return;
+    const sameGeneration = !cached?.generation || !activity.generation || cached.generation === activity.generation;
+    if (sameGeneration && (activity.control_revision || 0) < (cached?.control_revision || 0)) return;
+    if (sameGeneration && (activity.event_sequence || 0) < (cached?.event_sequence || 0)) return;
     const settled = terminal.current.has(activity.run_id) || (cached && ["completed", "failed", "cancelled", "abandoned"].includes(cached.status) && !cached.error?.retryable);
     if (settled && activePhase(phaseFor(activity))) {
       const activityRunId = activity.run_id;
@@ -142,18 +197,13 @@ export function useSessionWorkspace() {
       // 迟到的运行中快照不能撤销 SSE 终态；没有完成证据的开放步骤只标记中断。
       activity = { ...activity, status: confirmedStatus, steps: activity.steps?.map((step) => step.status !== "running" ? step : { ...step, status: confirmedStatus === "failed" ? "failed" : confirmedStatus === "cancelled" ? "cancelled" : "interrupted" }) };
     }
-    if (activity.status === "running" && current.runId === activity.run_id && ["suspended", "recoverable"].includes(current.phase)) {
-      // 只有显式控制入口会解除等待态，迟到的普通轮询不能撤销审批或恢复入口。
-      activity = { ...activity, status: current.activity?.status || cached?.status || "recoverable", approval_id: current.activity?.approval_id || null, approval_call_id: current.activity?.approval_call_id || null, child_run_id: current.activity?.child_run_id || null };
-    }
     const acceptedActivity = activity;
     patch(id, (view) => ({ ...view, activitiesByRunId: { ...view.activitiesByRunId, [acceptedActivity.run_id]: acceptedActivity } }), false);
     if (historyOnly) return;
     if (!knownRunId && ["completed", "failed", "cancelled", "abandoned"].includes(activity.status)) return;
     // 新请求尚未取得运行标识时，最近活动运行可能属于其他请求，不能冒充确认。
     if (streams.current.has(id) && current?.submissionStage === "sending" && !current.runId) return;
-    if (streams.current.has(id) && activity.status !== "running") return;
-    const resolvedError = activity.status === "abandoned" ? { error: "", errorCode: "", retryable: false } : activity.error ? { error: activity.error.message, errorCode: activity.error.code, retryable: activity.error.retryable === true }
+    const resolvedError = activity.committing || activity.status === "abandoned" ? { error: "", errorCode: "", retryable: false } : activity.error ? { error: activity.error.message, errorCode: activity.error.code, retryable: activity.error.retryable === true }
       : activity.status === "failed" ? { error: current?.error && !current.detached ? current.error : "运行失败，请查看执行记录", errorCode: current?.errorCode && !current.detached ? current.errorCode : "run_failed", retryable: current?.retryable || false }
       : current?.detached && activity.status !== "running" ? { error: "", errorCode: "", retryable: false } : {};
     let message = current.messages.find((item) => item.run_ids?.includes(activity.run_id));
@@ -169,26 +219,30 @@ export function useSessionWorkspace() {
     }
     patch(id, { activity, runId: activity.run_id, activeMessageId: messageId,
       messages: message ? current.messages.map((item) => item.id === messageId ? { ...item, execution: { ...(item.execution || newExecution()), stage } } : item) : [...current.messages, { id: messageId, role: "assistant", content: "", created_at: "", run_ids: [activity.run_id], execution: newExecution() }],
-      phase: current?.phase === "stopping" && activity.status === "running" ? "stopping" : phaseFor(activity), detached: activity.status === "running" && (!streams.current.has(id) || current?.errorCode === "invalid_run_accepted"),
+      phase: current?.phase === "stopping" && activity.status === "running" ? "stopping" : phaseFor(activity), detached: activity.status === "running" && ((!streams.current.has(id) && !activity.generation) || current?.errorCode === "invalid_run_accepted"),
       ...resolvedError,
       ...(activity.status !== "running" ? { submissionStage: "idle" as const } : {}),
     });
-    if (["completed", "failed", "cancelled", "abandoned"].includes(activity.status) && !activity.error?.retryable) terminal.current.add(activity.run_id);
+    if (["completed", "failed", "cancelled", "abandoned"].includes(activity.status) && !activity.error?.retryable) {
+      terminal.current.add(activity.run_id); stopObservation(id);
+    } else ensureObservation(id, activity.run_id);
     if (activity.status === "completed") {
       terminal.current.add(activity.run_id);
       try { await refresh(id); } catch (error) { patch(id, { statusError: "状态查询失败：完成记录读取失败，" + errorText(error) }); }
     }
   }
   async function open(session: SessionSummary): Promise<void> {
+    for (const id of observers.current.keys()) if (id !== session.id) stopObservation(id);
+    selectedRef.current = session.id;
     setSelectedId(session.id);
     writePreference("dotclaw.last-session.v1", session.id);
-    if (viewsRef.current[session.id]) return;
+    if (viewsRef.current[session.id]) { await readActivity(session.id); return; }
     patch(session.id, { loading: true });
     try {
       await refresh(session.id);
       await readActivity(session.id);
       const current = viewsRef.current[session.id];
-      if (current?.phase === "running") patch(session.id, { detached: true });
+      if (current?.phase === "running" && !current.activity?.generation) patch(session.id, { detached: true });
     } catch (error) { patch(session.id, { loading: false, error: errorText(error) }); }
   }
   useEffect(() => {
@@ -201,22 +255,17 @@ export function useSessionWorkspace() {
       if (selected) await open(selected);
     }).catch((error: unknown) => { if (alive.current) setLoadError(errorText(error)); })
       .finally(() => { if (alive.current) setLoading(false); });
-    const timer = window.setInterval(() => {
-      for (const [id, view] of Object.entries(viewsRef.current)) {
-        if ((!activePhase(view.phase) && !view.detached) || polling.current.has(id)) continue;
-        polling.current.add(id);
-        void readActivity(id, view.runId || undefined).finally(() => polling.current.delete(id));
-      }
-    }, 800);
     return () => {
       alive.current = false;
-      window.clearInterval(timer);
+      for (const id of observers.current.keys()) stopObservation(id);
       for (const controller of streams.current.values()) controller.abort();
       streams.current.clear();
     };
   }, []);
 
   function startNew(): void {
+    for (const id of observers.current.keys()) stopObservation(id);
+    selectedRef.current = null;
     setSelectedId(null);
     writePreference("dotclaw.last-session.v1", null);
   }
@@ -228,10 +277,12 @@ export function useSessionWorkspace() {
         protocolError(); return;
       }
       if (terminal.current.has(event.data.run_id)) return;
+      ensureObservation(id, event.data.run_id);
       patch(id, { runId: event.data.run_id, submissionStage: current.submissionStage === "streaming" ? "streaming" : current.detached ? "idle" : "accepted" });
       return;
     }
     if (event.event !== "message.delta" && !terminalEvents.has(event.event)) return;
+    if (event.event === "run.suspended" && current.phase === "stopping") return;
     const runId = field(event.data, "run_id");
     if ((typeof event.data.session_id === "string" && event.data.session_id !== id) || (runId && current.runId && current.runId !== runId)) {
       protocolError(); return;
@@ -256,14 +307,17 @@ export function useSessionWorkspace() {
     const code = rawError && typeof rawError === "object" && "code" in rawError ? String(rawError.code) : "";
     const retryable = Boolean(rawError && typeof rawError === "object" && "retryable" in rawError && rawError.retryable === true);
     const unknown = event.event === "stream.error";
-    if (runId && phase !== "suspended" && !unknown && !retryable) terminal.current.add(runId);
+    if (runId && phase !== "suspended" && !unknown && !retryable) {
+      terminal.current.add(runId); stopObservation(id);
+    }
+    if (!unknown) factVersions.current.set(id, (factVersions.current.get(id) || 0) + 1);
     patch(id, (view) => {
       const prior = runId ? view.activitiesByRunId[runId] : null;
       const activity: RunActivity | null = runId && !unknown ? { ...prior, run_id: runId, tools: prior?.tools || [], status: phase === "suspended" ? field(event.data, "status") || "waiting_approval" : phase,
         approval_id: field(event.data, "approval_id") || null, approval_call_id: prior?.approval_id === field(event.data, "approval_id") ? prior.approval_call_id : null, child_run_id: field(event.data, "child_run_id") || null,
         error: phase === "failed" ? { code, message: message || "运行失败，请查看执行记录", retryable } : null } : view.activity;
       return {
-      ...view, phase: unknown ? "running" : phase, detached: unknown, submissionStage: "idle", activity,
+      ...view, phase: unknown ? current.phase === "stopping" ? "stopping" : "running" : phase, detached: unknown, submissionStage: "idle", activity,
       activitiesByRunId: activity ? { ...view.activitiesByRunId, [activity.run_id]: activity } : view.activitiesByRunId,
       error: unknown ? (message || "消息连接异常") + "；结果待确认，请查询运行状态，不要重复发送。" : phase === "failed" ? message || "运行失败，请查看执行记录" : "",
       errorCode: code, retryable, statusError: "",
@@ -288,6 +342,7 @@ export function useSessionWorkspace() {
         completed ||= matchesRequest && event.event === "run.completed";
         receive(id, messageId, event);
       }, controller.signal);
+      receivedTerminal ||= terminal.current.has(viewsRef.current[id]?.runId || "");
       if (!receivedTerminal && !viewsRef.current[id]?.detached) patch(id, { phase: "running", detached: true, submissionStage: "idle", errorCode: "result_unknown", error: "消息连接已结束，结果待确认。请查询运行状态，不要重复发送。" });
       queryStatus = !receivedTerminal || completed || viewsRef.current[id]?.detached || viewsRef.current[id]?.retryable || viewsRef.current[id]?.phase === "suspended";
       if (completed) {
@@ -296,7 +351,7 @@ export function useSessionWorkspace() {
       }
     } catch (error) {
       if (!controller.signal.aborted) {
-        if (receivedTerminal && !viewsRef.current[id]?.detached) {
+        if (terminal.current.has(viewsRef.current[id]?.runId || "") || (receivedTerminal && !viewsRef.current[id]?.detached)) {
           // 已确认业务终态不能被随后连接或查询错误改写。
           patch(id, { statusError: "消息连接结束异常，已保留确认的运行结果" });
         } else if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
@@ -319,6 +374,7 @@ export function useSessionWorkspace() {
     const createdAt = new Date().toISOString();
     const messageId = `local-assistant-${crypto.randomUUID()}`;
     const requestId = crypto.randomUUID();
+    stopObservation(id);
     patch(id, (view) => ({ ...view, activity: null, runId: null, activeMessageId: messageId, submissionStage: "sending", lastSubmittedText: content, error: "", errorCode: "", retryable: false, statusError: "", detached: false, phase: "running", messages: [
       ...view.messages,
       { id: `local-user-${crypto.randomUUID()}`, requestId, role: "user", content, created_at: createdAt },
@@ -327,7 +383,7 @@ export function useSessionWorkspace() {
     await runStream(id, messageId, (callback, signal) => submitMessage(id, content, callback, signal));
   }
   async function control(id: string, targetMessageId: string, runId: string, operation: (callback: (event: StreamEvent) => void, signal: AbortSignal) => Promise<void>): Promise<void> {
-    if (streams.current.has(id) || viewsRef.current[id]?.abandoningRunId || viewsRef.current[id]?.runId !== runId || !["suspended", "recoverable"].includes(viewsRef.current[id]?.phase)) return;
+    if (streams.current.has(id) || viewsRef.current[id]?.activity?.committing || viewsRef.current[id]?.abandoningRunId || viewsRef.current[id]?.runId !== runId || !["suspended", "recoverable"].includes(viewsRef.current[id]?.phase)) return;
     revisions.current.set(id, (revisions.current.get(id) || 0) + 1);
     const messages = viewsRef.current[id]?.messages || [];
     const messageId = (messages.find((message) => message.id === targetMessageId && message.run_ids?.includes(runId)) || messages.find((message) => message.role === "assistant" && message.run_ids?.includes(runId)))?.id || `local-run-${runId}`;
@@ -335,11 +391,20 @@ export function useSessionWorkspace() {
     await runStream(id, messageId, operation);
   }
   async function stop(id: string): Promise<void> {
+    if (viewsRef.current[id]?.phase === "stopping") return;
+    const targetRunId = viewsRef.current[id]?.runId;
+    if (!targetRunId) return;
     const previousPhase = viewsRef.current[id]?.phase || "running";
     const messageId = viewsRef.current[id]?.activeMessageId;
     const previousStage = viewsRef.current[id]?.messages.find((message) => message.id === messageId)?.execution?.stage;
     patch(id, { phase: "stopping" });
-    try { await cancelSession(id); } catch (error) {
+    try {
+      const receipt = await cancelSession(id, targetRunId);
+      if (viewsRef.current[id]?.runId !== targetRunId) return;
+      if (receipt.disposition === "already_ended") await readActivity(id, targetRunId);
+      else ensureObservation(id, targetRunId);
+    } catch (error) {
+      if (viewsRef.current[id]?.runId !== targetRunId) return;
       const text = "停止请求失败：" + errorText(error);
       patch(id, (view) => ({ ...view,
         ...(view.activeMessageId === messageId ? { statusError: text, phase: view.phase === "stopping" ? previousPhase : view.phase } : {}),
@@ -355,7 +420,7 @@ export function useSessionWorkspace() {
   }
   async function abandon(id: string, messageId: string, runId: string): Promise<void> {
     const view = viewsRef.current[id];
-    if (!view || view.abandoningRunId || streams.current.has(id) || view.runId !== runId || view.activeMessageId !== messageId || view.activity?.status !== "recoverable" || !view.messages.some((message) => message.id === messageId && message.run_ids?.includes(runId))) return;
+    if (!view || view.activity?.committing || view.abandoningRunId || streams.current.has(id) || view.runId !== runId || view.activeMessageId !== messageId || view.activity?.status !== "recoverable" || !view.messages.some((message) => message.id === messageId && message.run_ids?.includes(runId))) return;
     // 忙标记先同步落入引用，连续点击和同会话恢复不能越过此边界。
     revisions.current.set(id, (revisions.current.get(id) || 0) + 1);
     patch(id, { abandoningRunId: runId, statusError: "" });
@@ -381,6 +446,7 @@ export function useSessionWorkspace() {
   }
   function remove(id: string): void {
     setSessions((current) => current.filter((session) => session.id !== id));
+    stopObservation(id);
     const next = { ...viewsRef.current }; delete next[id]; viewsRef.current = next; setViews(next);
     if (selectedId === id) startNew();
   }

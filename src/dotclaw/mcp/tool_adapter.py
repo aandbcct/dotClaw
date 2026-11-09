@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+from ..common.resource_errors import ResourceCleanupError
 import logging
 import re
 from typing import Any
@@ -90,6 +91,7 @@ class McpToolAdapter(ToolHandler):
                 "server": self._server,
                 "mcp_type": "tool",
                 "mcp_tool_name": name,
+                "cancellation_effect": "remote_unknown",
             },
             # 声明 MCP 档案，执行链据此形成 mcp.call 资源请求（总体设计 §4.3）。
             policy_profile=ToolPolicy.MCP.value,
@@ -122,6 +124,10 @@ class McpToolAdapter(ToolHandler):
                 is_error=result.is_error,
                 error_code="EXECUTION_ERROR" if result.is_error else None,
             )
+        except asyncio.CancelledError:
+            raise
+        except ResourceCleanupError:
+            raise
         except asyncio.TimeoutError:
             return ToolResult(
                 output=f"MCP 工具执行超时（{timeout}s）",

@@ -850,9 +850,8 @@ compressed_history
 **职责与用途：**新请求前：
 
 ```text
-recover_session()
-→ 扫描遗留非终态 Run，交由恢复边界按 Checkpoint 重放（不再改写状态）
-→ active_run()
+active_run()
+→ 查询持久化未终态占用，不触发自动恢复
 ```
 
 结果：
@@ -1170,7 +1169,7 @@ sequenceDiagram
     Entry->>Entry: 校验 session.agent_id
     Entry->>Coord: submit_prepared(session.id, request_factory)
     Coord->>Coord: 获取 session asyncio.Lock
-    Coord->>Engine: recover_session + active_run
+    Coord->>Engine: active_run
     Coord->>Entry: 调用 request_factory()
     Entry->>Entry: create_run_request(锁外捕获的 Session)
     Entry-->>Coord: RunRequest
@@ -1189,9 +1188,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    New["新普通请求"] --> Recover["recover_session(session_id)"]
-    Recover --> Scan["扫描遗留非终态 Run，交由恢复边界重放"]
-    Scan --> Active["active_run(session_id)"]
+    New["新普通请求"] --> Active["active_run(session_id)"]
     Active --> None{"存在非终态 AgentRunState?"}
     None -->|否| Allow["允许创建新 Run"]
     None -->|是| Busy["SESSION_BUSY，不自动放弃"]
@@ -1199,7 +1196,7 @@ flowchart TD
 
 **结论：**
 
-- 新进程第一次访问 Session 时会扫描遗留非终态 Run 并交由恢复边界重放，不再改写为特殊状态。
+- 新进程第一次普通提交只读取遗留未终态占用，不改写状态或自动重放；显式恢复使用 `resume_run()`。
 - 普通新消息遇到非终态 Run 返回 `SESSION_BUSY`，不再自动放弃旧 Run。
 - 同一 Session 最多一个非终态 Run 是持久化不变量；检测到多个时 Engine 抛错。
 - 门禁是“读取后判断”，不是文件系统原子租约。

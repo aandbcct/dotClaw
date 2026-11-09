@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import aiofiles
+import asyncio
+from ..function_handler import _await_io_completion
 from pydantic import BaseModel, Field
 
 from dotclaw.tools.base import ToolContext
@@ -50,16 +51,19 @@ def _get_memory_path(long_term_file: str) -> Path:
     path_param="long_term_file",
 )
 async def read(args: MemoryReadArgs, context: ToolContext) -> str:
-    """读取 MEMORY.md 内容。"""
-    try:
-        path = _get_memory_path(args.long_term_file)
-        if not path.exists():
-            return "(MEMORY.md 尚无内容)"
-        async with aiofiles.open(path, encoding="utf-8") as f:
-            content = await f.read()
-        return content if content.strip() else "(MEMORY.md 为空)"
-    except Exception as e:
-        return f"错误：{e}"
+    def perform() -> str:
+        """读取 MEMORY.md 内容。"""
+        try:
+            path = _get_memory_path(args.long_term_file)
+            if not path.exists():
+                return "(MEMORY.md 尚无内容)"
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+            return content if content.strip() else "(MEMORY.md 为空)"
+        except Exception as e:
+            return f"错误：{e}"
+
+    return await _await_io_completion(asyncio.to_thread(perform))
 
 
 @tool(
@@ -72,19 +76,22 @@ async def read(args: MemoryReadArgs, context: ToolContext) -> str:
     path_param="long_term_file",
 )
 async def write(args: MemoryWriteArgs, context: ToolContext) -> str:
-    """追加内容到 MEMORY.md。"""
-    try:
-        path = _get_memory_path(args.long_term_file)
-        async with aiofiles.open(path, "a", encoding="utf-8") as f:
-            # 确保有换行分隔
-            existing = ""
-            if path.exists():
-                async with aiofiles.open(path, encoding="utf-8") as rf:
-                    existing = await rf.read()
-            if existing and not existing.endswith("\n"):
-                await f.write("\n")
-            await f.write(args.content)
-            await f.write("\n")
-        return "已追加到 MEMORY.md"
-    except Exception as e:
-        return f"错误：{e}"
+    def perform() -> str:
+        """追加内容到 MEMORY.md。"""
+        try:
+            path = _get_memory_path(args.long_term_file)
+            with open(path, "a", encoding="utf-8") as f:
+                # 确保有换行分隔
+                existing = ""
+                if path.exists():
+                    with open(path, encoding="utf-8") as rf:
+                        existing = rf.read()
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(args.content)
+                f.write("\n")
+            return "已追加到 MEMORY.md"
+        except Exception as e:
+            return f"错误：{e}"
+
+    return await _await_io_completion(asyncio.to_thread(perform))

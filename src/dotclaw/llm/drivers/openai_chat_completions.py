@@ -23,6 +23,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from ...common.logging_setup import exception_diagnostic
+from ...common.resource_errors import ResourceCleanupError
 
 from ..base import (
     ChatChunk,
@@ -190,9 +191,26 @@ class OpenAIChatCompletionsClient(LLMClient):
         if openai_tools:
             params["tools"] = openai_tools
 
-        response = await asyncio.wait_for(
-            client.chat.completions.create(**params), timeout=request_timeout
-        )
+        creation = asyncio.create_task(client.chat.completions.create(**params))
+        try:
+            response = await asyncio.wait_for(asyncio.shield(creation), timeout=request_timeout)
+        except BaseException:
+            if not creation.done():
+                creation.cancel()
+            # SDK 可能在取消边界已经返回流，不能遗失已创建的请求资源。
+            while True:
+                try:
+                    orphan = await asyncio.shield(creation)
+                except asyncio.CancelledError:
+                    if creation.cancelled():
+                        break
+                    continue
+                except Exception:
+                    break
+                else:
+                    await self._close_stream(orphan)
+                    break
+            raise
 
         if stream:
             # 请求级状态：每次 chat() 新建，调用结束即释放，并发互不串线。
@@ -304,16 +322,29 @@ class OpenAIChatCompletionsClient(LLMClient):
         )
 
     async def _close_stream(self, response: Any) -> None:
-        """尽力关闭 SDK stream，关闭失败仅记录且绝不掩盖原始异常。"""
+        """关闭本次 SDK 请求流；失败明确保留资源清理错误。"""
         close = getattr(response, "close", None)
         if close is None:
             return
-        try:
+        async def close_response() -> None:
             result = close()
             if inspect.isawaitable(result):
                 await result
-        except Exception as error:
-            logging.getLogger("dotclaw.llm").warning("关闭 LLM SDK stream 失败 diagnostic=%s", exception_diagnostic(error))
+        cleanup = asyncio.create_task(close_response())
+        interrupted = False
+        while True:
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                if cleanup.cancelled():
+                    raise ResourceCleanupError("llm_stream", "llm_stream_close_interrupted", "模型请求流清理自行中断") from None
+                interrupted = True
+                continue
+            except Exception as error:
+                raise ResourceCleanupError("llm_stream", "llm_stream_close_failed", "模型请求流关闭失败") from error
+            if interrupted:
+                raise asyncio.CancelledError()
+            return
 
     # ---- 消息格式转换 ----
 

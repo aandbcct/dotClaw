@@ -9,12 +9,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...runtime.domain.facts import JSONMap, MessageRole, RunError
+from ...runtime.domain.cancellation import CancellationPhase, CancellationEffect
 
 
 class SSEEventType(StrEnum):
     """Web 消息流允许发送的事件类型。"""
 
     RUN_ACCEPTED = "run.accepted"
+    RUN_SNAPSHOT = "run.snapshot"
     MESSAGE_DELTA = "message.delta"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
@@ -49,6 +51,8 @@ class WebErrorCode(StrEnum):
     RUN_NOT_RECOVERABLE = "run_not_recoverable"
     SESSION_BUSY = "session_busy"
     INTERNAL_ERROR = "internal_error"
+    COMMITTING_SUCCESS = "committing_success"
+    INVALID_CURSOR = "invalid_cursor"
 
 
 class CreateSessionRequest(BaseModel):
@@ -171,7 +175,8 @@ class CancelSessionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    reason: str = "用户从 GUI 停止运行"
+    run_id: str = Field(min_length=1, max_length=200)
+    reason: str = Field(default="用户从 GUI 停止运行", max_length=500)
 
     @field_validator("reason")
     @classmethod
@@ -317,6 +322,18 @@ class RunStepResponse(BaseModel):
     call_id: str | None = None
 
 
+class CancellationActivityResponse(BaseModel):
+    """面向用户的取消进度，不透传内部任务与诊断对象。"""
+
+    request_id: str
+    requested_at: str
+    phase: CancellationPhase
+    pending_operation_count: int = Field(ge=0)
+    pending_child_count: int = Field(ge=0)
+    effect: CancellationEffect
+    diagnostic: str | None = None
+
+
 class RunActivityResponse(BaseModel):
     """当前或指定运行的状态与工具执行过程。"""
 
@@ -329,6 +346,10 @@ class RunActivityResponse(BaseModel):
     error: RunError | None = None
     steps: list[RunStepResponse] = Field(default_factory=list)
     event_sequence: int = 0
+    control_revision: int = 0
+    cancellation: CancellationActivityResponse | None = None
+    generation: str = ""
+    committing: bool = False
 
 
 @dataclass(frozen=True)
@@ -337,8 +358,11 @@ class SSEEvent:
 
     event: SSEEventType
     data: JSONMap
+    id: str | None = None
 
     def __post_init__(self) -> None:
         """允许 HTTP 契约测试用字符串构造，同时立即收窄为枚举。"""
         if isinstance(self.event, str):
             object.__setattr__(self, "event", SSEEventType(self.event))
+        if self.id is not None and any(character in self.id for character in "\r\n\x00"):
+            raise ValueError("SSE标识不能包含换行或空字符")

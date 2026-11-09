@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import aiofiles
+import asyncio
+from ..function_handler import _await_io_completion
 from pydantic import BaseModel, Field
 
 from dotclaw.tools.base import ToolContext
@@ -48,19 +49,22 @@ class ListDirectoryArgs(BaseModel):
     timeout=10.0,
 )
 async def read_text(args: ReadTextArgs, context: ToolContext) -> str:
-    """读取文件全部内容。"""
-    try:
-        file_path = Path(args.path).expanduser()
-        if not file_path.exists():
-            return f"错误：文件不存在 '{args.path}'"
-        if not file_path.is_file():
-            return f"错误：'{args.path}' 不是文件"
-        if file_path.stat().st_size > MAX_FILE_SIZE:
-            return f"错误：文件过大（{file_path.stat().st_size} bytes），超过限制 {MAX_FILE_SIZE} bytes"
-        async with aiofiles.open(file_path, encoding="utf-8", errors="replace") as f:
-            return await f.read()
-    except Exception as e:
-        return f"错误：{e}"
+    def perform() -> str:
+        """读取文件全部内容。"""
+        try:
+            file_path = Path(args.path).expanduser()
+            if not file_path.exists():
+                return f"错误：文件不存在 '{args.path}'"
+            if not file_path.is_file():
+                return f"错误：'{args.path}' 不是文件"
+            if file_path.stat().st_size > MAX_FILE_SIZE:
+                return f"错误：文件过大（{file_path.stat().st_size} bytes），超过限制 {MAX_FILE_SIZE} bytes"
+            with open(file_path, encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except Exception as e:
+            return f"错误：{e}"
+
+    return await _await_io_completion(asyncio.to_thread(perform))
 
 
 @tool(
@@ -72,15 +76,18 @@ async def read_text(args: ReadTextArgs, context: ToolContext) -> str:
     timeout=10.0,
 )
 async def write_text(args: WriteTextArgs, context: ToolContext) -> str:
-    """写入文件。"""
-    try:
-        file_path = Path(args.path).expanduser()
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
-            await f.write(args.content)
-        return f"成功写入 {args.path} ({len(args.content)} 字符)"
-    except Exception as e:
-        return f"错误：{e}"
+    def perform() -> str:
+        """写入文件。"""
+        try:
+            file_path = Path(args.path).expanduser()
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(args.content)
+            return f"成功写入 {args.path} ({len(args.content)} 字符)"
+        except Exception as e:
+            return f"错误：{e}"
+
+    return await _await_io_completion(asyncio.to_thread(perform))
 
 
 @tool(
@@ -91,18 +98,21 @@ async def write_text(args: WriteTextArgs, context: ToolContext) -> str:
     timeout=10.0,
 )
 async def list_directory(args: ListDirectoryArgs, context: ToolContext) -> str:
-    """列出目录。"""
-    try:
-        dir_path = Path(args.path).expanduser()
-        if not dir_path.exists():
-            return f"错误：目录不存在 '{args.path}'"
-        if not dir_path.is_dir():
-            return f"错误：'{args.path}' 不是目录"
+    def perform() -> str:
+        """列出目录。"""
+        try:
+            dir_path = Path(args.path).expanduser()
+            if not dir_path.exists():
+                return f"错误：目录不存在 '{args.path}'"
+            if not dir_path.is_dir():
+                return f"错误：'{args.path}' 不是目录"
 
-        entries = []
-        for entry in sorted(dir_path.iterdir()):
-            mark = "/" if entry.is_dir() else ""
-            entries.append(f"  {entry.name}{mark}")
-        return "\n".join(entries) if entries else "(空目录)"
-    except Exception as e:
-        return f"错误：{e}"
+            entries = []
+            for entry in sorted(dir_path.iterdir()):
+                mark = "/" if entry.is_dir() else ""
+                entries.append(f"  {entry.name}{mark}")
+            return "\n".join(entries) if entries else "(空目录)"
+        except Exception as e:
+            return f"错误：{e}"
+
+    return await _await_io_completion(asyncio.to_thread(perform))

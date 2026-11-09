@@ -21,12 +21,16 @@ from ...bootstrap.session_interaction import SessionDeletionRejected, UnknownIde
 from ...common.logging_setup import exception_diagnostic
 from ...runtime.application.session_run_coordinator import RunNotRecoverableError, SessionBusyError
 from ...runtime.application.dto import RunResult
+from ...runtime.application.run_watch_service import RunObservation, RunWatchCursor
+from ...runtime.application.ports import RUN_SESSION_MISMATCH_REASON
+from ...runtime.domain.cancellation import CancellationDisposition, CancellationPhase
 from ...runtime.domain.events import RunEvent, RunEventType
 from ...runtime.domain.facts import AgentRun, JSONMap, MessageRole, RunError, RunErrorCode, RunMessage, RunMessageKind
 from ...runtime.domain.state import RunOutcome, Suspended
 from ...session.session import Conversation, Session
 from .schemas import (
     CancelSessionRequest,
+    CancellationActivityResponse,
     CreateSessionRequest,
     AgentOptionResponse,
     ResolveApprovalRequest,
@@ -54,7 +58,7 @@ from .schemas import (
     SearchHitResponse,
     SearchSessionsResponse,
 )
-from .sse import SSEOutputAdapter
+from .sse import SSEOutputAdapter, encode_sse_event
 
 logger = logging.getLogger("dotclaw.channel.web")
 
@@ -74,7 +78,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """持有唯一 ApplicationHost，并在退出时等待提交后关闭资源。"""
+        """持有唯一 ApplicationHost，退出时先请求停止再有界等待提交。"""
         host = await factory()
         _load_runtime_preferences(host)
         app.state.host = host
@@ -82,10 +86,11 @@ def create_app(
         try:
             yield
         finally:
+            # 先让宿主拒绝新提交并请求停止，不能在此无限等待仍阻塞的生产者。
+            await host.shutdown()
             tasks = _submission_tasks(app)
             if tasks:
-                await asyncio.gather(*tuple(tasks), return_exceptions=True)
-            await host.shutdown()
+                await asyncio.wait(tuple(tasks), timeout=1.0)
 
     app = FastAPI(title="dotClaw GUI", version="0.1.0", lifespan=lifespan)
 
@@ -328,14 +333,50 @@ def create_app(
         host = _host(request)
         if await host.session_manager.load(session_id) is None:
             return _session_not_found()
-        run = await host.session_interaction.get_run(session_id, run_id)
+        try:
+            run = await host.session_interaction.get_run(session_id, run_id)
+        except (OSError, ValueError) as error:
+            return _run_storage_error(error)
         if run is None:
+            if run_id is not None:
+                return _error_response(404, WebErrorCode.RUN_NOT_FOUND, "运行不存在或不属于此会话")
             return None
-        events, messages = await host.session_interaction.get_run_evidence(
-            session_id, run.run_id,
-        )
-        executing = await host.session_interaction.is_session_executing(session_id)
-        return _run_activity(run, events, messages, executing)
+        try:
+            observation = await host.session_interaction.snapshot_run(session_id, run.run_id)
+        except (OSError, ValueError) as error:
+            return _run_storage_error(error)
+        return _observation_activity(observation)
+
+    @app.get("/api/v1/sessions/{session_id}/runs/{run_id}/events")
+    async def watch_run_activity(session_id: str, run_id: str, request: Request) -> Response:
+        """先校验游标与归属，响应开始后只持有当前订阅，不取消业务。"""
+        service = _host(request).session_interaction
+        try:
+            raw_cursor = request.headers.get("Last-Event-ID")
+            cursor = RunWatchCursor.parse(raw_cursor) if raw_cursor is not None else None
+        except ValueError as error:
+            return _error_response(422, WebErrorCode.INVALID_CURSOR, str(error))
+        try:
+            initial = await service.snapshot_run(session_id, run_id)
+        except FileNotFoundError:
+            return _error_response(404, WebErrorCode.RUN_NOT_FOUND, "运行不存在")
+        except (OSError, ValueError) as error:
+            return _run_storage_error(error)
+        if cursor is not None and (cursor.event_sequence > initial.cursor.event_sequence
+                or cursor.control_revision > initial.cursor.control_revision):
+            return _error_response(422, WebErrorCode.INVALID_CURSOR, "运行观察游标超出当前事实")
+        async def body() -> AsyncIterator[str]:
+            try:
+                async for observation in service.watch_run(session_id, run_id, cursor):
+                    if await request.is_disconnected():
+                        return
+                    yield encode_sse_event(SSEEvent(SSEEventType.RUN_SNAPSHOT,
+                        _observation_activity(observation).model_dump(mode="json"), str(observation.cursor)))
+            except (OSError, ValueError) as error:
+                logger.error("web.run.watch_failed diagnostic=%s", exception_diagnostic(error))
+                yield encode_sse_event(_stream_error_event(session_id))
+        return StreamingResponse(body(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.post("/api/v1/sessions/{session_id}/runs/{run_id}/abandon", response_model=RunActivityResponse)
     async def abandon_run(session_id: str, run_id: str, request: Request) -> RunActivityResponse | JSONResponse:
@@ -356,8 +397,7 @@ def create_app(
         run = await host.session_interaction.get_run(session_id, run_id)
         if run is None:
             return _error_response(status.HTTP_404_NOT_FOUND, WebErrorCode.RUN_NOT_FOUND, "运行记录不存在")
-        events, messages = await host.session_interaction.get_run_evidence(session_id, run_id)
-        return _run_activity(run, events, messages, False)
+        return _observation_activity(await host.session_interaction.snapshot_run(session_id, run_id))
 
     @app.post("/api/v1/approvals/{approval_id}", response_model=None)
     async def resolve_approval(
@@ -408,25 +448,23 @@ def create_app(
     async def cancel_session(
         session_id: str,
         request: Request,
-        payload: CancelSessionRequest | None = None,
+        payload: CancelSessionRequest,
     ) -> JSONMap | JSONResponse:
-        """按 Session 定位并取消唯一活动 Run。"""
+        """只请求明确目标停止，受理与真实终态使用不同回执。"""
         host = _host(request)
         if await host.session_manager.load(session_id) is None:
             return _session_not_found()
-        reason = payload.reason if payload is not None else _DEFAULT_CANCEL_REASON
-        run_id = await host.session_interaction.cancel_session(session_id, reason)
-        if run_id is None:
-            return _error_response(
-                status.HTTP_409_CONFLICT,
-                WebErrorCode.NO_ACTIVE_RUN,
-                "Session 没有活动 Run",
-            )
-        return {
-            "session_id": session_id,
-            "run_id": run_id,
-            "status": WebRunStatus.CANCELLING.value,
-        }
+        try:
+            receipt = await host.session_interaction.cancel_session(session_id, payload.reason, expected_run_id=payload.run_id)
+        except (OSError, ValueError) as error:
+            return _run_storage_error(error)
+        if receipt.disposition is CancellationDisposition.NOT_FOUND:
+            return _error_response(404, WebErrorCode.RUN_NOT_FOUND, "运行不存在")
+        if receipt.disposition is CancellationDisposition.COMMITTING_SUCCESS:
+            return _error_response(409, WebErrorCode.COMMITTING_SUCCESS, "运行正在提交结果，无法取消")
+        ended = receipt.disposition is CancellationDisposition.ALREADY_ENDED
+        return JSONResponse({"session_id": session_id, **receipt.to_dict(),
+            "status": receipt.outcome.value if ended and receipt.outcome else "cancelling"}, status_code=200 if ended else 202)
 
     static_directory = frontend_dir or _frontend_dist_directory()
     if (static_directory / "index.html").is_file():
@@ -617,6 +655,11 @@ def _run_stream(
             if not result_session_id and result.run_id:
                 run = await _host(request).session_interaction.get_run_by_id(result.run_id)
                 result_session_id = "" if run is None else run.session_id
+            if result.run_id and result_session_id:
+                observation = await _host(request).session_interaction.snapshot_run(result_session_id, result.run_id)
+                if observation.committing:
+                    await adapter.finish(_stream_error_event(result_session_id))
+                    return
             logger.log(logging.INFO if result.error is None else logging.WARNING, "web.run.result outcome=%s error_code=%s", result.state.outcome().value if result.state.outcome() is not None else "suspended", result.error.code.value if result.error is not None else "null", extra={"session_id": result_session_id or "-", "run_id": result.run_id or "-"})
             await adapter.finish(_result_event(result_session_id, result))
         except Exception as error:
@@ -690,6 +733,7 @@ def _run_activity(
     events: tuple[RunEvent, ...],
     messages: tuple[RunMessage, ...],
     executing: bool,
+    *, observation: RunObservation | None = None,
 ) -> RunActivityResponse:
     """把运行事实整理为前端可增量刷新的工具执行视图。"""
     calls = {
@@ -735,7 +779,16 @@ def _run_activity(
     approval_id: str | None = None
     approval_call_id: str | None = None
     child_run_id: str | None = None
-    if run.state.is_waiting_approval() and isinstance(run.state.mode, Suspended):
+    committing = observation.committing if observation else False
+    cancellation = observation.cancellation if observation else None
+    if run.state.is_ended() and not committing:
+        outcome = run.state.outcome()
+        status_value = outcome.value if outcome is not None else WebRunStatus.FAILED.value
+    elif cancellation is not None:
+        status_value = WebRunStatus.CANCELLING.value
+    elif committing:
+        status_value = WebRunStatus.RUNNING.value
+    elif run.state.is_waiting_approval() and isinstance(run.state.mode, Suspended):
         status_value = WebRunStatus.WAITING_APPROVAL.value
         approval_id = run.state.mode.control_id
         for event in sorted(events, key=lambda item: item.sequence):
@@ -759,13 +812,35 @@ def _run_activity(
         approval_call_id=approval_call_id,
         child_run_id=child_run_id,
         tools=list(steps.values()),
-        error=run.error,
-        steps=_run_steps(run, events),
+        error=None if committing else run.error,
+        steps=_run_steps(run, events, terminal_committed=not committing),
         event_sequence=max((event.sequence for event in events), default=0),
+        control_revision=observation.cursor.control_revision if observation else 0,
+        generation=observation.generation if observation else "",
+        committing=committing,
+        cancellation=CancellationActivityResponse(request_id=cancellation.request.request_id,
+            requested_at=cancellation.request.requested_at, phase=cancellation.phase,
+            pending_operation_count=len(cancellation.pending_operation_ids), pending_child_count=len(cancellation.pending_child_run_ids),
+            effect=cancellation.effect, diagnostic="停止尚未完成，请确认相关操作是否已经停止" if cancellation.phase is CancellationPhase.BLOCKED else None) if cancellation else None,
     )
 
 
-def _run_steps(run: AgentRun, events: tuple[RunEvent, ...]) -> list[RunStepResponse]:
+def _observation_activity(observation: RunObservation) -> RunActivityResponse:
+    """统一普通GET和SSE的事实投影，屏蔽未完成提交的终态事件。"""
+    terminal_types = {RunEventType.RUN_COMPLETED, RunEventType.RUN_CANCELLED, RunEventType.RUN_FAILED, RunEventType.RUN_ABANDONED}
+    events = tuple(event for event in observation.events if not observation.committing or event.event_type not in terminal_types)
+    return _run_activity(observation.run, events, observation.messages, observation.executing, observation=observation)
+
+
+def _run_storage_error(error: OSError | ValueError) -> JSONResponse:
+    """归属拒绝只匹配稳定标识；磁盘和格式错误保留服务端失败并脱敏记录。"""
+    if isinstance(error, PermissionError) and error.args == (RUN_SESSION_MISMATCH_REASON,):
+        return _error_response(404, WebErrorCode.RUN_NOT_FOUND, "运行不属于此会话")
+    logger.error("web.run.storage_failed diagnostic=%s", exception_diagnostic(error))
+    return _error_response(500, WebErrorCode.INTERNAL_ERROR, "运行记录暂时无法读取，请稍后重试")
+
+
+def _run_steps(run: AgentRun, events: tuple[RunEvent, ...], *, terminal_committed: bool = True) -> list[RunStepResponse]:
     """只投影允许展示的步骤事实，保留并行工具及不完整历史的真实状态。"""
     steps: list[RunStepResponse] = []
     models: list[RunStepResponse] = []
@@ -797,7 +872,7 @@ def _run_steps(run: AgentRun, events: tuple[RunEvent, ...]) -> list[RunStepRespo
             current.status = value if value in {"completed", "failed", "cancelled", "approval_required"} else "interrupted"
             if not is_model:
                 tools.pop(call_id or "", None)
-    if run.state.is_ended():
+    if run.state.is_ended() and terminal_committed:
         outcome = run.state.outcome()
         for step in steps:
             if step.status == "running":

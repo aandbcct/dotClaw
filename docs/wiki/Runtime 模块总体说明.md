@@ -495,7 +495,6 @@ HistoryCompactorPort
 | `execute()` | 创建新 Run 并执行 |
 | `resolve_approval()` | 消费审批并恢复原 Run |
 | `cancel()` | 尽力取消活动、等待审批或子 Run |
-| `recover_session()` | 扫描遗留非终态 Run 并交由恢复边界按 Checkpoint 重放，不再改写状态 |
 | `active_run()` | 查询 Session 当前唯一非终态 Run（按 `AgentRunState.is_ended()` 判断） |
 
 `RuntimeEngine` 的基本工作方式是：
@@ -503,7 +502,7 @@ HistoryCompactorPort
 ```text
 读取 AgentRunState
 → 执行当前阶段需要的副作用（由 transition() 返回的 AgentAction 决定）
-→ 将结果转换为 DomainEvent
+→ 将结果转换为 AgentRunEvent（当前状态机输入事件联合）
 → transition(state, event) → (next state, next action)
 → 持久化新 AgentRunState + Checkpoint（action 与之匹配）
 → 进入下一轮
@@ -886,7 +885,7 @@ parent_run_id → child_run_id
 
 #### 4.5.4 恢复边界、重试与放弃
 
-**职责与用途：**恢复边界用于区分“确定性业务失败”和“在安全边界发生的暂时外部不可用”。Runtime 不在进程重启时把遗留非终态 Run 改写为某个特殊状态——`recover_session()` 只扫描遗留的非终态 `AgentRunState`（Created/Running/Suspended），由 `_apply_transition` 包裹的 `transition()` 恢复边界在每次非终态迁移后先持久化新状态与 Checkpoint，再执行下一个外部副作用。崩溃后 `resume_run` 重新加载 Checkpoint 的 `action`（INVOKE_LLM 或 EXECUTE_TOOLS）并从正确节点重放；`EXECUTE_TOOLS` 恢复重放工具轮（待执行工具调用保存在 `checkpoint.pending`），而不是退化的 LLM 重调。
+**职责与用途：**恢复边界用于区分“确定性业务失败”和“在安全边界发生的暂时外部不可用”。Runtime 不在进程重启时把遗留非终态 Run 改写为某个特殊状态——普通提交仅通过 `active_run()` 检查遗留非终态占用，不自动重放；显式恢复由 `resume_run()` 读取 Checkpoint；由 `_apply_transition` 包裹的 `transition()` 恢复边界在每次非终态迁移后先持久化新状态与 Checkpoint，再执行下一个外部副作用。崩溃后 `resume_run` 重新加载 Checkpoint 的 `action`（INVOKE_LLM 或 EXECUTE_TOOLS）并从正确节点重放；`EXECUTE_TOOLS` 恢复重放工具轮（待执行工具调用保存在 `checkpoint.pending`），而不是退化的 LLM 重调。
 
 当前可恢复来源主要包括：
 
@@ -1920,7 +1919,7 @@ src/dotclaw/runtime/
 |---|---|---|
 | `domain/facts.py` | 运行事实 | AgentRun、RunMessage、Checkpoint、Policy、Status、Error |
 | `domain/context.py` | 上下文事实 | ContextVersion、Slot Snapshot、Staged Compression、Success Intent |
-| `domain/events.py` | 事件 | DomainEvent、RunEvent、事件类型和 Tool 审计状态 |
+| `domain/events.py` | 事件 | AgentRunEvent、RunEvent、事件类型和 Tool 审计状态 |
 | `domain/state.py` | 状态规则 | AgentRunState、RunStage、SuspendReason、RunOutcome、StateTransition、transition |
 | `domain/control.py` | 控制动作 | AgentAction |
 

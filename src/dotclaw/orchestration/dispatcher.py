@@ -10,12 +10,13 @@ from __future__ import annotations
 from uuid import uuid4
 
 from .message_broker import TaskMessageBroker
+from ..runtime.domain.state import RunOutcome
 from .task import (
     Task,
     TaskEndpoint,
     TaskEndpointBinding,
-    TaskMessageType,
     TaskSpecification,
+    TaskStatus,
 )
 
 
@@ -56,29 +57,20 @@ class AgentDispatcher:
         await self._broker.create_task(task, source_run_id)
         return await self._broker.mark_target_running(task.task_id)
 
-    async def finish_v2_delegation(
-        self,
-        task_id: str,
-        target_run_id: str,
-        output: str,
-        succeeded: bool,
-    ) -> Task:
-        """将 v2 子 Run 终态回调投影到既有 Task 状态机。"""
-        task: Task = await self._broker.get_task(task_id)
-        if task.status.is_terminal():
-            return task
-        message_type: TaskMessageType = TaskMessageType.RESULT if succeeded else TaskMessageType.FAILED
-        await self._broker.send_message(
-            task_id,
-            TaskEndpoint.TARGET,
-            task.target.identity_id,
-            task.target.session_id,
-            target_run_id,
-            message_type,
-            output,
-        )
-        return await self._broker.get_task(task_id)
+    async def restore_v2_delegation(self, task_id: str, source_agent_id: str, source_session_id: str,
+        target_agent_id: str, target_session_id: str, input_message: str) -> Task:
+        """从持久父子关联恢复固定 Task，不重启业务或伪造历史消息。"""
+        task = Task(task_id, TaskSpecification("Runtime v2 delegation", input_message),
+            TaskEndpointBinding(TaskEndpoint.SOURCE, source_agent_id, source_session_id),
+            TaskEndpointBinding(TaskEndpoint.TARGET, target_agent_id, target_session_id), status=TaskStatus.RUNNING_TARGET)
+        return await self._broker.restore_task(task)
 
-    async def cancel_task(self, task_id: str, identity_id: str, session_id: str, run_id: str, reason: str) -> Task:
-        """写入取消终态；实际子 Run 取消由适配器转交协调器。"""
-        return await self._broker.cancel_task(task_id, identity_id, session_id, run_id, reason)
+    async def settle_v2_delegation(self, task_id: str, target_run_id: str, outcome: RunOutcome, output: str) -> Task:
+        """真实 Run 终态才可投影到业务 Task，重复相同结果幂等。"""
+        status = {RunOutcome.COMPLETED: TaskStatus.COMPLETED, RunOutcome.FAILED: TaskStatus.FAILED,
+            RunOutcome.CANCELLED: TaskStatus.CANCELLED, RunOutcome.ABANDONED: TaskStatus.CANCELLED}[outcome]
+        return await self._broker.settle_task(task_id, target_run_id, status, output)
+
+    async def fail_v2_preparation(self, task_id: str, target_run_id: str, message: str) -> Task:
+        """子 Run 尚未创建时记录本地准备失败，不伪造运行结果。"""
+        return await self._broker.settle_task(task_id, target_run_id, TaskStatus.FAILED, message)

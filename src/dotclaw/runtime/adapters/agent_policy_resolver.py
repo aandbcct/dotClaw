@@ -16,15 +16,6 @@ from ..application.ports import RunPolicyPort
 from ..domain.facts import AgentPolicySnapshot
 
 
-LEGACY_TASK_TOOL_NAMES: frozenset[str] = frozenset({
-    "task_send_message",
-    "wait_task",
-    "task_status",
-    "cancel_task",
-})
-"""仅供旧 Runtime / Dispatcher 兼容链使用的跨 Run Task 工具名称。"""
-
-
 class AgentPolicyResolver(RunPolicyPort):
     """将 Agent 配置解析为一次 Run 不可变策略快照的适配器。"""
 
@@ -89,19 +80,19 @@ class AgentPolicyResolver(RunPolicyPort):
         return identity
 
     def _allowed_definitions(self, identity: AgentIdentity) -> list[LegacyToolDefinition]:
-        """按 Agent 白名单过滤工具，并排除 v2 未承载的旧 Task 协议工具。
+        """按 Agent 白名单过滤当前可用工具。
 
         工具集在每次 Run 解析时通过 snapshot_definitions() 捕获一次不可变快照，
         Run 内不再读取动态 Registry（总体设计 §9 / 开发计划阶段四）。
         """
         definitions: list[LegacyToolDefinition] = self._executor.snapshot_definitions()
         if not identity.allowed_tools:
-            return [definition for definition in definitions if definition.name not in LEGACY_TASK_TOOL_NAMES]
+            return definitions
         allowed: set[str] = set(identity.allowed_tools)
         return [
             definition
             for definition in definitions
-            if definition.name in allowed and definition.name not in LEGACY_TASK_TOOL_NAMES
+            if definition.name in allowed
         ]
 
     def _model_budget_settings(self, model_name: str) -> tuple[int, str]:

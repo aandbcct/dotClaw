@@ -864,8 +864,9 @@ async def test_cancelling_stream_closes_sdk_response():
     assert response.close_count == 1
 
 
-async def test_stream_close_failure_does_not_mask_iteration_error():
-    """关闭失败只能记录，流迭代原始异常必须仍由调用方接收。"""
+async def test_stream_close_failure_remains_explicit_resource_error():
+    """关闭失败必须报告资源残留，不能把运行收口成普通调用失败。"""
+    from dotclaw.common.resource_errors import ResourceCleanupError
     response = _ControlledResponse(
         [_chunk(_delta(content="first"))],
         close_error=True,
@@ -873,7 +874,32 @@ async def test_stream_close_failure_does_not_mask_iteration_error():
     )
     client = _ObservedClient(response)
 
-    with pytest.raises(ValueError, match="stream broke"):
+    with pytest.raises(ResourceCleanupError) as captured:
         await _collect_explicit_timeout(client, 0.2)
 
+    assert captured.value.diagnostic_code == "llm_stream_close_failed"
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert response.close_count == 1
+
+
+async def test_repeated_cancel_during_stream_close_waits_for_actual_cleanup():
+    """超时触发关闭后再收到取消，清理任务仍必须退出且只关闭一次。"""
+    entered, release = asyncio.Event(), asyncio.Event()
+    response = _ControlledResponse([], wait_after_chunks=True)
+    async def close():
+        response.close_count += 1
+        entered.set()
+        await release.wait()
+    response.close = close
+    client = _ObservedClient(response)
+    task = asyncio.create_task(_collect_explicit_timeout(client, .02))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done() and response.close_count == 1
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert response.close_count == 1

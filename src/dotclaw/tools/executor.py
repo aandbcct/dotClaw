@@ -23,6 +23,8 @@ import asyncio
 import dataclasses
 import logging
 import os
+from ..common.resource_errors import ResourceCleanupError
+
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -318,6 +320,8 @@ class ToolExecutor:
             result = await self._execute_handler(
                 name, validated, handler, execution_context, journal
             )
+        except ResourceCleanupError:
+            raise
         except Exception:  # 超时/调度异常已在 _execute_handler 内归一化
             result = ToolResult.from_error(
                 code=ToolErrorCode.EXECUTOR_ERROR,
@@ -351,6 +355,8 @@ class ToolExecutor:
                 message=f"错误：工具执行超时（{int(timeout)}秒）",
                 error_type=ToolErrorType.TIMEOUT,
             )
+        except ResourceCleanupError:
+            raise
         except Exception as exc:  # 业务异常统一转为 EXECUTION_ERROR
             logger.exception("工具 %s 调度出错", name)
             return ToolResult.from_error(

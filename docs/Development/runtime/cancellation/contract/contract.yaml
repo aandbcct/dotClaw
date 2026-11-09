@@ -1,0 +1,75 @@
+id: cancellation-lifecycle
+version: 3
+status: completed
+coordination:
+  owner_session: null # 工具未提供可信会话标识
+  owner_agent: /root
+  updated_at: '2026-11-06T19:18:33+08:00'
+model_policy:
+  coordinator: {model: gpt-6-astra, reasoning_effort: medium}
+  subagent: {model: gpt-6.1-sol, reasoning_effort: medium}
+  coordinator_actual: {model: gpt-6.1-sol, reasoning_effort: null} # 用户明确豁免本次主代理模型限制；实际思考强度未知
+goal: 停止请求能可靠终止本地能力和子运行，完成状态持久化，并在页面及时呈现一致结果。
+scope:
+  include: [能力取消, 资源清理, 审批竞争, 持久化补偿, 多Agent取消, 状态SSE, 前端同步]
+  exclude: [远程事务回滚, 分布式调度, 并行工具功能, 通用事务框架, commit, push, PR]
+facts:
+  - baseline: 479e3cbc8659ac45b4df38b62e006e022744589d
+  - 工具取消仅清审批集合，模型取消当前驱动任务；已在本聊天检查源码。
+  - 用户确认主代理选择器已设置为 gpt-6-astra / medium。
+decisions:
+  - 完整目标分阶段实现，不以改动规模缩减必要范围。
+  - CancellationService（取消控制服务）唯一拥有能力任务；不新增 RunOperationRunner。
+  - RuntimeEngine（运行引擎）独占控制受理、业务状态迁移和审计编排；取消服务不依赖仓储。
+  - SessionRunCoordinator（会话协调器）只拥有补收尾作业，不能复制能力任务注册表。
+  - 保留现有工具安全链与四模式状态机；删除替代完成的旧路径。
+  - 公开接口及字段以总体设计版本3为准，开发代理不得自行更改。
+assumptions:
+  - Windows 原生测试可执行；Linux/Docker 可用性需实施阶段核实。
+open_questions:
+  - owner_session 与运行时实际模型配置不可直接读取，不伪造。
+design:
+  entrypoints: ['总体设计.md §6.1：会话入口与协调器']
+  boundaries: ['总体设计.md §1.1、§4、§6：唯一所有权及调用链']
+  components: ['总体设计.md §6：类、方法、字段完整契约']
+  interfaces: ['总体设计.md §6、§7、§8']
+  data_models: ['总体设计.md §5：取消、能力动作、观察模型']
+  lifecycle: ['总体设计.md §7：提交、恢复和竞争规则']
+  compatibility: ['开发计划.md §9：加法兼容和删除门槛']
+acceptance:
+  - {id: A, given: 旧v4运行及新取消请求, when: 请求/提交/故障恢复, then: 幂等且无双终态, verify: 仓储故障注入及旧数据测试}
+  - {id: B, given: 在途模型工具和上下文, when: 重复停止或终态竞争, then: 唯一任务所有者且正确收尾, verify: 受控屏障测试与安全链回归}
+  - {id: C, given: 命令进程树与共享模型MCP, when: 取消, then: 本地资源回收且无关运行不受影响, verify: 分平台真实进程测试与请求隔离}
+  - {id: D, given: 父子孙运行和恢复窗口, when: 取消或关闭, then: 关联无丢失且无伪终态, verify: 委派竞态及重启测试}
+  - {id: E, given: 页面和运行观察连接, when: 取消刷新断流重连, then: 状态一致且无正常高频轮询, verify: 后端SSE前端测试与集成证据}
+  - {id: F, given: 全阶段集成工作区, when: 最终审查, then: C01-C12及唯一所有权均满足, verify: 开发计划验收矩阵与独立架构审查}
+execution:
+  workspace: 'D:\dev\dotClaw'
+  branch: feat/calculateRebuild
+  baseline: 479e3cbc8659ac45b4df38b62e006e022744589d
+  protected_changes: [docs/Development/runtime/cancellation/]
+  ownership:
+    - {owner: /root, files: [docs/Development/runtime/cancellation/], responsibility: 设计契约任务记录和集成裁决}
+    - {owner: developer, files: [当前阶段任务单范围], responsibility: 实现与自测}
+    - {owner: verifier, files: [], responsibility: 独立只读审查及执行验证}
+  integrator: /root
+  environment: 'Windows PowerShell；Python固定为 D:\dev\dotClaw\.venv\Scripts\python.exe；测试前打印sys.executable。'
+phases:
+  - {id: A, goal: 数据与仓储, depends_on: [], deliverables: [模型, 持久化, 通知契约], acceptance_ids: [A]}
+  - {id: B, goal: 统一能力取消与Runtime, depends_on: [A], deliverables: [任务所有权, Runtime收尾], acceptance_ids: [B]}
+  - {id: C, goal: 资源实现, depends_on: [B], deliverables: [进程树, 模型MCP隔离], acceptance_ids: [C]}
+  - {id: D, goal: 委派与恢复, depends_on: [C], deliverables: [两阶段启动, 关闭恢复], acceptance_ids: [D]}
+  - {id: E, goal: 状态观察, depends_on: [D], deliverables: [SSE, 前端], acceptance_ids: [E]}
+  - {id: F, goal: 集成验收, depends_on: [E], deliverables: [证据与架构审查], acceptance_ids: [F]}
+completion: 所有阶段经主代理核对独立验证通过；未测平台与未完成项不能当作通过；不自动提交。
+changes:
+  - version: 3
+    reason: B集成补全单Run取消意图查询恢复，防止在一个Run锁内恢复其他运行。
+    affected_tasks: [B-dev, B-verify, E-dev, F-verify]
+    affected_acceptance: [B, E, F]
+    acknowledged_by: [/root]
+  - version: 2
+    reason: 根据讨论固定完整目标及唯一任务所有权，合并重复执行管理职责。
+    affected_tasks: [A-dev, B-dev, C-dev, D-dev, E-dev, F-verify]
+    affected_acceptance: [A, B, C, D, E, F]
+    acknowledged_by: [/root]

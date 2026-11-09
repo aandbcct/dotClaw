@@ -73,9 +73,6 @@ class ToolExecutorAdapter(ToolPort):
         self._waiting_calls = {key for key in self._waiting_calls if key[0] != run_id}
         self._executed_calls = {key for key in self._executed_calls if key[0] != run_id}
 
-    async def cancel(self, run_id: str) -> None:
-        """旧执行器不持有可取消句柄；清理尚未执行的审批调用。"""
-        self._waiting_calls = {key for key in self._waiting_calls if key[0] != run_id}
 
 
 def _approval_id(run_id: str, call_id: str) -> str:

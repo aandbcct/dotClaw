@@ -154,7 +154,7 @@ async def _compression(config: ContextRunConfig) -> list[BenchmarkSample]:
             engine, repository = build_engine(root, manager, counter, compactor, llm, context_window=70, tool=CompletingTool() if outcome == "success" else None)
             compression_started = time.perf_counter()
             if outcome == "cancelled":
-                task = asyncio.create_task(engine.execute(request)); await llm.started.wait(); await engine.cancel(llm.run_id, "PR6 取消"); result = await task
+                task = asyncio.create_task(engine.execute(request)); await llm.started.wait(); await engine.request_cancel(llm.run_id, "PR6 取消"); result = await task
             else:
                 result = await engine.execute(request)
             if outcome == "abandoned":

@@ -1,11 +1,17 @@
 """GUI v0.1 SSE 消息流契约测试。"""
 
 from __future__ import annotations
+from dotclaw.runtime.application.run_watch_service import RunObservation, RunWatchCursor, RunWatchService
+from dotclaw.runtime.application.ports import RUN_SESSION_MISMATCH_REASON
+from dotclaw.runtime.domain.facts import AgentRun, AgentPolicySnapshot
+
 
 import asyncio
 import json
 import logging
 import socket
+from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -22,6 +28,8 @@ from dotclaw.runtime.application.dto import (
     RunAcceptedEvent,
 )
 from dotclaw.runtime.application.ports import LLMOutputPort
+from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
+from dotclaw.runtime.domain.cancellation import CancellationDisposition
 from dotclaw.runtime.domain.facts import MessageRole, RunError, RunErrorCode
 from dotclaw.runtime.domain.state import (
     AgentRunState,
@@ -91,6 +99,11 @@ class _FakeSessionInteraction:
         self.active_submissions: int = 0
         self.max_active_submissions: int = 0
 
+    async def snapshot_run(self, session_id, run_id):
+        """消息流替身以预设结果构造不含未决意图的事实。"""
+        run = AgentRun(run_id, session_id, "default", self.result.state, "test", AgentPolicySnapshot("default", "v", "model", 10), "input")
+        return RunObservation(run, (), (), None, RunWatchCursor(), False, "test-host")
+
     async def submit(
         self,
         session: Session | str,
@@ -140,6 +153,28 @@ class _FakeHost:
 async def _ready_host(host: _FakeHost) -> _FakeHost:
     """把测试宿主包装为异步工厂。"""
     return host
+
+
+@pytest.mark.asyncio
+async def test_lifespan_requests_host_stop_before_waiting_for_submission(monkeypatch) -> None:
+    """尚未退出的生产者由宿主停止释放，不能先gather造成关闭死锁。"""
+    host, _ = _host(_completed_result(), "session-1")
+    release = asyncio.Event()
+    order: list[str] = []
+    async def shutdown():
+        order.append("stop")
+        release.set()
+    async def submission():
+        await release.wait()
+        order.append("submission-exited")
+    monkeypatch.setattr(host, "shutdown", shutdown)
+    app = create_app(host_factory=lambda: _ready_host(host))
+    async with asyncio.timeout(2):
+        async with app.router.lifespan_context(app):
+            task = asyncio.create_task(submission())
+            app.state.submission_tasks.add(task)
+    assert order == ["stop", "submission-exited"]
+    assert task.done() and not task.cancelled()
 
 
 @asynccontextmanager
@@ -597,36 +632,40 @@ async def test_acceptance_is_idempotent_and_not_a_terminal_event() -> None:
 class _EngineInteraction(_FakeSessionInteraction):
     """HTTP 流测试使用真实引擎和文件仓储，仅模型端口为可控替身。"""
 
-    def __init__(self, engine, root) -> None:
+    def __init__(self, engine, root, *, run_change_notifier) -> None:
         super().__init__(_completed_result())
         self.engine = engine
+        self.coordinator = SessionRunCoordinator(engine, run_change_notifier=run_change_notifier)
         self.repository = RunRepositoryAdapter(root)
+        self.watcher = RunWatchService(self.repository, engine._cancellation_service, run_change_notifier, "test-host")
         self.executing = False
 
     async def submit(self, session, user_message, output_port=None) -> RunResult:
         self.executing = True
         try:
-            self.result = await self.engine.execute(_request(session), output_port)
+            self.result = await self.coordinator.submit(_request(session), output_port)
             return self.result
         finally:
             self.executing = False
             self.completed.set()
 
     async def get_run(self, session_id, run_id=None):
-        return await self.repository.load_run(session_id, run_id) if run_id else await self.engine.active_run(session_id)
+        try:
+            return await self.repository.load_run_snapshot(session_id, run_id) if run_id else await self.engine.active_run(session_id)
+        except PermissionError as error:
+            if error.args == (RUN_SESSION_MISMATCH_REASON,):
+                return None
+            raise
 
-    async def get_run_evidence(self, session_id, run_id):
-        return await self.repository.load_events(session_id, run_id), await self.repository.load_messages(session_id, run_id)
+    async def snapshot_run(self, session_id, run_id):
+        return await self.watcher.snapshot(session_id, run_id)
 
-    async def is_session_executing(self, session_id):
-        return self.executing
+    def watch_run(self, session_id, run_id, cursor=None):
+        return self.watcher.watch(session_id, run_id, cursor)
 
-    async def cancel_session(self, session_id, reason):
-        run = await self.engine.active_run(session_id)
-        if run is None:
-            return None
-        await self.engine.cancel(run.run_id, reason)
-        return run.run_id
+    async def cancel_session(self, session_id, reason, *, expected_run_id):
+        await self.repository.load_run_snapshot(session_id, expected_run_id)
+        return await self.coordinator.cancel(expected_run_id, reason)
 
 
 @asynccontextmanager
@@ -660,9 +699,10 @@ async def _live_http_client(host, model_release: asyncio.Event):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("disconnect,stop", [(False, False), (True, False), (True, True)])
 async def test_real_http_accepts_before_model_tokens_and_survives_disconnect(tmp_path, disconnect, stop) -> None:
-    engine, model = _engine(tmp_path), BlockedLLM()
+    notifier = RunChangeNotifier()
+    engine, model = _engine(tmp_path, run_change_notifier=notifier), BlockedLLM()
     engine._llm_port = model
-    interaction = _EngineInteraction(engine, tmp_path)
+    interaction = _EngineInteraction(engine, tmp_path, run_change_notifier=notifier)
     host = _FakeHost(_FakeSessionManager(("session-live",)), interaction)
     try:
         async with _live_http_client(host, model.release) as client:
@@ -687,15 +727,18 @@ async def test_real_http_accepts_before_model_tokens_and_survives_disconnect(tmp
                     assert [event.event for event in events] == ["message.delta", "run.completed"]
             if disconnect:
                 await asyncio.wait_for(model.started.wait(), 2)
-                assert not interaction.completed.is_set() and model.cancelled == []
+                assert not interaction.completed.is_set()
+                assert not model.cancel_observed.is_set() and not model.cleanup_completed.is_set()
                 if stop:
-                    stopped = await client.post("/api/v1/sessions/session-live/cancel", json={"reason": "显式停止"})
+                    stopped = await client.post("/api/v1/sessions/session-live/cancel", json={"run_id": run_id, "reason": "显式停止"})
                     assert stopped.json()["run_id"] == run_id
                 else:
                     model.release.set()
                 await asyncio.wait_for(interaction.completed.wait(), 3)
+                await asyncio.gather(*tuple(interaction.coordinator._cancellation_jobs.values()))
                 persisted = await interaction.repository.load_run("session-live", run_id)
                 assert persisted.state.outcome() is (RunOutcome.CANCELLED if stop else RunOutcome.COMPLETED)
-                assert model.cancelled == ([run_id] if stop else [])
+                assert model.cancel_observed.is_set() is stop
+                assert model.cleanup_completed.is_set()
     finally:
         model.release.set()

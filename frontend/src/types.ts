@@ -73,6 +73,7 @@ export interface ErrorEnvelope {
 export interface StreamEvent {
   event: string;
   data: Record<string, unknown>;
+    id?: string;
 }
 
 export interface RunAcceptedData {
@@ -114,6 +115,19 @@ export interface RunActivity {
   error?: ErrorEnvelope["error"] | null;
   steps?: RunStep[];
   event_sequence?: number;
+    control_revision?: number;
+    generation?: string;
+    committing?: boolean;
+    cancellation?: {
+      request_id: string; requested_at: string; phase: "requested" | "draining" | "blocked" | "settled";
+      pending_operation_count: number; pending_child_count: number; effect: "local_only" | "remote_unknown";
+      diagnostic: string | null;
+    } | null;
+}
+
+export interface CancelReceipt {
+  run_id: string; disposition: "accepted" | "already_requested" | "already_ended" | "committing_success" | "not_found";
+  request_id: string | null; control_revision: number; outcome: string | null; requested_at: string | null;
 }
 
 export interface ModelSetting {

@@ -10,14 +10,32 @@ from benchmarks.concurrency_reliability import (
     ConcurrencyReliabilityRunner,
     _GlobalLockCoordinator,
     _build_scheduling_report,
+    _build_services,
 )
 from benchmarks.concurrency_stats import (
     ConcurrencyLatencyStats,
     ConcurrencySnapshot,
     ScenarioStats,
 )
-from benchmarks.concurrency_workloads import WorkloadConfig
+from benchmarks.concurrency_workloads import WorkloadConfig, FixedDelayLLM, FixedDelayTool
+from dotclaw.runtime.application.dto import ConversationMessage, ConversationSnapshot, RunRequest
+from dotclaw.runtime.domain.facts import MessageRole
+from dotclaw.runtime.domain.state import RunOutcome
 from benchmarks.eval_baseline_models import BenchmarkSample, ConcurrencyScenario, ScheduleMode
+
+
+@pytest.mark.asyncio
+async def test_real_benchmark_assembly_shares_notifier_and_executes(tmp_path: Path) -> None:
+    """生产工作负载装配显式共享通知器，提交后可观察持久终态。"""
+    coordinator, repository, manager, _, _ = _build_services(str(tmp_path), FixedDelayLLM(0), FixedDelayTool(0), 0)
+    session = await manager.create(agent_id="default")
+    request = RunRequest(session.id, "benchmark-lease", "default",
+        ConversationMessage("input", MessageRole.USER, "session-0-run-0", ""), ConversationSnapshot(session.id, (), 0))
+    assert coordinator._notifier is coordinator._engine._run_change_notifier
+    result = await coordinator.submit(request)
+    assert result.state.outcome() is RunOutcome.COMPLETED
+    assert (await coordinator.wait_terminal(result.run_id)).state.outcome() is RunOutcome.COMPLETED
+    assert (await repository.find_run(result.run_id)).state.outcome() is RunOutcome.COMPLETED
 
 
 class TestConcurrencyReliabilityRunner:

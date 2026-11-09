@@ -1,25 +1,15 @@
-"""将 Runtime v2 的 DelegationPort 请求映射为目标 Agent 的子 Run。"""
+"""以持久父子运行关系准备、启动和投影同进程委派。"""
 
 from __future__ import annotations
 
-import asyncio
+import json
 import uuid
-from dataclasses import dataclass
 from typing import Protocol
 
-from ..runtime.application.dto import (
-    ConversationMessage,
-    ConversationSnapshot,
-    DelegationRequest,
-    DelegationResult,
-    DelegationSubmission,
-    RunRequest,
-    RunResult,
-    run_outcome_from_state,
-)
-from ..runtime.application.ports import DelegationPort
-from ..runtime.domain.facts import RunError, RunErrorCode
-from ..runtime.domain.state import RunOutcome
+from ..runtime.application.dto import ConversationMessage, ConversationSnapshot, DelegationRequest, DelegationResult, DelegationSubmission, RunRequest, RunResult
+from ..runtime.application.ports import DelegationPort, RunRepository
+from ..runtime.domain.cancellation import CancellationOrigin, CancellationReceipt
+from ..runtime.domain.facts import AgentRun, MessageRole
 from ..session.session import SessionManager
 from .dispatcher import AgentDispatcher
 from .registry import AgentRegistry
@@ -27,183 +17,119 @@ from .task import TaskSpecification
 
 
 class DelegationSubmissionPort(Protocol):
-    """适配器提交和取消目标 Run 所需的最小协调接口。"""
+    """子运行协调协议，不向适配器泄漏能力任务句柄。"""
 
-    async def submit(self, request: RunRequest) -> RunResult:
-        """串行提交目标 Session 的普通 Run。"""
-
-    async def cancel(self, run_id: str, reason: str) -> None:
-        """取消已创建的目标 Run。"""
-
-
-@dataclass(frozen=True)
-class DelegationTaskBinding:
-    """子 Run 与既有 Dispatcher Task 的最小关联，供完成和取消回调使用。"""
-
-    task_id: str
-    source_agent_id: str
-    source_session_id: str
+    async def _prepare_child_run_locked(self, request: RunRequest) -> str: ...
+    def schedule_prepared(self, run_id: str) -> None: ...
+    async def wait_terminal(self, run_id: str) -> RunResult: ...
+    async def cancel(self, run_id: str, reason: str, *, origin: CancellationOrigin = CancellationOrigin.USER, parent_request_id: str | None = None) -> CancellationReceipt: ...
 
 
 class RuntimeDelegationAdapter(DelegationPort):
-    """将 orchestration 的目标 Session 调度适配为 Runtime v2 委派端口。
+    """只持有仓储和业务投影依赖，不保存子驱动或第二份结果缓存。"""
 
-    适配器拥有目标 Session 的创建、子 Run 提交和取消转发；RuntimeEngine 只接收
-    子运行标识与标准化结果，既不依赖 Dispatcher，也不接触旧 Runtime。
-    """
-
-    def __init__(
-        self,
-        session_manager: SessionManager,
-        agent_registry: AgentRegistry,
-        dispatcher: AgentDispatcher,
-        preferred_model: str,
-    ) -> None:
-        """绑定目标 Run 的会话仓储与 Agent 身份目录。"""
+    def __init__(self, session_manager: SessionManager, agent_registry: AgentRegistry,
+                 dispatcher: AgentDispatcher, preferred_model: str, *, run_repository: RunRepository) -> None:
         self._coordinator: DelegationSubmissionPort | None = None
-        self._session_manager: SessionManager = session_manager
-        self._agent_registry: AgentRegistry = agent_registry
-        self._dispatcher: AgentDispatcher = dispatcher
-        self._preferred_model: str = preferred_model
-        self._results: dict[str, DelegationResult] = {}
-        self._running: dict[str, asyncio.Task[RunResult]] = {}
-        self._task_bindings: dict[str, DelegationTaskBinding] = {}
+        self._session_manager = session_manager
+        self._agent_registry = agent_registry
+        self._dispatcher = dispatcher
+        self._preferred_model = preferred_model
+        self._run_repository = run_repository
 
     def bind_coordinator(self, coordinator: DelegationSubmissionPort) -> None:
-        """在组合根完成 Engine 装配后绑定唯一的目标 Run 协调器。"""
         if self._coordinator is not None:
-            raise RuntimeError("DelegationPort 已绑定协调器，禁止重复装配")
+            raise RuntimeError("委派协调器不可重复绑定")
         self._coordinator = coordinator
 
-    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
-        """创建目标 Session 后异步提交子 Run，并立即返回稳定运行标识。"""
-        if not request.source_agent_id or not request.source_session_id:
-            raise ValueError("delegation 请求必须包含来源 Agent 与 Session")
+    async def prepare(self, request: DelegationRequest) -> DelegationSubmission:
+        """先保存 Created 子运行；相同工具调用重试使用相同子标识。"""
+        if request.input_message.role is not MessageRole.USER:
+            raise ValueError("委派输入必须为用户消息契约")
+        parent = await self._run_repository.find_run(request.parent_run_id)
+        if parent is None or (parent.agent_id, parent.session_id) != (request.source_agent_id, request.source_session_id):
+            raise ValueError("委派来源与持久父运行不一致")
+        if request.root_run_id != (parent.root_run_id or parent.run_id):
+            raise ValueError("委派根运行不一致")
         identity = self._agent_registry.get(request.target_agent_id)
         if identity is None:
-            raise ValueError(f"未找到 delegation target Agent {request.target_agent_id}")
-        session = await self._session_manager.create(
-            title=f"委托-{identity.agent_name}",
-            model=self._preferred_model,
-            agent_id=identity.agent_id,
-        )
-        task = await self._dispatcher.start_v2_delegation(
-            request.source_agent_id,
-            request.source_session_id,
-            request.parent_run_id,
-            identity.agent_id,
-            session.id,
-            _task_specification(request),
-        )
-        child_run_id: str = uuid.uuid4().hex
-        child_request: RunRequest = RunRequest(
-            session_id=session.id,
-            lease_id=f"delegation-{uuid.uuid4().hex}",
-            agent_id=identity.agent_id,
-            user_message=ConversationMessage(
-                message_id=f"delegation-input-{uuid.uuid4().hex}",
-                role=request.input_message.role,
-                content=request.input_message.content,
-                created_at=request.input_message.created_at,
-            ),
-            conversation=ConversationSnapshot(session.id, (), 0),
-            parent_run_id=request.parent_run_id,
-            root_run_id=request.root_run_id,
-            run_id=child_run_id,
-            model_id=self._preferred_model,
-        )
-        coordinator: DelegationSubmissionPort = self._require_coordinator()
-        execution: asyncio.Task[RunResult] = asyncio.create_task(coordinator.submit(child_request))
-        self._running[child_run_id] = execution
-        self._task_bindings[child_run_id] = DelegationTaskBinding(
-            task.task_id,
-            request.source_agent_id,
-            request.source_session_id,
-        )
-        # 让子协程先完成 Run 注册，再向父 Engine 返回可取消的子运行标识。
-        await asyncio.sleep(0)
-        return DelegationSubmission(
-            child_run_id=child_run_id,
-            task_id=task.task_id,
-            target_session_id=session.id,
-        )
+            raise ValueError("委派目标 Agent 不存在")
+        key = json.dumps(["dotclaw-delegation-v1", request.parent_run_id, request.source_tool_call_id or request.input_message.message_id], ensure_ascii=False)
+        child_id = uuid.uuid5(uuid.NAMESPACE_URL, key).hex
+        existing = await self._run_repository.find_run(child_id)
+        if existing is not None:
+            messages = await self._run_repository.load_messages(existing.session_id, child_id)
+            initial = next((message for message in messages if message.message_id == existing.input_message_id), None)
+            if (existing.parent_run_id, existing.root_run_id, existing.agent_id) != (parent.run_id, request.root_run_id, request.target_agent_id) or initial is None or (initial.role, initial.content) != (request.input_message.role, request.input_message.content) or not existing.delegation_task_id:
+                raise ValueError("相同委派标识的目标、来源或输入契约冲突")
+            await self._restore_projection(existing)
+            return DelegationSubmission(child_id, existing.delegation_task_id, existing.session_id)
+        session = await self._session_manager.create(title=f"委托-{identity.agent_name}", model=self._preferred_model, agent_id=identity.agent_id)
+        task = None
+        try:
+            task = await self._dispatcher.start_v2_delegation(parent.agent_id, parent.session_id, parent.run_id,
+                identity.agent_id, session.id, TaskSpecification("Runtime v2 delegation", request.input_message.content))
+            child_request = RunRequest(session.id, f"delegation-{child_id}", identity.agent_id,
+                ConversationMessage(f"delegation-input-{child_id}", request.input_message.role, request.input_message.content, request.input_message.created_at),
+                ConversationSnapshot(session.id, (), 0), parent.run_id, request.root_run_id, child_id, self._preferred_model, task.task_id)
+            await self._require_coordinator()._prepare_child_run_locked(child_request)
+            return DelegationSubmission(child_id, task.task_id, session.id)
+        except BaseException:
+            child = await self._run_repository.find_run(child_id)
+            if child is None:
+                if task is not None:
+                    await self._dispatcher.fail_v2_preparation(task.task_id, child_id, "准备失败：子运行未创建或启动")
+                await self._session_manager.delete(session.id)
+            else:
+                # 子运行存在后不能删除稳定证据，也不能重试时再准备另一份。
+                await self._require_coordinator().cancel(child_id, "委派准备中断，停止未启动子运行", origin=CancellationOrigin.PARENT)
+            raise
+
+    async def start(self, child_run_id: str) -> None:
+        """只有协调器创建和持有实际驱动任务。"""
+        self._require_coordinator().schedule_prepared(child_run_id)
 
     async def result(self, child_run_id: str) -> DelegationResult | None:
-        """等待并返回标准化子运行结果；未知标识表示尚无结果。"""
-        cached: DelegationResult | None = self._results.get(child_run_id)
-        if cached is not None:
-            return cached
-        execution: asyncio.Task[RunResult] | None = self._running.get(child_run_id)
-        if execution is None:
+        """依据持久事实投影，不 await 或取消子驱动。"""
+        run = await self._run_repository.find_run(child_run_id)
+        if run is None:
             return None
-        try:
-            result: RunResult = await execution
-            delegated_result: DelegationResult = _to_delegation_result(result)
-        except asyncio.CancelledError:
-            delegated_result = DelegationResult(
-                child_run_id,
-                RunOutcome.CANCELLED,
-                error=RunError(RunErrorCode.CANCELLED, "delegation 子运行已取消"),
-            )
-        except Exception as error:
-            delegated_result = DelegationResult(
-                child_run_id,
-                RunOutcome.FAILED,
-                error=RunError(RunErrorCode.TOOL_FAILURE, f"delegation 子运行异常：{error}"),
-            )
-        self._running.pop(child_run_id, None)
-        self._results[child_run_id] = delegated_result
-        await self._finish_task(child_run_id, delegated_result)
-        return delegated_result
+        await self._restore_projection(run)
+        if await self._run_repository.has_pending_cancellation_commit(run.session_id, run.run_id) or await self._run_repository.has_pending_success_commit(run.session_id, run.run_id) or not run.state.is_ended():
+            return None
+        messages = await self._run_repository.load_messages(run.session_id, run.run_id)
+        final = next((message for message in messages if message.message_id == run.final_message_id), None)
+        output = final.content if final else ""
+        if run.delegation_task_id:
+            await self._dispatcher.settle_v2_delegation(run.delegation_task_id, run.run_id, run.state.mode.outcome,
+                output or (run.error.message if run.error else "委派运行已结束"))
+        return DelegationResult(run.run_id, run.state.mode.outcome, output, run.error)
 
-    async def cancel(self, child_run_id: str) -> None:
-        """向协调器提交取消，并保留既有结果缓存用于审计查询。"""
-        coordinator: DelegationSubmissionPort = self._require_coordinator()
-        binding: DelegationTaskBinding | None = self._task_bindings.get(child_run_id)
-        if binding is not None:
-            await self._dispatcher.cancel_task(
-                binding.task_id,
-                binding.source_agent_id,
-                binding.source_session_id,
-                child_run_id,
-                "父运行取消 delegation",
-            )
-        await coordinator.cancel(child_run_id, "父运行取消 delegation")
+    async def wait_terminal(self, child_run_id: str) -> DelegationResult:
+        await self._require_coordinator().wait_terminal(child_run_id)
+        result = await self.result(child_run_id)
+        if result is None:
+            raise RuntimeError("等待完成后未读取到已提交子终态")
+        return result
+
+    async def cancel(self, child_run_id: str, reason: str, parent_request_id: str | None) -> CancellationReceipt:
+        """只请求子运行停止，业务 Task 在其真实终态后结算。"""
+        return await self._require_coordinator().cancel(child_run_id, reason, origin=CancellationOrigin.PARENT, parent_request_id=parent_request_id)
+
+    async def _restore_projection(self, run: AgentRun) -> None:
+        if not run.delegation_task_id:
+            return
+        parent = await self._run_repository.find_run(run.parent_run_id) if run.parent_run_id else None
+        if parent is None:
+            raise ValueError("委派子运行缺少持久父运行")
+        messages = await self._run_repository.load_messages(run.session_id, run.run_id)
+        initial = next((message for message in messages if message.message_id == run.input_message_id and message.role is MessageRole.USER), None)
+        if initial is None:
+            raise ValueError("委派子运行缺少持久输入")
+        await self._dispatcher.restore_v2_delegation(run.delegation_task_id, parent.agent_id, parent.session_id,
+            run.agent_id, run.session_id, initial.content)
 
     def _require_coordinator(self) -> DelegationSubmissionPort:
-        """保证适配器只在组合根完成双向装配后参与运行。"""
         if self._coordinator is None:
-            raise RuntimeError("DelegationPort 尚未绑定 SessionRunCoordinator")
+            raise RuntimeError("委派端口未绑定协调器")
         return self._coordinator
-
-    async def _finish_task(self, child_run_id: str, result: DelegationResult) -> None:
-        """将子运行终态投影到 Dispatcher，保持 Task 业务状态由 orchestration 管理。"""
-        binding: DelegationTaskBinding | None = self._task_bindings.pop(child_run_id, None)
-        if binding is None:
-            return
-        output: str = result.output or (result.error.message if result.error is not None else "delegation 未返回输出")
-        await self._dispatcher.finish_v2_delegation(
-            binding.task_id,
-            child_run_id,
-            output,
-            result.outcome is RunOutcome.COMPLETED,
-        )
-
-
-def _to_delegation_result(result: RunResult) -> DelegationResult:
-    """将目标 RunResult 转换为父运行只需了解的 delegation 摘要。"""
-    output: str = result.final_message.content if result.final_message is not None else ""
-    return DelegationResult(
-        child_run_id=result.run_id,
-        outcome=run_outcome_from_state(result.state),
-        output=output,
-        error=result.error,
-    )
-
-
-def _task_specification(request: DelegationRequest) -> TaskSpecification:
-    """将 Runtime 的最小输入消息包装为既有 Task 状态机需要的不可变契约。"""
-    return TaskSpecification(
-        title="Runtime v2 delegation",
-        objective=request.input_message.content,
-    )

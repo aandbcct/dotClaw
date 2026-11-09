@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from ..application.ports import RUN_SESSION_MISMATCH_REASON
+
 import asyncio
 import json
 import os
+import tempfile
 from hashlib import sha256
 from dataclasses import dataclass, replace
 from pathlib import Path
 from collections.abc import Callable
 
-from ..application.ports import ConversationProjectionPort, SuccessCommitFaultPort
+from ..application.ports import ApprovalRepository, ConversationProjectionPort, SuccessCommitFaultPort
+from ..domain.cancellation import (CancellationRequest, CancellationOrigin, CancellationRecord, CancellationPhase, CancellationEffect, CancellationCommitIntent)
 from ..application.dto import ConversationMessage
 from ..domain.events import RunEvent, RunEventType
 from ..domain.state import AgentRunState, Ended, RunOutcome
@@ -79,11 +83,201 @@ class RunRepositoryAdapter:
         root_directory: str | Path,
         conversation_projector: ConversationProjectionPort | None = None,
         success_commit_fault_port: SuccessCommitFaultPort | None = None,
+        approval_repository: ApprovalRepository | None = None,
     ) -> None:
         """初始化仓储根目录和可选的既有 Session 投影器。"""
+        self._approval_repository = approval_repository
         self._root_directory: Path = Path(root_directory).resolve()
         self._conversation_projector: ConversationProjectionPort | None = conversation_projector
         self._success_commit_fault_port: SuccessCommitFaultPort | None = success_commit_fault_port
+
+    async def load_cancellation(self, session_id: str, run_id: str) -> CancellationRecord | None:
+        """读取控制记录；不提前补偿未完成的终态提交。"""
+        return await asyncio.to_thread(self._load_cancellation_sync, session_id, run_id)
+
+    def _load_cancellation_sync(self, session_id: str, run_id: str) -> CancellationRecord | None:
+        run = self._load_run_sync(session_id, run_id)
+        path = self._run_path(session_id, run_id).with_name(RunStorageFileName.CANCELLATION.value)
+        if run is None:
+            if path.exists():
+                raise ValueError("取消记录缺少所属运行")
+            return None
+        if run.session_id != session_id or run.run_id != run_id:
+            raise ValueError("取消记录的运行归属不一致")
+        if not path.exists():
+            return None
+        record = _cancellation_record_from_dict(load_json_map(path))
+        if record.request.run_id != run_id:
+            raise ValueError("取消记录归属不一致")
+        return record
+
+    async def save_cancellation(self, session_id: str, record: CancellationRecord, *, expected_revision: int) -> None:
+        """调用者持有运行 gate；文件替换不提供跨进程比较交换。"""
+        await asyncio.to_thread(self._save_cancellation_sync, session_id, record, expected_revision)
+
+    def _save_cancellation_sync(self, session_id: str, record: CancellationRecord, expected_revision: int) -> None:
+        run_id = record.request.run_id
+        run = self._load_run_sync(session_id, run_id)
+        if run is None:
+            raise FileNotFoundError("取消记录的运行不存在")
+        current = self._load_cancellation_sync(session_id, run_id)
+        _validate_cancellation_revision(current, record, expected_revision)
+        if current is None and (run.state.is_ended() or self._success_commit_path(session_id, run_id).exists() or run.success_commit_intent is not None):
+            raise ValueError("已终态或成功提交中的运行不能接受取消")
+        write_json_atomic(self._run_path(session_id, run_id).with_name(RunStorageFileName.CANCELLATION.value), record.to_dict())
+
+    async def list_child_runs(self, parent_run_id: str) -> tuple[AgentRun, ...]:
+        """读取直接父子关系，结果按运行标识排序。"""
+        validate_path_segment(parent_run_id, "parent_run_id")
+        runs = await asyncio.to_thread(self._all_runs_sync)
+        return tuple(sorted((run for run in runs if run.parent_run_id == parent_run_id), key=lambda run: run.run_id))
+
+    def _all_runs_sync(self) -> tuple[AgentRun, ...]:
+        runs = []
+        for path in sorted(self._root_directory.glob("*/agent_runs/*/run.json")):
+            run = self._load_run_sync(path.parent.parent.parent.name, path.parent.name)
+            if run is not None:
+                if (run.session_id, run.run_id) != (path.parent.parent.parent.name, path.parent.name):
+                    raise ValueError("运行目录与归属不一致")
+                runs.append(run)
+        return tuple(runs)
+
+    async def has_pending_success_commit(self, session_id: str, run_id: str) -> bool:
+        """仅查询提交权，不触发成功恢复。"""
+        def read() -> bool:
+            run = self._load_run_sync(session_id, run_id)
+            return self._success_commit_path(session_id, run_id).exists() or (run is not None and run.success_commit_intent is not None)
+        return await asyncio.to_thread(read)
+
+    async def list_pending_cancellations(self) -> tuple[CancellationRecord, ...]:
+        """保留 settled 审计记录，但不把它返回为恢复入口。"""
+        records = []
+        for run in await asyncio.to_thread(self._all_runs_sync):
+            record = await self.load_cancellation(run.session_id, run.run_id)
+            if record is not None and record.phase is not CancellationPhase.SETTLED:
+                records.append(record)
+        return tuple(records)
+
+    async def has_pending_cancellation_commit(self, session_id: str, run_id: str) -> bool:
+        """只查询目标意图，并校验路径和运行归属。"""
+        return await asyncio.to_thread(self._load_cancellation_intent_sync, session_id, run_id) is not None
+
+    def _load_cancellation_intent_sync(self, session_id: str, run_id: str) -> CancellationCommitIntent | None:
+        path = self._run_path(session_id, run_id).with_name(RunStorageFileName.CANCEL_COMMIT.value)
+        if not path.exists():
+            return None
+        intent = _cancellation_intent_from_dict(load_json_map(path))
+        if (intent.run.session_id, intent.run.run_id) != (session_id, run_id):
+            raise ValueError("取消意图目录归属不一致")
+        run = self._load_run_sync(session_id, run_id)
+        if run is None or (run.session_id, run.run_id) != (session_id, run_id):
+            raise ValueError("取消意图缺少一致的所属运行")
+        return intent
+
+    async def recover_cancellation_commit(self, session_id: str, run_id: str) -> None:
+        """调用方持目标 gate，只重放已有意图。"""
+        intent = await asyncio.to_thread(self._load_cancellation_intent_sync, session_id, run_id)
+        if intent is not None:
+            await self._validate_cancellation_approvals(intent)
+            await asyncio.to_thread(self._prepare_cancellation_commit_sync, intent)
+            await self._recover_cancellation_commit(intent)
+
+    async def commit_cancellation(self, intent: CancellationCommitIntent) -> None:
+        """先保留取消决定，再补偿所有文件和审批副作用。"""
+        await self._validate_cancellation_approvals(intent)
+        await asyncio.to_thread(self._prepare_cancellation_commit_sync, intent)
+        await self._recover_cancellation_commit(intent)
+
+    async def _validate_cancellation_approvals(self, intent: CancellationCommitIntent) -> None:
+        if intent.approval_ids and self._approval_repository is None:
+            raise ValueError("取消意图包含审批，但未注入审批仓储")
+        if self._approval_repository is not None:
+            for approval_id in intent.approval_ids:
+                record = await self._approval_repository.load(approval_id)
+                if record is not None and (record.run_id != intent.run.run_id or record.session_id != intent.run.session_id):
+                    raise ValueError("取消审批不属于当前运行")
+
+    def _prepare_cancellation_commit_sync(self, intent: CancellationCommitIntent) -> None:
+        run = self._load_run_sync(intent.run.session_id, intent.run.run_id)
+        if run is None:
+            raise FileNotFoundError("取消运行不存在")
+        if self._success_commit_path(run.session_id, run.run_id).exists() or run.success_commit_intent is not None:
+            raise ValueError("成功与取消提交意图冲突")
+        current = self._load_cancellation_sync(run.session_id, run.run_id)
+        _validate_cancellation_intent(run, current, intent)
+        path = self._run_path(run.session_id, run.run_id).with_name(RunStorageFileName.CANCEL_COMMIT.value)
+        existing = self._load_events_sync(run.session_id, run.run_id)
+        _validate_cancellation_events(existing, intent)
+        if path.exists():
+            if load_json_map(path) != intent.to_dict():
+                raise ValueError("已存在内容不同的取消意图")
+            return
+        # 校验完整事件前缀后才落盘，冲突不能被意图覆盖。
+        write_json_atomic(path, intent.to_dict())
+
+    async def recover_pending_cancellation_commits(self) -> None:
+        """启动补偿；两种提交意图并存时拒绝选择任意一方。"""
+        paths = await asyncio.to_thread(lambda: tuple(sorted(self._root_directory.glob("*/agent_runs/*/cancel_commit.json"))))
+        for path in paths:
+            intent = _cancellation_intent_from_dict(await asyncio.to_thread(load_json_map, path))
+            if (intent.run.session_id, intent.run.run_id) != (path.parent.parent.parent.name, path.parent.name):
+                raise ValueError("取消意图目录归属不一致")
+            await self._validate_cancellation_approvals(intent)
+            await asyncio.to_thread(self._prepare_cancellation_commit_sync, intent)
+            await self._recover_cancellation_commit(intent)
+
+    async def _recover_cancellation_commit(self, intent: CancellationCommitIntent) -> None:
+        run = intent.run
+        await asyncio.to_thread(self._ensure_cancellation_events_sync, intent)
+        if self._approval_repository is not None:
+            for approval_id in intent.approval_ids:
+                await self._approval_repository.consume(approval_id)
+        await asyncio.to_thread(self._delete_checkpoint_sync, run.session_id, run.run_id)
+        await asyncio.to_thread(self._save_run_sync, run)
+        await asyncio.to_thread(self._settle_cancellation_sync, intent)
+        await asyncio.to_thread(self._delete_cancellation_intent_sync, run.session_id, run.run_id)
+
+    def _ensure_cancellation_events_sync(self, intent: CancellationCommitIntent) -> None:
+        """原子替换取消事件尾批，临时文件中断不能破坏既有完整事件。"""
+        run = intent.run
+        existing = self._load_events_sync(run.session_id, run.run_id)
+        _validate_cancellation_events(existing, intent)
+        missing_events = tuple(event for event in intent.events if event.sequence > len(existing))
+        if not missing_events:
+            return
+        message_ids = frozenset(message.message_id for message in self._load_messages_sync(run.session_id, run.run_id))
+        if any(message_id not in message_ids for event in missing_events for message_id in event.message_ids):
+            raise ValueError("取消事件引用了尚未保存的消息")
+        path = self._run_path(run.session_id, run.run_id).with_name(RunStorageFileName.EVENTS.value)
+        prefix = path.read_bytes() if path.exists() else b""
+        # 原始前缀逐字节保留；没有末尾换行的完整旧事件只补一个分隔符。
+        separator = b"\n" if prefix and not prefix.endswith((b"\n", b"\r")) else b""
+        tail = "".join(json.dumps(event.to_dict(), ensure_ascii=False) + "\n" for event in missing_events).encode("utf-8")
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".events.cancel.", suffix=".tmp", dir=path.parent)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as temporary_file:
+                temporary_file.write(prefix + separator + tail)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            os.replace(temporary_path, path)
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
+
+    def _settle_cancellation_sync(self, intent: CancellationCommitIntent) -> None:
+        current = self._load_cancellation_sync(intent.run.session_id, intent.run.run_id)
+        if current == intent.settled_record:
+            return
+        _validate_cancellation_revision(current, intent.settled_record, intent.settled_record.revision - 1)
+        write_json_atomic(self._run_path(intent.run.session_id, intent.run.run_id).with_name(RunStorageFileName.CANCELLATION.value), intent.settled_record.to_dict())
+
+    def _delete_cancellation_intent_sync(self, session_id: str, run_id: str) -> None:
+        self._run_path(session_id, run_id).with_name(RunStorageFileName.CANCEL_COMMIT.value).unlink(missing_ok=True)
+
+    async def list_runs(self) -> tuple[AgentRun, ...]:
+        """稳定枚举运行事实，供启动恢复和关闭使用。"""
+        return tuple(sorted(await asyncio.to_thread(self._all_runs_sync), key=lambda run: (run.started_at, run.run_id)))
 
     async def create_run(self, run: AgentRun) -> None:
         """创建新的 run.json，禁止意外覆盖既有运行。"""
@@ -96,22 +290,22 @@ class RunRepositoryAdapter:
 
     async def find_run(self, run_id: str) -> AgentRun | None:
         """跨 Session 定位运行摘要，供取消和审批恢复使用。"""
-        await self.recover_pending_success_commits()
         return await self._read_run_with_retry(self._find_run_sync, run_id)
 
+    async def load_run_snapshot(self, session_id: str, run_id: str) -> AgentRun | None:
+        """纯读指定归属，拒绝把其他Session中的同一运行当作不存在。"""
+        validate_path_segment(session_id, "session_id")
+        run = await self.find_run(run_id)
+        if run is not None and run.session_id != session_id:
+            raise PermissionError(RUN_SESSION_MISMATCH_REASON)
+        return run
+
     async def _read_run_with_retry(self, reader: Callable[..., AgentRun | None], *arguments: str) -> AgentRun | None:
-        """在 Windows 原子替换瞬间有限重试 run.json 读取，其他错误仍立即暴露。"""
-        for attempt in range(5):
-            try:
-                return await asyncio.to_thread(reader, *arguments)
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                await asyncio.sleep(0.005 * (attempt + 1))
-        raise AssertionError("run.json 读取重试循环未返回")
+        """JSON共享读取已在load_json_map统一有界重试，此层不叠加成25次。"""
+        return await asyncio.to_thread(reader, *arguments)
 
     async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
-        """扫描指定 Session 的 run.json，返回持久化的未终态占用。"""
+        """纯读未完整提交终态的占用，包括摘要Ended但意图仍在的运行。"""
         return await asyncio.to_thread(self._list_active_runs_sync, session_id)
 
     async def save_run(self, run: AgentRun) -> None:
@@ -336,6 +530,8 @@ class RunRepositoryAdapter:
         run: AgentRun | None = self._load_run_sync(session_id, run_id)
         if run is None:
             raise FileNotFoundError(f"运行 {run_id} 尚未创建")
+        if self._load_cancellation_sync(session_id, run_id) is not None or self._run_path(session_id, run_id).with_name(RunStorageFileName.CANCEL_COMMIT.value).exists():
+            raise ValueError("取消已保留提交权，不能保存成功意图")
         candidate_ids: frozenset[str] = frozenset(
             candidate.candidate_id for candidate in run.staged_history_compressions
         )
@@ -355,6 +551,8 @@ class RunRepositoryAdapter:
 
     async def _recover_success_commit(self, session_id: str, run_id: str) -> None:
         """按 Session、事件、Run、checkpoint 顺序幂等补齐成功提交。"""
+        if self._success_commit_path(session_id, run_id).exists() and self._run_path(session_id, run_id).with_name(RunStorageFileName.CANCEL_COMMIT.value).exists():
+            raise ValueError("成功与取消提交意图同时存在")
         intent: SuccessCommitIntent | None = await asyncio.to_thread(
             self._load_success_commit_intent_sync,
             session_id,
@@ -362,6 +560,8 @@ class RunRepositoryAdapter:
         )
         if intent is None:
             return
+        if self._run_path(session_id, run_id).with_name(RunStorageFileName.CANCEL_COMMIT.value).exists():
+            raise ValueError("成功与取消提交意图同时存在")
         final_message: RunMessage = await asyncio.to_thread(self._load_final_message_sync, intent.run)
         user_message: RunMessage = await asyncio.to_thread(
             self._validate_success_and_get_input_sync,
@@ -437,6 +637,12 @@ class RunRepositoryAdapter:
 
     def _prepare_success_commit_sync(self, intent: SuccessCommitIntent) -> None:
         """原子创建或校验既有成功提交意图，保证重试不会覆盖另一笔提交。"""
+        run_path = self._run_path(intent.run.session_id, intent.run.run_id)
+        current = self._load_run_sync(intent.run.session_id, intent.run.run_id)
+        if run_path.with_name(RunStorageFileName.CANCEL_COMMIT.value).exists() or self._load_cancellation_sync(intent.run.session_id, intent.run.run_id) is not None:
+            raise ValueError("取消已保留提交权，不能提交成功")
+        if current is not None and current.state.is_ended() and current.state != intent.run.state:
+            raise ValueError("不能覆盖其他终态")
         path: Path = self._success_commit_path(intent.run.session_id, intent.run.run_id)
         if path.is_file():
             existing_intent: SuccessCommitIntent = _success_commit_intent_from_dict(load_json_map(path))
@@ -518,7 +724,7 @@ class RunRepositoryAdapter:
         return result
 
     def _list_active_runs_sync(self, session_id: str) -> tuple[AgentRun, ...]:
-        """读取 Session 下的所有运行摘要并过滤终态。"""
+        """领域Ended与提交占用分开判断，不在查询中执行补偿。"""
         safe_session_id: str = validate_path_segment(session_id, "session_id")
         directory: Path = self._root_directory / safe_session_id / "agent_runs"
         if not directory.is_dir():
@@ -527,7 +733,11 @@ class RunRepositoryAdapter:
         path: Path
         for path in directory.glob(f"*/{RunStorageFileName.RUN.value}"):
             run: AgentRun = _agent_run_from_dict(load_json_map(path))
-            if not run.state.is_ended():
+            if (run.session_id, run.run_id) != (safe_session_id, path.parent.name):
+                raise ValueError("运行目录与归属不一致")
+            pending = (run.success_commit_intent is not None or self._success_commit_path(run.session_id, run.run_id).exists()
+                       or path.with_name(RunStorageFileName.CANCEL_COMMIT.value).exists())
+            if not run.state.is_ended() or pending:
                 runs.append(run)
         return tuple(runs)
 
@@ -754,6 +964,7 @@ def _agent_run_from_dict(data: JSONMap) -> AgentRun:
         input_message_id=get_string(data, "input_message_id"),
         parent_run_id=_optional_string(data.get("parent_run_id")),
         root_run_id=_optional_string(data.get("root_run_id")),
+        delegation_task_id=_optional_string(data.get("delegation_task_id")),
         ended_at=_optional_string(data.get("ended_at")),
         resume_count=get_integer(data, "resume_count"),
         final_message_id=_optional_string(data.get("final_message_id")),
@@ -996,3 +1207,77 @@ def _json_map_or_empty(value: JSONValue | None) -> JSONMap:
 def _optional_string(value: JSONValue | None) -> str | None:
     """将可选 JSON 值收窄为字符串或 None。"""
     return value if isinstance(value, str) else None
+
+
+def _cancellation_record_from_dict(data: JSONMap) -> CancellationRecord:
+    """严格重建取消记录的枚举和不可变集合。"""
+    request = require_json_map(data["request"])
+    return CancellationRecord(
+        request=CancellationRequest(get_string(request, "request_id"), get_string(request, "run_id"),
+            get_string(request, "reason"), CancellationOrigin(get_string(request, "origin")),
+            get_string(request, "requested_at"), request.get("parent_request_id")),
+        revision=get_integer(data, "revision"), phase=CancellationPhase(get_string(data, "phase")),
+        pending_operation_ids=_cancellation_string_tuple(data["pending_operation_ids"]),
+        pending_child_run_ids=_cancellation_string_tuple(data["pending_child_run_ids"]),
+        effect=CancellationEffect(get_string(data, "effect")), diagnostic_code=data.get("diagnostic_code"),
+        updated_at=get_string(data, "updated_at"), settled_at=data.get("settled_at"), version=get_integer(data, "version"))
+
+
+def _cancellation_string_tuple(value: JSONValue) -> tuple[str, ...]:
+    """拒绝字符串冒充数组，以及重复的资源标识。"""
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError("取消资源标识必须是字符串数组")
+    if len(set(value)) != len(value):
+        raise ValueError("取消资源标识不能重复")
+    return tuple(value)
+
+
+def _cancellation_intent_from_dict(data: JSONMap) -> CancellationCommitIntent:
+    """读取版本 1 意图，不改变运行容器版本。"""
+    return CancellationCommitIntent(get_string(data, "request_id"), _agent_run_from_dict(require_json_map(data["run"])),
+        tuple(_run_event_from_dict(require_json_map(item)) for item in data["events"]),
+        _cancellation_string_tuple(data["approval_ids"]), _cancellation_record_from_dict(require_json_map(data["settled_record"])),
+        get_integer(data, "version"))
+
+
+def _validate_cancellation_revision(current: CancellationRecord | None, record: CancellationRecord, expected_revision: int) -> None:
+    """首次请求固定不变，进度仅允许逐次递增。"""
+    if expected_revision < 0 or (current.revision if current else 0) != expected_revision or record.revision != expected_revision + 1:
+        raise ValueError("取消记录修订号冲突")
+    if current is not None:
+        if current.request != record.request or current.phase is CancellationPhase.SETTLED:
+            raise ValueError("首次请求不可变且 settled 记录不可修改")
+        before = (current.phase, current.pending_operation_ids, current.pending_child_run_ids, current.effect, current.diagnostic_code)
+        after = (record.phase, record.pending_operation_ids, record.pending_child_run_ids, record.effect, record.diagnostic_code)
+        if before == after:
+            raise ValueError("取消进度未变化，不应增加修订号")
+
+
+def _validate_cancellation_intent(run: AgentRun, current: CancellationRecord | None, intent: CancellationCommitIntent) -> None:
+    """校验取消终态只能来自同一次已落盘请求。"""
+    if current is None or current.request != intent.settled_record.request:
+        raise ValueError("取消提交缺少一致的持久化请求")
+    if (run.session_id, run.run_id) != (intent.run.session_id, intent.run.run_id):
+        raise ValueError("取消运行归属不一致")
+    if run.state.is_ended() and run != intent.run:
+        raise ValueError("取消提交不能覆盖既有终态")
+    if current != intent.settled_record:
+        _validate_cancellation_revision(current, intent.settled_record, intent.settled_record.revision - 1)
+
+
+def _validate_cancellation_events(existing: tuple[RunEvent, ...], intent: CancellationCommitIntent) -> None:
+    """已存在的序号必须匹配全部事件内容，未存在的部分必须连续。"""
+    terminal_types = {RunEventType.RUN_COMPLETED, RunEventType.RUN_FAILED, RunEventType.RUN_ABANDONED, RunEventType.RUN_CANCELLED}
+    if any(event.event_type in terminal_types and event != intent.events[-1] for event in existing):
+        raise ValueError("取消提交不能覆盖或重复既有终态事件")
+    length = len(existing)
+    for event in intent.events:
+        if event.sequence <= len(existing):
+            if existing[event.sequence - 1] != event:
+                raise ValueError("取消事件与既有序号内容冲突")
+        else:
+            if event.sequence != length + 1:
+                raise ValueError("取消事件序号不连续")
+            length += 1
+    if len(existing) > intent.events[-1].sequence:
+        raise ValueError("取消终态后存在额外事件")

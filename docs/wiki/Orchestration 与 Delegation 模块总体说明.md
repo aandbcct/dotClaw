@@ -62,10 +62,10 @@ Orchestration / Delegation 模块是 dotClaw 的**同进程多 Agent 委托协�
 | `RuntimeEngine` | 特殊识别 `delegate` ToolCall，调用 DelegationPort |
 | `RuntimeDelegationAdapter` | 创建目标 Session、Task、子 Run，并缓存执行结果 |
 | `SessionRunCoordinator` | 串行执行目标 Session 的子 Run，处理取消 |
-| `AgentDispatcher` | 维护 Task 创建、完成和取消门面 |
+| `AgentDispatcher` | 维护 Task 创建、恢复和真实终态投影 |
 | `TaskMessageBroker` | 保存 Task、消息、游标、状态与等待条件 |
 | `ContextProvider` | 将 AgentRegistry 摘要放入模型上下文，帮助模型选择目标 |
-| `AgentPolicyResolver` | 排除旧 Task 工具，但保留当前 `delegate` Tool Definition |
+| `AgentPolicyResolver` | 按正常工具白名单过滤，保留被允许的 `delegate` Tool Definition |
 | `CancellationService` | 保存父 Run 当前等待的 child_run_id |
 | `SessionManager` | 为每次委托创建独立目标 Session |
 | `AgentRegistry` | 提供目标 Identity；其逻辑主归属仍是 Agent 模块 |
@@ -560,7 +560,6 @@ source / target binding
 status
 result_message
 error
-cancellation_requested
 created_at / updated_at
 ```
 
@@ -675,7 +674,7 @@ SOURCE + REPLY + WAITING_SOURCE
 SOURCE + CONTEXT_UPDATE + WAITING_SOURCE
 ```
 
-普通 `send_message()` 不允许 CANCELLED；取消必须走 `cancel_task()`。
+普通 `send_message()` 不允许 CANCELLED；取消必须经 Run 请求与资源收尾，真实终态再由 `settle_task()` 投影。
 
 #### 4.6.5 `_apply_message_state_locked`
 
@@ -692,11 +691,9 @@ PROGRESS → 状态不变
 
 终态消息同时写 result_message；FAILED/CANCELLED 还写 error。
 
-#### 4.6.6 `cancel_task`
+#### 4.6.6 `settle_task`
 
-**职责与用途：**只允许 SOURCE 端取消。
-
-非终态时追加 SOURCE→TARGET CANCELLED，设置 cancellation_requested，并投影 CANCELLED。Task 已终态时幂等返回，不再追加消息。
+**职责与用途：**真实子 Run 终态结算 Task；同一把锁内追加 TARGET→SOURCE 终态消息并投影状态，相同结果幂等，冲突结果拒绝。
 
 #### 4.6.7 `wait_for_messages`
 
@@ -771,22 +768,13 @@ Task ID 使用完整 UUID hex。
 
 活动检查和 Task 创建不是同一个 Broker 原子操作；并发调用可能同时通过检查。
 
-#### 4.7.3 `finish_v2_delegation`
+#### 4.7.3 `settle_v2_delegation`
 
-**职责与用途：**读取 Task，若未终态则由 TARGET 发送：
+**职责与用途：**把真实子 Run 的 COMPLETED / FAILED 映射到对应 Task 终态，CANCELLED / ABANDONED 映射到 Task CANCELLED；委托 Broker 原子结算，禁止提前制造取消终态。
 
-```text
-succeeded=True → RESULT
-succeeded=False → FAILED
-```
+#### 4.7.4 `restore_v2_delegation`
 
-它不知道具体 AgentRunState；所有非成功子 Run 都被压缩为 Task FAILED。
-
-#### 4.7.4 `cancel_task`
-
-**职责与用途：**仅委托 Broker 写入 Task CANCELLED。
-
-真正的 child Run 取消由 RuntimeDelegationAdapter 转给 SessionRunCoordinator。
+**职责与用途：**从持久父子关联恢复固定 Task 的端点和输入，不伪造历史消息。签名只接收 task_id、source_agent_id、source_session_id、target_agent_id、target_session_id、input_message。
 
 ---
 
@@ -1118,16 +1106,11 @@ capabilities
 
 #### 4.12.2 Tool Definition 冻结
 
-**职责与用途：**AgentPolicyResolver 从 ToolExecutor 快照已注册的 Tool Definitions，并排除旧协议工具：
+**职责与用途：**AgentPolicyResolver 从 ToolExecutor 快照当前可用 Tool Definitions，按 Agent.allowed_tools 精确名称过滤；空白名单允许全部可用工具。
 
-```text
-task_send_message
-wait_task
-task_status
-cancel_task
-```
+项目已无旧 Task 工具注册者，取消裸名称特殊过滤。外部手工注册 `wait_task`、`task_send_message`、`task_status` 或 `cancel_task` 等同名自定义工具时按正常白名单暴露；MCP 工具带命名空间，不受影响。
 
-`delegate` 不在该排除集合中，但 Resolver 也不会自动创建它。当前已确认的源码只能证明 RuntimeEngine 支持名称为 `delegate` 的 ToolCall；尚未在已扫描文件中确认默认 Tool Definition 的注册来源。
+`delegate` ToolCall 由 RuntimeEngine 特殊识别，其定义仍需被注册并通过白名单。
 
 因此模型能够发起委托还必须同时满足：
 
@@ -1410,7 +1393,7 @@ sequenceDiagram
 **结论：**
 
 - Broker 已定义中途问答的内存状态机。
-- 旧 `wait_task`、`task_send_message`、`task_status` 和 `cancel_task` Tool Definitions 被当前 Policy Resolver 排除。
+- 项目没有旧 Task 工具注册者；Policy Resolver 只应用正常可用性与白名单。
 - RuntimeDelegationAdapter 不调用 wait_for_messages 或 send_message 的问答类型。
 - 生产父 Run在子 Run 执行时处于 `Suspended(DELEGATION)`，不接入 Broker 的中途问答。
 - 因此当前 Agent 执行过程中不存在真正双向通信。
@@ -1445,7 +1428,7 @@ flowchart LR
     Call1 --> Wait1["等待 A 终态"]
     Wait1 --> Call2["delegate B"]
     Call2 --> Wait2["等待 B 终态"]
-    Wait2 --> Batch["ToolCompleted Batch"]
+    Wait2 --> Batch["ToolBatchCompleted"]
     Batch --> NextLLM["下一轮 LLM"]
 ```
 
@@ -1538,7 +1521,6 @@ Task
 ├── status
 ├── result_message
 ├── error
-├── cancellation_requested
 ├── created_at
 └── updated_at
 ```
@@ -1555,7 +1537,7 @@ RUNNING_TARGET → WAITING_SOURCE
 WAITING_SOURCE → RUNNING_TARGET
 RUNNING_TARGET → COMPLETED
 RUNNING_TARGET → FAILED
-任意非终态 → CANCELLED（仅 SOURCE cancel_task）
+任意非终态 → CANCELLED（真实子 Run 取消/放弃后经 settle_task 投影）
 ```
 
 PROGRESS 不改变状态。
@@ -1724,7 +1706,7 @@ Task CANCELLED
 12. 父 Run的 Delegation Result 保留原 source_tool_call_id。
 13. Adapter 只把 COMPLETED 映射为 Task COMPLETED。
 14. Task 消息和 AgentRun 事实属于不同状态模型。
-15. 旧 Task 协议工具不会进入当前 Agent Tool Definitions。
+15. 项目无旧 Task 工具注册者，外部同名自定义工具按正常白名单处理。
 16. Broker REQUEST 不会在目标 Endpoint 第一次等待时重复投递。
 17. 不同 Target Session 通过 SessionRunCoordinator 分别串行。
 18. 父取消不会直接修改 Child Run文件，而是走 Coordinator/Engine 取消协议。
@@ -1788,7 +1770,7 @@ Task CANCELLED
 | 增加能力路由 | AgentDirectory | Context、Adapter | 选择可解释且执行前复核 |
 | 接入中途通信 | Broker + Runtime 安全点 | Task Tools、Checkpoint | 不破坏单 Session 串行 |
 | 修改 Available Agents | ContextProvider | 可见性、健康状态 | 不暴露无权调用目标 |
-| 修改旧 Task Tools | AgentPolicyResolver | Tool Registry、Runtime | 避免两套协议并存 |
+| 修改工具可见性 | AgentPolicyResolver | Tool Registry、Runtime | 遵守正常白名单 |
 | 修改 Bootstrap 装配 | runtime_factory | Adapter bind、Host | 双向绑定只发生一次 |
 | 增加 Adapter shutdown | RuntimeDelegationAdapter | Host、运行任务 | 正确取消/等待未完成 asyncio Task |
 | 修改进程恢复 | TaskRepository + RunRepository | Parent/Child relation | 不重复提交 Child |
@@ -1938,15 +1920,11 @@ Task CANCELLED
 
 **代价与边界：**没有可见性、允许列表和环路治理。
 
-#### 8.2.12 旧 Task 工具暂时排除
+#### 8.2.12 工具按正常白名单暴露
 
-**问题与选择：**旧 `wait_task` 等工具没有接入 Runtime 的安全和恢复链。当前 Policy Resolver 排除它们。
+**明确的选择：**项目已无旧 Task 工具注册者，不再按裸工具名称特殊过滤。外部同名自定义工具按正常白名单处理，MCP 名称空间工具不受影响。
 
-**未选择：**继续向模型暴露不完整协议。
-
-**收益：**避免模型进入无法闭环的中途通信路径。
-
-**代价与边界：**Broker 的 QUESTION/REPLY 能力成为未使用的内部能力。
+**边界：**Broker 的 QUESTION/REPLY 是内部能力，当前委派主链不接入中途通信。
 
 ### 8.3 已知痛点
 
@@ -2008,22 +1986,13 @@ Runtime 将 title/objective 拼为文本；Adapter 又用固定标题 `"Runtime 
 
 #### O11. Broker 中途通信和 Suspended(DELEGATION) 状态未接入生产主链
 
-QUESTION、REPLY、CONTEXT_UPDATE 和 PROGRESS 只存在于 Broker 与测试；旧 Task Tools 被 Policy Resolver 排除。实际 ToolCall 路径中，委派提交后经 `DelegationSubmitted` 进入 `Suspended(DELEGATION)`；独立中途通信（QUESTION/REPLY）状态转换未接入生产主链。
+QUESTION、REPLY、CONTEXT_UPDATE 和 PROGRESS 只存在于 Broker 与测试；项目无旧 Task 工具注册者。实际 ToolCall 路径中，委派提交后经 `DelegationSubmitted` 进入 `Suspended(DELEGATION)`；独立中途通信（QUESTION/REPLY）状态转换未接入生产主链。
 
-#### O12. Task 与父子 Run 缺少持久化恢复协议
+#### O12. Task 恢复依赖持久父子 Run 事实
 
-```mermaid
-flowchart TD
-    Running["父 Run Suspended(DELEGATION)"] --> Crash["进程退出"]
-    Crash --> Lost["Broker / Task / asyncio Task / results 映射丢失"]
-    Crash --> Persisted["Parent/Child run.json 与 Session 保留"]
-    Persisted --> Recover["下次访问 recover_session"]
-    Recover --> NonEnded["扫描非终态 Run 并由恢复边界重放"]
-    Persisted --> Resume["按 Checkpoint.action 恢复"]
-    Resume --> Duplicate{"可能重新执行 LLM / delegate"}
-```
+Broker 与 Task 是内存投影。进程退出后，普通提交只查询 `active_run()`，未终态占用返回 SESSION_BUSY，不自动重放。
 
-**结论：**TaskMessage 与 RunEvent 存在重复投影，却没有共同事务；Parent 没有持久化 task_id/child_run_id 等委托 Checkpoint，重启后无法重连 Child，恢复可能重复创建子任务。
+显式恢复通过持久 parent/child/delegation_task_id 关联与子运行输入调用 `restore_v2_delegation()`，重建固定 Task 端点和输入，不伪造历史 request/progress 消息；冲突恢复拒绝。真实子 Run 终态经 `settle_v2_delegation()` 结算，取消先完成 Run 取消协议与资源收尾。
 
 #### O13. 委托治理缺少深度、环路、目标权限和资源预算
 
@@ -2154,7 +2123,7 @@ src/dotclaw/
 
 | 文件 | Orchestration 视角 |
 |---|---|
-| `runtime/adapters/agent_policy_resolver.py` | 排除旧 Task Tools，按目标 Identity 冻结子策略 |
+| `runtime/adapters/agent_policy_resolver.py` | 按正常工具白名单与目标 Identity 冻结子策略 |
 | `context/provider.py` | 格式化 Available Agents 摘要 |
 | `agent/identity.py` | capabilities、input_modes、output_modes 等目标元数据 |
 

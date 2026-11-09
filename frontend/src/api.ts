@@ -7,6 +7,7 @@ import type {
   RuntimeSettings,
   SearchResults,
   WorkspaceOptions,
+  CancelReceipt,
 } from "./types";
 
 const API_ROOT = "/api/v1";
@@ -136,11 +137,21 @@ export async function getRunActivity(
 }
 
 function validateRunActivity(activity: RunActivity): RunActivity {
-  if (!isRecord(activity) || !Array.isArray(activity.tools)) {
+  if (!isRecord(activity) || !Array.isArray(activity.tools) || typeof activity.run_id !== "string" || !activity.run_id
+    || !["running", "completed", "failed", "cancelled", "abandoned", "waiting_approval", "waiting_delegation", "recoverable", "cancelling"].includes(activity.status)) {
     throw new ApiError("运行状态数据格式无效", "invalid_activity", 200);
   }
   if (activity.approval_call_id !== undefined && activity.approval_call_id !== null && typeof activity.approval_call_id !== "string") throw new ApiError("审批关联数据格式无效", "invalid_activity", 200);
-  if ((activity.event_sequence !== undefined && (!Number.isInteger(activity.event_sequence) || activity.event_sequence < 0)) || (activity.steps !== undefined && (!Array.isArray(activity.steps) || !activity.steps.every((step) =>
+  if ((activity.control_revision !== undefined && (!Number.isSafeInteger(activity.control_revision) || activity.control_revision < 0))
+    || (activity.generation !== undefined && typeof activity.generation !== "string")
+    || (activity.committing !== undefined && typeof activity.committing !== "boolean")) throw new ApiError("运行控制游标格式无效", "invalid_activity", 200);
+  const cancellation = activity.cancellation;
+  if (cancellation !== undefined && cancellation !== null && (!isRecord(cancellation) || !["requested", "draining", "blocked", "settled"].includes(cancellation.phase)
+    || !["local_only", "remote_unknown"].includes(cancellation.effect) || typeof cancellation.request_id !== "string"
+    || typeof cancellation.requested_at !== "string" || !Number.isSafeInteger(cancellation.pending_operation_count) || cancellation.pending_operation_count < 0
+    || !Number.isSafeInteger(cancellation.pending_child_count) || cancellation.pending_child_count < 0
+    || (cancellation.diagnostic !== null && typeof cancellation.diagnostic !== "string"))) throw new ApiError("取消进度格式无效", "invalid_activity", 200);
+  if ((activity.event_sequence !== undefined && (!Number.isSafeInteger(activity.event_sequence) || activity.event_sequence < 0)) || (activity.steps !== undefined && (!Array.isArray(activity.steps) || !activity.steps.every((step) =>
     isRecord(step) && typeof step.id === "string" && Boolean(step.id) && Number.isInteger(step.sequence) && step.sequence >= 0 &&
     ["model", "tool"].includes(step.kind) && ["running", "completed", "failed", "cancelled", "approval_required", "interrupted"].includes(step.status) &&
     typeof step.started_at === "string" && typeof step.completed_at === "string" && (step.call_id === null || typeof step.call_id === "string")
@@ -152,15 +163,28 @@ export async function abandonRun(sessionId: string, runId: string): Promise<RunA
   return validateRunActivity(await requestJson<RunActivity>(`${API_ROOT}/sessions/${sessionId}/runs/${runId}/abandon`, { method: "POST" }));
 }
 
-export async function cancelSession(sessionId: string): Promise<void> {
-  await requestJson<Record<string, unknown>>(
+export async function cancelSession(sessionId: string, runId: string): Promise<CancelReceipt> {
+  return await requestJson<CancelReceipt>(
     `${API_ROOT}/sessions/${sessionId}/cancel`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reason: "用户点击停止" }),
+      body: JSON.stringify({ run_id: runId, reason: "用户点击停止" }),
     },
   );
+}
+
+export async function watchRunActivity(sessionId: string, runId: string,
+  onActivity: (activity: RunActivity) => void, signal: AbortSignal, cursor?: string): Promise<void> {
+  await streamRequest(`${API_ROOT}/sessions/${sessionId}/runs/${encodeURIComponent(runId)}/events`, {
+    headers: cursor ? { "Last-Event-ID": cursor } : {},
+  }, (event) => {
+    if (event.event !== "run.snapshot") return;
+    const activity = validateRunActivity(event.data as unknown as RunActivity);
+    if (activity.run_id !== runId || !activity.generation || !Number.isInteger(activity.control_revision)
+      || event.id !== `e${activity.event_sequence}-c${activity.control_revision}`) throw new ApiError("运行观察快照格式无效", "invalid_activity", 200);
+    onActivity(activity);
+  }, signal);
 }
 
 export async function submitMessage(
@@ -236,9 +260,12 @@ export async function readEventStream(
   const decoder = new TextDecoder();
   let buffer = "";
 
+  let finished = false;
+  try {
   while (true) {
     const { done, value } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done }).replaceAll("\r\n", "\n");
+    buffer += decoder.decode(value, { stream: !done });
+    buffer = buffer.replaceAll("\r\n", "\n");
     let separator = buffer.indexOf("\n\n");
     while (separator >= 0) {
       const block = buffer.slice(0, separator);
@@ -250,18 +277,26 @@ export async function readEventStream(
       separator = buffer.indexOf("\n\n");
     }
     if (done) {
+      finished = true;
       return;
     }
+  }
+  } finally {
+    if (!finished) { try { await reader.cancel(); } catch { /* 断连后的流可能已取消。 */ } }
+    reader.releaseLock();
   }
 }
 
 function parseEventBlock(block: string): StreamEvent | null {
   let eventName = "message";
+  let id: string | undefined;
   const dataLines: string[] = [];
 
   for (const line of block.split("\n")) {
     if (line.startsWith("event:")) {
       eventName = line.slice(6).trim();
+    } else if (line.startsWith("id:")) {
+      id = line.slice(3).trimStart();
     } else if (line.startsWith("data:")) {
       dataLines.push(line.slice(5).trimStart());
     }
@@ -273,7 +308,7 @@ function parseEventBlock(block: string): StreamEvent | null {
   if (!isRecord(parsed)) {
     throw new ApiError("消息流数据格式无效", "invalid_stream", 200);
   }
-  return { event: eventName, data: parsed };
+  return { event: eventName, data: parsed, ...(id === undefined ? {} : { id }) };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

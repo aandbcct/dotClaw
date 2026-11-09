@@ -23,6 +23,7 @@ from ..runtime.application.dto import (
 from ..runtime.application.execution import RunExecutionView
 from ..runtime.application.ports import LLMOutputPort
 from ..runtime.domain.context import ContextOwner
+from ..runtime.domain.cancellation import CancellationReceipt, CancellationDisposition
 from ..runtime.domain.facts import (
     AgentPolicySnapshot,
     ApprovalRecord,
@@ -116,10 +117,6 @@ class ScriptedLLMPort:
             content=response.content,
             tool_calls=response.tool_calls,
         )
-
-    async def cancel(self, run_id: str) -> None:
-        """隔离环境无远程调用，仅记录取消请求。"""
-        self.cancelled_runs.append(run_id)
 
     def verify_fully_consumed(self) -> None:
         """校验脚本被完整消费；剩余响应视为缺失调用。"""
@@ -223,10 +220,6 @@ class FixtureToolPort:
             )
         return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output)
 
-    async def cancel(self, run_id: str) -> None:
-        """隔离环境无真实工具进程，仅记录取消请求。"""
-        self.cancelled_runs.append(run_id)
-
     def verify_fully_consumed(self) -> None:
         """校验所有工具 Fixture 均被调用；剩余项视为缺失调用。"""
         if self.remaining:
@@ -326,7 +319,7 @@ class FixtureDelegationPort:
             raise FixtureConfigurationError(f"子运行 {child_run_id} 未经过 fixture 受理")
         return fixture
 
-    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
+    async def prepare(self, request: DelegationRequest) -> DelegationSubmission:
         """按模式匹配委派 Fixture 并返回冻结受理信息。"""
         fixture: DelegationFixture = (
             self._match_strict(request) if self._mode is FixtureMatchMode.STRICT else self._match_normal(request)
@@ -364,6 +357,17 @@ class FixtureDelegationPort:
             return candidate
         raise FixtureConfigurationError(f"委派目标 {request.target_agent_id} 没有可用 fixture")
 
+    async def start(self, child_run_id: str) -> None:
+        """冻结 fixture 没有外部驱动，校验准备归属即可。"""
+        self.submitted_fixture(child_run_id)
+
+    async def wait_terminal(self, child_run_id: str) -> DelegationResult:
+        """隔离回放只接受已有冻结终态，不启动真实任务。"""
+        result = await self.result(child_run_id)
+        if result is None:
+            raise FixtureConfigurationError("委派 fixture 缺少终态")
+        return result
+
     async def result(self, child_run_id: str) -> DelegationResult | None:
         """返回冻结子执行结果；未受理的子运行判定为配置失败。"""
         fixture: DelegationFixture | None = self._submitted.get(child_run_id)
@@ -381,9 +385,14 @@ class FixtureDelegationPort:
             error=error,
         )
 
-    async def cancel(self, child_run_id: str) -> None:
+    async def cancel(self, child_run_id: str, reason: str, parent_request_id: str | None) -> CancellationReceipt:
         """隔离环境无真实子执行，仅记录取消请求。"""
+        fixture = self.submitted_fixture(child_run_id)
         self.cancelled_children.append(child_run_id)
+        if fixture.outcome is not None:
+            return CancellationReceipt(child_run_id, CancellationDisposition.ALREADY_ENDED, None, 0, fixture.outcome, None)
+        return CancellationReceipt(child_run_id, CancellationDisposition.ACCEPTED,
+            f"fixture-cancel-{child_run_id}", 1, None, "eval-fixture")
 
     def verify_fully_consumed(self) -> None:
         """校验所有委派 Fixture 均被受理；剩余项视为缺失调用。"""

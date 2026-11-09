@@ -11,6 +11,7 @@ import pytest
 
 from dotclaw.runtime.adapters import CheckpointRepositoryAdapter, InMemoryRunRepository, RunRepositoryAdapter
 from dotclaw.runtime.adapters.run_repository import _run_event_from_dict
+from dotclaw.runtime.adapters import _file_support as storage
 from dotclaw.runtime.application.ports import RunRepository
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.context import (
@@ -466,20 +467,28 @@ async def test_file_load_events_rejects_corrupted_json(tmp_path: Path) -> None:
 
 
 async def test_find_run_retries_transient_permission_error(tmp_path: Path, monkeypatch) -> None:
-    """Windows 原子替换短暂拒读时，仓储有限重试后返回读取结果。"""
+    """Windows 原子替换短暂拒读时，共享读取层有限重试后返回真实 Run。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
+    run: AgentRun = _run()
+    await repository.create_run(run)
+    target: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "run.json"
+    read_text = Path.read_text
     attempts = 0
 
-    def reader(run_id: str):
-        """前两次模拟文件锁，第三次返回未找到。"""
+    def reader(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        """只在目标 Run 文件前两次读取时模拟 Windows 共享占用。"""
         nonlocal attempts
-        attempts += 1
-        if attempts < 3:
-            raise PermissionError("临时文件锁")
-        return None
+        if path == target:
+            attempts += 1
+            if attempts < 3:
+                error = PermissionError(13, "临时文件锁")
+                error.winerror = 32
+                raise error
+        return read_text(path, encoding=encoding, errors=errors)
 
-    monkeypatch.setattr(repository, "_find_run_sync", reader)
-    assert await repository.find_run("run-1") is None
+    monkeypatch.setattr(storage, "_IS_WINDOWS", True)
+    monkeypatch.setattr(Path, "read_text", reader)
+    assert await repository.find_run(run.run_id) == run
     assert attempts == 3
 
 

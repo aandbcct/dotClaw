@@ -8,6 +8,27 @@ const message: DisplayMessage = { id: "m", role: "assistant", content: "", creat
 const activity: RunActivity = { run_id: "r", status: "running", approval_id: null, child_run_id: null, tools: [{ call_id: "c", name: "读取文件", status: "failed", started_at: "", completed_at: "", arguments: { path: "demo" }, result: "", error: "没有权限" }], steps: [{ id: "r:1", sequence: 1, kind: "model", status: "completed", started_at: "", completed_at: "", call_id: null }, { id: "r:3", sequence: 3, kind: "tool", status: "failed", started_at: "", completed_at: "", call_id: "c" }] };
 const actions = () => ({ onLoadRun: vi.fn(), onCheckStatus: vi.fn(), onRestoreInput: vi.fn(), onApprove: vi.fn(), onResumeDelegation: vi.fn(), onAbandon: vi.fn(), abandoningRunId: null, onResumeRun: vi.fn() });
 
+it("成功提交保留期间明确显示保存结果，不能恢复或放弃", () => {
+  render(<RunActivityPanel {...actions()} message={message} activities={[{ ...activity, status: "recoverable", committing: true }]} canControl />);
+  expect(screen.getByText("正在保存结果，请稍候。")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "恢复运行" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "放弃本次运行" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("取消清理阻塞只显示待完成提示并禁审批，远端未知仅在本地终态说明", () => {
+  const cancellation = { request_id: "request-private", requested_at: "time", phase: "blocked" as const, pending_operation_count: 1,
+    pending_child_count: 0, effect: "remote_unknown" as const, diagnostic: "停止尚未完成" };
+  const current = { ...activity, status: "waiting_approval", approval_id: "approval", approval_call_id: "c", cancellation };
+  const { rerender } = render(<RunActivityPanel {...actions()} message={message} activities={[current]} canControl />);
+  expect(screen.getByText(/停止尚未完成/)).toBeTruthy();
+  expect((screen.getByRole("button", { name: "批准并继续" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByText(/request-private/)).toBeNull();
+  rerender(<RunActivityPanel {...actions()} message={message} activities={[{ ...current, cancellation: { ...cancellation, pending_operation_count: 0 } }]} canControl />);
+  expect(screen.getByText(/尚未确认外部操作是否已停止/)).toBeTruthy();
+  rerender(<RunActivityPanel {...actions()} message={message} activities={[{ ...current, status: "cancelled", cancellation: { ...cancellation, phase: "settled" } }]} canControl />);
+  expect(screen.getByText("本地已停止，远端执行结果未确认。")).toBeTruthy();
+});
+
 it("无正文立即显示真实处理反馈，思考首次展开后尊重手动折叠，完成折叠不反复关闭", async () => {
   const user = userEvent.setup(), callbacks = actions();
   const { rerender } = render(<RunActivityPanel {...callbacks} message={message} activities={[activity]} canControl={false} />);

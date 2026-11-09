@@ -179,10 +179,6 @@ class _LLMComposite:
         self.real_served += 1
         return await self._real.complete(context, execution, output_port)
 
-    async def cancel(self, run_id: str) -> None:
-        """取消请求仅转发到真实端口（若有）。"""
-        if self._real is not None:
-            await self._real.cancel(run_id)
 
 
 class _ToolComposite:
@@ -213,10 +209,6 @@ class _ToolComposite:
         self.real_served += 1
         return await self._real.execute(invocation, execution)
 
-    async def cancel(self, run_id: str) -> None:
-        """取消请求仅转发到真实端口（若有）。"""
-        if self._real is not None:
-            await self._real.cancel(run_id)
 
 
 class _ContextComposite:
@@ -308,11 +300,11 @@ class _DelegationComposite:
         self.fixture_served: int = 0
         self.real_served: int = 0
 
-    async def submit(self, request: Any) -> Any:
+    async def prepare(self, request: Any) -> Any:
         """优先受理 Fixture 子执行；仅当允许回退且 Fixture 缺失时回退真实端口。"""
         if self._fixture is not None:
             try:
-                result: Any = await self._fixture.submit(request)
+                result: Any = await self._fixture.prepare(request)
                 self.fixture_served += 1
                 return result
             except FixtureConfigurationError:
@@ -323,7 +315,7 @@ class _DelegationComposite:
         if self._real is None:
             raise FixtureConfigurationError("未配置委派 fixture 或真实委派端口")
         self.real_served += 1
-        return await self._real.submit(request)
+        return await self._real.prepare(request)
 
     async def result(self, child_run_id: str) -> Any:
         """优先查询 Fixture 子执行结果；仅当允许回退且 Fixture 缺失时回退真实端口。"""
@@ -339,10 +331,37 @@ class _DelegationComposite:
             raise FixtureConfigurationError("未配置委派 fixture 或真实委派端口")
         return await self._real.result(child_run_id)
 
-    async def cancel(self, child_run_id: str) -> None:
-        """取消请求仅转发到真实端口（若有）。"""
-        if self._real is not None:
-            await self._real.cancel(child_run_id)
+    async def start(self, child_run_id: str) -> None:
+        """启动已准备的对应端口，不重复消费冻结请求。"""
+        if self._fixture is not None:
+            try:
+                await self._fixture.start(child_run_id)
+                return
+            except FixtureConfigurationError:
+                if not self._allow_fallback:
+                    raise
+        if self._real is None or not self._allow_fallback:
+            raise FixtureConfigurationError("未配置已准备的委派端口")
+        await self._real.start(child_run_id)
+
+    async def wait_terminal(self, child_run_id: str) -> Any:
+        """等待对应端口的真实或冻结终态。"""
+        if self._fixture is not None:
+            try:
+                return await self._fixture.wait_terminal(child_run_id)
+            except FixtureConfigurationError:
+                if not self._allow_fallback:
+                    raise
+        if self._real is None or not self._allow_fallback:
+            raise FixtureConfigurationError("未配置委派终态")
+        return await self._real.wait_terminal(child_run_id)
+
+    async def cancel(self, child_run_id: str, reason: str, parent_request_id: str | None) -> Any:
+        """按已准备归属转发控制请求。"""
+        if self._fixture is not None:
+            return await self._fixture.cancel(child_run_id, reason, parent_request_id)
+        if self._real is not None and self._allow_fallback:
+            return await self._real.cancel(child_run_id, reason, parent_request_id)
 
 
 class _ApprovalRepositoryComposite:
@@ -470,7 +489,6 @@ class EvalEnvironment:
         allow_fallback: bool = self.mode is FixtureMatchMode.NORMAL
 
         # 每个环境独立持有内存仓储，互不共享运行事实或检查点。
-        self.run_repository: RunRepository = InMemoryRunRepository()
         self.checkpoint_repository: CheckpointRepository = InMemoryCheckpointRepository()
         self.token_counter: TokenCounterPort = _FixedTokenCounter()
         self.history_compactor: HistoryCompactorPort = _FixedHistoryCompactor()
@@ -500,6 +518,7 @@ class EvalEnvironment:
         )
 
         self.approval_service: ApprovalService = ApprovalService(self.approval_repository)
+        self.run_repository: RunRepository = InMemoryRunRepository(self.approval_repository, self.checkpoint_repository)
         self.cancellation_service: CancellationService = CancellationService()
 
         self.engine: RuntimeEngine = RuntimeEngine(

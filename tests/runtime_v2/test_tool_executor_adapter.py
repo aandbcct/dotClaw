@@ -139,8 +139,6 @@ class ToolThenFinalLLM(LLMPort):
             return RunMessage("tool-request", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(ToolCall("call-1", self._tool_name, {}),))
         return RunMessage("final", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "工具已完成")
 
-    async def cancel(self, run_id: str) -> None:
-        """测试替身不需要远程取消。"""
 
 
 def _request() -> RunRequest:

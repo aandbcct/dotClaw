@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from ..domain.cancellation import CancellationRecord, CancellationCommitIntent, CancellationReceipt
 from ..domain.events import RunEvent
 from dotclaw.runtime.application.execution import RunExecutionView
 from ..domain.context import ContextOwner, ContextVersion, StagedHistoryCompression, SuccessCommitFaultPoint, SuccessCommitIntent
@@ -19,6 +20,9 @@ from .context_budget import TokenCountRequest, TokenCountResult
 from .context_compaction import ContextCompactionRequest, ContextCompactionResult
 from .history_compaction import HistoryCompactionRequest, HistoryCompactionResult
 from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, LLMOutputEvent, RunAcceptedEvent, RunRequest, ToolInvocation, ToolResult
+
+RUN_SESSION_MISMATCH_REASON = "run_session_mismatch"
+"""仅用于完成读取后的归属拒绝，不与操作系统读盘权限错误混用。"""
 
 
 class LLMUnavailableError(RuntimeError):
@@ -86,17 +90,50 @@ class SuccessCommitFaultPort(Protocol):
 class RunRepository(Protocol):
     """保存运行摘要、消息、事件与成功会话投影的协议。"""
 
+    async def load_cancellation(self, session_id: str, run_id: str) -> CancellationRecord | None:
+        """读取并校验取消记录归属。"""
+
+    async def save_cancellation(self, session_id: str, record: CancellationRecord, *, expected_revision: int) -> None:
+        """校验修订号后保存取消进度。"""
+
+    async def list_child_runs(self, parent_run_id: str) -> tuple[AgentRun, ...]:
+        """从持久关系查询直接子运行。"""
+
+    async def has_pending_success_commit(self, session_id: str, run_id: str) -> bool:
+        """查询成功是否已保留提交权，不触发恢复。"""
+
+    async def has_pending_cancellation_commit(self, session_id: str, run_id: str) -> bool:
+        """查询目标运行是否存在未完成取消提交。"""
+
+    async def recover_cancellation_commit(self, session_id: str, run_id: str) -> None:
+        """只重放目标运行已冻结的取消提交意图。"""
+
+    async def commit_cancellation(self, intent: CancellationCommitIntent) -> None:
+        """按可恢复协议提交取消终态。"""
+
+    async def recover_pending_cancellation_commits(self) -> None:
+        """幂等恢复所有取消提交意图。"""
+
+    async def list_pending_cancellations(self) -> tuple[CancellationRecord, ...]:
+        """查询尚未完成收尾的取消请求。"""
+
+    async def list_runs(self) -> tuple[AgentRun, ...]:
+        """按 started_at、run_id 稳定枚举运行事实。"""
+
     async def create_run(self, run: AgentRun) -> None:
         """创建运行摘要。"""
 
     async def load_run(self, session_id: str, run_id: str) -> AgentRun | None:
         """加载指定运行摘要。"""
 
+    async def load_run_snapshot(self, session_id: str, run_id: str) -> AgentRun | None:
+        """严格校验归属的纯读取，不触发任何提交恢复。"""
+
     async def find_run(self, run_id: str) -> AgentRun | None:
         """按运行标识定位摘要，供取消和审批恢复使用。"""
 
     async def list_active_runs(self, session_id: str) -> tuple[AgentRun, ...]:
-        """读取指定 Session 的全部未终态 Run，作为串行占用的持久化真相。"""
+        """纯读未完整提交终态的Run：非Ended或仍有成功/取消意图，作为唯一占用规则。"""
 
     async def save_run(self, run: AgentRun) -> None:
         """原子更新运行摘要。"""
@@ -203,18 +240,12 @@ class LLMPort(Protocol):
     ) -> RunMessage:
         """返回一次完整模型响应消息；output_port 为本次提交的运行级输出端口。"""
 
-    async def cancel(self, run_id: str) -> None:
-        """尽力取消正在进行的模型调用。"""
-
 
 class ToolPort(Protocol):
     """检查、执行和取消工具调用的协议。"""
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """执行工具或返回审批需求。"""
-
-    async def cancel(self, run_id: str) -> None:
-        """尽力取消当前运行中的工具调用。"""
 
 
 class ApprovalRepository(Protocol):
@@ -231,13 +262,19 @@ class ApprovalRepository(Protocol):
 
 
 class DelegationPort(Protocol):
-    """提交、查询和取消外部子执行的可选协议。"""
+    """准备、启动、读取和收尾独立子运行的协议。"""
 
-    async def submit(self, request: DelegationRequest) -> DelegationSubmission:
-        """提交子执行并返回子 Run、Task 与目标 Session 的稳定关联。"""
+    async def prepare(self, request: DelegationRequest) -> DelegationSubmission:
+        """只创建本地稳定关联，不启动外部能力。"""
+
+    async def start(self, child_run_id: str) -> None:
+        """安排已准备子运行，不等待执行结束。"""
 
     async def result(self, child_run_id: str) -> DelegationResult | None:
-        """查询子执行结果。"""
+        """读取已提交终态，活跃运行返回 None。"""
 
-    async def cancel(self, child_run_id: str) -> None:
-        """尽力取消子执行。"""
+    async def wait_terminal(self, child_run_id: str) -> DelegationResult:
+        """观察真实终态，观察者取消不取消子驱动。"""
+
+    async def cancel(self, child_run_id: str, reason: str, parent_request_id: str | None) -> CancellationReceipt:
+        """仅请求停止，返回持久化受理回执。"""

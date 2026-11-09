@@ -31,6 +31,10 @@ class _FakeRunRepository:
     async def recover_pending_success_commits(self) -> None:
         self.recovered = True
 
+    async def recover_pending_cancellation_commits(self) -> None:
+        """模拟启动意图恢复。"""
+        self.cancel_recovered = True
+
 
 class _FakeContextPort:
     def __init__(self) -> None:
@@ -41,7 +45,13 @@ class _FakeContextPort:
 
 
 class _FakeCoordinator:
-    pass
+    async def recover_cancellations(self) -> None:
+        """模拟开放观察前登记取消作业。"""
+        self.recovered = True
+
+    async def shutdown(self, grace_seconds: float = 5.0) -> None:
+        """模拟关闭前拒绝提交并请求停止。"""
+        self.stopped = True
 
 
 class _FakeLLM:
@@ -240,6 +250,9 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
         assert host.session_interaction is not None
         assert host.session_manager is not None
         assert host.agent_registry.get("default") is not None
+        assert host._runtime_services.run_repository.recovered
+        assert host._runtime_services.run_repository.cancel_recovered
+        assert host._runtime_services.coordinator.recovered
     finally:
         await host.shutdown()
 
@@ -279,3 +292,24 @@ async def test_application_host_build_cleans_up_partial_resources_on_init_failur
     with pytest.raises(RuntimeError):
         await ApplicationHost.build()
     assert fake_mcp.shutdown_called, "initialize 失败后应回收已构建的 MCP Provider"
+
+
+async def test_host_requests_run_shutdown_before_shared_resources(tmp_path: Path) -> None:
+    """共享连接关闭前，运行协调器必须已收到停止和等待命令。"""
+    host = ApplicationHost(_fake_config(str(tmp_path)), tmp_path)
+    order: list[str] = []
+    async def stop(grace_seconds):
+        assert grace_seconds > 0
+        order.append("runs")
+    async def mcp():
+        order.append("mcp")
+    async def context():
+        order.append("context")
+    async def http():
+        order.append("http")
+    host._runtime_services = types.SimpleNamespace(coordinator=types.SimpleNamespace(shutdown=stop))
+    host._mcp_provider = types.SimpleNamespace(shutdown=mcp)
+    host._context_port = types.SimpleNamespace(release_all=context)
+    host._http_client = types.SimpleNamespace(close=http)
+    await host.shutdown()
+    assert order == ["runs", "mcp", "context", "http"]
