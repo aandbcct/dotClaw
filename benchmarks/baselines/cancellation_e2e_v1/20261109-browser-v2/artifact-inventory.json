@@ -1,0 +1,7 @@
+{
+  "path": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109_retry_v2",
+  "measurement_artifact_file_count": 2842,
+  "measurement_artifact_bytes": 26117575,
+  "excluded_source_exports": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109_retry_v2\\sources",
+  "source_exports_note": "原版源码、前端构建输出及指向现有node_modules的联接，不加入Git基线目录"
+}

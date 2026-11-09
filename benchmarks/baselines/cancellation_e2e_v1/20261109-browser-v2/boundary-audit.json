@@ -1,0 +1,9 @@
+{
+  "success_n": 60,
+  "browser_max_ms": 1016.1999999284744,
+  "resource_before_or_at_commit_n": 60,
+  "near_9000ms_sample_ids": [],
+  "observer_start": "Playwright button.click return",
+  "dom_deadline_start": "native DOM click event",
+  "unrelated_check": "at cancellation core observation end before refresh/followup"
+}

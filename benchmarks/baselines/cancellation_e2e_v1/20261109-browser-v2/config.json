@@ -1,0 +1,34 @@
+{
+  "schema_version": 2,
+  "protocol_version": 2,
+  "prior_invalid_run": "reports/cancellation_e2e_20261109/invalid-run-v1.json",
+  "old_revision": "479e3cb",
+  "new_revision": "7860daa",
+  "scenarios": [
+    "before_first",
+    "streaming",
+    "command",
+    "delegation"
+  ],
+  "deadline_ms": 10000,
+  "operation_seconds": 60,
+  "warmup_per_version_scenario": 2,
+  "formal_per_version_scenario": 20,
+  "rounds": 2,
+  "formal_per_round": 10,
+  "version_order": [
+    [
+      "479e3cb",
+      "7860daa"
+    ],
+    [
+      "7860daa",
+      "479e3cb"
+    ]
+  ],
+  "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+  "clock_mapping": null,
+  "frozen_at": "2026-11-09T07:55:40.922528+00:00",
+  "command_interpreter": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+  "browser_dependency": "playwright==1.57.0"
+}
