@@ -836,7 +836,7 @@ MCP inputSchema 使用 `validate_json_schema()` 的有限实现，不是完整 J
 
 #### 4.6.2 Agent 工具快照
 
-**职责与用途：**`AgentPolicyResolver` 在每个 Run 读取 Tool Definition 快照、排除旧 Task Tool、按 Agent.allowed_tools 精确名称过滤，并保存到 AgentPolicySnapshot。
+**职责与用途：**`AgentPolicyResolver` 在每个 Run 读取当前可用 Tool Definition 快照、按 Agent.allowed_tools 精确名称过滤，并保存到 AgentPolicySnapshot。
 
 MCP 首次发现发生在 Runtime 构造前，正常首个 Run 可以看到已成功注册的工具。已有 Run 不受后续 Registry 变化影响。
 

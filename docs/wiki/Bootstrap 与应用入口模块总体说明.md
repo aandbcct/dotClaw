@@ -1330,7 +1330,7 @@ success_commit.json
 → 清理临时意图
 ```
 
-它不在 Host 启动时改写遗留非终态 Run 的状态；该恢复由 Coordinator 在具体 Session 下次提交前调用 `recover_session()`，交由恢复边界按 Checkpoint 重放。
+Host 启动不改写遗留 Run 的领域状态，并执行取消补偿 `recover_cancellations()`；普通提交仅查询 `active_run()` 拒绝未结束占用，Checkpoint 重放通过显式 `resume_run()` 执行。
 
 #### 4.9.2 初始化失败清理
 
@@ -1601,7 +1601,7 @@ flowchart LR
 - 该步骤是 Host 启动关键阶段，失败会阻止入口就绪。
 - 补偿依赖 Runtime Repository 和 SessionConversationProjector 已完成装配。
 - 它只恢复未决成功提交，不处理所有非终态 Run。
-- 遗留非终态 Run 在对应 Session 下次提交前由 Coordinator 调用 `recover_session()` 交由恢复边界重放。
+- 遗留非终态 Run 继续占用对应 Session，普通提交只检查 `active_run()`；显式恢复通过 `resume_run()` 重放 Checkpoint，Host 启动取消补偿保留。
 - Journal 不参与补偿。
 
 ### 5.8 初始化失败清理

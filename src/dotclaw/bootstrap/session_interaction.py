@@ -24,8 +24,7 @@ from ..runtime.application.request_factory import create_run_request
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
 from ..runtime.application.run_watch_service import RunWatchService, RunWatchCursor, RunObservation
 from ..runtime.domain.context import ContextOwner
-from ..runtime.domain.events import RunEvent
-from ..runtime.domain.facts import AgentRun, RunErrorCode, RunMessage
+from ..runtime.domain.facts import AgentRun, RunErrorCode
 from ..session.session import Session, SessionManager
 
 
@@ -260,21 +259,6 @@ class SessionInteractionService:
         if self._run_repository is None:
             return None
         return await self._run_repository.find_run(run_id)
-
-    async def get_run_evidence(
-        self, session_id: str, run_id: str,
-    ) -> tuple[tuple[RunEvent, ...], tuple[RunMessage, ...]]:
-        """读取工具过程展示所需的权威事件与运行消息。"""
-        if self._run_repository is None:
-            return (), ()
-        return (
-            await self._run_repository.load_events(session_id, run_id),
-            await self._run_repository.load_messages(session_id, run_id),
-        )
-
-    async def is_session_executing(self, session_id: str) -> bool:
-        """判断运行是否仍由当前进程执行，用于区分运行中与可恢复。"""
-        return await self._coordinator.is_session_executing(session_id)
 
     # ── 删除协调 ──
 

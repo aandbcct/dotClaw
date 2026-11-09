@@ -133,29 +133,6 @@ class TaskMessageBroker:
         await self._notify(task_id)
         return message
 
-    async def cancel_task(
-        self,
-        task_id: str,
-        identity_id: str,
-        session_id: str,
-        run_id: str,
-        reason: str,
-    ) -> Task:
-        """由 source 原子写入 cancelled 消息并更新 Task 终态。"""
-        async with self._lock:
-            task: Task = self._get_task_locked(task_id)
-            self._validate_endpoint_locked(task, TaskEndpoint.SOURCE, identity_id, session_id)
-            if task.status.is_terminal():
-                return task
-            message: TaskMessage = self._append_message_locked(
-                task, TaskEndpoint.SOURCE, TaskEndpoint.TARGET, run_id,
-                TaskMessageType.CANCELLED, reason,
-            )
-            task.cancellation_requested = True
-            self._apply_message_state_locked(task, message)
-        await self._notify(task_id)
-        return task
-
     async def wait_for_messages(
         self,
         task_id: str,
@@ -188,19 +165,6 @@ class TaskMessageBroker:
         """读取 Task 当前投影。"""
         async with self._lock:
             return self._get_task_locked(task_id)
-
-    async def get_task_for_endpoint(
-        self,
-        task_id: str,
-        endpoint: TaskEndpoint,
-        identity_id: str,
-        session_id: str,
-    ) -> Task:
-        """校验端点后读取状态，不改变任何消息消费游标。"""
-        async with self._lock:
-            task: Task = self._get_task_locked(task_id)
-            self._validate_endpoint_locked(task, endpoint, identity_id, session_id)
-            return task
 
     async def active_task_for_source(self, session_id: str) -> Task | None:
         """返回 source Session 的唯一活动 Task。"""

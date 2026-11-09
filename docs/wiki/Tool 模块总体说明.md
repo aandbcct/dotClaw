@@ -124,7 +124,7 @@ sequenceDiagram
         User->>Channel: 批准或拒绝
         Channel->>App: 提交审批结果
         App->>Coord: 恢复原 Run
-        Coord->>Engine: ApprovalResolved
+        Coord->>Engine: resolve_approval(approved)
         Engine->>Adapter: execute(approved invocation)
     end
 

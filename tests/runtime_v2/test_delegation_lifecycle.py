@@ -212,7 +212,7 @@ async def test_restore_fixed_projection_without_fake_messages_and_reject_conflic
     with pytest.raises(ValueError, match="冲突"):
         await restored_adapter.prepare(replace(request, input_message=replace(request.input_message, content="另一任务")))
     with pytest.raises(TaskStateError, match="冲突"):
-        await dispatcher.restore_v2_delegation(task.task_id, "foreign", "session-parent", "parent", "target-agent", task.target.session_id, request.input_message.content)
+        await dispatcher.restore_v2_delegation(task.task_id, "foreign", "session-parent", "target-agent", task.target.session_id, request.input_message.content)
     await restored_coordinator.cancel(submission.child_run_id, "独立取消子分支")
     await restored_adapter.wait_terminal(submission.child_run_id)
     assert isinstance((await repository.find_run("parent")).state.mode, Created)

@@ -37,23 +37,6 @@ class RunEventType(StrEnum):
     STATE_TRANSITION_REJECTED = "state_transition_rejected"
 
 
-class LLMCompletionKind(StrEnum):
-    """一次模型调用完成后的控制结果。"""
-
-    FINAL_RESPONSE = "final_response"
-    TOOL_CALLS = "tool_calls"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
-
-
-class ToolCompletionKind(StrEnum):
-    """一次工具批次完成后的控制结果。"""
-
-    COMPLETED = "completed"
-    FAILED = "failed"
-    APPROVAL_REQUIRED = "approval_required"
-
-
 class ToolAuditStatus(StrEnum):
     """单个工具调用审计事件的终态，独立于 ToolPort 返回类别。"""
 
@@ -98,47 +81,10 @@ class RunStarted:
 
 
 @dataclass(frozen=True)
-class LLMCompleted:
-    """模型调用已完成的领域事件。"""
-
-    kind: LLMCompletionKind
-    response_message_id: str | None = None
-    tool_call_count: int = 0
-    error: RunError | None = None
-    occurred_at: str = field(default_factory=utc_now_iso)
-
-
-@dataclass(frozen=True)
-class ToolCompleted:
-    """工具调用批次已完成的领域事件。"""
-
-    kind: ToolCompletionKind
-    result_message_ids: tuple[str, ...] = ()
-    approval_id: str | None = None
-    error: RunError | None = None
-    occurred_at: str = field(default_factory=utc_now_iso)
-
-
-@dataclass(frozen=True)
-class ApprovalResolved:
-    """审批交互层提交的结构化审批结果。"""
-
-    approval_id: str
-    approved: bool
-    occurred_at: str = field(default_factory=utc_now_iso)
-
-
-@dataclass(frozen=True)
 class DelegationCompleted:
     """外部子执行完成事件。"""
 
     child_run_id: str
-    succeeded: bool
-    error: RunError | None = None
-    occurred_at: str = field(default_factory=utc_now_iso)
-    # 子运行已固化的 DELEGATION_RESULT 消息 ID，供父运行回灌；新状态机仅用
-    # child_run_id 校验挂起控制标识，其余字段供下游恢复使用。
-    result_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,15 +111,11 @@ class TimeoutReached:
     occurred_at: str = field(default_factory=utc_now_iso)
 
 
-DomainEvent = RunStarted | LLMCompleted | ToolCompleted | ApprovalResolved | DelegationSubmitted | DelegationCompleted | CancelRequested | TimeoutReached
-
-
 # ============================================================================
-# 新状态机（目标契约）判别联合事件
+# 当前状态机判别联合事件
 # ----------------------------------------------------------------------------
 # 以下事件仅经 transition() 消费，表达「发生在 Engine 或外部控制边界的瞬时决策
 # 事实」，不携带消息正文等审计负载；与上面的审计 RunEvent / RunEventType 严格区分。
-# 旧 DomainEvent 与旧事件类仍被未迁移的应用层使用，调用方清零后删除。
 # ============================================================================
 
 
@@ -250,9 +192,7 @@ class AbandonRequested:
     occurred_at: str = field(default_factory=utc_now_iso)
 
 
-# 新状态机输入事件的判别联合类型。复用 RunStarted / DelegationSubmitted /
-# DelegationCompleted / CancelRequested / TimeoutReached 这些字段已满足迁移需要
-# 的既有事件类，避免重复定义；其余为新增分支。
+# 当前状态机输入事件的判别联合类型；控制事件不携带重复的执行结果负载。
 AgentRunEvent = (
     RunStarted
     | LLMResponseProduced

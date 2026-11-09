@@ -122,18 +122,6 @@ class _FakeSessionInteraction:
         """按标识返回预设运行。"""
         return self.activity_run if self.activity_run and self.activity_run.run_id == run_id else None
 
-    async def get_run_evidence(
-        self, session_id: str, run_id: str,
-    ) -> tuple[tuple[RunEvent, ...], tuple[RunMessage, ...]]:
-        """返回预设工具执行证据。"""
-        del session_id, run_id
-        return self.activity_events, self.activity_messages
-
-    async def is_session_executing(self, session_id: str) -> bool:
-        """返回当前进程是否正在执行预设运行。"""
-        del session_id
-        return self.executing
-
     async def resolve_approval(
         self, approval_id: str, approved: bool, output_port=None,
     ) -> RunResult:
@@ -322,7 +310,6 @@ async def test_completion_and_model_edit_share_the_same_execution_lease(tmp_path
     """用真实并发任务冻结旧模型，完成投影后再切换不会丢历史。"""
     host, coordinator = _persistent_host(tmp_path)
     engine = coordinator._engine
-    engine.recover_session = AsyncMock()
     engine.active_run = AsyncMock(return_value=None)
     entered, release = asyncio.Event(), asyncio.Event()
     frozen_models: list[str] = []
@@ -358,7 +345,6 @@ async def test_submit_waits_for_delete_and_does_not_recreate_deleted_session(tmp
     """删除已取得租约时，新提交在删除后重读失败，不产生孤儿运行。"""
     host, coordinator = _persistent_host(tmp_path)
     engine = coordinator._engine
-    engine.recover_session = AsyncMock()
     engine.active_run = AsyncMock(return_value=None)
     engine.execute = AsyncMock()
     repository = Mock()

@@ -195,7 +195,7 @@ Runtime 是共享、业务无状态的执行内核。每个请求创建独立 `R
 | 组件 | 核心代码 | 核心对象 | 职责 |
 |---|---|---|---|
 | 运行事实与值对象 | `runtime/domain/facts.py`、`context.py` | `AgentRun`、`RunMessage`、`RunCheckpoint`、`ContextVersion`、`SuccessCommitIntent` | 描述持久化事实、策略、错误、消息和恢复数据 |
-| 领域事件 | `runtime/domain/events.py` | `RunStarted`、`LLMCompleted`、`ToolCompleted`、`ApprovalResolved` 等 | 描述驱动状态迁移的业务事实 |
+| 领域事件 | `runtime/domain/events.py` | `AgentRunEvent`、`LLMResponseProduced`、`ToolBatchCompleted`、`ApprovalGranted` 等 | 描述驱动状态迁移的业务事实 |
 | 状态机 | `runtime/domain/state.py`、`control.py` | `AgentRunState`、`AgentAction`、`transition` | 将领域事件转换为新状态和下一动作 |
 | 单 Run 执行上下文 | `runtime/application/execution.py` | `RunExecution`、`RunExecutionView`、`RunBudget` | 保存本次 Run 的可变控制数据、消息游标和取消令牌 |
 | 执行引擎 | `runtime/application/engine.py` | `RuntimeEngine` | 创建/恢复 Run；驱动 Context、LLM、Tool、Delegation 循环；收口终态和提交 |

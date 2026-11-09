@@ -657,12 +657,6 @@ class _EngineInteraction(_FakeSessionInteraction):
                 return None
             raise
 
-    async def get_run_evidence(self, session_id, run_id):
-        return await self.repository.load_events(session_id, run_id), await self.repository.load_messages(session_id, run_id)
-
-    async def is_session_executing(self, session_id):
-        return self.executing
-
     async def snapshot_run(self, session_id, run_id):
         return await self.watcher.snapshot(session_id, run_id)
 

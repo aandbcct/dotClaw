@@ -776,9 +776,6 @@ class OrderedEngine:
             await self.release.wait()
         return RunResult(request.lease_id, AgentRunState(mode=Ended(RunOutcome.COMPLETED)))
 
-    async def recover_session(self, session_id: str) -> None:
-        """测试替身没有持久化遗留运行。"""
-
     async def active_run(self, session_id: str) -> AgentRun | None:
         """测试替身不占用 Session。"""
         return None
@@ -840,9 +837,6 @@ class ControlOrderedEngine:
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """测试替身不需要取消行为。"""
-
-    async def recover_session(self, session_id: str) -> None:
-        """测试替身没有持久化遗留运行。"""
 
     async def active_run(self, session_id: str) -> AgentRun | None:
         """测试替身不占用 Session。"""

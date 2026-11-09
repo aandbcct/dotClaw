@@ -14,6 +14,7 @@ from typing import TypeAlias
 from .control import AgentAction
 from .events import (
     AbandonRequested,
+    AgentRunEvent,
     ApprovalGranted,
     ApprovalRejected,
     CancelRequested,

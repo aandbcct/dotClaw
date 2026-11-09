@@ -15,7 +15,6 @@ from .task import (
     Task,
     TaskEndpoint,
     TaskEndpointBinding,
-    TaskMessageType,
     TaskSpecification,
     TaskStatus,
 )
@@ -59,7 +58,7 @@ class AgentDispatcher:
         return await self._broker.mark_target_running(task.task_id)
 
     async def restore_v2_delegation(self, task_id: str, source_agent_id: str, source_session_id: str,
-        parent_run_id: str, target_agent_id: str, target_session_id: str, input_message: str) -> Task:
+        target_agent_id: str, target_session_id: str, input_message: str) -> Task:
         """从持久父子关联恢复固定 Task，不重启业务或伪造历史消息。"""
         task = Task(task_id, TaskSpecification("Runtime v2 delegation", input_message),
             TaskEndpointBinding(TaskEndpoint.SOURCE, source_agent_id, source_session_id),
@@ -75,7 +74,3 @@ class AgentDispatcher:
     async def fail_v2_preparation(self, task_id: str, target_run_id: str, message: str) -> Task:
         """子 Run 尚未创建时记录本地准备失败，不伪造运行结果。"""
         return await self._broker.settle_task(task_id, target_run_id, TaskStatus.FAILED, message)
-
-    async def cancel_task(self, task_id: str, identity_id: str, session_id: str, run_id: str, reason: str) -> Task:
-        """写入取消终态；实际子 Run 取消由适配器转交协调器。"""
-        return await self._broker.cancel_task(task_id, identity_id, session_id, run_id, reason)

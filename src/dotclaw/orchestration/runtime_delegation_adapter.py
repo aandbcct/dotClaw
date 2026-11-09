@@ -127,7 +127,7 @@ class RuntimeDelegationAdapter(DelegationPort):
         if initial is None:
             raise ValueError("委派子运行缺少持久输入")
         await self._dispatcher.restore_v2_delegation(run.delegation_task_id, parent.agent_id, parent.session_id,
-            parent.run_id, run.agent_id, run.session_id, initial.content)
+            run.agent_id, run.session_id, initial.content)
 
     def _require_coordinator(self) -> DelegationSubmissionPort:
         if self._coordinator is None:

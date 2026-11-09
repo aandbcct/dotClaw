@@ -58,9 +58,6 @@ class RuntimeControlPort(RuntimeExecutionPort, Protocol):
     async def refresh_cancellation_progress(self, run_id: str) -> CancellationRecord | None:
         """刷新清理进度，不追加运行事件。"""
 
-    async def recover_session(self, session_id: str) -> None:
-        """恢复进程重启遗留的 Session 运行状态。"""
-
     async def active_run(self, session_id: str) -> AgentRun | None:
         """读取持久化的当前 Session 占用。"""
 
@@ -354,7 +351,6 @@ class SessionRunCoordinator:
         """以持久化占用表保证跨进程 Session 串行；任意非终态 Run 拒绝普通请求。"""
         if not self._accepting_submissions:
             raise RuntimeError("宿主已停止接受新运行")
-        await self._engine.recover_session(session_id)
         active: AgentRun | None = await self._engine.active_run(session_id)
         if active is None:
             return None

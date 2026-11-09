@@ -451,7 +451,7 @@ async def test_invalid_context_window_fails_deterministically_without_checkpoint
 
 
 async def test_recovery_preserves_orphan_running_run_and_new_request_returns_busy(tmp_path: Path) -> None:
-    """进程重启恢复入口保留遗留 RUNNING，新普通请求返回 SESSION_BUSY 而不自动放弃。"""
+    """普通提交保留重启遗留 RUNNING，新普通请求返回 SESSION_BUSY 而不自动放弃。"""
     notifier = RunChangeNotifier()
     counter = ScriptedCounter(10)
     compactor = ScriptedCompactor()
@@ -470,7 +470,6 @@ async def test_recovery_preserves_orphan_running_run_and_new_request_returns_bus
         pending={"phase": "waiting_llm", "iteration": 1},
         budget={},
     ))
-    await engine.recover_session("session-e4")
     recovered = await repository.find_run(orphan.run_id)
     coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
 
@@ -478,7 +477,7 @@ async def test_recovery_preserves_orphan_running_run_and_new_request_returns_bus
     after = await repository.find_run(orphan.run_id)
 
     assert recovered is not None
-    assert isinstance(recovered.state.mode, Running)  # 恢复入口不再改写为伪状态
+    assert isinstance(recovered.state.mode, Running)  # 持久化遗留运行保持原状态
     assert after is not None
     assert isinstance(after.state.mode, Running)  # 新请求不自动放弃旧 Run
     assert new_request.state.outcome() is RunOutcome.FAILED

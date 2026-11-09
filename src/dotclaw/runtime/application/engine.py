@@ -425,7 +425,7 @@ class RuntimeEngine:
         await self._register_driver(execution)
         try:
             if not approved:
-                result: RunResult = await self._finish_cancelled(execution, run, messages, event_sequence, "审批被拒绝")
+                result: RunResult = await self._finish_cancelled(run, "审批被拒绝")
                 await self._release_run_context_if_terminal(result)
                 return result
             resumed_run: AgentRun = replace(
@@ -552,7 +552,7 @@ class RuntimeEngine:
         completion_transition = await self._apply_transition(
             execution,
             parent_run,
-            DelegationCompleted(child_run_id, child_result.outcome is RunOutcome.COMPLETED),
+            DelegationCompleted(child_run_id),
             event_sequence,
         )
         if completion_transition is None:
@@ -696,16 +696,6 @@ class RuntimeEngine:
                 self._run_change_notifier.notify(run_id)
             await _await_control(confirm())
         return await self.complete_cancellation(run_id)
-
-    async def recover_session(self, session_id: str) -> None:
-        """进程重启后的 Session 恢复入口。
-
-        阶段 4 起不再将遗留 ``RUNNING`` 改写为伪状态：未结束 Run 保持其最后持久化的
-        非终态（``Created`` / ``Running`` / ``Suspended``），占用判定与恢复均由
-        ``active_run`` 与 ``resume_run`` / ``abandon_run`` 负责，普通新消息只返回
-        ``SESSION_BUSY``，不会自动放弃旧 Run。
-        """
-        # 故意不改写领域状态：具体节点恢复继续委托 checkpoint/resume（见 resume_run）。
 
     async def active_run(self, session_id: str) -> AgentRun | None:
         """返回唯一未完整提交终态的占用Run，保留其原领域状态。"""
@@ -1077,7 +1067,7 @@ class RuntimeEngine:
             event_number = await self._event(run, event_number, RunEventType.RUN_STARTED, (run.input_message_id,))
         while not execution.state.is_ended():
             if execution.cancellation.cancelled:
-                return await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
+                return await self._finish_cancelled(run, execution.cancellation.reason)
             action: AgentAction = execution.action
             if action is AgentAction.EXECUTE_TOOLS:
                 run, sequence, event_number, pending_calls, terminal = await self._execute_tools_action(
@@ -1177,7 +1167,7 @@ class RuntimeEngine:
         completed_message_ids: list[str] = []
         for tool_index, tool_call in enumerate(tool_calls):
             if execution.cancellation.cancelled:
-                return run, sequence, event_number, pending_calls, await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
+                return run, sequence, event_number, pending_calls, await self._finish_cancelled(run, execution.cancellation.reason)
             event_number = await self._tool_started_event(run, event_number, messages, tool_call)
             run = await self._persist_running_transition(execution, run, execution.state, AgentAction.EXECUTE_TOOLS, event_number, sequence, tool_calls[tool_index:])
             try:
@@ -1191,7 +1181,7 @@ class RuntimeEngine:
                     call_id=tool_call.call_id,
                 )
             except RunOperationCancelled:
-                return run, sequence, event_number, pending_calls, await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
+                return run, sequence, event_number, pending_calls, await self._finish_cancelled(run, execution.cancellation.reason)
             except RunOperationCleanupError as error:
                 await self.refresh_cancellation_progress(run.run_id)
                 return run, sequence, event_number, pending_calls, RunResult(run.run_id, run.state, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, str(error)))
@@ -1212,7 +1202,7 @@ class RuntimeEngine:
             await self._save_messages(run, execution, messages)
             event_number = await self._tool_completed_event(run, event_number, tool_call, tool_message.message_id, _tool_audit_status(tool_result.status), _tool_error_summary(tool_result))
             if execution.cancellation.cancelled:
-                return run, sequence, event_number, pending_calls, await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
+                return run, sequence, event_number, pending_calls, await self._finish_cancelled(run, execution.cancellation.reason)
             if tool_result.status is ToolResultStatus.FAILED:
                 error = tool_result.error.message if tool_result.error is not None else tool_result.output or "工具执行失败"
                 return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, error, RunErrorCode.TOOL_FAILURE)
@@ -1304,7 +1294,7 @@ class RuntimeEngine:
         try:
             prepared: _PreparedContext = await self._cancellation_service.run_operation(execution.run_id, RunOperationKind.CONTEXT, lambda: self._prepare_context(execution, run, messages))
         except RunOperationCancelled:
-            return run, sequence, event_number, (), await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
+            return run, sequence, event_number, (), await self._finish_cancelled(run, execution.cancellation.reason)
         except RunOperationCleanupError as error:
             await self.refresh_cancellation_progress(run.run_id)
             return run, sequence, event_number, (), RunResult(run.run_id, run.state, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, str(error)))
@@ -1347,13 +1337,13 @@ class RuntimeEngine:
         try:
             response = await self._cancellation_service.run_operation(execution.run_id, RunOperationKind.LLM, lambda: self._llm_port.complete(context, execution.view(), output_port))
         except RunOperationCancelled:
-            return run, sequence, event_number, (), await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
+            return run, sequence, event_number, (), await self._finish_cancelled(run, execution.cancellation.reason)
         except RunOperationCleanupError as error:
             await self.refresh_cancellation_progress(run.run_id)
             return run, sequence, event_number, (), RunResult(run.run_id, run.state, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, str(error)))
         except InvalidLLMResponseError:
             if execution.cancellation.cancelled:
-                return run, sequence, event_number, (), await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
+                return run, sequence, event_number, (), await self._finish_cancelled(run, execution.cancellation.reason)
             return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, "模型未返回有效回答，请查看执行记录或稍后重新发送。", RunErrorCode.EMPTY_MODEL_RESPONSE)
         except LLMUnavailableError as error:
             return run, sequence, event_number, (), await self._suspend_on_unavailable(execution, run, tuple(messages), event_number, str(error))
@@ -1371,7 +1361,7 @@ class RuntimeEngine:
         await self._save_messages(run, execution, messages)
         event_number = await self._event(run, event_number, RunEventType.LLM_COMPLETED, (response_message.message_id,))
         if execution.cancellation.cancelled:
-            return run, sequence, event_number, (), await self._finish_cancelled(execution, run, tuple(messages), event_number, execution.cancellation.reason)
+            return run, sequence, event_number, (), await self._finish_cancelled(run, execution.cancellation.reason)
         response_transition = await self._apply_transition(execution, run, LLMResponseProduced(final, response_message.message_id, len(response.tool_calls)), event_number)
         if response_transition is None:
             return run, sequence, event_number, (), await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 LLMResponseProduced 迁移")
@@ -1754,7 +1744,7 @@ class RuntimeEngine:
         )
         return context_version
 
-    async def _finish_cancelled(self, execution: RunExecution, run: AgentRun, messages: tuple[RunMessage, ...], event_sequence: int, reason: str) -> RunResult:
+    async def _finish_cancelled(self, run: AgentRun, reason: str) -> RunResult:
         """统一委托持久化取消提交，审批拒绝也先保存明确请求。"""
         record = await self._run_repository.load_cancellation(run.session_id, run.run_id)
         if record is None:

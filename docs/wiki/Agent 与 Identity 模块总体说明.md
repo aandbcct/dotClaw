@@ -421,7 +421,7 @@ agent_name
 ```text
 []
 → 所有当前已注册工具可见
-→ 但排除旧 Task 协议工具
+→ 按正常可用性与白名单暴露工具
 
 ["a", "b"]
 → 只保留名称精确匹配的定义
@@ -780,16 +780,9 @@ context_compaction_tokenizer_encoding
 
 **职责与用途：**`_allowed_definitions()` 从 ToolExecutor 获取当前 Registry 的深拷贝快照，再应用 Identity.allowed_tools。
 
-无论白名单如何，以下旧 Task 工具都会排除：
+项目没有旧 Task 工具注册者；外部手工注册同名自定义工具时按正常白名单暴露，不再按裸名称特殊过滤。MCP 工具带命名空间，不受影响。
 
-```text
-task_send_message
-wait_task
-task_status
-cancel_task
-```
-
-真正的 `delegate` ToolCall 由 RuntimeEngine 特殊识别，不属于上述旧 Task 工具集合。
+真正的 `delegate` ToolCall 由 RuntimeEngine 特殊识别，其定义仍遵守正常白名单。
 
 #### 4.4.5 模型与 Context 预算冻结
 
@@ -1266,9 +1259,8 @@ flowchart TD
     Registry["Tool Registry Snapshot"] --> Allowed{"allowed_tools 为空?"}
     Allowed -->|是| All["保留全部定义"]
     Allowed -->|否| Filter["按名称白名单过滤"]
-    All --> Legacy["移除旧 Task 工具"]
-    Filter --> Legacy
-    Legacy --> Snapshot["policy_data.tools"]
+    All --> Snapshot["policy_data.tools"]
+    Filter --> Snapshot
     Snapshot --> Context["ToolsSlot"]
     Context --> LLM["ContextBundle.tools"]
 ```
@@ -1654,10 +1646,10 @@ AgentPolicySnapshot
 
 ```text
 allowed_tools == []
-→ 全部当前定义，排除旧 Task Tools
+→ 全部当前可用定义
 
 allowed_tools 非空
-→ 精确名称交集，排除旧 Task Tools
+→ 当前可用定义与白名单的精确名称交集
 ```
 
 白名单仅影响 `ContextBundle.tools`。执行端仍检查 Tool 是否存在和安全策略。
