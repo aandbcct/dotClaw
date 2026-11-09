@@ -1,0 +1,15 @@
+{
+  "verified_at": "2026-11-09T08:48:47.672910+00:00",
+  "formal_count": 160,
+  "warmup_count": 16,
+  "formal_invalid_fixture_count": 0,
+  "core_success_count": 60,
+  "target_commit_and_persisted_cancelled_verified_for_all_successes": true,
+  "interleaved_batch_order_verified": true,
+  "prior_raw_files_byte_identical": 10,
+  "owned_long_command_processes_remaining": 0,
+  "production_src_git_diff_empty": true,
+  "contract_test_result": "5 passed",
+  "deprecated_derived_directory": "benchmarks/baselines/cancellation_e2e_v1/20261109-browser-v1",
+  "deprecated_derived_cleanup": "automatic approval review rejected deletion: blocked by policy; left untracked"
+}

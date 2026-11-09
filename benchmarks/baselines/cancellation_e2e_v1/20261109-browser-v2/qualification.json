@@ -1,0 +1,10 @@
+{
+  "measurement_qualified": true,
+  "complete": true,
+  "formal_count": 160,
+  "expected_formal_count": 160,
+  "warmup_count": 16,
+  "expected_warmup_count": 16,
+  "formal_invalid_fixture_count": 0,
+  "note": "产品失败、超时和入口缺失不等于测量无效；它们仍进入正式分母"
+}

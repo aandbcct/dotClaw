@@ -1,0 +1,161 @@
+{
+  "debug1-old": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "479e3cb"
+  },
+  "debug2-old": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "479e3cb"
+  },
+  "debug3-old": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "479e3cb"
+  },
+  "debug4-new": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "7860daa"
+  },
+  "debug5-recoverable": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "479e3cb"
+  },
+  "debug6-new-delegation": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "7860daa"
+  },
+  "debug7-old-delegation": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "479e3cb"
+  },
+  "debug8-new-delegation": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "7860daa"
+  },
+  "formal-round1-479e3cb": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "479e3cb"
+  },
+  "formal-round1-7860daa": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "7860daa"
+  },
+  "formal-round2-479e3cb": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "479e3cb"
+  },
+  "formal-round2-7860daa": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "7860daa"
+  },
+  "warmup-round0-479e3cb": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\479e3cb\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "479e3cb"
+  },
+  "warmup-round0-7860daa": {
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa",
+    "imported_dotclaw": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109\\sources\\7860daa\\src\\dotclaw\\__init__.py",
+    "browser": "C:\\Users\\atozn\\AppData\\Local/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "browser_version": "143.0.7499.4",
+    "source_commit": "7860daa"
+  },
+  "dependencies": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.5 (tags/v3.13.5:6cb20a2, Jun 11 2025, 16:15:46) [MSC v.1943 64 bit (AMD64)]",
+    "executable": "D:\\dev\\dotClaw\\.venv\\Scripts\\python.exe",
+    "packages": {
+      "playwright": "1.57.0",
+      "openai": "2.53.0",
+      "httpx": "0.28.1",
+      "fastapi": "0.141.1",
+      "uvicorn": "0.52.4",
+      "pydantic": "2.13.4",
+      "tiktoken": "0.13.0",
+      "pyyaml": "6.0.3"
+    }
+  },
+  "source_provenance": {
+    "479e3cb": {
+      "commit": "479e3cbc8659ac45b4df38b62e006e022744589d",
+      "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109_retry_v2\\sources\\479e3cb",
+      "frontend_assets": [
+        "index-BKh28Q7c.js",
+        "index-Dqs2pdVD.css"
+      ]
+    },
+    "7860daa": {
+      "commit": "7860daa23ddb982a4c16f0d50c8393c062f07aa4",
+      "source": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109_retry_v2\\sources\\7860daa",
+      "frontend_assets": [
+        "index-Dqs2pdVD.css",
+        "index-v516U4TH.js"
+      ]
+    }
+  }
+}

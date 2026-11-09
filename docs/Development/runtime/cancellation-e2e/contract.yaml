@@ -1,0 +1,65 @@
+id: cancellation-browser-e2e
+version: 2
+status: completed
+coordination:
+  owner_agent: /root
+  owner_session: null
+model_policy:
+  coordinator_actual: {model: gpt-6.1-sol, reasoning_effort: null} # 沿用用户对本聊天主代理的豁免
+  subagent: {model: gpt-6.1-sol, reasoning_effort: medium}
+goal: 为PR46补充真实浏览器停止点击到页面确认的旧新版对照，不修改生产来改善测量结果。
+execution:
+  workspace: 'D:\dev\dotClaw'
+  branch: codex/cancellation-e2e-benchmark
+  before: 479e3cbc8659ac45b4df38b62e006e022744589d
+  after: 7860daa23ddb982a4c16f0d50c8393c062f07aa4
+  interpreter: 'D:\dev\dotClaw\.venv\Scripts\python.exe'
+scope:
+  include: [真实浏览器, 各版真实前端和Web与Runtime, 受控本地能力, 分段测量, 失败与超时保留, 报告及复现脚本]
+  exclude: [生产功能修改, 真实付费供应商, 用户文件, 现有容器重启, 压测全系统, 自动push或PR]
+decisions:
+  - 两版源码及前端均按提交隔离，实际导入路径和commit必须写入样本环境。
+  - 不得用浏览器路由mock或假时钟替代主测试HTTP及DOM路径。
+  - 开发先做每场景各版1次debug，确认有效后冻结配置再正式执行。
+  - 每场景每版2次预热与20次正式，分两轮旧新顺序交错，各10正式。
+  - 点击前能力必须已到同一明确阶段屏障；从真实click起10秒截止，未结束为右删失timeout。
+  - 成功要求页面权威cancelled、资源退出、终态完整提交、刷新一致、后续请求可运行且无误伤。
+  - 后处理隔离清理只能发生在样本判定后，不得算作被测系统取消成功。
+  - 不同钟不直接相减；browser总耗时和backend分段各用本钟，映射需报告误差，无映射字段为null。
+scenarios: [before_first, streaming, command, delegation] # 分别为首包前、流式中、命令树、父子委派
+data_models:
+  sample:
+    required: [protocol_version, version, scenario, phase, round, attempt, status, deadline_ms, browser_clock, backend_clock, cancel_success, overall_success, refresh_error, followup_success, unrelated_task_stopped]
+    status: [success, failure, timeout, entry_unavailable, invalid_fixture]
+    timestamps: [browser_click_ms, backend_receive_s, backend_resource_exit_s, backend_terminal_commits_s, browser_dom_terminal_ms]
+    latencies_ms: [browser_click_to_terminal_ms, backend_receive_to_resource_exit_ms, backend_receive_to_terminal_commit_ms, terminal_to_page_ms]
+    ownership: [target_session_id, target_run_id, cancel_http_target, target_commit_confirmed, persisted_target_outcome, resource_pids]
+    mapping: 原嵌套设计以扁平字段序列化，version对应source_commit，phase区分debug/warmup/formal，invalid_fixture由status表示，refresh_error为刷新不一致，schema_version在整批config中。
+  summary:
+    files: [config.json, environment.json, summary.json, qualification.json, boundary-audit.json, verification.json, report.md, formal.jsonl, warmup.jsonl, debug.jsonl]
+    mapping: 环境与源码事实在environment中，各版本场景统计在summary中，数量及无效输入在qualification中，原始样本与限制由report引用。
+acceptance:
+  - 主流程必须真实浏览器与真实HTTP，旧版和新版真实前端均加载。
+  - valid样本成功率分母含超时与失败；预热debug无效输入保留但单列；延迟仅有观测值者统计且列n。
+  - P50/P95/max与超过5秒比例可重算，超时不能伪造为10秒成功。
+  - 不宣称真实供应商远端停止、线上成功率或未测场景普遍性能保证。
+  - 可复现脚本和脱敏小型原始数据可随代码审阅，不只写入ignored reports。
+ownership:
+  coordinator: [本契约, 任务裁决, 最终提交]
+  developer: [benchmarks/cancellation_e2e/, benchmarks/baselines/cancellation_e2e_v1/, tests/benchmarks/关联新测试]
+tasks:
+  - {id: implement, role: developer, agent_id: /root/e2e_implement, status: accepted, model_requested: {model: gpt-6.1-sol, reasoning_effort: medium}, model_actual: null}
+  - {id: verify, role: verifier, agent_id: /root/e2e_measurement_review, status: accepted, writable: []}
+handoff:
+  completed: [最新master分支建立, 原有后端报告核对, 测量口径确定, 真实浏览器装配, v1废弃保留, v2正式160加预热16, 独立复算PASS, 5项统计测试通过]
+  remaining: []
+  blockers: []
+  next_action: 主代理单独提交测试与v2小型工件，不推送或建PR
+results:
+  path: benchmarks/baselines/cancellation_e2e_v1/20261109-browser-v2/
+  qualification: 160正式样本零invalid_fixture，16预热单列，旧批次全部单列无效不混计。
+  core: 新版前三场各20/20，旧版各20/20超时；委派两版各20入口缺失。
+  end_to_end: 新版点击到DOM中位334/392/431ms；旧版无成功延迟，不能算加速倍数。
+  incomplete: 取消记录刷新未回显，整体成功两版均0/80；不能以核心成功掩盖刷新及委派入口缺失。
+  limits: 本地受控Windows/Chromium，无跨钟映射，旧超时右删失；误停只检查核心结束时，P95为20样本探索分位。
+  cleanup: 自动审批拒绝删除旧v1派生目录（blocked by policy）；保留未跟踪，禁止纳入本次提交。

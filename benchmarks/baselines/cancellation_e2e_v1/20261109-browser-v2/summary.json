@@ -1,0 +1,430 @@
+{
+  "479e3cb": {
+    "before_first": {
+      "n": 20,
+      "cancel_success_n": 0,
+      "overall_success_n": 0,
+      "timeout_n": 20,
+      "entry_unavailable_n": 0,
+      "invalid_fixture_n": 0,
+      "refresh_error_n": 20,
+      "followup_success_n": 0,
+      "page_false_success_n": 0,
+      "unrelated_task_stopped_n": 0,
+      "latency": {
+        "browser_click_to_terminal_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_resource_exit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_terminal_commit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        }
+      },
+      "residual_resource_n": 0,
+      "cancel_success_rate": 0.0,
+      "overall_success_rate": 0.0,
+      "timeout_rate": 1.0,
+      "resource_exit_observed_all_statuses": {
+        "n": 20,
+        "p50": 3.5503500257618725,
+        "p95": 5.5165500496514195,
+        "max": 12.025000061839819,
+        "note": "独立局部诊断，包含取消未成功但真实观测到本地资源退出的样本，不能混入核心成功延迟"
+      },
+      "completed_gt_5000ms_n": 0,
+      "completed_gt_5000ms_rate": 0.0,
+      "not_completed_by_5000ms_n": 20,
+      "not_completed_by_5000ms_rate": 1.0,
+      "completed_gt_10000ms_n": 0,
+      "completed_gt_10000ms_rate": null,
+      "not_completed_by_10000ms_n": 20,
+      "not_completed_by_10000ms_rate": 1.0,
+      "completed_gt_10000ms_estimable": false,
+      "completed_gt_10000ms_note": "10秒截止后隔离清理，真实迟于10秒才完成的比例不可估；n仅是截止前的观测计数"
+    },
+    "streaming": {
+      "n": 20,
+      "cancel_success_n": 0,
+      "overall_success_n": 0,
+      "timeout_n": 20,
+      "entry_unavailable_n": 0,
+      "invalid_fixture_n": 0,
+      "refresh_error_n": 20,
+      "followup_success_n": 0,
+      "page_false_success_n": 0,
+      "unrelated_task_stopped_n": 0,
+      "latency": {
+        "browser_click_to_terminal_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_resource_exit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_terminal_commit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        }
+      },
+      "residual_resource_n": 0,
+      "cancel_success_rate": 0.0,
+      "overall_success_rate": 0.0,
+      "timeout_rate": 1.0,
+      "resource_exit_observed_all_statuses": {
+        "n": 20,
+        "p50": 3.4503000206314027,
+        "p95": 6.417810090351853,
+        "max": 10.763300000689924,
+        "note": "独立局部诊断，包含取消未成功但真实观测到本地资源退出的样本，不能混入核心成功延迟"
+      },
+      "completed_gt_5000ms_n": 0,
+      "completed_gt_5000ms_rate": 0.0,
+      "not_completed_by_5000ms_n": 20,
+      "not_completed_by_5000ms_rate": 1.0,
+      "completed_gt_10000ms_n": 0,
+      "completed_gt_10000ms_rate": null,
+      "not_completed_by_10000ms_n": 20,
+      "not_completed_by_10000ms_rate": 1.0,
+      "completed_gt_10000ms_estimable": false,
+      "completed_gt_10000ms_note": "10秒截止后隔离清理，真实迟于10秒才完成的比例不可估；n仅是截止前的观测计数"
+    },
+    "command": {
+      "n": 20,
+      "cancel_success_n": 0,
+      "overall_success_n": 0,
+      "timeout_n": 20,
+      "entry_unavailable_n": 0,
+      "invalid_fixture_n": 0,
+      "refresh_error_n": 20,
+      "followup_success_n": 0,
+      "page_false_success_n": 0,
+      "unrelated_task_stopped_n": 0,
+      "latency": {
+        "browser_click_to_terminal_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_resource_exit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_terminal_commit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        }
+      },
+      "residual_resource_n": 20,
+      "cancel_success_rate": 0.0,
+      "overall_success_rate": 0.0,
+      "timeout_rate": 1.0,
+      "resource_exit_observed_all_statuses": {
+        "n": 0,
+        "p50": null,
+        "p95": null,
+        "max": null,
+        "note": "独立局部诊断，包含取消未成功但真实观测到本地资源退出的样本，不能混入核心成功延迟"
+      },
+      "completed_gt_5000ms_n": 0,
+      "completed_gt_5000ms_rate": 0.0,
+      "not_completed_by_5000ms_n": 20,
+      "not_completed_by_5000ms_rate": 1.0,
+      "completed_gt_10000ms_n": 0,
+      "completed_gt_10000ms_rate": null,
+      "not_completed_by_10000ms_n": 20,
+      "not_completed_by_10000ms_rate": 1.0,
+      "completed_gt_10000ms_estimable": false,
+      "completed_gt_10000ms_note": "10秒截止后隔离清理，真实迟于10秒才完成的比例不可估；n仅是截止前的观测计数"
+    },
+    "delegation": {
+      "n": 20,
+      "cancel_success_n": 0,
+      "overall_success_n": 0,
+      "timeout_n": 0,
+      "entry_unavailable_n": 20,
+      "invalid_fixture_n": 0,
+      "refresh_error_n": 20,
+      "followup_success_n": 0,
+      "page_false_success_n": 0,
+      "unrelated_task_stopped_n": 0,
+      "latency": {
+        "browser_click_to_terminal_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_resource_exit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_terminal_commit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        }
+      },
+      "residual_resource_n": 0,
+      "cancel_success_rate": 0.0,
+      "overall_success_rate": 0.0,
+      "timeout_rate": 0.0,
+      "resource_exit_observed_all_statuses": {
+        "n": 0,
+        "p50": null,
+        "p95": null,
+        "max": null,
+        "note": "独立局部诊断，包含取消未成功但真实观测到本地资源退出的样本，不能混入核心成功延迟"
+      },
+      "completed_gt_5000ms_n": 0,
+      "completed_gt_5000ms_rate": 0.0,
+      "not_completed_by_5000ms_n": 20,
+      "not_completed_by_5000ms_rate": 1.0,
+      "completed_gt_10000ms_n": 0,
+      "completed_gt_10000ms_rate": null,
+      "not_completed_by_10000ms_n": 20,
+      "not_completed_by_10000ms_rate": 1.0,
+      "completed_gt_10000ms_estimable": false,
+      "completed_gt_10000ms_note": "10秒截止后隔离清理，真实迟于10秒才完成的比例不可估；n仅是截止前的观测计数"
+    }
+  },
+  "7860daa": {
+    "before_first": {
+      "n": 20,
+      "cancel_success_n": 20,
+      "overall_success_n": 0,
+      "timeout_n": 0,
+      "entry_unavailable_n": 0,
+      "invalid_fixture_n": 0,
+      "refresh_error_n": 20,
+      "followup_success_n": 20,
+      "page_false_success_n": 0,
+      "unrelated_task_stopped_n": 0,
+      "latency": {
+        "browser_click_to_terminal_ms": {
+          "n": 20,
+          "p50": 334.2999999523163,
+          "p95": 507.2150000214578,
+          "max": 708.8999999761581
+        },
+        "backend_receive_to_resource_exit_ms": {
+          "n": 20,
+          "p50": 56.060949980746955,
+          "p95": 117.05220504663892,
+          "max": 211.96109999436885
+        },
+        "backend_receive_to_terminal_commit_ms": {
+          "n": 20,
+          "p50": 316.39580003684387,
+          "p95": 480.4985400463922,
+          "max": 687.6163999550045
+        }
+      },
+      "residual_resource_n": 0,
+      "cancel_success_rate": 1.0,
+      "overall_success_rate": 0.0,
+      "timeout_rate": 0.0,
+      "resource_exit_observed_all_statuses": {
+        "n": 20,
+        "p50": 56.060949980746955,
+        "p95": 117.05220504663892,
+        "max": 211.96109999436885,
+        "note": "独立局部诊断，包含取消未成功但真实观测到本地资源退出的样本，不能混入核心成功延迟"
+      },
+      "completed_gt_5000ms_n": 0,
+      "completed_gt_5000ms_rate": 0.0,
+      "not_completed_by_5000ms_n": 0,
+      "not_completed_by_5000ms_rate": 0.0,
+      "completed_gt_10000ms_n": 0,
+      "completed_gt_10000ms_rate": null,
+      "not_completed_by_10000ms_n": 0,
+      "not_completed_by_10000ms_rate": 0.0,
+      "completed_gt_10000ms_estimable": false,
+      "completed_gt_10000ms_note": "10秒截止后隔离清理，真实迟于10秒才完成的比例不可估；n仅是截止前的观测计数"
+    },
+    "streaming": {
+      "n": 20,
+      "cancel_success_n": 20,
+      "overall_success_n": 0,
+      "timeout_n": 0,
+      "entry_unavailable_n": 0,
+      "invalid_fixture_n": 0,
+      "refresh_error_n": 20,
+      "followup_success_n": 20,
+      "page_false_success_n": 0,
+      "unrelated_task_stopped_n": 0,
+      "latency": {
+        "browser_click_to_terminal_ms": {
+          "n": 20,
+          "p50": 391.5999999642372,
+          "p95": 565.0449999511245,
+          "max": 1016.1999999284744
+        },
+        "backend_receive_to_resource_exit_ms": {
+          "n": 20,
+          "p50": 54.65990002267063,
+          "p95": 94.83089505811223,
+          "max": 109.6906999591738
+        },
+        "backend_receive_to_terminal_commit_ms": {
+          "n": 20,
+          "p50": 369.3263999884948,
+          "p95": 544.511334964773,
+          "max": 995.8456000313163
+        }
+      },
+      "residual_resource_n": 0,
+      "cancel_success_rate": 1.0,
+      "overall_success_rate": 0.0,
+      "timeout_rate": 0.0,
+      "resource_exit_observed_all_statuses": {
+        "n": 20,
+        "p50": 54.65990002267063,
+        "p95": 94.83089505811223,
+        "max": 109.6906999591738,
+        "note": "独立局部诊断，包含取消未成功但真实观测到本地资源退出的样本，不能混入核心成功延迟"
+      },
+      "completed_gt_5000ms_n": 0,
+      "completed_gt_5000ms_rate": 0.0,
+      "not_completed_by_5000ms_n": 0,
+      "not_completed_by_5000ms_rate": 0.0,
+      "completed_gt_10000ms_n": 0,
+      "completed_gt_10000ms_rate": null,
+      "not_completed_by_10000ms_n": 0,
+      "not_completed_by_10000ms_rate": 0.0,
+      "completed_gt_10000ms_estimable": false,
+      "completed_gt_10000ms_note": "10秒截止后隔离清理，真实迟于10秒才完成的比例不可估；n仅是截止前的观测计数"
+    },
+    "command": {
+      "n": 20,
+      "cancel_success_n": 20,
+      "overall_success_n": 0,
+      "timeout_n": 0,
+      "entry_unavailable_n": 0,
+      "invalid_fixture_n": 0,
+      "refresh_error_n": 20,
+      "followup_success_n": 20,
+      "page_false_success_n": 0,
+      "unrelated_task_stopped_n": 0,
+      "latency": {
+        "browser_click_to_terminal_ms": {
+          "n": 20,
+          "p50": 431.39999997615814,
+          "p95": 737.2149999320508,
+          "max": 880.0
+        },
+        "backend_receive_to_resource_exit_ms": {
+          "n": 20,
+          "p50": 68.80359997740015,
+          "p95": 149.05882001039578,
+          "max": 216.61940007470548
+        },
+        "backend_receive_to_terminal_commit_ms": {
+          "n": 20,
+          "p50": 409.8884499981068,
+          "p95": 720.8700499322732,
+          "max": 850.2153999870643
+        }
+      },
+      "residual_resource_n": 0,
+      "cancel_success_rate": 1.0,
+      "overall_success_rate": 0.0,
+      "timeout_rate": 0.0,
+      "resource_exit_observed_all_statuses": {
+        "n": 20,
+        "p50": 68.80359997740015,
+        "p95": 149.05882001039578,
+        "max": 216.61940007470548,
+        "note": "独立局部诊断，包含取消未成功但真实观测到本地资源退出的样本，不能混入核心成功延迟"
+      },
+      "completed_gt_5000ms_n": 0,
+      "completed_gt_5000ms_rate": 0.0,
+      "not_completed_by_5000ms_n": 0,
+      "not_completed_by_5000ms_rate": 0.0,
+      "completed_gt_10000ms_n": 0,
+      "completed_gt_10000ms_rate": null,
+      "not_completed_by_10000ms_n": 0,
+      "not_completed_by_10000ms_rate": 0.0,
+      "completed_gt_10000ms_estimable": false,
+      "completed_gt_10000ms_note": "10秒截止后隔离清理，真实迟于10秒才完成的比例不可估；n仅是截止前的观测计数"
+    },
+    "delegation": {
+      "n": 20,
+      "cancel_success_n": 0,
+      "overall_success_n": 0,
+      "timeout_n": 0,
+      "entry_unavailable_n": 20,
+      "invalid_fixture_n": 0,
+      "refresh_error_n": 20,
+      "followup_success_n": 0,
+      "page_false_success_n": 0,
+      "unrelated_task_stopped_n": 0,
+      "latency": {
+        "browser_click_to_terminal_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_resource_exit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "backend_receive_to_terminal_commit_ms": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        }
+      },
+      "residual_resource_n": 0,
+      "cancel_success_rate": 0.0,
+      "overall_success_rate": 0.0,
+      "timeout_rate": 0.0,
+      "resource_exit_observed_all_statuses": {
+        "n": 0,
+        "p50": null,
+        "p95": null,
+        "max": null,
+        "note": "独立局部诊断，包含取消未成功但真实观测到本地资源退出的样本，不能混入核心成功延迟"
+      },
+      "completed_gt_5000ms_n": 0,
+      "completed_gt_5000ms_rate": 0.0,
+      "not_completed_by_5000ms_n": 20,
+      "not_completed_by_5000ms_rate": 1.0,
+      "completed_gt_10000ms_n": 0,
+      "completed_gt_10000ms_rate": null,
+      "not_completed_by_10000ms_n": 20,
+      "not_completed_by_10000ms_rate": 1.0,
+      "completed_gt_10000ms_estimable": false,
+      "completed_gt_10000ms_note": "10秒截止后隔离清理，真实迟于10秒才完成的比例不可估；n仅是截止前的观测计数"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "status": "invalid_run",
+  "reason": "initial automatic session open raced new-session click; whole run invalidated; no selection or replacement",
+  "aborted_at": "2026-11-09T07:45:31.013690+00:00",
+  "runner_pid": 57164,
+  "formal_count": 17,
+  "interrupted_sample_status": "run_aborted",
+  "original_raw_preserved": true,
+  "raw_source_directory": "D:\\dev\\dotClaw\\reports\\cancellation_e2e_20261109",
+  "excluded_from_current_formal_statistics": true
+}
