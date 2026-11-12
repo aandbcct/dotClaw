@@ -29,10 +29,10 @@ async def test_repeated_cancel_waits_for_file_thread_and_actual_close(tmp_path, 
     module = memory_tool if operation.startswith("memory") else file_tool
     monkeypatch.setattr(module, "open", blocked_open, raising=False)
     calls = {
-        "read": lambda: file_tool.read_text(file_tool.ReadTextArgs(path=str(path)), ToolContext()),
-        "write": lambda: file_tool.write_text(file_tool.WriteTextArgs(path=str(path), content="new"), ToolContext()),
-        "memory_read": lambda: memory_tool.read(memory_tool.MemoryReadArgs(long_term_file=str(path)), ToolContext()),
-        "memory_write": lambda: memory_tool.write(memory_tool.MemoryWriteArgs(long_term_file=str(path), content="new"), ToolContext()),
+        "read": lambda: file_tool.read_text(str(path), context=ToolContext()),
+        "write": lambda: file_tool.write_text(str(path), "new", context=ToolContext()),
+        "memory_read": lambda: memory_tool.read(str(path), context=ToolContext()),
+        "memory_write": lambda: memory_tool.write("new", str(path), context=ToolContext()),
     }
     task = asyncio.create_task(calls[operation]())
     try:
@@ -64,7 +64,7 @@ async def test_directory_enumeration_is_off_loop_and_waits_for_worker(tmp_path, 
                 raise TimeoutError("测试没有释放目录I/O屏障")
         return original(path)
     monkeypatch.setattr(Path, "iterdir", blocked)
-    task = asyncio.create_task(file_tool.list_directory(file_tool.ListDirectoryArgs(path=str(tmp_path)), ToolContext()))
+    task = asyncio.create_task(file_tool.list_directory(str(tmp_path), context=ToolContext()))
     try:
         assert await asyncio.to_thread(entered.wait, 2)
         task.cancel()

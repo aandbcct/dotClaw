@@ -23,6 +23,10 @@ class AddArgs(BaseModel):
     b: int
 
 
+class NestedValue(BaseModel):
+    value: int
+
+
 @tool(name="demo.add", args_model=AddArgs, description="加法")
 async def add(args: AddArgs) -> str:
     return str(args.a + args.b)
@@ -108,6 +112,21 @@ async def test_function_handler_definition_uses_args_model_schema() -> None:
     assert definition.name == "demo.add"
     assert definition.parameters["type"] == "object"
     assert "a" in definition.parameters["properties"]
+
+
+async def test_inferred_fields_preserve_nested_model_value() -> None:
+    """签名推导拆包时保留嵌套业务模型的 Python 类型。"""
+    async def consume(value: NestedValue) -> str:
+        return type(value).__name__
+
+    from dotclaw.tools.discovery import _infer_args_model, _with_inferred
+
+    inferred = _infer_args_model(consume, "demo.nested")
+    assert inferred is not None
+    meta = _with_inferred(ToolMeta(name="demo.nested", description="嵌套参数"), inferred)
+    handler = FunctionToolHandler(consume, meta)
+    result = await handler.execute({"value": {"value": 3}}, ToolExecutionContext())
+    assert result.output == "NestedValue"
 
 
 async def test_signature_analyzed_once_not_per_call(monkeypatch: pytest.MonkeyPatch) -> None:

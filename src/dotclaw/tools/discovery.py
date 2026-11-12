@@ -16,9 +16,14 @@ import inspect
 import logging
 import pkgutil
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from enum import Enum
+from math import isfinite
+from types import UnionType
+from typing import Annotated, Any, Callable, Literal, Union, get_args, get_origin, get_type_hints
 
-from pydantic import BaseModel, create_model
+from pydantic import AfterValidator, BeforeValidator, BaseModel, ConfigDict, create_model
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 
 from .base import ToolExecutionContext, ToolSource
 from .decorator import ToolMeta, get_tool_meta
@@ -28,7 +33,7 @@ from .registry import DuplicateToolError
 
 logger = logging.getLogger("dotclaw.tools.discovery")
 
-# 签名推导支持的基础标量类型（总体设计 §4.1）。
+# 签名推导支持的 JSON 标量类型（总体设计 §4.1）。
 _BASIC_TYPES = (str, int, float, bool)
 
 
@@ -142,86 +147,150 @@ def _iter_tool_functions(package: str, report: DiscoveryReport) -> list[Callable
 
 
 def _safe_signature(func: Callable[..., Any]) -> inspect.Signature:
-    """解析函数签名；优先 eval_str=True（解析字符串注解），失败则降级为非 eval。
-
-    生产 builtin 的类型均在模块级导入，可正常解析；仅测试或异常场景会降级。
-    降级后注解保留为字符串，调用方按严格规则判为不支持（拒绝而非降级）。
-    """
+    """解析参数结构；完整注解由 _resolve_annotations 严格解析，失败不降级。"""
     try:
         return inspect.signature(func, eval_str=True)
     except Exception:
         return inspect.signature(func, eval_str=False)
 
 
-def _is_context_param(param: inspect.Parameter) -> bool:
-    """判断形参是否为运行上下文（按名称或注解）。"""
-    return param.name in ("context", "ctx") or param.annotation in (
-        ToolExecutionContext,
-        ToolExecutionContext,  # 别名兼容
-    )
+def _resolve_annotations(func: Callable[..., Any], tool_name: str) -> dict[str, Any]:
+    """解析完整注解并保留 Annotated 元数据，失败即在发现阶段拒绝工具。"""
+    try:
+        return get_type_hints(func, include_extras=True)
+    except Exception as exc:
+        raise ToolDeclarationError(tool_name, f"函数注解无法解析: {exc}") from exc
 
 
-def _infer_args_model(func: Callable[..., Any], tool_name: str) -> type[BaseModel] | None:
+def _infer_args_model(func: Callable[..., Any], tool_name: str) -> type[BaseModel]:
     """从函数签名推导等价 Pydantic 模型。
 
-    支持范围（总体设计 §4.1）：
-    - 零参函数 → 返回 None（无参对象）。
-    - 全部业务参数为 str/int/float/bool 的普通位置/关键字参数（允许字面量默认值）。
-
-    以下一律不支持，直接抛 ToolDeclarationError：
-    Optional/Union、容器、枚举、嵌套模型、Annotated 约束、仅位置参数、
-    *args、**kwargs、自定义类型、缺少类型注解。
+    为直接签名创建唯一的内部参数模型；上下文不进入模型字段。
     """
     sig = _safe_signature(func)
+    annotations = _resolve_annotations(func, tool_name)
     business: list[inspect.Parameter] = []
+    contexts = 0
     for param in sig.parameters.values():
-        if _is_context_param(param):
+        annotation = annotations.get(param.name, inspect.Parameter.empty)
+        if annotation is ToolExecutionContext:
+            contexts += 1
+            if param.kind not in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
+            ):
+                raise ToolDeclarationError(tool_name, "上下文参数必须是命名参数")
+            if param.default is not inspect.Parameter.empty:
+                raise ToolDeclarationError(tool_name, "上下文参数不能有默认值")
             continue
-        business.append(param)
-
-    if not business:
-        return None
-
-    fields: dict[str, Any] = {}
-    for param in business:
-        ann = param.annotation
-        if ann is inspect.Parameter.empty or ann is None:
-            raise ToolDeclarationError(
-                tool_name, f"参数 '{param.name}' 缺少类型注解，无法推导"
-            )
+        if param.name in {"context", "ctx"}:
+            raise ToolDeclarationError(tool_name, f"业务参数名 '{param.name}' 为保留名称")
         if param.kind not in (
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
         ):
-            raise ToolDeclarationError(
-                tool_name,
-                f"参数 '{param.name}' 为仅位置/*args/**kwargs，不在推导支持范围",
-            )
-        if isinstance(ann, str):
-            # 注解无法解析（如局部定义的类型）；严格按不支持拒绝，绝不降级。
-            raise ToolDeclarationError(
-                tool_name,
-                f"参数 '{param.name}' 的注解无法解析，不在推导支持范围",
-            )
-        if ann not in _BASIC_TYPES:
-            # 覆盖 Optional/Union、容器、枚举、嵌套模型、Annotated、自定义类型。
-            raise ToolDeclarationError(
-                tool_name,
-                f"参数 '{param.name}' 的类型 {_type_label(ann)} 不在推导支持范围"
-                f"（仅支持 str/int/float/bool）",
-            )
+            raise ToolDeclarationError(tool_name, f"参数 '{param.name}' 不是命名参数或 keyword-only")
+        if annotation is inspect.Parameter.empty:
+            raise ToolDeclarationError(tool_name, f"参数 '{param.name}' 缺少类型注解")
+        if isinstance(param.default, FieldInfo):
+            raise ToolDeclarationError(tool_name, f"参数 '{param.name}' 的默认值必须写在函数签名中")
+        _validate_annotation(annotation, tool_name, param.name, set())
+        business.append(param)
+
+    if contexts > 1:
+        raise ToolDeclarationError(tool_name, "最多允许一个上下文参数")
+
+    fields: dict[str, Any] = {}
+    for param in business:
+        ann = annotations[param.name]
         if param.default is inspect.Parameter.empty:
             fields[param.name] = (ann, ...)
         else:
             fields[param.name] = (ann, param.default)
 
     model_name = f"{getattr(func, '__name__', 'tool')}Args"
-    return create_model(model_name, **fields)
+    try:
+        model = create_model(model_name, __config__=ConfigDict(extra="forbid", validate_default=True), **fields)
+        from .schema import to_json_schema
+
+        to_json_schema(model)
+        return model
+    except ToolDeclarationError:
+        raise
+    except Exception as exc:
+        raise ToolDeclarationError(tool_name, f"参数 schema 无法生成: {exc}") from exc
 
 
-def _with_inferred(meta: ToolMeta, inferred: type[BaseModel] | None) -> ToolMeta:
+def _validate_annotation(
+    annotation: Any,
+    tool_name: str,
+    parameter: str,
+    model_stack: set[type[BaseModel]],
+    *,
+    check_field_metadata: bool = True,
+) -> None:
+    """验证声明只使用支持的业务类型，并拒绝循环 Pydantic schema。"""
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Annotated:
+        base, *metadata = args
+        for item in metadata:
+            if isinstance(item, FieldInfo):
+                if check_field_metadata and (item.default is not PydanticUndefined or item.default_factory is not None
+                        or item.alias is not None or item.validation_alias is not None
+                        or item.serialization_alias is not None):
+                    raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 的 Field 不支持默认值或 alias")
+            elif not isinstance(item, (BeforeValidator, AfterValidator)):
+                raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 的 Annotated 元数据不受支持")
+        _validate_annotation(base, tool_name, parameter, model_stack, check_field_metadata=check_field_metadata)
+        return
+    if annotation in _BASIC_TYPES:
+        return
+    if annotation is Any or annotation is inspect.Parameter.empty or isinstance(annotation, str):
+        raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 的类型不受支持或未解析")
+    if origin is Literal:
+        if not args or any(not _is_json_scalar(item) for item in args):
+            raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 的 Literal 必须是 JSON 标量")
+        return
+    if origin in (Union, UnionType):
+        if len(args) != 2 or type(None) not in args:
+            raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 只支持单类型可空联合")
+        branch = args[0] if args[1] is type(None) else args[1]
+        _validate_annotation(branch, tool_name, parameter, model_stack, check_field_metadata=check_field_metadata)
+        return
+    if origin is list:
+        if len(args) != 1:
+            raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 的 list 必须声明元素类型")
+        _validate_annotation(args[0], tool_name, parameter, model_stack, check_field_metadata=check_field_metadata)
+        return
+    if origin is dict:
+        if len(args) != 2 or args[0] is not str:
+            raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 只支持 dict[str, T]")
+        _validate_annotation(args[1], tool_name, parameter, model_stack, check_field_metadata=check_field_metadata)
+        return
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        if any(not _is_json_scalar(member.value) for member in annotation):
+            raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 的 Enum 值必须是 JSON 标量")
+        return
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if annotation in model_stack:
+            raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 的嵌套模型包含循环 schema")
+        next_stack = model_stack | {annotation}
+        for field_info in annotation.model_fields.values():
+            _validate_annotation(
+                field_info.annotation, tool_name, parameter, next_stack,
+                check_field_metadata=False,
+            )
+        return
+    raise ToolDeclarationError(tool_name, f"参数 '{parameter}' 的类型 {_type_label(annotation)} 不受支持")
+
+
+def _is_json_scalar(value: Any) -> bool:
+    return value is None or type(value) in (str, int, float, bool) and (not isinstance(value, float) or isfinite(value))
+
+
+def _with_inferred(meta: ToolMeta, inferred: type[BaseModel]) -> ToolMeta:
     """基于推导出的模型生成新元数据（args_style='fields'）。"""
-    return replace(meta, args_model=inferred, args_style="fields" if inferred is not None else "model")
+    return replace(meta, args_model=inferred, args_style="fields")
 
 
 def _type_label(ann: Any) -> str:

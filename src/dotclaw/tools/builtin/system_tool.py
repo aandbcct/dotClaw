@@ -23,7 +23,7 @@ from dotclaw.common.tool_replay import ToolReplayPolicy, ToolSideEffect
     replay_policy=ToolReplayPolicy.SAFE_RETRY, replay_contract_version="1",
     side_effect=ToolSideEffect.NONE, recovery_max_retries=3,
 )
-async def get_info(context: ToolContext) -> str:
+async def get_info(*, context: ToolContext) -> str:
     """返回系统时间、当前目录、环境变量概要。"""
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cwd = os.getcwd()

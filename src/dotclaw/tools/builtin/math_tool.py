@@ -20,14 +20,14 @@ import ast
 import json
 import logging
 import math
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import AfterValidator
 from simpleeval import SimpleEval
 
 from dotclaw.tools.base import ToolContext, ToolErrorCode, ToolResult
 from dotclaw.tools.decorator import tool
-from dotclaw.common.tool_replay import ToolReplayPolicy, ToolSideEffect
+from dotclaw.common.tool_replay import ToolExecutionEvidence, ToolReplayPolicy, ToolSideEffect
 
 logger = logging.getLogger("dotclaw.tools.builtin.math")
 
@@ -77,20 +77,12 @@ _MATH_FUNCS: dict[str, Any] = {
 _MATH_NAMES: dict[str, float] = {"pi": math.pi, "e": math.e, "tau": math.tau}
 
 
-class CalculateArgs(BaseModel):
-    """计算参数（显式 Pydantic 模型，严格校验；extra=forbid）。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    expression: str
-
-    @field_validator("expression")
-    @classmethod
-    def _validate_expression(cls, v: str) -> str:
-        v = v.strip()
-        if not (1 <= len(v) <= _MAX_EXPR_LEN):
-            raise ValueError("expression 需为去除首尾空白后 1–256 字符")
-        return v
+def _validate_expression(value: str) -> str:
+    """清理表达式首尾空白并保留原长度限制。"""
+    value = value.strip()
+    if not (1 <= len(value) <= _MAX_EXPR_LEN):
+        raise ValueError("expression 需为去除首尾空白后 1–256 字符")
+    return value
 
 
 def _safe_pow(base: float, exp: float) -> float:
@@ -175,14 +167,13 @@ def _safe_eval(expression: str) -> float | int:
         "括号、固定数学函数（sqrt/log/exp/sin/cos 等）与常量 pi/e/tau。仅做数值计算，"
         "不执行任意代码。"
     ),
-    args_model=CalculateArgs,
     replay_policy=ToolReplayPolicy.SAFE_RETRY, replay_contract_version="1",
     side_effect=ToolSideEffect.NONE, recovery_max_retries=3,
 )
-async def math_calculate(args: CalculateArgs, context: ToolContext) -> ToolResult:
+async def math_calculate(expression: Annotated[str, AfterValidator(_validate_expression)], *, context: ToolContext) -> ToolResult:
     """执行受限表达式计算，返回脱敏的有限数值结果或安全的计算错误。"""
     try:
-        value = _safe_eval(args.expression)
+        value = _safe_eval(expression)
     except ZeroDivisionError:
         return ToolResult.from_error(
             code=ToolErrorCode.EXECUTION_ERROR, message="计算错误：除以零",
@@ -203,6 +194,6 @@ async def math_calculate(args: CalculateArgs, context: ToolContext) -> ToolResul
 
     return ToolResult(
         output=json.dumps(
-            {"expression": args.expression, "result": value}, ensure_ascii=False
+            {"expression": expression, "result": value}, ensure_ascii=False
         )
     )

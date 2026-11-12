@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from dotclaw.tools.process_supervisor import ProcessSupervisor
-from dotclaw.tools.builtin.exec_tool import execute, ExecArgs
+from dotclaw.tools.builtin.exec_tool import execute
 from dotclaw.tools.base import ToolContext
 from dotclaw.common.resource_errors import ResourceCleanupError
 
@@ -178,7 +178,7 @@ async def test_cancel_during_creation_retains_resource_then_cleans_once(tmp_path
 async def test_natural_exit_and_context_timeout_are_respected() -> None:
     assert "natural-success" in await ProcessSupervisor().run("echo natural-success", 3)
     with pytest.raises(TimeoutError):
-        await execute(ExecArgs(command=f'"{sys.executable}" -c "import time;time.sleep(5)"'), ToolContext(timeout=.1))
+        await execute(f'"{sys.executable}" -c "import time;time.sleep(5)"', context=ToolContext(timeout=.1))
 
 
 async def test_shell_exit_does_not_hide_descendants_holding_stdout(tmp_path) -> None:

@@ -123,14 +123,14 @@ def tool(
 ) -> Callable[[FuncT], FuncT]:
     """声明一个工具的元数据。
 
-    用法：
-        @tool(name="builtin.files.read_text", args_model=ReadTextArgs,
-              policy=ToolPolicy.WORKSPACE_READ)
-        async def read_text(args: ReadTextArgs, context: ToolExecutionContext) -> str:
+    新工具优先直接声明业务参数：
+        @tool(name="builtin.files.read_text", policy=ToolPolicy.WORKSPACE_READ)
+        async def read_text(path: Annotated[str, Field(description="路径")], *,
+                            context: ToolExecutionContext) -> str:
             ...
 
-        @tool(name="builtin.web.search", args_model=SearchArgs,
-              policy=ToolPolicy.NETWORK,
+    旧自定义工具仍可通过 args_model 保持兼容：
+        @tool(name="custom.web.search", args_model=SearchArgs, policy=ToolPolicy.NETWORK,
               network_service="tavily", network_hosts=["api.tavily.com"])
         async def search(args: SearchArgs, context: ToolExecutionContext) -> str:
             ...

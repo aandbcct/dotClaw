@@ -5,12 +5,12 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any
 
 from dotclaw.tools.decorator import tool
 
 
-@tool(name="sample.bad_optional", description="不支持：Optional 参数")
-async def bad_optional(value: Optional[int]) -> str:
-    """Optional 不在推导支持范围，Discovery 必须拒绝而非降级为无校验。"""
+@tool(name="sample.bad_any", description="不支持：Any 参数")
+async def bad_any(value: Any) -> str:
+    """Any 不在推导支持范围，Discovery 必须拒绝而非降级为无校验。"""
     return "x"

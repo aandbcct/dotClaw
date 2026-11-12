@@ -7,10 +7,11 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from enum import Enum
+from typing import Annotated, Any, Optional
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from dotclaw.tools.base import ToolExecutionContext
 from dotclaw.tools.decorator import ToolMeta, tool
@@ -19,6 +20,19 @@ from dotclaw.tools.discovery import (
     ToolDiscovery,
     _infer_args_model,
 )
+
+
+class DiscoveryInner(BaseModel):
+    value: int
+
+
+class DiscoveryColor(str, Enum):
+    RED = "red"
+    BLUE = "blue"
+
+
+class RecursiveModel(BaseModel):
+    child: RecursiveModel | None = None
 
 
 def _handler_by_name(handlers, name):
@@ -86,11 +100,15 @@ async def _noop() -> str:
     return "x"
 
 
-def test_infer_zero_arg_returns_none() -> None:
+def test_infer_zero_arg_returns_empty_model() -> None:
     async def f() -> str:
         return "x"
 
-    assert _infer_args_model(f, "f") is None
+    model = _infer_args_model(f, "f")
+    assert model.model_fields == {}
+    assert model.model_config["extra"] == "forbid"
+    assert model.model_config["validate_default"] is True
+    assert model.model_json_schema()["additionalProperties"] is False
 
 
 def test_infer_basic_fields_succeeds() -> None:
@@ -107,11 +125,12 @@ def _expect_declaration(func, name: str) -> None:
         _infer_args_model(func, name)
 
 
-def test_infer_rejects_optional() -> None:
+def test_infer_supports_required_nullable_type() -> None:
     async def f(x: Optional[int]) -> str:
         return "x"
 
-    _expect_declaration(f, "f")
+    model = _infer_args_model(f, "f")
+    assert model.model_fields["x"].is_required()
 
 
 def test_infer_rejects_union() -> None:
@@ -121,39 +140,85 @@ def test_infer_rejects_union() -> None:
     _expect_declaration(f, "f")
 
 
-def test_infer_rejects_list() -> None:
+def test_infer_supports_typed_list() -> None:
     async def f(items: list[str]) -> str:
         return "x"
 
-    _expect_declaration(f, "f")
+    model = _infer_args_model(f, "f")
+    assert model.model_fields["items"].annotation == list[str]
 
 
-def test_infer_rejects_enum() -> None:
-    from enum import Enum
-
-    class Color(Enum):
-        RED = 1
-
-    async def f(c: Color) -> str:
+def test_infer_supports_json_enum() -> None:
+    async def f(c: DiscoveryColor) -> str:
         return "x"
 
-    _expect_declaration(f, "f")
+    model = _infer_args_model(f, "f")
+    assert model.model_fields["c"].annotation is DiscoveryColor
 
 
-def test_infer_rejects_nested_model() -> None:
-    class Inner(BaseModel):
-        a: str
-
-    async def f(x: Inner) -> str:
+def test_infer_supports_nested_model() -> None:
+    async def f(x: DiscoveryInner) -> str:
         return "x"
 
-    _expect_declaration(f, "f")
+    model = _infer_args_model(f, "f")
+    assert model.model_fields["x"].annotation is DiscoveryInner
 
 
-def test_infer_rejects_annotated() -> None:
-    from typing import Annotated
+def test_infer_preserves_annotated_field_constraints() -> None:
+    async def f(x: Annotated[int, Field(ge=1)]) -> str:
+        return "x"
 
-    async def f(x: Annotated[int, "gt=0"]) -> str:  # type: ignore[valid-type]
+    model = _infer_args_model(f, "f")
+    assert model.model_json_schema()["properties"]["x"]["minimum"] == 1
+
+
+def test_infer_rejects_any_and_reserved_context_name() -> None:
+    async def any_value(value: Any) -> str:
+        return "x"
+
+    async def reserved(context: str) -> str:
+        return "x"
+
+    _expect_declaration(any_value, "any_value")
+    _expect_declaration(reserved, "reserved")
+
+
+def test_infer_context_is_keyword_only_and_not_in_schema() -> None:
+    async def f(value: int, *, runtime: ToolExecutionContext) -> str:
+        return str(value)
+
+    model = _infer_args_model(f, "f")
+    assert set(model.model_fields) == {"value"}
+
+
+def test_infer_rejects_non_keyword_context_parameters() -> None:
+    async def positional_only(context: ToolExecutionContext, /) -> str:
+        return "x"
+
+    async def variadic_context(*context: ToolExecutionContext) -> str:
+        return "x"
+
+    _expect_declaration(positional_only, "positional_only")
+    _expect_declaration(variadic_context, "variadic_context")
+
+
+def test_infer_rejects_field_defaults_aliases_and_default_factory() -> None:
+    async def field_default(value: Annotated[int, Field(default=2)]) -> str:
+        return "x"
+
+    async def alias(value: Annotated[int, Field(alias="renamed")]) -> str:
+        return "x"
+
+    async def factory(value: list[int] = Field(default_factory=list)) -> str:
+        return "x"
+
+    _expect_declaration(field_default, "field_default")
+    _expect_declaration(alias, "alias")
+    _expect_declaration(factory, "factory")
+
+
+def test_infer_rejects_recursive_nested_schema() -> None:
+    async def f(value: RecursiveModel) -> str:
         return "x"
 
     _expect_declaration(f, "f")
