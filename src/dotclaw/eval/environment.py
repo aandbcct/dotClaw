@@ -30,6 +30,7 @@ from ..runtime.application.dto import ConversationSnapshot, RunRequest, RunResul
 from ..runtime.application.engine import RuntimeEngine
 from ..runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
 from ..runtime.adapters.in_memory_run_repository import InMemoryRunRepository
+from ..runtime.adapters.checkpoint_repository import _validate_checkpoint_payload
 from ..runtime.application.ports import (
     ApprovalRepository,
     CheckpointRepository,
@@ -85,6 +86,32 @@ class InMemoryCheckpointRepository:
     async def delete(self, session_id: str, run_id: str) -> None:
         """删除已不再需要的检查点。"""
         self._checkpoints.pop((session_id, run_id), None)
+
+    async def ensure_tool_checkpoint(
+        self,
+        base: RunCheckpoint | None,
+        target: RunCheckpoint | None,
+    ) -> None:
+        """按 base/target 条件幂等保存或删除工具投影检查点。"""
+        if base is None and target is None:
+            return
+        if target is not None:
+            _validate_checkpoint_payload(target)
+        reference = target if target is not None else base
+        if base is not None and target is not None and (base.session_id, base.run_id) != (target.session_id, target.run_id):
+            raise ValueError("工具检查点投影的 base/target 身份必须一致")
+        key = (reference.session_id, reference.run_id)
+        current = self._checkpoints.get(key)
+        if current is not None and (current.session_id, current.run_id) != key:
+            raise ValueError("工具检查点存储容器身份不一致")
+        if current == target:
+            return
+        if current != base:
+            raise ValueError("工具检查点投影基线已变化")
+        if target is None:
+            self._checkpoints.pop(key, None)
+        else:
+            self._checkpoints[key] = target
 
 
 class _FixedTokenCounter:
@@ -391,6 +418,19 @@ class _ApprovalRepositoryComposite:
             raise FixtureConfigurationError("未配置审批 fixture 或真实审批仓储")
         self.real_served += 1
         await self._real.create(record)
+
+    async def ensure(self, record: Any) -> None:
+        """将冻结审批投影写入当前优先仓储。"""
+        if self._fixture is not None:
+            await self._fixture.ensure(record)
+            self.fixture_served += 1
+            return
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("Playback 模式禁止回退到真实审批仓储")
+        if self._real is None:
+            raise FixtureConfigurationError("未配置审批 fixture 或真实审批仓储")
+        self.real_served += 1
+        await self._real.ensure(record)
 
     async def load(self, approval_id: str) -> Any:
         """优先读取 Fixture 记录；未命中且允许回退时才查询真实仓储。"""

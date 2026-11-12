@@ -33,6 +33,7 @@ class RunStorageFileName(StrEnum):
     CANCEL_COMMIT = "cancel_commit.json"
     SUCCESS_COMMIT = "success_commit.json"
     """成功提交期间临时存在的可恢复事务意图记录。"""
+    TOOL_CALLS = "tool_calls.json"
 
 
 class SessionStorageFileName(StrEnum):
@@ -77,6 +78,34 @@ def write_json_atomic(path: Path, payload: JSONMap) -> None:
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
         # Windows 的短暂共享占用不改变原子替换协议；各次尝试复用同一完整临时文件。
+        for attempt in range(5):
+            try:
+                temporary_path.replace(path)
+                break
+            except PermissionError as error:
+                if not _IS_WINDOWS or getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 4:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
+    except BaseException:
+        if temporary_path.exists():
+            temporary_path.unlink()
+        raise
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """将完整文本写入同目录临时文件后原子替换目标文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_path_text = tempfile.mkstemp(
+        prefix=f".{path.stem}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary_path = Path(temporary_path_text)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8", newline="\n") as temporary_file:
+            temporary_file.write(text)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
         for attempt in range(5):
             try:
                 temporary_path.replace(path)

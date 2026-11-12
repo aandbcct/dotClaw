@@ -17,6 +17,7 @@ from ..domain.facts import (
     AgentPolicySnapshot,
     ToolCall,
 )
+from ..domain.tool_recovery import ToolCallLedger
 from .context_budget import TokenCountRequest, TokenCountResult
 from .context_compaction import ContextCompactionRequest, ContextCompactionResult
 from .history_compaction import HistoryCompactionRequest, HistoryCompactionResult
@@ -139,8 +140,20 @@ class RunRepository(Protocol):
     async def save_run(self, run: AgentRun) -> None:
         """原子更新运行摘要。"""
 
+    async def ensure_tool_run(self, base_run: AgentRun, target_run: AgentRun) -> None:
+        """目标已存在则幂等成功；仅当前等于 base_run 时写入目标。"""
+
+    async def load_tool_ledger(self, session_id: str, run_id: str) -> ToolCallLedger | None:
+        """加载严格校验归属的工具账本，不存在返回 None。"""
+
+    async def save_tool_ledger(self, ledger: ToolCallLedger, *, expected_revision: int) -> None:
+        """按预期修订号保存下一账本版本。"""
+
     async def save_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         """原子更新完整运行消息。"""
+
+    async def ensure_tool_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
+        """按 ID 与完整内容幂等补写连续消息。"""
 
     async def append_context_version(
         self,
@@ -181,6 +194,9 @@ class RunRepository(Protocol):
     async def load_events(self, session_id: str, run_id: str) -> tuple[RunEvent, ...]:
         """读取按 sequence 连续排列的运行事件。"""
 
+    async def ensure_tool_events(self, session_id: str, events: tuple[RunEvent, ...]) -> None:
+        """校验连续事件前缀并原子替换完整 JSONL。"""
+
     async def commit_success(
         self,
         run: AgentRun,
@@ -202,6 +218,13 @@ class CheckpointRepository(Protocol):
 
     async def delete(self, session_id: str, run_id: str) -> None:
         """删除已经不再需要的检查点。"""
+
+    async def ensure_tool_checkpoint(
+        self,
+        base: RunCheckpoint | None,
+        target: RunCheckpoint | None,
+    ) -> None:
+        """按 base/target 条件幂等保存或删除工具投影检查点。"""
 
 
 class ContextPort(Protocol):
@@ -257,6 +280,9 @@ class ApprovalRepository(Protocol):
 
     async def create(self, record: ApprovalRecord) -> None:
         """创建审批记录。"""
+
+    async def ensure(self, record: ApprovalRecord) -> None:
+        """幂等投影审批记录，拒绝身份变化或决议翻转。"""
 
     async def load(self, approval_id: str) -> ApprovalRecord | None:
         """按审批 ID 查找记录。"""

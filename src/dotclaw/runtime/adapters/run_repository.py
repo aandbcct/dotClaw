@@ -47,6 +47,7 @@ from ..domain.facts import (
     require_json_map,
     utc_now_iso,
 )
+from ..domain.tool_recovery import ToolCallLedger
 from ._file_support import (
     RunStorageFileName,
     SessionStorageFileName,
@@ -54,6 +55,7 @@ from ._file_support import (
     load_json_map,
     validate_path_segment,
     write_json_atomic,
+    write_text_atomic,
 )
 
 
@@ -312,9 +314,25 @@ class RunRepositoryAdapter:
         """原子更新已存在运行的摘要。"""
         await asyncio.to_thread(self._save_run_sync, run)
 
+    async def ensure_tool_run(self, base_run: AgentRun, target_run: AgentRun) -> None:
+        """仅在运行仍等于提交基线时投影目标运行快照。"""
+        await asyncio.to_thread(self._ensure_tool_run_sync, base_run, target_run)
+
+    async def load_tool_ledger(self, session_id: str, run_id: str) -> ToolCallLedger | None:
+        """严格读取工具调用账本；文件不存在时返回 None。"""
+        return await asyncio.to_thread(self._load_tool_ledger_sync, session_id, run_id)
+
+    async def save_tool_ledger(self, ledger: ToolCallLedger, *, expected_revision: int) -> None:
+        """比较当前 revision 后原子替换工具调用账本。"""
+        await asyncio.to_thread(self._save_tool_ledger_sync, ledger, expected_revision)
+
     async def save_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         """原子保存完整消息，并保证消息序号与标识唯一。"""
         await asyncio.to_thread(self._save_messages_sync, session_id, run_id, messages)
+
+    async def ensure_tool_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
+        """按稳定消息 ID 与完整内容幂等补写连续消息。"""
+        await asyncio.to_thread(self._ensure_tool_messages_sync, session_id, run_id, messages)
 
     async def append_context_version(
         self,
@@ -363,6 +381,10 @@ class RunRepositoryAdapter:
         """读取按 sequence 连续排列的运行事件。"""
         return await asyncio.to_thread(self._load_events_sync, session_id, run_id)
 
+    async def ensure_tool_events(self, session_id: str, events: tuple[RunEvent, ...]) -> None:
+        """幂等合并连续工具事件并原子替换完整事件文件。"""
+        await asyncio.to_thread(self._ensure_tool_events_sync, session_id, events)
+
     def _load_events_sync(self, session_id: str, run_id: str) -> tuple[RunEvent, ...]:
         """严格读取 events.jsonl，独立校验 run_id 与连续 sequence。
 
@@ -404,6 +426,36 @@ class RunRepositoryAdapter:
             events.append(event)
             expected_sequence += 1
         return tuple(events)
+
+    def _ensure_tool_events_sync(self, session_id: str, events: tuple[RunEvent, ...]) -> None:
+        if not events:
+            return
+        run_id = events[0].run_id
+        if any(event.run_id != run_id for event in events):
+            raise ValueError("一次工具事件投影只能属于一个运行")
+        path = self._run_path(session_id, run_id).with_name(RunStorageFileName.EVENTS.value)
+        if path.is_file() and path.stat().st_size > 0 and not path.read_text(encoding="utf-8").strip():
+            raise ValueError("events.jsonl 仅含空白内容，文件损坏")
+        existing = self._load_events_sync(session_id, run_id)
+        message_ids = {message.message_id for message in self._load_messages_sync(session_id, run_id)}
+        merged = list(existing)
+        for event in events:
+            if not isinstance(event.sequence, int) or isinstance(event.sequence, bool) or event.sequence < 1:
+                raise ValueError("工具事件 sequence 必须是正整数")
+            if any(message_id not in message_ids for message_id in event.message_ids):
+                raise ValueError("工具事件引用了尚未持久化的消息")
+            if event.sequence <= len(merged):
+                if merged[event.sequence - 1] != event:
+                    raise ValueError("同序号工具事件内容冲突")
+                continue
+            expected_sequence = len(merged) + 1
+            if event.sequence != expected_sequence:
+                raise ValueError(f"工具事件序号必须连续；期望 {expected_sequence}，实际为 {event.sequence}")
+            merged.append(event)
+        if len(merged) == len(existing):
+            return
+        text = "".join(f"{json.dumps(event.to_dict(), ensure_ascii=False)}\n" for event in merged)
+        write_text_atomic(path, text)
 
     async def commit_success(
         self,
@@ -471,11 +523,79 @@ class RunRepositoryAdapter:
             raise FileNotFoundError(f"运行 {run.run_id} 尚未创建")
         write_json_atomic(path, _run_payload(run))
 
+    def _ensure_tool_run_sync(self, base_run: AgentRun, target_run: AgentRun) -> None:
+        identity = (base_run.session_id, base_run.run_id)
+        if (target_run.session_id, target_run.run_id) != identity:
+            raise ValueError("工具运行投影的 base/target 身份必须一致")
+        current = self._load_run_sync(*identity)
+        if current is None:
+            raise FileNotFoundError(f"运行 {base_run.run_id} 尚未创建")
+        if (current.session_id, current.run_id) != identity:
+            raise ValueError("工具运行投影容器身份不一致")
+        if current == target_run:
+            return
+        if current != base_run:
+            raise ValueError("工具运行投影基线已变化")
+        self._save_run_sync(target_run)
+
+    def _load_tool_ledger_sync(self, session_id: str, run_id: str) -> ToolCallLedger | None:
+        path = self._run_path(session_id, run_id).with_name(RunStorageFileName.TOOL_CALLS.value)
+        if not path.is_file():
+            return None
+        ledger = ToolCallLedger.from_dict(load_json_map(path))
+        if (ledger.session_id, ledger.run_id) != (session_id, run_id):
+            raise ValueError("工具账本身份与存储路径不一致")
+        return ledger
+
+    def _save_tool_ledger_sync(self, ledger: ToolCallLedger, expected_revision: int) -> None:
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0:
+            raise ValueError("expected_revision 必须是非负整数")
+        current = self._load_tool_ledger_sync(ledger.session_id, ledger.run_id)
+        current_revision = 0 if current is None else current.revision
+        if current_revision != expected_revision:
+            raise ValueError("工具账本 revision 冲突")
+        if ledger.revision != expected_revision + 1:
+            raise ValueError("目标工具账本 revision 必须恰好递增 1")
+        path = self._run_path(ledger.session_id, ledger.run_id).with_name(RunStorageFileName.TOOL_CALLS.value)
+        write_json_atomic(path, ledger.to_dict())
+
     def _save_messages_sync(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         self._validate_messages(messages)
         path: Path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
         context_versions: tuple[ContextVersion, ...] = self._load_context_versions_from_path_sync(path)
         self._write_messages_payload_sync(path, run_id, messages, context_versions)
+
+    def _ensure_tool_messages_sync(
+        self,
+        session_id: str,
+        run_id: str,
+        messages: tuple[RunMessage, ...],
+    ) -> None:
+        path = self._run_path(session_id, run_id).with_name(RunStorageFileName.MESSAGES.value)
+        current = self._load_messages_from_path_sync(path)
+        by_id = {message.message_id: message for message in current}
+        merged = list(current)
+        for message in messages:
+            if not message.message_id:
+                raise ValueError("工具消息 ID 不能为空")
+            if not isinstance(message.sequence, int) or isinstance(message.sequence, bool) or message.sequence < 1:
+                raise ValueError("工具消息 sequence 必须是正整数")
+            existing = by_id.get(message.message_id)
+            if existing is not None:
+                if existing != message:
+                    raise ValueError("同一工具消息 ID 对应的完整内容冲突")
+                continue
+            expected_sequence = len(merged) + 1
+            if message.sequence != expected_sequence:
+                raise ValueError(f"工具消息序号必须连续；期望 {expected_sequence}，实际为 {message.sequence}")
+            merged.append(message)
+            by_id[message.message_id] = message
+        result = tuple(merged)
+        self._validate_messages(result)
+        if len(result) == len(current):
+            return
+        context_versions = self._load_context_versions_from_path_sync(path)
+        self._write_messages_payload_sync(path, run_id, result, context_versions)
 
     def _append_context_version_sync(
         self,

@@ -47,6 +47,36 @@ class CheckpointRepositoryAdapter:
         """删除完成或取消后不再需要的检查点。"""
         await asyncio.to_thread(self._delete_sync, session_id, run_id)
 
+    async def ensure_tool_checkpoint(
+        self,
+        base: RunCheckpoint | None,
+        target: RunCheckpoint | None,
+    ) -> None:
+        """按 base/target 条件幂等保存或删除工具投影检查点。"""
+        await asyncio.to_thread(self._ensure_tool_checkpoint_sync, base, target)
+
+    def _ensure_tool_checkpoint_sync(
+        self,
+        base: RunCheckpoint | None,
+        target: RunCheckpoint | None,
+    ) -> None:
+        if base is None and target is None:
+            return
+        reference = target if target is not None else base
+        if base is not None and target is not None and (base.session_id, base.run_id) != (target.session_id, target.run_id):
+            raise ValueError("工具检查点投影的 base/target 身份必须一致")
+        current = self._load_sync(reference.session_id, reference.run_id)
+        if current is not None and (current.session_id, current.run_id) != (reference.session_id, reference.run_id):
+            raise ValueError("工具检查点存储容器身份不一致")
+        if current == target:
+            return
+        if current != base:
+            raise ValueError("工具检查点投影基线已变化")
+        if target is None:
+            self._delete_sync(reference.session_id, reference.run_id)
+            return
+        self._save_sync(target)
+
     def _save_sync(self, checkpoint: RunCheckpoint) -> None:
         _validate_checkpoint_payload(checkpoint)
         path: Path = self._checkpoint_path(checkpoint.session_id, checkpoint.run_id)

@@ -74,3 +74,17 @@ def test_non_target_errors_are_never_retried(tmp_path, monkeypatch, case):
     assert captured.value is error
     assert len(attempts) == 1 and sleeps == []
     assert not target.exists()
+
+
+def test_atomic_text_replace_keeps_previous_complete_file_when_replace_fails(tmp_path, monkeypatch):
+    target = tmp_path / "events.jsonl"
+    target.write_text('{"sequence":1}\n', encoding="utf-8")
+
+    def fail_replace(source, destination):
+        raise OSError("模拟原子替换前故障")
+
+    monkeypatch.setattr(support.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="替换前故障"):
+        support.write_text_atomic(target, '{"sequence":1}\n{"sequence":2}\n')
+    assert target.read_text(encoding="utf-8") == '{"sequence":1}\n'
+    assert not tuple(tmp_path.glob("*.tmp"))

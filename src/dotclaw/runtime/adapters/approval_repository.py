@@ -21,6 +21,10 @@ class ApprovalRepositoryAdapter:
         """创建待处理审批记录。"""
         await asyncio.to_thread(self._create_sync, record)
 
+    async def ensure(self, record: ApprovalRecord) -> None:
+        """幂等投影审批记录，拒绝身份变化或决议翻转。"""
+        await asyncio.to_thread(self._ensure_sync, record)
+
     async def load(self, approval_id: str) -> ApprovalRecord | None:
         """读取审批记录；不存在时返回 None。"""
         return await asyncio.to_thread(self._load_sync, approval_id)
@@ -42,6 +46,30 @@ class ApprovalRepositoryAdapter:
         if path.exists():
             raise FileExistsError(f"审批 {record.approval_id} 已存在")
         write_json_atomic(path, record.to_dict())
+
+    def _ensure_sync(self, record: ApprovalRecord) -> None:
+        path = self._approval_path(record.approval_id)
+        current = self._load_sync(record.approval_id)
+        if current is None:
+            write_json_atomic(path, record.to_dict())
+            return
+        if current == record:
+            return
+        if (current.approval_id, current.run_id, current.session_id, current.call_id) != (
+            record.approval_id, record.run_id, record.session_id, record.call_id,
+        ) or (current.created_at, current.metadata) != (record.created_at, record.metadata):
+            raise ValueError("审批投影身份或不可变字段冲突")
+        if current.decision is not None and record.decision is not None:
+            if current.status is record.status and current.decision is record.decision:
+                return
+            raise ValueError("审批决议已固定，不能改变状态或翻转决议")
+        if current.status is ApprovalStatus.PENDING and record.decision is not None:
+            expected_status = ApprovalStatus.APPROVED if record.decision else ApprovalStatus.REJECTED
+            if record.status not in {expected_status, ApprovalStatus.CONSUMED}:
+                raise ValueError("审批投影状态与决议不一致")
+            write_json_atomic(path, record.to_dict())
+            return
+        raise ValueError("审批记录已存在相反或不同的投影事实")
 
     def _load_sync(self, approval_id: str) -> ApprovalRecord | None:
         path: Path = self._approval_path(approval_id)
