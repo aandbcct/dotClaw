@@ -377,6 +377,9 @@ class ToolRecoveryService:
             raise ValueError("工具账本与原始助手消息不一致")
         decisions: list[ToolRecoveryDecision] = []
         for record in batch:
+            if record.state is ToolCallState.UNCERTAIN:
+                decisions.append(ToolRecoveryDecision(record.call.call_id, ToolRecoveryAction.BLOCK, record.uncertainty_reason or "uncertain_outcome"))
+                continue
             if record.kind is ToolCallKind.DELEGATION:
                 if record.state in {ToolCallState.PENDING, ToolCallState.STARTED}:
                     action, reason = ToolRecoveryAction.EXECUTE, "stable_delegation_prepare"
@@ -388,9 +391,6 @@ class ToolRecoveryService:
                 continue
             if record.state in {ToolCallState.SUCCEEDED, ToolCallState.FAILED, ToolCallState.CANCELLED}:
                 decisions.append(ToolRecoveryDecision(record.call.call_id, ToolRecoveryAction.REUSE, "stored_outcome"))
-                continue
-            if record.state is ToolCallState.UNCERTAIN:
-                decisions.append(ToolRecoveryDecision(record.call.call_id, ToolRecoveryAction.BLOCK, record.uncertainty_reason or "uncertain_outcome"))
                 continue
             contract = contracts[record.call.call_id]
             frozen_contract = (
@@ -855,18 +855,30 @@ class ToolRecoveryService:
         record = self._call(ledger, call_id)
         if record.state is ToolCallState.UNCERTAIN:
             if record.uncertainty_reason == reason:
-                return ledger
-            raise ValueError("工具调用已按不同原因阻止恢复")
-        record.validate_transition(ToolCallState.UNCERTAIN)
-        updated = replace(record, state=ToolCallState.UNCERTAIN, uncertainty_reason=reason, last_execution_evidence=record.last_execution_evidence, updated_at=utc_now_iso())
+                base_run, base_checkpoint = await self._persistent_base(run)
+                if base_run.state.is_ended() and base_checkpoint is None:
+                    return ledger
+                updated = record
+            else:
+                raise ValueError("工具调用已按不同原因阻止恢复")
+        else:
+            record.validate_transition(ToolCallState.UNCERTAIN)
+            updated = replace(record, state=ToolCallState.UNCERTAIN, uncertainty_reason=reason, last_execution_evidence=record.last_execution_evidence, updated_at=utc_now_iso())
         calls = tuple(updated if item.call.call_id == call_id else item for item in ledger.calls)
-        base_run, base_checkpoint = await self._persistent_base(run)
+        if record.state is not ToolCallState.UNCERTAIN:
+            base_run, base_checkpoint = await self._persistent_base(run)
         error = RunError(RunErrorCode.TOOL_OUTCOME_UNCERTAIN, "工具结果待确认：外部操作可能已生效，请先核对。")
-        target_run = self._failed_run_target(base_run, error)
+        if base_run.state.is_ended():
+            if base_run.state.outcome() is not RunOutcome.FAILED:
+                raise ValueError("工具不确定结果不能覆盖其他运行终态")
+            target_run = base_run
+        else:
+            target_run = self._failed_run_target(base_run, error)
         existing_events = await self._runs.load_events(run.session_id, run.run_id)
-        blocked_event = RunEvent(run.run_id, len(existing_events) + 1, RunEventType.TOOL_RECOVERY_BLOCKED, utc_now_iso(), (record.source_message_id,), "工具结果不确定，已阻止自动执行", {"call_id": call_id, "tool_name": record.call.name, "source_response_message_id": record.source_message_id, "reason": reason, "attempt": record.attempt})
-        failed_event = RunEvent(run.run_id, len(existing_events) + 2, RunEventType.RUN_FAILED, utc_now_iso(), (), reason, {"error_code": error.code.value})
-        return await self._commit_fact(replace(ledger, calls=calls), base_run, target_run, base_checkpoint, None, events=(blocked_event, failed_event))
+        new_events = [RunEvent(run.run_id, len(existing_events) + 1, RunEventType.TOOL_RECOVERY_BLOCKED, utc_now_iso(), (record.source_message_id,), "工具结果不确定，已阻止自动执行", {"call_id": call_id, "tool_name": record.call.name, "source_response_message_id": record.source_message_id, "reason": reason, "attempt": record.attempt})]
+        if not base_run.state.is_ended():
+            new_events.append(RunEvent(run.run_id, len(existing_events) + 2, RunEventType.RUN_FAILED, utc_now_iso(), (), reason, {"error_code": error.code.value}))
+        return await self._commit_fact(replace(ledger, calls=calls), base_run, target_run, base_checkpoint, None, events=tuple(new_events))
 
     def _failed_run_target(self, base_run: AgentRun, error: RunError) -> AgentRun:
         return replace(base_run, state=transition(base_run.state, ToolBatchFailed(error)).state, ended_at=utc_now_iso(), error=error)

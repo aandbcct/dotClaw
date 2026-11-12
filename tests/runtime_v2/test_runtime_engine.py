@@ -3,8 +3,9 @@
 from __future__ import annotations
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
 
+from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
-from dotclaw.runtime.domain.events import RunEvent, RunEventType, ToolAuditStatus, is_terminal_tool_event
+from dotclaw.runtime.domain.events import RunEvent, RunEventType, ToolAuditStatus, ToolBatchFailed, is_terminal_tool_event
 
 import asyncio
 import json
@@ -26,7 +27,7 @@ from dotclaw.runtime.application.dto import (
     ContextRefreshSignal, LLMOutputEvent, LLMOutputKind, RunAcceptedEvent, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
-    AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunError, RunErrorCode, RunMessage, RunMessageKind, ToolCall,
+    AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunCheckpoint, RunError, RunErrorCode, RunMessage, RunMessageKind, ToolCall,
     require_json_map,
 )
 from dotclaw.context import (
@@ -48,8 +49,9 @@ from dotclaw.context import (
     RunMessagesSlot,
     build_context_provider,
 )
-from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent
+from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, ContextVersion, TextSlotContent
 from dotclaw.runtime.domain.tool_recovery import ToolCallState, ToolEffectCertainty
+from dotclaw.runtime.domain.state import transition
 from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
 
@@ -67,6 +69,19 @@ def test_legacy_approval_completion_is_waiting_not_terminal() -> None:
     assert "call" in activity.waiting
     assert "call" not in activity.terminal_call_ids
     assert is_terminal_tool_event(completion)
+
+
+def test_tool_batch_failure_from_tool_stage_delegation_suspension_is_terminal() -> None:
+    """旧委派恢复中的工具不确定结果可经状态机收口并保留 iteration。"""
+    suspended = AgentRunState(
+        Suspended(SuspendReason.DELEGATION, "child", RunStage.EXECUTING_TOOLS), iteration=3,
+    )
+
+    result = transition(suspended, ToolBatchFailed(RunError(RunErrorCode.TOOL_OUTCOME_UNCERTAIN, "结果待确认")))
+
+    assert result.state.outcome() is RunOutcome.FAILED
+    assert result.state.iteration == 3
+    assert result.action is AgentAction.FINALIZE
 
 
 class PolicyPort(RunPolicyPort):
@@ -219,6 +234,63 @@ async def test_engine_completes_clarification_as_normal_conversation(tmp_path: P
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
     conversation = await run_repository.load_conversation("session-1")
     assert conversation[0].content == "请补充信息"
+
+
+@pytest.mark.parametrize("tool_name", ["lookup", "delegate"])
+async def test_legacy_unmatched_ordinary_and_delegation_outcomes_fail_uncertain_on_engine_resume(
+    tmp_path: Path, tool_name: str,
+) -> None:
+    """旧批次结果证据不完整时，普通和委派调用都由 Engine 收口为真实 uncertain 失败。"""
+    engine = _engine(tmp_path)
+    run = AgentRun(
+        run_id=f"legacy-{tool_name}", session_id="legacy-session", agent_id="agent-1",
+        state=AgentRunState(Running(RunStage.EXECUTING_TOOLS)), started_at="2026-11-12T00:00:00+00:00",
+        policy=AgentPolicySnapshot("agent-1", "identity-v1", "model-v1", 8), input_message_id="input",
+    )
+    call = ToolCall(
+        "legacy-call", tool_name,
+        {"target_agent_id": "agent-child", "title": "旧任务", "objective": "核验旧结果"} if tool_name == "delegate" else {"query": "x"},
+    )
+    input_message = RunMessage("input", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "恢复旧运行")
+    source = RunMessage("assistant", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(call,))
+    repository = engine._run_repository
+    await repository.create_run(run)
+    await repository.save_messages(run.session_id, run.run_id, (input_message, source))
+    await repository.append_context_version(run.session_id, run.run_id, ContextVersion(
+        1, "2026-11-12T00:00:00+00:00", (), "content-hash", "schema-hash",
+    ))
+    await repository.set_active_context_version(run.session_id, run.run_id, 1)
+    started = RunEvent(run.run_id, 1, RunEventType.TOOL_STARTED, "2026-11-12T00:00:01+00:00", (source.message_id,), data={
+        "call_id": call.call_id, "tool_name": call.name, "source_response_message_id": source.message_id,
+    })
+    if tool_name == "delegate":
+        legacy_event = RunEvent(run.run_id, 2, RunEventType.DELEGATION_REQUESTED, "2026-11-12T00:00:02+00:00", (source.message_id,), data={
+            "tool_call_id": call.call_id, "target_agent_id": "agent-child",
+        })
+    else:
+        legacy_event = RunEvent(run.run_id, 2, RunEventType.TOOL_COMPLETED, "2026-11-12T00:00:02+00:00", data={
+            "call_id": call.call_id, "tool_name": call.name, "status": "completed", "result_message_id": "missing-result",
+        })
+    await repository.append_event(run.session_id, started)
+    await repository.append_event(run.session_id, legacy_event)
+    old_checkpoint = RunCheckpoint(
+        f"checkpoint-{run.run_id}", run.run_id, run.session_id, 1, 2, 2,
+        {"tool_calls": [call.to_dict()]}, {}, AgentAction.EXECUTE_TOOLS,
+        active_context_version=1,
+    )
+    await engine._checkpoint_repository.save(old_checkpoint)
+
+    result = await engine.resume_run(run.run_id)
+
+    assert result.state.outcome() is RunOutcome.FAILED
+    assert result.error is not None and result.error.code is RunErrorCode.TOOL_OUTCOME_UNCERTAIN
+    assert await engine._checkpoint_repository.load(run.session_id, run.run_id) is None
+    failed = await repository.load_run(run.session_id, run.run_id)
+    assert failed is not None and failed.error is not None
+    assert failed.error.code is RunErrorCode.TOOL_OUTCOME_UNCERTAIN
+    ledger = await repository.load_tool_ledger(run.session_id, run.run_id)
+    assert ledger is not None and ledger.calls[0].state is ToolCallState.UNCERTAIN
+    await engine._tool_recovery.block_uncertain(failed, call.call_id, ledger.calls[0].uncertainty_reason or "legacy_execution_unproven", old_checkpoint)
 
 
 async def test_acceptance_is_persisted_before_blocked_model_output(tmp_path: Path) -> None:
@@ -607,6 +679,70 @@ class CompletedTool(ToolPortTestBase):
         self.calls.append(invocation)
         return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=f"结果-{invocation.call.call_id}",
             execution_evidence=ToolExecutionEvidence.RETURNED)
+
+
+class PreflightFailedTool(ToolPortTestBase):
+    """在处理函数启动前返回确定失败的工具替身。"""
+
+    def __init__(self, error_code: str) -> None:
+        self.error_code = error_code
+        self.execute_calls = 0
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(
+            invocation.call.call_id, ToolResultStatus.FAILED, output="预检拒绝",
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED, tool_error_code=self.error_code,
+        )
+
+    async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        self.execute_calls += 1
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="不应执行",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+
+class NotStartedExecutionFailureTool(ToolPortTestBase):
+    """处理函数明确报告尚未开始副作用的失败结果。"""
+
+    async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(
+            invocation.call.call_id, ToolResultStatus.FAILED, output="执行前拒绝",
+            error=RunError(RunErrorCode.TOOL_FAILURE, "执行前拒绝"),
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED,
+        )
+
+
+@pytest.mark.parametrize("error_code", ["INVALID_ARGUMENTS", "POLICY_DENIED"])
+async def test_preflight_not_started_failure_is_committed_without_handler(error_code: str, tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port = ApprovalLLM()
+    tool = PreflightFailedTool(error_code)
+    engine._tool_port = tool
+
+    result = await engine.execute(_request(f"preflight-{error_code}"))
+
+    assert result.state.outcome() is RunOutcome.FAILED
+    assert result.error is not None and result.error.code is RunErrorCode.TOOL_FAILURE
+    run = await engine._run_repository.find_run(result.run_id)
+    ledger = await engine._run_repository.load_tool_ledger("preflight-" + error_code, result.run_id)
+    assert run is not None and run.error is not None and run.error.code is RunErrorCode.TOOL_FAILURE
+    assert ledger is not None and ledger.calls[0].state is ToolCallState.FAILED
+    assert ledger.calls[0].result is not None and ledger.calls[0].result.tool_error_code == error_code
+    assert tool.execute_calls == 0
+
+
+async def test_execute_failed_not_started_is_committed_as_reliable_failure(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port = ApprovalLLM()
+    engine._tool_port = NotStartedExecutionFailureTool()
+
+    result = await engine.execute(_request("execute-not-started-failure"))
+
+    assert result.state.outcome() is RunOutcome.FAILED
+    assert result.error is not None and result.error.code is RunErrorCode.TOOL_FAILURE
+    ledger = await engine._run_repository.load_tool_ledger("execute-not-started-failure", result.run_id)
+    assert ledger is not None and ledger.calls[0].state is ToolCallState.FAILED
+    assert ledger.calls[0].result is not None
+    assert ledger.calls[0].result.effect_certainty.value == "known"
 
 
 

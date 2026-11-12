@@ -34,7 +34,7 @@ it("恢复阻断展示结果待确认并提示核对，不提供恢复按钮", (
     ...activity,
     status: "failed",
     tools: [{ ...activity.tools[0], status: "uncertain", error: "工具结果待确认：外部操作可能已生效，请先核对。" }],
-    steps: [{ ...activity.steps![1], status: "uncertain" }],
+    steps: [{ ...activity.steps![1], status: "uncertain" as const }],
   };
   render(<RunActivityPanel {...actions()} message={message} activities={[uncertain]} canControl />);
   expect(screen.getByText("结果待确认")).toBeTruthy();

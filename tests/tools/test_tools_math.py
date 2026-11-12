@@ -137,7 +137,7 @@ async def test_math_rejects_non_finite() -> None:
     assert r2.is_error
 
 
-def test_math_rejects_overlong_expression() -> None:
+async def test_math_rejects_overlong_expression() -> None:
     """超长表达式在 Pydantic 校验期即被拒绝（>256 字符）。"""
     handler = {item.name: item for item in ToolDiscovery.discover_builtin()}["builtin.math.calculate"]
     result = await handler.execute({"expression": "1+" * 200}, _ctx())

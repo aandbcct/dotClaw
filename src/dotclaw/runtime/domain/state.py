@@ -381,6 +381,8 @@ def _on_running(state: AgentRunState, event: AgentRunEvent) -> StateTransition:
 def _on_suspended(state: AgentRunState, event: AgentRunEvent) -> StateTransition:
     """Suspended 按挂起原因匹配唤醒事件，并校验 control_id 归属。"""
     suspended: Suspended = state.mode
+    if isinstance(event, ToolBatchFailed) and suspended.resume_stage is RunStage.EXECUTING_TOOLS:
+        return StateTransition(_end(state, RunOutcome.FAILED), AgentAction.FINALIZE)
     if suspended.reason is SuspendReason.APPROVAL:
         if isinstance(event, ApprovalGranted):
             if event.approval_id != suspended.control_id:

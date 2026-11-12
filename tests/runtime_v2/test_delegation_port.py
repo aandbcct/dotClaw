@@ -491,8 +491,11 @@ async def test_engine_resume_delegation_rejects_mismatched_child_id(tmp_path: Pa
     assert parent_run.state.is_waiting_delegation()
 
 
-async def test_engine_resume_legacy_suspended_delegation_imports_once_on_repeated_callback(tmp_path: Path) -> None:
-    """旧挂起委派从真实入口迁入账本；重复回调复用已有迁移结果。"""
+@pytest.mark.parametrize("child_identity_valid", [True, False])
+async def test_engine_resume_legacy_suspended_delegation_imports_and_closes_uncertain_child(
+    tmp_path: Path, child_identity_valid: bool,
+) -> None:
+    """旧挂起委派从真实入口迁移；无法核验子身份时收口为不确定失败。"""
     repository = RunRepositoryAdapter(tmp_path)
     checkpoints = CheckpointRepositoryAdapter(tmp_path)
     delegation = PendingDelegation(repository, child_run_id="child-legacy")
@@ -528,7 +531,8 @@ async def test_engine_resume_legacy_suspended_delegation_imports_once_on_repeate
         AgentPolicySnapshot("target-agent", "policy-v1", "model", 5), "child-input",
         parent_run_id=parent.run_id, root_run_id=parent.run_id, delegation_task_id="task-child-legacy",
     )
-    child_input = RunMessage("child-input", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "任务：检查\n\n目标：检查目标")
+    child_content = "任务：检查\n\n目标：检查目标" if child_identity_valid else "不匹配的子任务"
+    child_input = RunMessage("child-input", 1, RunMessageKind.USER_INPUT, MessageRole.USER, child_content)
     await repository.create_run(child)
     await repository.save_messages(child.session_id, child.run_id, (child_input,))
     events = (
@@ -547,14 +551,24 @@ async def test_engine_resume_legacy_suspended_delegation_imports_once_on_repeate
     ))
 
     first = await engine.resume_delegation(child.run_id)
-    second = await engine.resume_delegation(child.run_id)
-
-    assert first.state.is_waiting_delegation()
-    assert second.state.is_waiting_delegation()
-    assert delegation.result_calls == 2
     ledger = await repository.load_tool_ledger(parent.session_id, parent.run_id)
     assert ledger is not None and len(ledger.calls) == 1
-    assert ledger.calls[0].state.value == "waiting_child"
+    if child_identity_valid:
+        second = await engine.resume_delegation(child.run_id)
+        assert first.state.is_waiting_delegation()
+        assert second.state.is_waiting_delegation()
+        assert ledger.calls[0].state.value == "waiting_child"
+        assert delegation.result_calls == 2
+    else:
+        assert first.state.outcome() is RunOutcome.FAILED
+        assert first.error is not None and first.error.code is RunErrorCode.TOOL_OUTCOME_UNCERTAIN
+        assert ledger.calls[0].state.value == "uncertain"
+        assert delegation.result_calls == 0
+        assert await checkpoints.load(parent.session_id, parent.run_id) is None
+        repeated = await engine.resume_delegation(child.run_id)
+        assert repeated.state == first.state
+        assert repeated.error is not None and repeated.error.code is RunErrorCode.TOOL_OUTCOME_UNCERTAIN
+        assert delegation.result_calls == 0
 
 
 async def _submit_then_resume_with_outcome(tmp_path: Path, outcome: RunOutcome) -> tuple[RunResult, JSONMap, tuple[JSONMap, ...]]:
