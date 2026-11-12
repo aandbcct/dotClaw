@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from dotclaw.tools.base import ToolContext
 from dotclaw.tools.decorator import ToolPolicy, tool
+from dotclaw.common.tool_replay import ToolSideEffect
 
 DEFAULT_MEMORY_FILE = "./data/memory/MEMORY.md"
 
@@ -49,6 +50,7 @@ def _get_memory_path(long_term_file: str) -> Path:
     policy=ToolPolicy.WORKSPACE_READ,
     timeout=10.0,
     path_param="long_term_file",
+    side_effect=ToolSideEffect.PRESENT,
 )
 async def read(args: MemoryReadArgs, context: ToolContext) -> str:
     def perform() -> str:
@@ -74,6 +76,7 @@ async def read(args: MemoryReadArgs, context: ToolContext) -> str:
     needs_approval=True,
     timeout=10.0,
     path_param="long_term_file",
+    side_effect=ToolSideEffect.PRESENT,
 )
 async def write(args: MemoryWriteArgs, context: ToolContext) -> str:
     def perform() -> str:

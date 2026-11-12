@@ -15,7 +15,7 @@ import importlib
 import inspect
 import logging
 import pkgutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from pydantic import BaseModel, create_model
@@ -90,19 +90,7 @@ class ToolDiscovery:
                 meta = _with_inferred(meta, inferred)
             else:
                 # 显式模型一律按单一 args 形参传入。
-                meta = ToolMeta(
-                    name=meta.name,
-                    description=meta.description,
-                    args_model=meta.args_model,
-                    policy=meta.policy,
-                    source=meta.source,
-                    needs_approval=meta.needs_approval,
-                    timeout=meta.timeout,
-                    metadata=dict(meta.metadata),
-                    args_style="model",
-                    network_service=meta.network_service,
-                    network_hosts=list(meta.network_hosts),
-                )
+                meta = replace(meta, args_style="model")
 
             handler = FunctionToolHandler(func, meta)
             if handler.name in handlers:
@@ -233,19 +221,7 @@ def _infer_args_model(func: Callable[..., Any], tool_name: str) -> type[BaseMode
 
 def _with_inferred(meta: ToolMeta, inferred: type[BaseModel] | None) -> ToolMeta:
     """基于推导出的模型生成新元数据（args_style='fields'）。"""
-    return ToolMeta(
-        name=meta.name,
-        description=meta.description,
-        args_model=inferred,
-        policy=meta.policy,
-        source=meta.source,
-        needs_approval=meta.needs_approval,
-        timeout=meta.timeout,
-        metadata=dict(meta.metadata),
-        args_style="fields" if inferred is not None else "model",
-        network_service=meta.network_service,
-        network_hosts=list(meta.network_hosts),
-    )
+    return replace(meta, args_model=inferred, args_style="fields" if inferred is not None else "model")
 
 
 def _type_label(ann: Any) -> str:

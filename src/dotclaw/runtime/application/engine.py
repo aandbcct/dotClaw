@@ -7,6 +7,7 @@ import json
 import time
 import logging
 import uuid
+from datetime import UTC, datetime
 from dataclasses import dataclass, replace
 from collections.abc import Awaitable
 from hashlib import sha256
@@ -1373,6 +1374,11 @@ class RuntimeEngine:
                             run, RunError(RunErrorCode.PERSISTENCE_FAILURE,
                                 f"工具恢复契约与冻结记录不一致：{decision.reason}"), checkpoint,
                         )
+                    elif decision.reason == "retry_budget_exhausted":
+                        await self._tool_recovery.commit_run_failure(
+                            run, RunError(RunErrorCode.TOOL_RECOVERY_RETRY_EXHAUSTED,
+                                "工具恢复重试预算已耗尽"), checkpoint,
+                        )
                     else:
                         await self._tool_recovery.block_uncertain(run, record.call.call_id, decision.reason, checkpoint)
                 latest = await self._run_repository.load_run(run.session_id, run.run_id)
@@ -1439,6 +1445,27 @@ class RuntimeEngine:
                 return await self._after_tool_failure(execution, run, error, checkpoint)
             if decision.action is ToolRecoveryAction.REUSE:
                 continue
+            if decision.action is ToolRecoveryAction.RETRY:
+                if record.recovery_retry_not_before is None:
+                    async with self._cancellation_service.gate(run.run_id):
+                        latest = await self._run_repository.load_run(run.session_id, run.run_id)
+                        current_checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                        if latest is None or current_checkpoint is None:
+                            raise ValueError("初始化工具重试期限时运行或检查点不存在")
+                        if await self._run_repository.load_cancellation(run.session_id, run.run_id) is not None:
+                            return RunResult(run.run_id, latest.state, control_status="cancelling")
+                        await self._tool_recovery.record_interruption(
+                            latest, record.call.call_id, record.last_execution_evidence,
+                            record.last_error or RunError(RunErrorCode.TOOL_FAILURE, "恢复 STARTED 工具调用"),
+                            current_checkpoint,
+                        )
+                    ledger = await self._run_repository.load_tool_ledger(run.session_id, run.run_id)
+                    record = next(item for item in ledger.calls if item.call.call_id == record.call.call_id)
+                due = datetime.fromisoformat(record.recovery_retry_not_before)
+                while due > datetime.now(UTC):
+                    if execution.cancellation.cancelled:
+                        return RunResult(run.run_id, run.state, control_status="cancelling")
+                    await asyncio.sleep(min((due - datetime.now(UTC)).total_seconds(), 0.1))
             if record.kind is ToolCallKind.DELEGATION:
                 if self._delegation_port is None:
                     raise ValueError("当前 Runtime 未装配 DelegationPort")
@@ -1522,7 +1549,8 @@ class RuntimeEngine:
             checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
             if latest is None or checkpoint is None:
                 raise ValueError("开始工具调用前运行或检查点不存在")
-            await self._tool_recovery.begin_attempt(latest, record.call.call_id, checkpoint)
+            current_contract = await self._tool_port.describe_recovery(record.call, execution.view())
+            await self._tool_recovery.begin_attempt(latest, record.call.call_id, checkpoint, current_contract)
             started = await self._run_repository.load_tool_ledger(run.session_id, run.run_id)
             record = next(item for item in started.calls if item.call.call_id == record.call.call_id)
             run, _, checkpoint, _ = await self._reload_tool_execution(execution, run.run_id)
@@ -1542,13 +1570,11 @@ class RuntimeEngine:
             return ToolStepResult(ToolStepKind.CANCEL_PENDING,
                 run_result=RunResult(run.run_id, run.state, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, str(error)), control_status="cancelling"))
         except Exception as error:
-            async with self._cancellation_service.gate(run.run_id):
-                await self._tool_recovery.record_interruption(
-                    run, record.call.call_id, ToolExecutionEvidence.UNKNOWN,
-                    RunError(RunErrorCode.TOOL_FAILURE, str(error)), checkpoint,
-                )
-            return ToolStepResult(ToolStepKind.SUSPENDED,
-                run_result=RunResult(run.run_id, run.state, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "工具执行中断，结果待恢复"), control_status="recoverable"))
+            result = ToolResult(
+                record.call.call_id, ToolResultStatus.FAILED,
+                error=RunError(RunErrorCode.TOOL_FAILURE, str(error)),
+                execution_evidence=ToolExecutionEvidence.UNKNOWN,
+            )
         if result.status is ToolResultStatus.APPROVAL_REQUIRED:
             approval_id = result.approval_id or uuid.uuid5(uuid.NAMESPACE_URL, f"dotclaw:approval:{run.run_id}:{record.call.call_id}").hex
             async with self._cancellation_service.gate(run.run_id):
@@ -1565,13 +1591,37 @@ class RuntimeEngine:
             latest = await self._run_repository.load_run(run.session_id, run.run_id)
             if latest is None:
                 raise ValueError("未知结果记录后运行不存在")
-            async with self._cancellation_service.gate(run.run_id):
-                await self._tool_recovery.block_uncertain(latest, record.call.call_id, "tool_effect_unknown", checkpoint)
-            final = await self._run_repository.load_run(run.session_id, run.run_id)
-            if final is None:
-                raise ValueError("未知结果阻断后运行不存在")
-            execution.update_state(final.state, AgentAction.FINALIZE)
-            return ToolStepResult(ToolStepKind.BLOCKED, run_result=RunResult(run.run_id, final.state, error=final.error))
+            retry_supported = (
+                record.replay_policy.value == "safe_retry" and record.side_effect.value == "none"
+            ) or (
+                record.replay_policy.value == "keyed_idempotent"
+                and record.idempotency_key is not None
+                and record.side_effect.value != "unknown"
+                and (record.key_valid_until is None or datetime.fromisoformat(record.key_valid_until) > datetime.now(UTC))
+            )
+            if not retry_supported:
+                async with self._cancellation_service.gate(run.run_id):
+                    await self._tool_recovery.block_uncertain(latest, record.call.call_id, "tool_effect_unknown", checkpoint)
+                final = await self._run_repository.load_run(run.session_id, run.run_id)
+                if final is None:
+                    raise ValueError("未知结果阻断后运行不存在")
+                execution.update_state(final.state, AgentAction.FINALIZE)
+                return ToolStepResult(ToolStepKind.BLOCKED, run_result=RunResult(run.run_id, final.state, error=final.error))
+            if record.retry_count >= min(record.recovery_max_retries, current_contract.recovery_max_retries):
+                async with self._cancellation_service.gate(run.run_id):
+                    await self._tool_recovery.commit_run_failure(
+                        latest, RunError(RunErrorCode.TOOL_RECOVERY_RETRY_EXHAUSTED,
+                            "工具恢复重试预算已耗尽"), checkpoint,
+                    )
+                final = await self._run_repository.load_run(run.session_id, run.run_id)
+                if final is None:
+                    raise ValueError("重试预算耗尽后运行不存在")
+                execution.update_state(final.state, AgentAction.FINALIZE)
+                return ToolStepResult(ToolStepKind.BLOCKED, run_result=RunResult(run.run_id, final.state, error=final.error))
+            return ToolStepResult(ToolStepKind.SUSPENDED,
+                run_result=RunResult(run.run_id, latest.state,
+                    error=RunError(RunErrorCode.TOOL_OUTCOME_UNCERTAIN, "工具结果不确定，等待显式恢复"),
+                    control_status="recoverable"))
         snapshot = ToolOutcomeSnapshot(
             ToolOutcomeStatus.COMPLETED if result.status is ToolResultStatus.COMPLETED else ToolOutcomeStatus.FAILED,
             result.output,

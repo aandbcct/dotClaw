@@ -27,6 +27,7 @@ from simpleeval import SimpleEval
 
 from dotclaw.tools.base import ToolContext, ToolErrorCode, ToolResult
 from dotclaw.tools.decorator import tool
+from dotclaw.common.tool_replay import ToolReplayPolicy, ToolSideEffect
 
 logger = logging.getLogger("dotclaw.tools.builtin.math")
 
@@ -175,6 +176,8 @@ def _safe_eval(expression: str) -> float | int:
         "不执行任意代码。"
     ),
     args_model=CalculateArgs,
+    replay_policy=ToolReplayPolicy.SAFE_RETRY, replay_contract_version="1",
+    side_effect=ToolSideEffect.NONE, recovery_max_retries=3,
 )
 async def math_calculate(args: CalculateArgs, context: ToolContext) -> ToolResult:
     """执行受限表达式计算，返回脱敏的有限数值结果或安全的计算错误。"""
@@ -182,17 +185,20 @@ async def math_calculate(args: CalculateArgs, context: ToolContext) -> ToolResul
         value = _safe_eval(args.expression)
     except ZeroDivisionError:
         return ToolResult.from_error(
-            code=ToolErrorCode.EXECUTION_ERROR, message="计算错误：除以零"
+            code=ToolErrorCode.EXECUTION_ERROR, message="计算错误：除以零",
+            execution_evidence=ToolExecutionEvidence.RETURNED,
         )
     except (ValueError, OverflowError, TypeError) as exc:
         # 仅透出我们生成的类别化安全信息，绝不回显内部栈。
         return ToolResult.from_error(
-            code=ToolErrorCode.EXECUTION_ERROR, message=f"计算错误：{exc}"
+            code=ToolErrorCode.EXECUTION_ERROR, message=f"计算错误：{exc}",
+            execution_evidence=ToolExecutionEvidence.RETURNED,
         )
     except Exception:  # 兜底：任何未预期异常都归为计算错误，不泄漏细节。
         logger.exception("math.calculate 求值异常")
         return ToolResult.from_error(
-            code=ToolErrorCode.EXECUTION_ERROR, message="计算错误：表达式无法求值"
+            code=ToolErrorCode.EXECUTION_ERROR, message="计算错误：表达式无法求值",
+            execution_evidence=ToolExecutionEvidence.RETURNED,
         )
 
     return ToolResult(

@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import os
+from pathlib import Path
 from ..common.resource_errors import ResourceCleanupError
 
 from typing import Any, Callable
@@ -34,7 +36,7 @@ from .base import (
     ToolExecutionContext,
     ToolResult,
 )
-from dotclaw.common.tool_replay import ToolExecutionEvidence
+from dotclaw.common.tool_replay import ToolExecutionEvidence, ToolReplayPolicy
 from .capability import CapabilityBroker, CapabilityRequest, ResourceKind
 from .decorator import ToolPolicy
 from .handler import ToolHandler
@@ -129,7 +131,7 @@ class ToolExecutor:
         """按名称获取 Handler（转发给 Registry）。"""
         return self._registry.get(name)
 
-    def describe_recovery(self, name: str) -> "ToolRecoveryContract":
+    def describe_recovery(self, name: str, execution_context: ToolExecutionContext | None = None) -> "ToolRecoveryContract":
         """读取注册工具的恢复声明；未知工具使用默认禁止重试契约。"""
         from dotclaw.runtime.application.dto import ToolRecoveryContract
 
@@ -137,6 +139,17 @@ class ToolExecutor:
         if handler is None:
             return ToolRecoveryContract()
         definition = handler.definition()
+        execution_scope = ""
+        if definition.replay_policy in {ToolReplayPolicy.SAFE_RETRY, ToolReplayPolicy.KEYED_IDEMPOTENT}:
+            scope = self._effective_scope(execution_context)
+            execution_scope = json.dumps({
+                "workspace_root": str(Path(scope.workspace_root).expanduser().resolve()),
+                "global_rules": {key: value.value for key, value in scope.global_rules.items()},
+                "agent_rules": {key: value.value for key, value in scope.agent_rules.items()},
+                "denied_paths": sorted(scope.denied_paths),
+                "allowed_mcp_servers": sorted(scope.allowed_mcp_servers),
+                "network_services": {key: sorted(value) for key, value in scope.network_services.items()},
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return ToolRecoveryContract(
             policy=definition.replay_policy,
             version=definition.replay_contract_version,
@@ -145,6 +158,7 @@ class ToolExecutor:
             recovery_initial_delay_s=definition.recovery_initial_delay_s,
             recovery_backoff_multiplier=definition.recovery_backoff_multiplier,
             recovery_max_delay_s=definition.recovery_max_delay_s,
+            execution_scope=execution_scope,
         )
 
     def requires_approval(
@@ -396,11 +410,8 @@ class ToolExecutor:
         if journal and not result.is_error:
             journal.tool_policy_resolved(name, "allow", outcome.matched_rule, summary)
         if result.execution_evidence is None:
-            result = dataclasses.replace(result, execution_evidence=ToolExecutionEvidence.UNKNOWN)
-        if not result.is_error and result.execution_evidence is ToolExecutionEvidence.UNKNOWN:
-            result = dataclasses.replace(result, execution_evidence=ToolExecutionEvidence.RETURNED)
-        elif result.is_error and result.execution_evidence is ToolExecutionEvidence.UNKNOWN:
-            result = dataclasses.replace(result, execution_evidence=ToolExecutionEvidence.UNKNOWN)
+            evidence = ToolExecutionEvidence.UNKNOWN if result.is_error else ToolExecutionEvidence.RETURNED
+            result = dataclasses.replace(result, execution_evidence=evidence)
         return self._finish(result, name, journal, handler)
 
     async def _execute_handler(

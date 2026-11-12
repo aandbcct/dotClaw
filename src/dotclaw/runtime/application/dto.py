@@ -281,7 +281,7 @@ class ToolResult:
     output: str = ""
     approval_id: str | None = None
     error: RunError | None = None
-    execution_evidence: ToolExecutionEvidence = ToolExecutionEvidence.UNKNOWN
+    execution_evidence: ToolExecutionEvidence | None = None
     tool_error_code: str | None = None
     tool_error_type: str | None = None
 
@@ -343,6 +343,7 @@ class ToolRecoveryContract:
     recovery_initial_delay_s: float = 1.0
     recovery_backoff_multiplier: float = 2.0
     recovery_max_delay_s: float = 30.0
+    execution_scope: str = ""
 
     def __post_init__(self) -> None:
         if self.policy in {ToolReplayPolicy.SAFE_RETRY, ToolReplayPolicy.KEYED_IDEMPOTENT} and not self.version:

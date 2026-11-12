@@ -110,21 +110,43 @@ class ToolRecoveryService:
             contract = contracts[record.call.call_id]
             frozen_contract = (
                 record.replay_policy, record.side_effect, record.replay_contract_version,
-                record.key_valid_until, record.recovery_max_retries,
+                record.key_valid_until,
                 record.recovery_initial_delay_s, record.recovery_backoff_multiplier,
-                record.recovery_max_delay_s,
+                record.recovery_max_delay_s, record.execution_scope,
             )
             current_contract = (
                 contract.policy, contract.side_effect, contract.version, contract.key_valid_until,
-                contract.recovery_max_retries, contract.recovery_initial_delay_s,
+                contract.recovery_initial_delay_s,
                 contract.recovery_backoff_multiplier, contract.recovery_max_delay_s,
+                contract.execution_scope,
             )
             if frozen_contract != current_contract:
                 action, reason = ToolRecoveryAction.BLOCK, "recovery_contract_changed"
             elif record.state is ToolCallState.PENDING:
                 action, reason = ToolRecoveryAction.EXECUTE, "pending_not_started"
             elif record.state is ToolCallState.STARTED:
-                action, reason = ToolRecoveryAction.BLOCK, "started_outcome_unknown"
+                if record.replay_policy.value in {"safe_retry", "keyed_idempotent"} and (
+                    not record.execution_scope or not contract.execution_scope
+                ):
+                    action, reason = ToolRecoveryAction.BLOCK, "recovery_scope_missing"
+                    decisions.append(ToolRecoveryDecision(record.call.call_id, action, reason))
+                    continue
+                key_valid = (
+                    record.replay_policy.value == "keyed_idempotent"
+                    and record.idempotency_key is not None
+                    and (record.key_valid_until is None or datetime.fromisoformat(record.key_valid_until) > datetime.now(UTC))
+                    and record.side_effect.value != "unknown"
+                )
+                retry_safe = record.last_execution_evidence in {None, ToolExecutionEvidence.UNKNOWN} and (
+                    (record.replay_policy.value == "safe_retry" and record.side_effect.value == "none")
+                    or key_valid
+                )
+                if not retry_safe:
+                    action, reason = ToolRecoveryAction.BLOCK, "started_outcome_unknown"
+                elif record.retry_count < min(record.recovery_max_retries, contract.recovery_max_retries):
+                    action, reason = ToolRecoveryAction.RETRY, "safe_retry_due"
+                else:
+                    action, reason = ToolRecoveryAction.BLOCK, "retry_budget_exhausted"
             elif record.state is ToolCallState.WAITING_APPROVAL:
                 action, reason = (ToolRecoveryAction.EXECUTE, "approval_granted") if record.approval_decision is True else (ToolRecoveryAction.WAIT_APPROVAL, "approval_pending")
             elif record.state is ToolCallState.WAITING_CHILD:
@@ -158,19 +180,6 @@ class ToolRecoveryService:
             if records:
                 if tuple(record.call for record in records) != source_message.tool_calls:
                     raise ValueError("同批工具调用与冻结账本不一致")
-                for record in records:
-                    contract = contracts[record.call.call_id]
-                    if (
-                        record.replay_policy != contract.policy
-                        or record.side_effect != contract.side_effect
-                        or record.replay_contract_version != contract.version
-                        or record.key_valid_until != contract.key_valid_until
-                        or record.recovery_max_retries != contract.recovery_max_retries
-                        or record.recovery_initial_delay_s != contract.recovery_initial_delay_s
-                        or record.recovery_backoff_multiplier != contract.recovery_backoff_multiplier
-                        or record.recovery_max_delay_s != contract.recovery_max_delay_s
-                    ):
-                        raise ValueError("同批工具恢复契约与冻结账本不一致")
                 return existing
             if any(item.state not in _TERMINAL for item in existing.calls):
                 raise ValueError("上一工具批次尚未完成，不能规划新批次")
@@ -191,6 +200,7 @@ class ToolRecoveryService:
                 recovery_initial_delay_s=contract.recovery_initial_delay_s,
                 recovery_backoff_multiplier=contract.recovery_backoff_multiplier,
                 recovery_max_delay_s=contract.recovery_max_delay_s,
+                execution_scope=contract.execution_scope,
             ))
         base_ledger = existing or ToolCallLedger(run.session_id, run.run_id, 1, tuple(records))
         if existing is not None:
@@ -201,15 +211,51 @@ class ToolRecoveryService:
         target_run = replace(base_run, state=run.state)
         return await self._commit_fact(base_ledger, base_run, target_run, base_checkpoint, target_checkpoint)
 
-    async def begin_attempt(self, run: AgentRun, call_id: str, checkpoint: RunCheckpoint) -> ToolCallRecord:
+    async def begin_attempt(self, run: AgentRun, call_id: str, checkpoint: RunCheckpoint, contract: ToolRecoveryContract | None = None) -> ToolCallRecord:
         ledger = await self._required_ledger(run, checkpoint)
         record = self._call(ledger, call_id)
-        if record.state not in {ToolCallState.PENDING, ToolCallState.WAITING_APPROVAL}:
+        if record.state not in {ToolCallState.PENDING, ToolCallState.STARTED, ToolCallState.WAITING_APPROVAL}:
             raise ValueError("工具调用当前状态不允许开始执行")
+        retry = record.state is ToolCallState.STARTED
+        if record.kind is ToolCallKind.ORDINARY and (retry or contract is not None):
+            if contract is None or (
+                record.replay_policy, record.side_effect, record.replay_contract_version,
+                record.key_valid_until,
+                record.recovery_initial_delay_s, record.recovery_backoff_multiplier,
+                record.recovery_max_delay_s, record.execution_scope,
+            ) != (
+                contract.policy, contract.side_effect, contract.version, contract.key_valid_until,
+                contract.recovery_initial_delay_s,
+                contract.recovery_backoff_multiplier, contract.recovery_max_delay_s,
+                contract.execution_scope,
+            ):
+                raise ValueError("工具恢复契约与冻结记录不一致")
+        if retry and (
+            not record.execution_scope
+            or contract is None
+            or not contract.execution_scope
+            or
+            not (
+                (record.replay_policy.value == "safe_retry" and record.side_effect.value == "none")
+                or (
+                    record.replay_policy.value == "keyed_idempotent"
+                    and record.idempotency_key is not None
+                    and record.side_effect.value != "unknown"
+                    and (record.key_valid_until is None or datetime.fromisoformat(record.key_valid_until) > datetime.now(UTC))
+                )
+            )
+            or record.last_execution_evidence not in {None, ToolExecutionEvidence.UNKNOWN}
+            or record.retry_count >= min(record.recovery_max_retries, contract.recovery_max_retries)
+            or record.recovery_retry_not_before is None
+            or datetime.fromisoformat(record.recovery_retry_not_before) > datetime.now(UTC)
+        ):
+            raise ValueError("工具调用不满足安全重试条件")
         if record.state is ToolCallState.WAITING_APPROVAL and record.approval_decision is not True:
             raise ValueError("未批准的调用不能开始执行")
         updated = replace(
             record, state=ToolCallState.STARTED, attempt=record.attempt + 1,
+            retry_count=record.retry_count + (1 if retry else 0),
+            recovery_retry_not_before=None,
             attempt_started_at=utc_now_iso(), updated_at=utc_now_iso(),
         )
         record.validate_transition(updated.state)
@@ -490,15 +536,19 @@ class ToolRecoveryService:
         event = await self._event(base_run, RunEventType.RUN_FAILED, {"error_code": error.code.value}, error.message)
         return await self._commit_fact(ledger, base_run, target_run, base_checkpoint, None, events=(event,))
 
-    async def record_interruption(self, run: AgentRun, call_id: str, evidence: ToolExecutionEvidence, error: RunError, checkpoint: RunCheckpoint) -> ToolCallLedger:
+    async def record_interruption(self, run: AgentRun, call_id: str, evidence: ToolExecutionEvidence | None, error: RunError, checkpoint: RunCheckpoint) -> ToolCallLedger:
         ledger = await self._required_ledger(run, checkpoint)
         record = self._call(ledger, call_id)
         if record.state is not ToolCallState.STARTED:
             raise ValueError("只有 STARTED 调用可以记录中断诊断")
         retry_not_before = record.recovery_retry_not_before
         if retry_not_before is None:
-            retry_not_before = (datetime.now(UTC) + timedelta(seconds=record.recovery_initial_delay_s)).isoformat()
-        updated = replace(record, last_execution_evidence=evidence, last_error=error, recovery_retry_not_before=retry_not_before, updated_at=utc_now_iso())
+            delay = min(
+                record.recovery_initial_delay_s * record.recovery_backoff_multiplier ** record.retry_count,
+                record.recovery_max_delay_s,
+            )
+            retry_not_before = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
+        updated = replace(record, last_execution_evidence=evidence or ToolExecutionEvidence.UNKNOWN, last_error=error, recovery_retry_not_before=retry_not_before, updated_at=utc_now_iso())
         calls = tuple(updated if item.call.call_id == call_id else item for item in ledger.calls)
         base_run, base_checkpoint = await self._persistent_base(run)
         target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, dict(base_checkpoint.pending if base_checkpoint else {}), AgentAction.EXECUTE_TOOLS, None)

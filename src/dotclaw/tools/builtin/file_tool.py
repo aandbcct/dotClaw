@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from dotclaw.tools.base import ToolContext
 from dotclaw.tools.decorator import ToolPolicy, tool
+from dotclaw.common.tool_replay import ToolReplayPolicy, ToolSideEffect
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 WORKSPACE_PATH_DESCRIPTION = (
@@ -47,6 +48,8 @@ class ListDirectoryArgs(BaseModel):
     args_model=ReadTextArgs,
     policy=ToolPolicy.WORKSPACE_READ,
     timeout=10.0,
+    replay_policy=ToolReplayPolicy.SAFE_RETRY, replay_contract_version="1",
+    side_effect=ToolSideEffect.NONE, recovery_max_retries=3,
 )
 async def read_text(args: ReadTextArgs, context: ToolContext) -> str:
     def perform() -> str:
@@ -74,6 +77,7 @@ async def read_text(args: ReadTextArgs, context: ToolContext) -> str:
     policy=ToolPolicy.WORKSPACE_WRITE,
     needs_approval=True,
     timeout=10.0,
+    side_effect=ToolSideEffect.PRESENT,
 )
 async def write_text(args: WriteTextArgs, context: ToolContext) -> str:
     def perform() -> str:
@@ -96,6 +100,8 @@ async def write_text(args: WriteTextArgs, context: ToolContext) -> str:
     args_model=ListDirectoryArgs,
     policy=ToolPolicy.WORKSPACE_READ,
     timeout=10.0,
+    replay_policy=ToolReplayPolicy.SAFE_RETRY, replay_contract_version="1",
+    side_effect=ToolSideEffect.NONE, recovery_max_retries=3,
 )
 async def list_directory(args: ListDirectoryArgs, context: ToolContext) -> str:
     def perform() -> str:

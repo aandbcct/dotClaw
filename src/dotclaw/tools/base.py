@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from math import isfinite
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -100,6 +101,19 @@ class ToolDefinition:
     recovery_backoff_multiplier: float = 2.0
     recovery_max_delay_s: float = 30.0
 
+    def __post_init__(self) -> None:
+        if self.replay_policy in {ToolReplayPolicy.SAFE_RETRY, ToolReplayPolicy.KEYED_IDEMPOTENT} and not self.replay_contract_version:
+            raise ValueError("安全恢复策略必须声明非空契约版本")
+        if self.replay_policy is ToolReplayPolicy.SAFE_RETRY and self.side_effect is not ToolSideEffect.NONE:
+            raise ValueError("SAFE_RETRY 仅允许副作用声明为 NONE 的工具")
+        if not isinstance(self.recovery_max_retries, int) or isinstance(self.recovery_max_retries, bool) or self.recovery_max_retries < 0:
+            raise ValueError("recovery_max_retries 必须是非负整数")
+        values = (self.recovery_initial_delay_s, self.recovery_backoff_multiplier, self.recovery_max_delay_s)
+        if any(not isinstance(value, (int, float)) or isinstance(value, bool) or not isfinite(value) for value in values):
+            raise ValueError("恢复退避参数必须是有限数字")
+        if self.recovery_initial_delay_s < 0 or self.recovery_backoff_multiplier < 1 or self.recovery_max_delay_s < self.recovery_initial_delay_s:
+            raise ValueError("恢复退避参数范围无效")
+
 
 @dataclass
 class ToolResult:
@@ -113,7 +127,7 @@ class ToolResult:
     error_code: str | None = None      # ToolErrorCode 的值
     error_type: str | None = None      # ToolErrorType 的值
     metadata: dict = field(default_factory=dict)  # 扩展字段
-    execution_evidence: ToolExecutionEvidence = ToolExecutionEvidence.UNKNOWN
+    execution_evidence: ToolExecutionEvidence | None = None
     approval_required: bool = False
 
     @classmethod
@@ -123,7 +137,7 @@ class ToolResult:
         code: ToolErrorCode,
         message: str,
         error_type: ToolErrorType | None = None,
-        execution_evidence: ToolExecutionEvidence = ToolExecutionEvidence.UNKNOWN,
+        execution_evidence: ToolExecutionEvidence | None = None,
     ) -> "ToolResult":
         """由标准错误码构造统一的错误结果，避免调用方重复指定类别。"""
         if error_type is None:

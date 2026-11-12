@@ -83,7 +83,10 @@ class ToolExecutorAdapter(ToolPort):
 
     async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
         """从已注册工具读取冻结前恢复契约，未知工具按禁止重试处理。"""
-        return self._executor.describe_recovery(call.name)
+        return self._executor.describe_recovery(call.name, ToolExecutionContext(
+            agentrun_id=execution.run_id, session_id=execution.session_id,
+            agent_id=execution.policy.agent_id,
+        ))
 
 
 

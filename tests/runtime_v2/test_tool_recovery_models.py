@@ -72,6 +72,7 @@ def test_tool_call_round_trip_preserves_recovery_contract_and_evidence() -> None
         recovery_initial_delay_s=0.5,
         recovery_backoff_multiplier=2.0,
         recovery_max_delay_s=8.0,
+        execution_scope='{"workspace_root":"/workspace"}',
         recovery_retry_not_before="2026-11-12T00:00:01+00:00",
         last_execution_evidence=ToolExecutionEvidence.RETURNED,
         last_error=RunError(RunErrorCode.TOOL_FAILURE, "rejected", True),
@@ -250,6 +251,7 @@ def test_recovery_contract_and_plan_use_typed_decisions_and_next_sequences() -> 
         "2026-11-12T01:00:00+00:00",
         ToolSideEffect.PRESENT,
         recovery_max_retries=2,
+        execution_scope='{"workspace_root":"/workspace"}',
     )
     ledger = ToolCallLedger("session-1", "run-1", 1, (_record(),))
     plan = ToolRecoveryPlan(_run(), (), None, ledger, 3, 2, (ToolRecoveryDecision("call-1", ToolRecoveryAction.RETRY, "keyed"),))

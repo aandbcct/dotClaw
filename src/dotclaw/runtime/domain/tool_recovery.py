@@ -161,6 +161,7 @@ class ToolCallRecord:
     recovery_initial_delay_s: float = 1.0
     recovery_backoff_multiplier: float = 2.0
     recovery_max_delay_s: float = 30.0
+    execution_scope: str = ""
     recovery_retry_not_before: str | None = None
     last_execution_evidence: ToolExecutionEvidence | None = None
     last_error: RunError | None = None
@@ -266,6 +267,7 @@ class ToolCallRecord:
             "recovery_initial_delay_s": self.recovery_initial_delay_s,
             "recovery_backoff_multiplier": self.recovery_backoff_multiplier,
             "recovery_max_delay_s": self.recovery_max_delay_s,
+            "execution_scope": self.execution_scope,
             "recovery_retry_not_before": self.recovery_retry_not_before,
             "last_execution_evidence": None if self.last_execution_evidence is None else self.last_execution_evidence.value,
             "last_error": None if self.last_error is None else self.last_error.to_dict(),
@@ -282,7 +284,7 @@ class ToolCallRecord:
 
     @classmethod
     def from_dict(cls, data: JSONMap) -> ToolCallRecord:
-        fields = {"run_id", "call", "source_message_id", "ordinal", "kind", "state", "attempt", "replay_policy", "side_effect", "replay_contract_version", "idempotency_key", "key_valid_until", "retry_count", "recovery_max_retries", "recovery_initial_delay_s", "recovery_backoff_multiplier", "recovery_max_delay_s", "recovery_retry_not_before", "last_execution_evidence", "last_error", "last_tool_error_code", "last_tool_error_type", "attempt_started_at", "approval_id", "approval_decision", "child_run_id", "result", "uncertainty_reason", "updated_at"}
+        fields = {"run_id", "call", "source_message_id", "ordinal", "kind", "state", "attempt", "replay_policy", "side_effect", "replay_contract_version", "idempotency_key", "key_valid_until", "retry_count", "recovery_max_retries", "recovery_initial_delay_s", "recovery_backoff_multiplier", "recovery_max_delay_s", "recovery_retry_not_before", "last_execution_evidence", "last_error", "last_tool_error_code", "last_tool_error_type", "attempt_started_at", "approval_id", "approval_decision", "child_run_id", "result", "uncertainty_reason", "updated_at", "execution_scope"}
         _reject_unknown(data, fields, "ToolCallRecord")
         call_data = require_json_map(data.get("call"))
         call = ToolCall(
@@ -308,6 +310,7 @@ class ToolCallRecord:
             recovery_initial_delay_s=_optional_number(data.get("recovery_initial_delay_s"), "recovery_initial_delay_s", 1.0),
             recovery_backoff_multiplier=_optional_number(data.get("recovery_backoff_multiplier"), "recovery_backoff_multiplier", 2.0),
             recovery_max_delay_s=_optional_number(data.get("recovery_max_delay_s"), "recovery_max_delay_s", 30.0),
+            execution_scope=_optional_string(data.get("execution_scope"), "execution_scope") or "",
             recovery_retry_not_before=_optional_string(data.get("recovery_retry_not_before"), "recovery_retry_not_before"),
             last_execution_evidence=_optional_enum(data.get("last_execution_evidence"), ToolExecutionEvidence, "last_execution_evidence"),
             last_error=_optional_error(data.get("last_error")),

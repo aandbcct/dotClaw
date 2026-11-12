@@ -16,6 +16,7 @@ from collections.abc import Awaitable
 import inspect
 import logging
 from ..common.resource_errors import ResourceCleanupError
+from ..common.tool_replay import ToolExecutionEvidence
 
 from typing import Any, Callable
 
@@ -105,6 +106,7 @@ class FunctionToolHandler(ToolHandler):
                     code=ToolErrorCode.INVALID_ARGUMENTS,
                     message=str(exc),
                     error_type=ToolErrorType.VALIDATION,
+                    execution_evidence=ToolExecutionEvidence.NOT_STARTED,
                 )
         validated = arguments
 
@@ -131,12 +133,13 @@ class FunctionToolHandler(ToolHandler):
                 code=ToolErrorCode.EXECUTION_ERROR,
                 message=f"工具执行出错: {exc}",
                 error_type=ToolErrorType.EXECUTION,
+                execution_evidence=ToolExecutionEvidence.UNKNOWN,
             )
 
         # 结构化 ToolResult 直接透传；其余返回值转为 output 文本。
         if isinstance(result, ToolResult):
             return result
-        return ToolResult(output=str(result))
+        return ToolResult(output=str(result), execution_evidence=ToolExecutionEvidence.RETURNED)
 
 
 async def _await_io_completion[T](operation: Awaitable[T]) -> T:

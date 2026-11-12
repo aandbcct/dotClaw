@@ -13,12 +13,15 @@ import platform
 
 from dotclaw.tools.base import ToolContext
 from dotclaw.tools.decorator import tool
+from dotclaw.common.tool_replay import ToolReplayPolicy, ToolSideEffect
 
 
 @tool(
     name="builtin.system.get_info",
     description="获取系统基本信息，当用户提到系统信息详细内容，你需要根据系统信息回复时调用",
     timeout=10.0,
+    replay_policy=ToolReplayPolicy.SAFE_RETRY, replay_contract_version="1",
+    side_effect=ToolSideEffect.NONE, recovery_max_retries=3,
 )
 async def get_info(context: ToolContext) -> str:
     """返回系统时间、当前目录、环境变量概要。"""
@@ -47,6 +50,8 @@ async def get_info(context: ToolContext) -> str:
     name="builtin.system.get_time",
     description="获取当前日期和时间,当用户问到任何与当前时间相关的内容时，先调用该tool获取当前时间",
     timeout=5.0,
+    replay_policy=ToolReplayPolicy.SAFE_RETRY, replay_contract_version="1",
+    side_effect=ToolSideEffect.NONE, recovery_max_retries=3,
 )
 async def get_time() -> str:
     """返回当前时间字符串。"""
