@@ -189,6 +189,28 @@ class SessionRunCoordinator:
         self._driver_tasks[run_id] = task
         task.add_done_callback(lambda completed: self._driver_done(run_id, completed))
 
+    def schedule_resume(self, run_id: str) -> None:
+        """按运行 ID 去重登记恢复驱动，并复用既有任务清理回调。"""
+        existing = self._driver_tasks.get(run_id)
+        if existing is not None:
+            return
+        self._assert_accepting_business()
+        task = asyncio.create_task(self._resume_serial(run_id))
+        self._driver_tasks[run_id] = task
+        task.add_done_callback(lambda completed: self._driver_done(run_id, completed))
+
+    async def _resume_serial(self, run_id: str) -> RunResult:
+        session_id = await self._engine.get_run_session_id(run_id)
+        if session_id is None:
+            raise ValueError("恢复运行不存在")
+        lock = await self._get_lock(session_id)
+        async with lock:
+            self._assert_accepting_business()
+            result = await self._engine.resume_run(run_id)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(run_id)
+            return result
+
     def _driver_done(self, run_id: str, task: asyncio.Task[RunResult]) -> None:
         if self._driver_tasks.get(run_id) is task:
             self._driver_tasks.pop(run_id, None)

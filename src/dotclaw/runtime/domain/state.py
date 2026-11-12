@@ -355,7 +355,7 @@ def _on_running(state: AgentRunState, event: AgentRunEvent) -> StateTransition:
         if isinstance(event, DelegationSubmitted):
             return StateTransition(
                 AgentRunState(
-                    mode=Suspended(SuspendReason.DELEGATION, event.child_run_id, RunStage.CALLING_LLM),
+                    mode=Suspended(SuspendReason.DELEGATION, event.child_run_id, RunStage.EXECUTING_TOOLS),
                     iteration=state.iteration,
                     retry_count=state.retry_count,
                     truncate_count=state.truncate_count,
@@ -426,13 +426,13 @@ def _on_suspended(state: AgentRunState, event: AgentRunEvent) -> StateTransition
                 )
             return StateTransition(
                 AgentRunState(
-                    mode=Running(RunStage.CALLING_LLM),
-                    iteration=state.iteration + 1,
+                    mode=Running(RunStage.EXECUTING_TOOLS),
+                    iteration=state.iteration,
                     retry_count=state.retry_count,
                     truncate_count=state.truncate_count,
                     loop_fingerprint=state.loop_fingerprint,
                 ),
-                AgentAction.INVOKE_LLM,
+                AgentAction.EXECUTE_TOOLS,
             )
         raise InvalidTransition(
             "DELEGATION 挂起仅接受子运行完成事件",

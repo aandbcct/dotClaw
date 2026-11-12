@@ -24,8 +24,7 @@ class PendingDelegation:
 
     request: DelegationRequest
     tool_call: ToolCall
-    tool_calls: tuple[ToolCall, ...]
-    tool_index: int
+    batch_id: str
 
 
 class PendingControlKind(StrEnum):

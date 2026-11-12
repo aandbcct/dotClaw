@@ -415,6 +415,10 @@ class FixtureDelegationPort:
         """冻结 fixture 没有外部驱动，校验准备归属即可。"""
         self.submitted_fixture(child_run_id)
 
+    async def resume(self, child_run_id: str) -> None:
+        """冻结 fixture 无需启动恢复驱动，只校验委派归属。"""
+        self.submitted_fixture(child_run_id)
+
     async def wait_terminal(self, child_run_id: str) -> DelegationResult:
         """隔离回放只接受已有冻结终态，不启动真实任务。"""
         result = await self.result(child_run_id)

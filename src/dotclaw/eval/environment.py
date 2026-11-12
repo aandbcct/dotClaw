@@ -390,6 +390,22 @@ class _DelegationComposite:
             raise FixtureConfigurationError("未配置已准备的委派端口")
         await self._real.start(child_run_id)
 
+    async def resume(self, child_run_id: str) -> None:
+        """按子运行归属把恢复请求交给 Fixture 或真实委派端口。"""
+        if self._fixture is not None:
+            try:
+                await self._fixture.resume(child_run_id)
+                return
+            except FixtureConfigurationError:
+                if not self._allow_fallback:
+                    raise
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("未配置委派 fixture，且 Playback 模式禁止回退到真实委派端口")
+        if self._real is None:
+            raise FixtureConfigurationError("未配置委派 fixture 或真实委派端口")
+        self.real_served += 1
+        await self._real.resume(child_run_id)
+
     async def wait_terminal(self, child_run_id: str) -> Any:
         """等待对应端口的真实或冻结终态。"""
         if self._fixture is not None:

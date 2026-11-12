@@ -307,6 +307,9 @@ class DelegationPort(Protocol):
     async def start(self, child_run_id: str) -> None:
         """安排已准备子运行，不等待执行结束。"""
 
+    async def resume(self, child_run_id: str) -> None:
+        """按子运行持久状态安排已有运行的恢复。"""
+
     async def result(self, child_run_id: str) -> DelegationResult | None:
         """读取已提交终态，活跃运行返回 None。"""
 

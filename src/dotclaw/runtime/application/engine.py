@@ -108,6 +108,7 @@ from .dto import (
     ToolStepResult,
 )
 from ..domain.tool_recovery import (
+    ToolCallKind,
     ToolCallState,
     ToolEffectCertainty,
     ToolOutcomeSnapshot,
@@ -412,12 +413,56 @@ class RuntimeEngine:
         if checkpoint is None:
             return RunResult(parent_run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "父运行或检查点不存在"))
         state: AgentRunState = parent_run.state
-        if not (isinstance(state.mode, Suspended) and state.mode.reason is SuspendReason.DELEGATION):
+        ledger = await self._run_repository.load_tool_ledger(parent_run.session_id, parent_run_id)
+        if ledger is None and not (isinstance(state.mode, Suspended) and state.mode.reason is SuspendReason.DELEGATION):
             return RunResult(parent_run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "父运行不处于 delegation 挂起"))
         child_result = await self._delegation_port.result(child_run_id) if self._delegation_port is not None else None
         if child_result is None:
             # 子运行尚未结束：父运行继续挂起，不修改任何持久化状态。
-            return RunResult(parent_run_id, AgentRunState(mode=Suspended(SuspendReason.DELEGATION, child_run_id, RunStage.CALLING_LLM)), child_run_id=child_run_id)
+            return RunResult(parent_run_id, AgentRunState(mode=Suspended(SuspendReason.DELEGATION, child_run_id, RunStage.EXECUTING_TOOLS)), child_run_id=child_run_id)
+        if ledger is not None:
+            async with self._cancellation_service.gate(parent_run_id):
+                await self._tool_recovery.recover_projection(parent_run.session_id, parent_run_id)
+                latest = await self._run_repository.load_run(parent_run.session_id, parent_run_id)
+                current_checkpoint = await self._checkpoint_repository.load(parent_run.session_id, parent_run_id)
+                if latest is None or current_checkpoint is None:
+                    raise ValueError("委派结果提交时父运行或检查点不存在")
+                if latest.state.is_ended():
+                    return await self._result_from_run(latest)
+                waiting_for_child = (
+                    isinstance(latest.state.mode, Suspended)
+                    and latest.state.mode.reason is SuspendReason.DELEGATION
+                    and latest.state.mode.control_id == child_run_id
+                )
+                resuming_batch = (
+                    isinstance(latest.state.mode, Running)
+                    and latest.state.mode.stage is RunStage.EXECUTING_TOOLS
+                    and current_checkpoint.pending.get("child_run_id") == child_run_id
+                )
+                if not waiting_for_child and not resuming_batch:
+                    return RunResult(parent_run_id, latest.state)
+                cancellation = await self._run_repository.load_cancellation(parent_run.session_id, parent_run_id)
+                if cancellation is not None:
+                    return RunResult(parent_run_id, latest.state, control_status="cancelling")
+                current_ledger = await self._run_repository.load_tool_ledger(parent_run.session_id, parent_run_id)
+                record = next((item for item in current_ledger.calls if item.kind is ToolCallKind.DELEGATION and item.child_run_id == child_run_id), None) if current_ledger else None
+                if record is None:
+                    return RunResult(parent_run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "账本中不存在该子运行关联"))
+                child_output = child_result.output or (child_result.error.message if child_result.error is not None else "delegation 未返回输出")
+                if record.result is not None and (
+                    record.result.message_kind is not RunMessageKind.DELEGATION_RESULT
+                    or record.result.output != child_output
+                    or record.result.child_outcome is not child_result.outcome
+                ):
+                    raise ValueError("重复委派回调与已提交子结果不一致")
+                if record.result is None:
+                    outcome = ToolOutcomeSnapshot(
+                        ToolOutcomeStatus.COMPLETED, child_output, None,
+                        f"delegation-{parent_run_id}-{record.call.call_id}", utc_now_iso(), ToolEffectCertainty.KNOWN,
+                        message_kind=RunMessageKind.DELEGATION_RESULT, child_outcome=child_result.outcome,
+                    )
+                    await _await_control(self._tool_recovery.commit_outcome(latest, record.call.call_id, outcome, current_checkpoint))
+            return await self.resume_run(parent_run_id, output_port)
         messages = list(await self._run_repository.load_messages(session_id, parent_run_id))
         input_message = next((message for message in messages if message.message_id == parent_run.input_message_id), None)
         if input_message is None:
@@ -718,6 +763,12 @@ class RuntimeEngine:
         if version is None:
             return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "checkpoint 引用的 Context Version 不存在")), False
         messages: tuple[RunMessage, ...] = await self._run_repository.load_messages(run.session_id, run.run_id)
+        if resume_action is AgentAction.EXECUTE_TOOLS and checkpoint.tool_ledger_revision is not None:
+            batch_id = checkpoint.pending.get("tool_batch_id")
+            source = next((item for item in messages if item.message_id == batch_id), None)
+            if source is None or not source.tool_calls:
+                return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "账本工具批次缺少原始助手调用")), False
+            resume_pending_calls = source.tool_calls
         input_message: RunMessage | None = next((item for item in messages if item.message_id == run.input_message_id), None)
         if input_message is None:
             return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "Run 缺少用户输入消息")), False
@@ -1172,16 +1223,8 @@ class RuntimeEngine:
         pending_calls = ()
         if not tool_calls:
             return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "缺少待执行工具调用")
-        delegation_calls = tuple(call for call in tool_calls if _delegation_request(
-            execution.run_id, run.root_run_id or run.run_id, run.agent_id, run.session_id, call
-        ) is not None)
-        if delegation_calls and len(delegation_calls) != len(tool_calls):
-            return run, sequence, event_number, pending_calls, await self._fail(
-                execution, run, tuple(messages), event_number,
-                "普通工具与委派调用混合的批次暂不支持，未执行本批调用", RunErrorCode.INVALID_STATE,
-            )
-        # 阶段一：为所有非委派工具写入 tool_started 审计事件；委派工具在此提前返回 HANDOFF_TARGET。
-        for tool_index, tool_call in enumerate(tool_calls):
+        # 旧检查点继续走兼容动作；新格式批次由 ordinal 账本统一处理普通调用与委派。
+        for tool_index, tool_call in (enumerate(tool_calls) if execution.legacy_tool_recovery else ()):
             delegation_request: DelegationRequest | None = _delegation_request(
                 execution.run_id,
                 run.root_run_id or run.run_id,
@@ -1208,12 +1251,11 @@ class RuntimeEngine:
                 execution.pending_delegation = PendingDelegation(
                     request=delegation_request,
                     tool_call=tool_call,
-                    tool_calls=tool_calls,
-                    tool_index=tool_index,
+                    batch_id=_source_response_message_id(messages, tool_call.call_id),
                 )
                 # 不直接提交：返回空 terminal 让主循环按 HANDOFF_TARGET 分支调度 _handoff_target_action。
                 return run, sequence, event_number, pending_calls, None
-        if not delegation_calls and not execution.legacy_tool_recovery:
+        if not execution.legacy_tool_recovery:
             source_id = _source_response_message_id(messages, tool_calls[0].call_id)
             source_message = next((item for item in messages if item.message_id == source_id), None)
             if source_message is None:
@@ -1343,12 +1385,96 @@ class RuntimeEngine:
             if decision.action is ToolRecoveryAction.WAIT_APPROVAL:
                 return RunResult(run.run_id, run.state, approval_id=record.approval_id)
             if decision.action is ToolRecoveryAction.RESUME_CHILD:
-                return RunResult(run.run_id, run.state, child_run_id=record.child_run_id)
+                if self._delegation_port is None or record.child_run_id is None:
+                    raise ValueError("待恢复委派缺少子运行端口或稳定子 ID")
+                child_result = await self._delegation_port.result(record.child_run_id)
+                if child_result is None:
+                    await self._delegation_port.resume(record.child_run_id)
+                    child_result = await self._delegation_port.result(record.child_run_id)
+                if child_result is None:
+                    latest = await self._run_repository.load_run(run.session_id, run.run_id)
+                    if latest is None:
+                        raise ValueError("恢复委派子运行后父运行不存在")
+                    return RunResult(run.run_id, latest.state, child_run_id=record.child_run_id)
+                child_output = child_result.output or (
+                    child_result.error.message if child_result.error is not None else "delegation 未返回输出"
+                )
+                outcome = ToolOutcomeSnapshot(
+                    ToolOutcomeStatus.COMPLETED,
+                    child_output,
+                    None,
+                    f"delegation-{run.run_id}-{record.call.call_id}",
+                    utc_now_iso(),
+                    ToolEffectCertainty.KNOWN,
+                    message_kind=RunMessageKind.DELEGATION_RESULT,
+                    child_outcome=child_result.outcome,
+                )
+                async with self._cancellation_service.gate(run.run_id):
+                    latest = await self._run_repository.load_run(run.session_id, run.run_id)
+                    current_checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                    if latest is None or current_checkpoint is None:
+                        raise ValueError("提交恢复到的委派结果时父运行或检查点不存在")
+                    cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
+                    if cancellation is not None:
+                        return RunResult(run.run_id, latest.state, control_status="cancelling")
+                    current_ledger = await self._run_repository.load_tool_ledger(run.session_id, run.run_id)
+                    current_record = next(item for item in current_ledger.calls if item.call.call_id == record.call.call_id)
+                    if current_record.result is None:
+                        await _await_control(self._tool_recovery.commit_outcome(
+                            latest, record.call.call_id, outcome, current_checkpoint,
+                        ))
+                    elif current_record.result != outcome and (
+                        current_record.result.message_kind is not RunMessageKind.DELEGATION_RESULT
+                        or current_record.result.output != child_output
+                        or current_record.result.child_outcome is not child_result.outcome
+                    ):
+                        raise ValueError("恢复到的委派结果与账本终态不一致")
+                    run = await self._run_repository.load_run(run.session_id, run.run_id)
+                    checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                    if run is None or checkpoint is None:
+                        raise ValueError("委派结果提交后父运行或检查点不存在")
+                continue
             if decision.action is ToolRecoveryAction.REUSE and record.state is ToolCallState.FAILED:
                 error = record.result.error if record.result is not None else RunError(RunErrorCode.TOOL_FAILURE, "工具调用失败")
                 return await self._after_tool_failure(execution, run, error, checkpoint)
             if decision.action is ToolRecoveryAction.REUSE:
                 continue
+            if record.kind is ToolCallKind.DELEGATION:
+                if self._delegation_port is None:
+                    raise ValueError("当前 Runtime 未装配 DelegationPort")
+                request = _delegation_request(
+                    run.run_id, run.root_run_id or run.run_id, run.agent_id, run.session_id, record.call,
+                )
+                if request is None:
+                    raise ValueError("委派账本记录缺少 delegate 调用")
+                async with self._cancellation_service.gate(run.run_id):
+                    latest = await self._run_repository.load_run(run.session_id, run.run_id)
+                    current_checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                    cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
+                    if latest is None or current_checkpoint is None:
+                        raise ValueError("准备委派子运行前父运行或检查点不存在")
+                    if cancellation is not None:
+                        return RunResult(run.run_id, latest.state, control_status="cancelling")
+                    if record.state is ToolCallState.PENDING:
+                        await self._tool_recovery.begin_attempt(latest, record.call.call_id, current_checkpoint)
+                submission = await self._delegation_port.prepare(request)
+                async with self._cancellation_service.gate(run.run_id):
+                    latest = await self._run_repository.load_run(run.session_id, run.run_id)
+                    current_checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                    if latest is None or current_checkpoint is None:
+                        raise ValueError("准备委派子运行后父运行或检查点不存在")
+                    cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
+                    await self._tool_recovery.attach_child(latest, record.call.call_id, submission.child_run_id, current_checkpoint)
+                    suspended = await self._run_repository.load_run(run.session_id, run.run_id)
+                    if suspended is None:
+                        raise ValueError("关联委派子运行后父运行不存在")
+                if cancellation is not None:
+                    return RunResult(run.run_id, suspended.state, child_run_id=submission.child_run_id, control_status="cancelling")
+                await self._delegation_port.resume(submission.child_run_id)
+                suspended = await self._run_repository.load_run(run.session_id, run.run_id)
+                if suspended is None:
+                    raise ValueError("关联子运行后父运行不存在")
+                return RunResult(run.run_id, suspended.state, child_run_id=submission.child_run_id)
             step = await self._execute_one_tool(execution, run, record, checkpoint)
             if step.kind is not ToolStepKind.COMPLETED:
                 return step.run_result
@@ -1868,8 +1994,7 @@ class RuntimeEngine:
         """
         request: DelegationRequest = pending.request
         tool_call: ToolCall = pending.tool_call
-        tool_calls: tuple[ToolCall, ...] = pending.tool_calls
-        tool_index: int = pending.tool_index
+        tool_calls: tuple[ToolCall, ...] = (tool_call,)
         execution.pending_delegation = None
         if self._delegation_port is None:
             event_number = await self._tool_completed_event(run, event_sequence, tool_call, None, ToolAuditStatus.FAILED, "未装配 DelegationPort")
@@ -1903,7 +2028,6 @@ class RuntimeEngine:
                                 "target_session_id": submission.target_session_id,
                             },
                         )
-                        remaining_calls: tuple[ToolCall, ...] = tool_calls[tool_index + 1:]
                         checkpoint = RunCheckpoint(
                             checkpoint_id=f"checkpoint-{run.run_id}",
                             run_id=run.run_id,
@@ -1917,7 +2041,7 @@ class RuntimeEngine:
                                 "source_tool_call_id": tool_call.call_id,
                                 "target_agent_id": request.target_agent_id,
                                 "target_session_id": submission.target_session_id,
-                                "tool_calls": [call.to_dict() for call in remaining_calls],
+                                "tool_calls": [],
                             },
                             budget=execution.budget.to_dict(),
                             active_context_version=(

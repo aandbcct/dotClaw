@@ -10,6 +10,7 @@ from ..runtime.application.dto import ConversationMessage, ConversationSnapshot,
 from ..runtime.application.ports import DelegationPort, RunRepository
 from ..runtime.domain.cancellation import CancellationOrigin, CancellationReceipt
 from ..runtime.domain.facts import AgentRun, MessageRole
+from ..runtime.domain.state import Created, Running, Suspended
 from ..session.session import SessionManager
 from .dispatcher import AgentDispatcher
 from .registry import AgentRegistry
@@ -21,6 +22,7 @@ class DelegationSubmissionPort(Protocol):
 
     async def _prepare_child_run_locked(self, request: RunRequest) -> str: ...
     def schedule_prepared(self, run_id: str) -> None: ...
+    def schedule_resume(self, run_id: str) -> None: ...
     async def wait_terminal(self, run_id: str) -> RunResult: ...
     async def cancel(self, run_id: str, reason: str, *, origin: CancellationOrigin = CancellationOrigin.USER, parent_request_id: str | None = None) -> CancellationReceipt: ...
 
@@ -81,13 +83,40 @@ class RuntimeDelegationAdapter(DelegationPort):
                     await self._dispatcher.fail_v2_preparation(task.task_id, child_id, "准备失败：子运行未创建或启动")
                 await self._session_manager.delete(session.id)
             else:
-                # 子运行存在后不能删除稳定证据，也不能重试时再准备另一份。
-                await self._require_coordinator().cancel(child_id, "委派准备中断，停止未启动子运行", origin=CancellationOrigin.PARENT)
+                messages = await self._run_repository.load_messages(child.session_id, child_id)
+                initial = next((message for message in messages if message.message_id == child.input_message_id), None)
+                if (child.parent_run_id, child.root_run_id, child.agent_id) != (parent.run_id, request.root_run_id, request.target_agent_id) or initial is None or (initial.role, initial.content) != (request.input_message.role, request.input_message.content) or not child.delegation_task_id:
+                    raise ValueError("准备失败后发现的稳定子运行与本调用契约冲突")
+                await self._restore_projection(child)
+                return DelegationSubmission(child_id, child.delegation_task_id, child.session_id)
             raise
 
     async def start(self, child_run_id: str) -> None:
         """只有协调器创建和持有实际驱动任务。"""
         self._require_coordinator().schedule_prepared(child_run_id)
+
+    async def resume(self, child_run_id: str) -> None:
+        """按持久子状态分流调度；挂起等待由原审批/委派入口唤醒。"""
+        child = await self._run_repository.find_run(child_run_id)
+        if child is None:
+            raise ValueError("待恢复委派子运行不存在")
+        await self._restore_projection(child)
+        coordinator = self._require_coordinator()
+        if child.state.is_ended():
+            return
+        parent = await self._run_repository.find_run(child.parent_run_id) if child.parent_run_id else None
+        if parent is not None and await self._run_repository.load_cancellation(parent.session_id, parent.run_id) is not None:
+            await coordinator.cancel(child.run_id, "父运行已请求停止", origin=CancellationOrigin.PARENT)
+            return
+        if await self._run_repository.load_cancellation(child.session_id, child.run_id) is not None:
+            await coordinator.cancel(child.run_id, "恢复发现子运行已有取消请求", origin=CancellationOrigin.PARENT)
+            return
+        if isinstance(child.state.mode, Created):
+            coordinator.schedule_prepared(child_run_id)
+        elif isinstance(child.state.mode, Running):
+            coordinator.schedule_resume(child_run_id)
+        elif isinstance(child.state.mode, Suspended):
+            return
 
     async def result(self, child_run_id: str) -> DelegationResult | None:
         """依据持久事实投影，不 await 或取消子驱动。"""

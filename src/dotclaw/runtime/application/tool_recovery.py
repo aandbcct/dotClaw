@@ -11,6 +11,7 @@ from typing import Mapping
 from ..domain.control import AgentAction
 from ..domain.events import (
     ApprovalGranted,
+    DelegationCompleted,
     DelegationSubmitted,
     RunEvent,
     RunEventType,
@@ -31,7 +32,7 @@ from ..domain.facts import (
     utc_now_iso,
 )
 from ...common.tool_replay import ToolExecutionEvidence
-from ..domain.state import Ended, RunOutcome, Running, RunStage, transition
+from ..domain.state import Ended, RunOutcome, Running, RunStage, Suspended, SuspendReason, transition
 from ..domain.tool_recovery import (
     ToolCallKind,
     ToolCallLedger,
@@ -91,6 +92,15 @@ class ToolRecoveryService:
             raise ValueError("工具账本与原始助手消息不一致")
         decisions: list[ToolRecoveryDecision] = []
         for record in batch:
+            if record.kind is ToolCallKind.DELEGATION:
+                if record.state in {ToolCallState.PENDING, ToolCallState.STARTED}:
+                    action, reason = ToolRecoveryAction.EXECUTE, "stable_delegation_prepare"
+                elif record.state is ToolCallState.WAITING_CHILD:
+                    action, reason = ToolRecoveryAction.RESUME_CHILD, "delegation_pending"
+                else:
+                    action, reason = ToolRecoveryAction.REUSE, "stored_delegation_outcome"
+                decisions.append(ToolRecoveryDecision(record.call.call_id, action, reason))
+                continue
             if record.state in {ToolCallState.SUCCEEDED, ToolCallState.FAILED, ToolCallState.CANCELLED}:
                 decisions.append(ToolRecoveryDecision(record.call.call_id, ToolRecoveryAction.REUSE, "stored_outcome"))
                 continue
@@ -290,7 +300,24 @@ class ToolRecoveryService:
             "工具调用已完成",
             message_ids,
         )
-        return await self._commit_fact(replace(ledger, calls=calls), base_run, target_run, base_checkpoint, target_checkpoint, messages=messages, events=(event,))
+        events = (event,)
+        if record.kind is ToolCallKind.DELEGATION:
+            if outcome.status is not ToolOutcomeStatus.COMPLETED or outcome.message_kind is not RunMessageKind.DELEGATION_RESULT or record.child_run_id is None or outcome.message_id is None:
+                raise ValueError("委派调用必须以 DELEGATION_RESULT 和稳定子运行结局提交")
+            if isinstance(base_run.state.mode, Suspended) and base_run.state.mode.reason is SuspendReason.DELEGATION:
+                target_run = replace(target_run, state=transition(base_run.state, DelegationCompleted(record.child_run_id)).state)
+            elif not (isinstance(base_run.state.mode, Running) and base_run.state.mode.stage is RunStage.EXECUTING_TOOLS):
+                raise ValueError("委派结果只能从委派挂起或工具恢复阶段提交")
+            delegation_event = RunEvent(
+                run.run_id, event.sequence + 1, RunEventType.DELEGATION_COMPLETED, utc_now_iso(),
+                (outcome.message_id,), "委派子运行已完成",
+                {"child_run_id": record.child_run_id, "outcome": outcome.child_outcome.value if outcome.child_outcome else ""},
+            )
+            events = (event, delegation_event)
+        return await self._commit_fact(
+            replace(ledger, calls=calls), base_run, target_run, base_checkpoint, target_checkpoint,
+            messages=messages, events=events,
+        )
 
     async def cancel_unfinished(self, run: AgentRun, checkpoint: RunCheckpoint) -> ToolCallLedger:
         """将取消收尾时账本中的非终态调用标为取消，并保留未知效果证据。"""
@@ -423,13 +450,21 @@ class ToolRecoveryService:
         record = self._call(ledger, call_id)
         if record.kind is not ToolCallKind.DELEGATION:
             raise ValueError("只有委派调用可以关联子运行")
-        if record.state is ToolCallState.WAITING_CHILD and record.child_run_id == child_run_id:
-            return ledger
         child = await self._runs.find_run(child_run_id)
         if child is None or child.parent_run_id != run.run_id or child.root_run_id != (run.root_run_id or run.run_id):
             raise ValueError("子运行与父调用归属不匹配")
+        target_agent_id = record.call.arguments.get("target_agent_id")
+        title = record.call.arguments.get("title")
+        objective = record.call.arguments.get("objective")
+        child_messages = await self._runs.load_messages(child.session_id, child.run_id)
+        initial = next((message for message in child_messages if message.message_id == child.input_message_id), None)
+        expected_input = f"任务：{title}\n\n目标：{objective}"
+        if child.agent_id != target_agent_id or initial is None or initial.role is not MessageRole.USER or initial.content != expected_input or not child.delegation_task_id:
+            raise ValueError("子运行目标、输入或业务任务与父调用不匹配")
         if record.child_run_id is not None and record.child_run_id != child_run_id:
             raise ValueError("委派调用已关联不同子运行")
+        if record.state is ToolCallState.WAITING_CHILD:
+            return ledger
         record.validate_transition(ToolCallState.WAITING_CHILD)
         updated = replace(record, state=ToolCallState.WAITING_CHILD, child_run_id=child_run_id, updated_at=utc_now_iso())
         calls = tuple(updated if item.call.call_id == call_id else item for item in ledger.calls)
@@ -437,7 +472,7 @@ class ToolRecoveryService:
         target_run = replace(base_run, state=transition(base_run.state, DelegationSubmitted(child_run_id)).state)
         pending = dict(base_checkpoint.pending if base_checkpoint else {})
         pending.update({"child_run_id": child_run_id, "pending_call_ids": [item.call.call_id for item in calls if item.state not in _TERMINAL]})
-        target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, pending, AgentAction.SUSPEND, None)
+        target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, pending, AgentAction.EXECUTE_TOOLS, None)
         event = await self._event(base_run, RunEventType.DELEGATION_SUBMITTED, {"call_id": call_id, "tool_name": record.call.name, "source_response_message_id": record.source_message_id, "attempt": record.attempt, "child_run_id": child_run_id}, "委派子运行已关联", (record.source_message_id,))
         return await self._commit_fact(replace(ledger, calls=calls), base_run, target_run, base_checkpoint, target_checkpoint, events=(event,))
 
