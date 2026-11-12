@@ -61,6 +61,8 @@ class RunErrorCode(StrEnum):
     TOKENIZER_UNAVAILABLE = "tokenizer_unavailable"
     SESSION_BUSY = "session_busy"
     PROCESS_RESTART = "process_restart"
+    TOOL_OUTCOME_UNCERTAIN = "tool_outcome_uncertain"
+    TOOL_RECOVERY_RETRY_EXHAUSTED = "tool_recovery_retry_exhausted"
 
 
 class ApprovalStatus(StrEnum):
@@ -296,6 +298,8 @@ class RunCheckpoint:
     action: AgentAction = AgentAction.INVOKE_LLM
     active_context_version: int | None = None
     staged_history_compression_ids: tuple[str, ...] = ()
+    tool_ledger_revision: int | None = None
+    replay_context: bool | None = None
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -311,6 +315,8 @@ class RunCheckpoint:
             "budget": self.budget,
             "active_context_version": self.active_context_version,
             "staged_history_compression_ids": list(self.staged_history_compression_ids),
+            "tool_ledger_revision": self.tool_ledger_revision,
+            "replay_context": self.replay_context,
         }
 
 
@@ -324,6 +330,19 @@ class ApprovalRecord:
     status: ApprovalStatus
     created_at: str
     metadata: JSONMap = field(default_factory=dict)
+    call_id: str | None = None
+    decision: bool | None = None
+    resolved_at: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.decision is not None:
+            if not isinstance(self.decision, bool) or not self.call_id or not self.resolved_at:
+                raise ValueError("审批决议必须包含 call_id 和 resolved_at")
+            expected_status = ApprovalStatus.APPROVED if self.decision else ApprovalStatus.REJECTED
+            if self.status not in {expected_status, ApprovalStatus.CONSUMED}:
+                raise ValueError("审批记录状态与持久决议不一致")
+        elif self.resolved_at is not None:
+            raise ValueError("没有审批决议时 resolved_at 必须为空")
 
     def to_dict(self) -> JSONMap:
         """转换为 JSON 兼容字典。"""
@@ -334,6 +353,9 @@ class ApprovalRecord:
             "status": self.status.value,
             "created_at": self.created_at,
             "metadata": self.metadata,
+            "call_id": self.call_id,
+            "decision": self.decision,
+            "resolved_at": self.resolved_at,
         }
 
 

@@ -15,11 +15,12 @@ from ..domain.facts import (
     RunCheckpoint,
     RunMessage,
     AgentPolicySnapshot,
+    ToolCall,
 )
 from .context_budget import TokenCountRequest, TokenCountResult
 from .context_compaction import ContextCompactionRequest, ContextCompactionResult
 from .history_compaction import HistoryCompactionRequest, HistoryCompactionResult
-from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, LLMOutputEvent, RunAcceptedEvent, RunRequest, ToolInvocation, ToolResult
+from .dto import ContextBundle, ContextRefreshSignal, DelegationRequest, DelegationResult, DelegationSubmission, LLMOutputEvent, RunAcceptedEvent, RunRequest, ToolInvocation, ToolRecoveryContract, ToolResult
 
 RUN_SESSION_MISMATCH_REASON = "run_session_mismatch"
 """仅用于完成读取后的归属拒绝，不与操作系统读盘权限错误混用。"""
@@ -246,6 +247,9 @@ class ToolPort(Protocol):
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """执行工具或返回审批需求。"""
+
+    async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
+        """只读返回已注册工具的恢复安全契约，不执行工具。"""
 
 
 class ApprovalRepository(Protocol):

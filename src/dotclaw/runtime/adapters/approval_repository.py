@@ -75,6 +75,15 @@ def _approval_from_dict(data: JSONMap) -> ApprovalRecord:
     """将审批 JSON 反序列化为领域记录。"""
     raw_metadata: JSONValue | None = data.get("metadata")
     metadata: JSONMap = raw_metadata if isinstance(raw_metadata, dict) else {}
+    raw_call_id = data.get("call_id")
+    raw_decision = data.get("decision")
+    raw_resolved_at = data.get("resolved_at")
+    if raw_call_id is not None and not isinstance(raw_call_id, str):
+        raise ValueError("approval.call_id 必须是字符串或 null")
+    if raw_decision is not None and not isinstance(raw_decision, bool):
+        raise ValueError("approval.decision 必须是布尔值或 null")
+    if raw_resolved_at is not None and not isinstance(raw_resolved_at, str):
+        raise ValueError("approval.resolved_at 必须是字符串或 null")
     return ApprovalRecord(
         approval_id=get_string(data, "approval_id"),
         run_id=get_string(data, "run_id"),
@@ -82,4 +91,7 @@ def _approval_from_dict(data: JSONMap) -> ApprovalRecord:
         status=ApprovalStatus(get_string(data, "status")),
         created_at=get_string(data, "created_at"),
         metadata=metadata,
+        call_id=raw_call_id,
+        decision=raw_decision,
+        resolved_at=raw_resolved_at,
     )

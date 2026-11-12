@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from dotclaw.common.tool_replay import ToolExecutionEvidence, ToolReplayPolicy, ToolSideEffect
+
 if TYPE_CHECKING:
     # HttpClient 协议由阶段二新增的 http_client.py 定义；此处仅用于类型标注，
     # 不在运行时导入，避免 base 模块过早依赖 httpx。
@@ -90,6 +92,13 @@ class ToolDefinition:
                                                        # Agent 参数中的 URL。
                                                        # memory 工具声明为 "long_term_file" 等，
                                                        # 使 Broker 能正确读取路径并做逃逸检测。
+    replay_policy: ToolReplayPolicy = ToolReplayPolicy.NO_AUTO_RETRY
+    replay_contract_version: str = ""
+    side_effect: ToolSideEffect = ToolSideEffect.UNKNOWN
+    recovery_max_retries: int = 0
+    recovery_initial_delay_s: float = 1.0
+    recovery_backoff_multiplier: float = 2.0
+    recovery_max_delay_s: float = 30.0
 
 
 @dataclass
@@ -104,6 +113,8 @@ class ToolResult:
     error_code: str | None = None      # ToolErrorCode 的值
     error_type: str | None = None      # ToolErrorType 的值
     metadata: dict = field(default_factory=dict)  # 扩展字段
+    execution_evidence: ToolExecutionEvidence = ToolExecutionEvidence.UNKNOWN
+    approval_required: bool = False
 
     @classmethod
     def from_error(
@@ -164,6 +175,15 @@ class ToolExecutionContext:
     http_client: "HttpClient | None" = None
     """内部只读依赖：受控 HTTP 客户端（阶段二装配）；网络 Tool 经此调用固定
     Provider，Agent 不可见、不可覆盖。"""
+
+    tool_call_id: str = ""
+    """当前逻辑工具调用 ID。"""
+
+    attempt: int = 1
+    """当前实际执行尝试序号。"""
+
+    idempotency_key: str | None = None
+    """由 Runtime 冻结并传给受支持提供方的稳定幂等键。"""
 
 
 # ToolContext 在模块末尾绑定为 ToolExecutionContext 的别名，供函数签名使用。

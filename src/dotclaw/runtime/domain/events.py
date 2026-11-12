@@ -18,6 +18,7 @@ class RunEventType(StrEnum):
     LLM_COMPLETED = "llm_completed"
     TOOL_STARTED = "tool_started"
     TOOL_COMPLETED = "tool_completed"
+    TOOL_RECOVERY_BLOCKED = "tool_recovery_blocked"
     STATE_TRANSITION = "state_transition"
     CHECKPOINT_SAVED = "checkpoint_saved"
     WAITING_APPROVAL = "waiting_approval"

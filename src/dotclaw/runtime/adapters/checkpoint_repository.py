@@ -89,6 +89,8 @@ def _checkpoint_from_dict(data: JSONMap) -> RunCheckpoint:
         budget=_json_map_or_empty(data.get("budget")),
         active_context_version=_optional_positive_integer(data.get("active_context_version")),
         staged_history_compression_ids=_string_tuple(data.get("staged_history_compression_ids")),
+        tool_ledger_revision=_optional_positive_integer(data.get("tool_ledger_revision")),
+        replay_context=_optional_bool(data.get("replay_context"), "replay_context"),
     )
 
 
@@ -100,6 +102,28 @@ def _json_map_or_empty(value: JSONValue | None) -> JSONMap:
 def _validate_checkpoint_payload(checkpoint: RunCheckpoint) -> None:
     """确保检查点只保存最小控制状态，不夹带完整上下文或工具结果。"""
     pending = dict(checkpoint.pending)
+    has_new_tool_fields = "tool_batch_id" in pending or "pending_call_ids" in pending
+    if has_new_tool_fields:
+        if "tool_calls" in pending:
+            raise ValueError("新格式 pending 不得与旧 tool_calls 同时存在")
+        if not isinstance(pending.get("tool_batch_id"), str) or not pending["tool_batch_id"]:
+            raise ValueError("新格式 pending 必须包含非空 tool_batch_id")
+        call_ids = pending.get("pending_call_ids")
+        if not isinstance(call_ids, list) or not all(isinstance(call_id, str) and call_id for call_id in call_ids):
+            raise ValueError("pending_call_ids 必须是字符串数组")
+        if len(set(call_ids)) != len(call_ids):
+            raise ValueError("pending_call_ids 不得重复")
+        for key in ("approval_id", "child_run_id"):
+            if key in pending and (not isinstance(pending[key], str) or not pending[key]):
+                raise ValueError(f"pending.{key} 必须是非空字符串")
+    if checkpoint.tool_ledger_revision is not None and (
+        not isinstance(checkpoint.tool_ledger_revision, int)
+        or isinstance(checkpoint.tool_ledger_revision, bool)
+        or checkpoint.tool_ledger_revision <= 0
+    ):
+        raise ValueError("tool_ledger_revision 必须是正整数或 null")
+    if checkpoint.replay_context is not None and not isinstance(checkpoint.replay_context, bool):
+        raise ValueError("replay_context 必须是布尔值或 null")
     prepared = pending.pop("prepared_request", None)
     if prepared is not None:
         if pending:
@@ -158,6 +182,15 @@ def _optional_positive_integer(value: JSONValue | None) -> int | None:
         return None
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError("active_context_version 必须为正整数或 null")
+    return value
+
+
+def _optional_bool(value: JSONValue | None, field_name: str) -> bool | None:
+    """读取可选布尔控制字段，不把整数当作布尔值。"""
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} 必须是布尔值或 null")
     return value
 
 

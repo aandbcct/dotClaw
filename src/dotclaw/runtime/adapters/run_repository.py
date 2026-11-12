@@ -1054,6 +1054,15 @@ def _run_event_from_dict(data: JSONMap) -> RunEvent:
     else:
         event_data = raw_event_data
 
+    if event_type is RunEventType.TOOL_RECOVERY_BLOCKED:
+        call_id = event_data.get("call_id")
+        reason = event_data.get("reason")
+        attempt = event_data.get("attempt")
+        if not isinstance(call_id, str) or not call_id or not isinstance(reason, str) or not reason:
+            raise ValueError("TOOL_RECOVERY_BLOCKED 必须包含 call_id 和 reason")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
+            raise ValueError("TOOL_RECOVERY_BLOCKED attempt 必须是非负整数")
+
     return RunEvent(
         run_id=raw_run_id,
         sequence=raw_sequence,
