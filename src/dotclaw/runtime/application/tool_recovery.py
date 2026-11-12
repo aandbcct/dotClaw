@@ -340,23 +340,36 @@ class ToolRecoveryService:
         )
         return await self._commit_fact(replace(ledger, calls=calls), base_run, target_run, base_checkpoint, target_checkpoint, events=(event,), approval=approval)
 
-    async def decide_approval(self, run: AgentRun, approval_id: str, approved: bool, checkpoint: RunCheckpoint) -> ToolCallLedger:
-        ledger = await self._required_ledger(run, checkpoint)
+    async def decide_approval(self, run: AgentRun, approval_id: str, approved: bool, checkpoint: RunCheckpoint | None) -> ToolCallLedger:
+        await self.recover_projection(run.session_id, run.run_id)
+        ledger = await self._ledger(run.session_id, run.run_id)
+        if ledger is None:
+            raise ValueError("审批决议关联的工具账本不存在")
         records = [item for item in ledger.calls if item.approval_id == approval_id]
         if len(records) != 1:
             raise ValueError("审批 ID 未唯一关联账本调用")
         record = records[0]
-        if record.approval_decision is not None:
-            if record.approval_decision is not approved:
-                raise ValueError("审批决议不可翻转")
-            return ledger
-        if record.state is not ToolCallState.WAITING_APPROVAL:
-            raise ValueError("调用不在审批等待状态")
         approval = await self._approvals.find(approval_id)
         if approval is None or (approval.run_id, approval.session_id, approval.call_id) != (run.run_id, run.session_id, record.call.call_id):
             raise ValueError("审批记录与账本调用身份不匹配")
         if approval.decision is not None and approval.decision is not approved:
             raise ValueError("审批仓储已保存相反决议")
+        if approval.status is ApprovalStatus.CONSUMED and approval.decision is None:
+            raise ValueError("旧消费记录缺少决议证据，禁止从账本补猜审批结论")
+        if record.approval_decision is not None:
+            if record.approval_decision is not approved:
+                raise ValueError("审批决议不可翻转")
+            if approval.decision is not record.approval_decision:
+                raise ValueError("审批账本与仓储决议不一致")
+            return ledger
+        if run.state.is_ended():
+            raise ValueError("运行已结束，不能新增审批决议")
+        if checkpoint is None:
+            raise ValueError("未决审批缺少活动检查点")
+        ledger = await self._required_ledger(run, checkpoint)
+        record = self._call(ledger, record.call.call_id)
+        if record.state is not ToolCallState.WAITING_APPROVAL:
+            raise ValueError("调用不在审批等待状态")
         resolved = replace(approval, status=ApprovalStatus.CONSUMED, decision=approved, resolved_at=approval.resolved_at or utc_now_iso())
         updated = replace(record, approval_decision=approved, updated_at=utc_now_iso())
         calls = tuple(updated if item.call.call_id == record.call.call_id else item for item in ledger.calls)

@@ -19,8 +19,6 @@ logger = logging.getLogger(__name__)
 from ..domain.events import (
     AbandonRequested,
     AgentRunEvent,
-    ApprovalGranted,
-    ApprovalRejected,
     CancelRequested,
     DelegationCompleted,
     DelegationRequested,
@@ -350,147 +348,36 @@ class RuntimeEngine:
         approved: bool,
         output_port: LLMOutputPort | None = None,
     ) -> RunResult:
-        """消费审批记录，并在同一 run_id 上恢复等待中的执行。"""
-        pending_record: ApprovalRecord | None = await self._approval_service.find(approval_id)
-        if pending_record is None:
-            return RunResult("", AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在或已消费"))
-        run: AgentRun | None = await self._run_repository.load_run_snapshot(
-            pending_record.session_id,
-            pending_record.run_id,
-        )
-        if run is not None:
-            async with self._cancellation_service.gate(run.run_id):
-                committing_result = await self._pending_success_result_locked(run)
-                if committing_result is not None:
-                    return committing_result
-        context_versions: tuple[ContextVersion, ...] = await self._run_repository.load_context_versions(
-            pending_record.session_id, pending_record.run_id,
-        )
-        if run is None or run.active_context_version is None:
-            return RunResult(
-                pending_record.run_id,
-                AgentRunState(mode=Ended(RunOutcome.FAILED)),
-                error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "Run 缺少活动 Context Version，拒绝恢复审批"),
-            )
-        active_context_version: ContextVersion | None = next(
-            (item for item in context_versions if item.version == run.active_context_version),
-            None,
-        )
-        if active_context_version is None:
-            return RunResult(
-                pending_record.run_id,
-                AgentRunState(mode=Ended(RunOutcome.FAILED)),
-                error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "Run 活动 Context Version 不存在"),
-            )
-        async with self._cancellation_service.gate(pending_record.run_id):
+        """先持久化账本审批决定，再恢复执行或收口已受理取消。"""
+        record = await self._approval_service.find(approval_id)
+        if record is None:
+            return RunResult("", AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在"))
+        run = await self._run_repository.load_run(record.session_id, record.run_id)
+        if run is None:
+            return RunResult(record.run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "审批关联运行不存在"))
+        cancellation = None
+        async with self._cancellation_service.gate(run.run_id):
+            await self._tool_recovery.recover_projection(run.session_id, run.run_id)
+            run = await self._run_repository.load_run(run.session_id, run.run_id)
+            if run is None:
+                raise RunPersistenceError("审批投影后运行不存在")
             committing_result = await self._pending_success_result_locked(run)
+            checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+            await self._tool_recovery.decide_approval(run, approval_id, approved, checkpoint)
             if committing_result is not None:
                 return committing_result
-            cancellation = await self._run_repository.load_cancellation(pending_record.session_id, pending_record.run_id)
-            if cancellation is None:
-                blocked = self._resources_blocked_result_locked(run)
-                if blocked is not None:
-                    return blocked
+            cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
+            if not approved and cancellation is None:
+                await self._request_cancel_locked(run.run_id, "工具审批被拒绝", CancellationOrigin.USER, None)
+                cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
+            run = await self._run_repository.load_run(run.session_id, run.run_id)
+            if run is None:
+                raise RunPersistenceError("审批决定后运行不存在")
         if cancellation is not None:
-            return await self.complete_cancellation(pending_record.run_id)
-        record: ApprovalRecord | None = await self._approval_service.find(approval_id)
-        if record is None:
-            return RunResult("", AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在或已消费"))
-        run = await self._run_repository.load_run(record.session_id, record.run_id)
-        checkpoint = await self._checkpoint_repository.load(record.session_id, record.run_id)
-        if run is None or checkpoint is None:
-            return RunResult(record.run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "审批恢复状态无效"))
-        if checkpoint.tool_ledger_revision is not None:
-            async with self._cancellation_service.gate(run.run_id):
-                await self._tool_recovery.recover_projection(run.session_id, run.run_id)
-                await self._tool_recovery.decide_approval(run, approval_id, approved, checkpoint)
-            if not approved:
-                await self.request_cancel(run.run_id, "工具审批被拒绝", CancellationOrigin.USER)
-                return await self.complete_cancellation(run.run_id)
-            return await self.resume_run(run.run_id, output_port)
-        async with self._cancellation_service.gate(run.run_id):
-            record = await _await_control(self._approval_service.consume(approval_id))
-        if record is None:
-            return RunResult("", AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在或已消费"))
-        # 阶段3：审批恢复改走状态机校验，不再依赖已删除的旧状态枚举。
-        state: AgentRunState = run.state
-        if not (isinstance(state.mode, Suspended) and state.mode.reason is SuspendReason.APPROVAL):
-            return RunResult(record.run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "审批恢复状态无效"))
-        messages = await self._run_repository.load_messages(record.session_id, record.run_id)
-        input_message = next((message for message in messages if message.message_id == run.input_message_id), None)
-        if input_message is None:
-            return RunResult(record.run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "缺少运行输入消息"))
-        request: RunRequest = RunRequest(
-            session_id=run.session_id,
-            lease_id="approval-resume",
-            agent_id=run.agent_id,
-            user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
-            conversation=_conversation_from_context_version(active_context_version),
-            model_id=run.policy.model_id,
-            parent_run_id=run.parent_run_id, root_run_id=run.root_run_id, delegation_task_id=run.delegation_task_id,
-        )
-        approval_event = ApprovalGranted(approval_id) if approved else ApprovalRejected(approval_id)
-        tr = transition(state, approval_event)
-        execution: RunExecution = RunExecution(
-            run_id=run.run_id,
-            request=request,
-            policy=run.policy,
-            state=tr.state,
-            action=tr.action,
-            budget=RunBudget(max_iterations=run.policy.max_iterations),
-            message_cursor=checkpoint.message_sequence,
-            run_messages=messages,
-            active_context_version=active_context_version,
-            staged_history_compressions=run.staged_history_compressions,
-            replay_active_context=True,
-            legacy_tool_recovery=True,
-        )
-        pending_calls: tuple[ToolCall, ...] = _calls_from_checkpoint(checkpoint)
-        event_sequence: int = await self._event(
-            run,
-            checkpoint.event_sequence,
-            RunEventType.APPROVAL_RESOLVED,
-            (),
-            "审批已通过" if approved else "审批已拒绝",
-            {
-                "approval_id": approval_id,
-                "approved": approved,
-                "tool_event_semantics": 2,
-            },
-        )
-        await self._register_driver(execution)
-        try:
-            if not approved:
-                result: RunResult = await self._finish_cancelled(run, "审批被拒绝")
-                await self._release_run_context_if_terminal(result)
-                return result
-            resumed_run: AgentRun = replace(
-                run,
-                state=tr.state,
-                resume_count=run.resume_count + 1,
-            )
-            await self._run_repository.save_run(resumed_run)
-            self._run_change_notifier.notify(resumed_run.run_id)
-            event_sequence = await self._event(
-                resumed_run,
-                event_sequence,
-                RunEventType.RUN_RESUMED,
-                (),
-                "审批通过后恢复运行",
-            )
-            result = await self._drive(
-                execution,
-                resumed_run,
-                messages,
-                pending_calls,
-                event_sequence,
-                output_port,
-                resume_approved_call_id=pending_calls[0].call_id if pending_calls else None,
-            )
-            await self._release_run_context_if_terminal(result)
-            return result
-        finally:
-            await self._unregister_driver(run.run_id)
+            return await self.complete_cancellation(run.run_id)
+        if run.state.is_ended():
+            return await self._result_from_run(run)
+        return await self.resume_run(run.run_id, output_port)
 
     async def resume_delegation(
         self,
@@ -630,8 +517,8 @@ class RuntimeEngine:
             await self._unregister_driver(parent_run.run_id)
 
     async def get_approval_session_id(self, approval_id: str) -> str | None:
-        """返回待处理审批所属 Session，供协调器获取同一把租约锁。"""
-        record = await self._approval_service.find_pending(approval_id)
+        """返回包括已决定审批在内的所属 Session，供协调器取得同一租约。"""
+        record = await self._approval_service.find(approval_id)
         return record.session_id if record is not None else None
 
     async def get_delegation_session_id(self, child_run_id: str) -> str | None:
@@ -786,10 +673,20 @@ class RuntimeEngine:
             committing_result = await self._pending_success_result_locked(run)
             if committing_result is not None:
                 return committing_result, False
-            blocked = self._resources_blocked_result_locked(run)
-            if blocked is not None:
-                return blocked, False
             cancellation = await self._run_repository.load_cancellation(run.session_id, run_id)
+            if cancellation is None:
+                ledger = await self._run_repository.load_tool_ledger(run.session_id, run_id)
+                rejected = next(
+                    (item for item in ledger.calls
+                     if item.state is ToolCallState.WAITING_APPROVAL and item.approval_decision is False),
+                    None,
+                ) if ledger is not None else None
+                if rejected is not None:
+                    await self._request_cancel_locked(run_id, "工具审批被拒绝", CancellationOrigin.USER, None)
+                    cancellation = await self._run_repository.load_cancellation(run.session_id, run_id)
+            blocked = self._resources_blocked_result_locked(run)
+            if cancellation is None and blocked is not None:
+                return blocked, False
         if run.state.is_ended():
             return await self._result_from_run(run), False
         if cancellation is not None:

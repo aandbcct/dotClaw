@@ -26,7 +26,7 @@ from dotclaw.runtime.application.dto import (
     ContextRefreshSignal, LLMOutputEvent, LLMOutputKind, RunAcceptedEvent, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
-    AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, ToolCall,
+    AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunError, RunErrorCode, RunMessage, RunMessageKind, ToolCall,
     require_json_map,
 )
 from dotclaw.context import (
@@ -274,6 +274,71 @@ async def test_approval_resume_keeps_id_without_second_acceptance(tmp_path: Path
     resumed = await engine.resolve_approval("approval-1", True, output)
     assert resumed.run_id == waiting.run_id and resumed.state.outcome() is RunOutcome.COMPLETED
     assert [event.run_id for event in output.accepted] == [waiting.run_id]
+
+
+async def test_approval_same_decision_reentry_returns_terminal_and_opposite_conflicts(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port, engine._tool_port = ApprovalLLM(), ApprovalTool()
+    waiting = await engine.execute(_request("approval-repeat"))
+    completed = await engine.resolve_approval("approval-1", True)
+
+    repeated = await engine.resolve_approval("approval-1", True)
+
+    assert repeated.run_id == waiting.run_id
+    assert repeated.state == completed.state
+    assert await engine.get_approval_session_id("approval-1") == "approval-repeat"
+    with pytest.raises(ValueError, match="相反|不可翻转"):
+        await engine.resolve_approval("approval-1", False)
+
+
+async def test_pending_success_result_still_checks_opposite_approval_decision(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port, engine._tool_port = ApprovalLLM(), ApprovalTool()
+    waiting = await engine.execute(_request("approval-pending-success-conflict"))
+    run = await engine._run_repository.load_run(waiting.session_id, waiting.run_id)
+    checkpoint = await engine._checkpoint_repository.load(waiting.session_id, waiting.run_id)
+    assert run is not None and checkpoint is not None
+    async with engine._cancellation_service.gate(run.run_id):
+        await engine._tool_recovery.decide_approval(run, "approval-1", True, checkpoint)
+    engine._pending_success_result_locked = AsyncMock(return_value=RunResult(
+        waiting.run_id,
+        AgentRunState(mode=Ended(RunOutcome.FAILED)),
+        error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "结果仍待提交"),
+    ))
+
+    with pytest.raises(ValueError, match="不可翻转|相反"):
+        await engine.resolve_approval("approval-1", False)
+
+
+async def test_resume_completes_refusal_decision_left_before_cancel_request(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port, tool = ApprovalLLM(), ApprovalTool()
+    engine._tool_port = tool
+    waiting = await engine.execute(_request("approval-reject-recover"))
+    run = await engine._run_repository.load_run(waiting.session_id, waiting.run_id)
+    checkpoint = await engine._checkpoint_repository.load(waiting.session_id, waiting.run_id)
+    assert run is not None and checkpoint is not None
+    async with engine._cancellation_service.gate(run.run_id):
+        await engine._tool_recovery.decide_approval(run, "approval-1", False, checkpoint)
+
+    assert await engine._run_repository.load_cancellation(run.session_id, run.run_id) is None
+    result = await engine.resume_run(run.run_id)
+
+    assert result.state.outcome() is RunOutcome.CANCELLED
+    assert tool._call_count == 0
+
+
+async def test_accepted_cancellation_prevents_approved_tool_start(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port, tool = ApprovalLLM(), ApprovalTool()
+    engine._tool_port = tool
+    waiting = await engine.execute(_request("approval-cancel-priority"))
+    await engine.request_cancel(waiting.run_id, "先受理取消")
+
+    result = await engine.resolve_approval("approval-1", True)
+
+    assert result.state.outcome() is RunOutcome.CANCELLED
+    assert tool._call_count == 0
 
 
 async def test_engine_releases_run_scope_only_after_terminal_result(tmp_path: Path) -> None:
