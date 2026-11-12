@@ -7,6 +7,7 @@ from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointReposi
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine
+from tests.runtime_v2.tool_recovery_testkit import file_tool_recovery
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, LLMOutputPort, RunPolicyPort
 from dotclaw.runtime.application.execution import RunBudget, RunExecutionView
 from dotclaw.runtime.application.dto import (
@@ -31,8 +32,8 @@ def _execution() -> RunExecutionView:
     return RunExecutionView("run-1", AgentPolicySnapshot("agent", "v1", "model", 3), AgentRunState(mode=Running(RunStage.CALLING_LLM)), RunBudget(3), 0, None)
 
 
-async def test_tool_executor_adapter_requires_approval_without_channel_and_executes_once() -> None:
-    """审批前不执行工具；同一调用恢复后仅执行一次且不访问 Channel。"""
+async def test_tool_executor_adapter_requires_approval_and_has_no_process_local_replay_guard() -> None:
+    """审批前不执行工具；获批重复直调由账本层负责防重，而非 Adapter 缓存。"""
     executions: list[str] = []
 
     @tool(name="dangerous", description="危险操作", needs_approval=True)
@@ -57,17 +58,12 @@ async def test_tool_executor_adapter_requires_approval_without_channel_and_execu
     assert repeated_waiting.status is ToolResultStatus.APPROVAL_REQUIRED
     assert completed.status is ToolResultStatus.COMPLETED
     assert completed.output == "完成"
-    assert repeated.status is ToolResultStatus.FAILED
-    assert executions == ["done"]
+    assert repeated.status is ToolResultStatus.COMPLETED
+    assert executions == ["done", "done"]
 
 
-async def test_clear_run_removes_run_keys_from_cache() -> None:
-    """Run 终态后 clear_run 必须清空其进程内短生命周期缓存（阶段4 验证门槛#3）。
-
-    开发计划阶段4：若保留短生命周期执行缓存，必须在 Run 终态清理且不改变
-    恢复语义。引擎在每条终态路径调用 clear_run，本测试断言缓存确实被清空，
-    避免终态 Run 在 Adapter 内累积内存状态。
-    """
+async def test_clear_run_remains_noop_compatibility_method() -> None:
+    """clear_run 为旧调用方保留无状态兼容入口。"""
 
     @tool(name="dangerous", description="危险操作", needs_approval=True)
     async def dangerous() -> str:
@@ -79,14 +75,10 @@ async def test_clear_run_removes_run_keys_from_cache() -> None:
     port: ToolExecutorAdapter = ToolExecutorAdapter(executor)
     invocation = ToolInvocation("run-9", ToolCall("call-9", "dangerous", {}))
 
-    # 走完审批后执行，只有已执行调用保存在短期缓存中。
+    # 走完审批后执行。
     await port.execute(invocation, _execution())  # APPROVAL_REQUIRED
     await port.execute(ToolInvocation("run-9", invocation.call, approved=True), _execution())  # COMPLETED
-    assert ("run-9", "call-9") in port._executed_calls
-
-    # 模拟 Run 终态清理：调用 clear_run 后该 Run 的缓存键必须被移除。
     await port.clear_run("run-9")
-    assert ("run-9", "call-9") not in port._executed_calls
 
 
 class FixedPolicy(RunPolicyPort):
@@ -172,6 +164,7 @@ async def test_tool_executor_adapter_drives_engine_approval_resume_with_same_run
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 

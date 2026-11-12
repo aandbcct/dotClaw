@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..domain.control import AgentAction
 from ..domain.facts import JSONMap, JSONValue, RunCheckpoint, get_integer, get_string
+from ..application.ports import RunPersistenceError
 from ._file_support import StorageFormatVersion
 from ._file_support import RunStorageFileName, load_json_map, validate_path_segment, write_json_atomic
 
@@ -41,7 +42,10 @@ class CheckpointRepositoryAdapter:
 
     async def load(self, session_id: str, run_id: str) -> RunCheckpoint | None:
         """加载检查点；不存在时返回 None。"""
-        return await asyncio.to_thread(self._load_sync, session_id, run_id)
+        try:
+            return await asyncio.to_thread(self._load_sync, session_id, run_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def delete(self, session_id: str, run_id: str) -> None:
         """删除完成或取消后不再需要的检查点。"""

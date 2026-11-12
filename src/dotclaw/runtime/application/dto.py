@@ -23,7 +23,7 @@ from ..domain.facts import (
 from ..domain.state import AgentRunState, Ended, RunOutcome
 from ..domain.context import ContextOwner, ContextRefreshReason, ContextSlotSnapshot
 from ..domain.events import RunEvent
-from ..domain.tool_recovery import ToolCallLedger, ToolRecoveryAction
+from ..domain.tool_recovery import ToolCallLedger, ToolOutcomeSnapshot, ToolRecoveryAction
 
 
 @dataclass(frozen=True)
@@ -233,6 +233,31 @@ class ToolResultStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     APPROVAL_REQUIRED = "approval_required"
+
+
+class ToolStepKind(StrEnum):
+    """账本工具步骤在当前驱动中的控制结果。"""
+
+    COMPLETED = "completed"
+    SUSPENDED = "suspended"
+    BLOCKED = "blocked"
+    CANCEL_PENDING = "cancel_pending"
+
+
+@dataclass(frozen=True)
+class ToolStepResult:
+    """单工具步骤的完整结果，避免用 None 混淆审批、阻断与取消。"""
+
+    kind: ToolStepKind
+    outcome: ToolOutcomeSnapshot | None = None
+    run_result: "RunResult | None" = None
+
+    def __post_init__(self) -> None:
+        if self.kind is ToolStepKind.COMPLETED:
+            if self.outcome is None or self.run_result is not None:
+                raise ValueError("completed 工具步骤必须且仅能包含 outcome")
+        elif self.outcome is not None or self.run_result is None:
+            raise ValueError("非 completed 工具步骤必须且仅能包含 run_result")
 
 
 @dataclass(frozen=True)

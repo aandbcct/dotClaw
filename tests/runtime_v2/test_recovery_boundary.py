@@ -36,6 +36,8 @@ from dotclaw.runtime.application.dto import (
     ToolResultStatus,
 )
 from dotclaw.runtime.application.engine import RuntimeEngine
+from tests.runtime_v2.tool_recovery_testkit import file_tool_recovery, ToolPortTestBase
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, ToolPort
 from dotclaw.runtime.domain.control import AgentAction
@@ -109,7 +111,7 @@ class _FinalOnlyLLM(LLMPort):
 
 
 
-class _CrashingTool(ToolPort):
+class _CrashingTool(ToolPortTestBase):
     """首次执行即模拟进程被杀死，并捕获 run_id。"""
 
     def __init__(self) -> None:
@@ -121,7 +123,7 @@ class _CrashingTool(ToolPort):
 
 
 
-class _RecordingTool(ToolPort):
+class _RecordingTool(ToolPortTestBase):
     """记录工具被调用的次数（恢复重放的证明）。"""
 
     def __init__(self) -> None:
@@ -129,7 +131,8 @@ class _RecordingTool(ToolPort):
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         self.calls += 1
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="ok")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="ok",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
 
 
 
@@ -144,6 +147,7 @@ def _engine(root: Path, llm: LLMPort, tool: ToolPort) -> RuntimeEngine:
         ApprovalService(ApprovalRepositoryAdapter(root)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 

@@ -19,13 +19,14 @@ from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointReposi
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.context_budget import TokenCountRequest, TokenCountResult
-from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ContextRefreshSignal, ConversationMessage, ConversationSnapshot, LLMOutputEvent, LLMOutputKind, RunRequest, ToolInvocation, ToolResult, ToolResultStatus
+from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ContextRefreshSignal, ConversationMessage, ConversationSnapshot, LLMOutputEvent, LLMOutputKind, RunRequest, ToolInvocation, ToolResult, ToolResultStatus, ToolRecoveryContract
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
 from dotclaw.runtime.application.ports import ContextPort, LLMOutputPort, LLMPort, LLMUnavailableError, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+from dotclaw.runtime.application.tool_recovery import ToolRecoveryService
 from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, MessageRole, RunMessage, RunMessageKind, ToolCall
 from dotclaw.session.session import SessionManager
@@ -210,6 +211,12 @@ class _NoTools(ToolPort):
         self.run_ids.append(execution.run_id)
         return ToolResult(invocation.call.call_id, ToolResultStatus.FAILED)
 
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED)
+
+    async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
+        return ToolRecoveryContract()
+
     async def cancel(self, run_id: str) -> None:
         """没有可取消的工具调用。"""
 
@@ -253,7 +260,9 @@ async def run_child_outcome(root: Path, config: DelegationWorkloadConfig, reques
     adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model", run_repository=repository)
     llm = _DelegatingLLM(request_id, config.fake_delay_ms, outcome)
     context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
-    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), context, llm, tools, _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor(), run_change_notifier=notifier)
+    checkpoints = CheckpointRepositoryAdapter(root)
+    approvals = ApprovalService(ApprovalRepositoryAdapter(root))
+    engine = RuntimeEngine(repository, checkpoints, context, llm, tools, _FixedPolicy(), approvals, CancellationService(), tool_recovery=ToolRecoveryService(repository, checkpoints, approvals), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor(), run_change_notifier=notifier)
     coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
     request = RunRequest(f"parent-{request_id}", f"lease-{request_id}", "parent-agent", ConversationMessage("input", MessageRole.USER, request_id, ""), ConversationSnapshot(f"parent-{request_id}", (), 0))
@@ -335,15 +344,18 @@ async def run_harness_delegations(
     dispatcher = AgentDispatcher(TaskMessageBroker())
     adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model", run_repository=repository)
     context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
+    checkpoints = CheckpointRepositoryAdapter(root)
+    approvals = ApprovalService(ApprovalRepositoryAdapter(root))
     engine = RuntimeEngine(
         repository,
-        CheckpointRepositoryAdapter(root),
+        checkpoints,
         context,
         _HarnessDelegatingLLM(tasks, config.fake_delay_ms),
         tools,
         _FixedPolicy(),
-        ApprovalService(ApprovalRepositoryAdapter(root)),
+        approvals,
         CancellationService(),
+        tool_recovery=ToolRecoveryService(repository, checkpoints, approvals),
         delegation_port=adapter,
         token_counter=_AlwaysWithinBudgetCounter(),
         history_compactor=_UnexpectedHistoryCompactor(),
@@ -408,7 +420,9 @@ async def run_concurrent_completed(root: Path, config: DelegationWorkloadConfig,
     dispatcher = AgentDispatcher(TaskMessageBroker())
     adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model", run_repository=repository)
     context, tools, output = _FixedContext(), _NoTools(), _RecordingOutput()
-    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), context, _DelegatingLLM("shared", config.fake_delay_ms, delegate_all_parents=True), tools, _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor(), run_change_notifier=notifier)
+    checkpoints = CheckpointRepositoryAdapter(root)
+    approvals = ApprovalService(ApprovalRepositoryAdapter(root))
+    engine = RuntimeEngine(repository, checkpoints, context, _DelegatingLLM("shared", config.fake_delay_ms, delegate_all_parents=True), tools, _FixedPolicy(), approvals, CancellationService(), tool_recovery=ToolRecoveryService(repository, checkpoints, approvals), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor(), run_change_notifier=notifier)
     coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
     request_ids = [chain_request_id(index, attempt) for index in range(config.concurrent_parents)]
@@ -451,7 +465,9 @@ async def run_parent_cancellation(root: Path, config: DelegationWorkloadConfig, 
     dispatcher = AgentDispatcher(TaskMessageBroker())
     adapter = RuntimeDelegationAdapter(SessionManager(root), registry, dispatcher, "fixture-model", run_repository=repository)
     llm = _DelegatingLLM(request_id, config.fake_delay_ms, ChildOutcome.CANCELLED)
-    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), _FixedContext(), llm, _NoTools(), _FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor(), run_change_notifier=notifier)
+    checkpoints = CheckpointRepositoryAdapter(root)
+    approvals = ApprovalService(ApprovalRepositoryAdapter(root))
+    engine = RuntimeEngine(repository, checkpoints, _FixedContext(), llm, _NoTools(), _FixedPolicy(), approvals, CancellationService(), tool_recovery=ToolRecoveryService(repository, checkpoints, approvals), delegation_port=adapter, token_counter=_AlwaysWithinBudgetCounter(), history_compactor=_UnexpectedHistoryCompactor(), run_change_notifier=notifier)
     coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
     session_id = f"parent-{request_id}"

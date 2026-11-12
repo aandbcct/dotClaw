@@ -123,6 +123,7 @@ class ToolResult:
         code: ToolErrorCode,
         message: str,
         error_type: ToolErrorType | None = None,
+        execution_evidence: ToolExecutionEvidence = ToolExecutionEvidence.UNKNOWN,
     ) -> "ToolResult":
         """由标准错误码构造统一的错误结果，避免调用方重复指定类别。"""
         if error_type is None:
@@ -132,6 +133,7 @@ class ToolResult:
             is_error=True,
             error_code=code.value,
             error_type=error_type.value,
+            execution_evidence=execution_evidence,
         )
 
 

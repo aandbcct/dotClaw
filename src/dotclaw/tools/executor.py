@@ -34,6 +34,7 @@ from .base import (
     ToolExecutionContext,
     ToolResult,
 )
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 from .capability import CapabilityBroker, CapabilityRequest, ResourceKind
 from .decorator import ToolPolicy
 from .handler import ToolHandler
@@ -53,6 +54,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .http_client import HttpClient, ProviderHttpResponse
     from .parser import SkillParser
+    from dotclaw.runtime.application.dto import ToolRecoveryContract
 
 logger = logging.getLogger("dotclaw.tools.executor")
 
@@ -127,6 +129,24 @@ class ToolExecutor:
         """按名称获取 Handler（转发给 Registry）。"""
         return self._registry.get(name)
 
+    def describe_recovery(self, name: str) -> "ToolRecoveryContract":
+        """读取注册工具的恢复声明；未知工具使用默认禁止重试契约。"""
+        from dotclaw.runtime.application.dto import ToolRecoveryContract
+
+        handler = self._registry.get(name)
+        if handler is None:
+            return ToolRecoveryContract()
+        definition = handler.definition()
+        return ToolRecoveryContract(
+            policy=definition.replay_policy,
+            version=definition.replay_contract_version,
+            side_effect=definition.side_effect,
+            recovery_max_retries=definition.recovery_max_retries,
+            recovery_initial_delay_s=definition.recovery_initial_delay_s,
+            recovery_backoff_multiplier=definition.recovery_backoff_multiplier,
+            recovery_max_delay_s=definition.recovery_max_delay_s,
+        )
+
     def requires_approval(
         self, name: str, execution_context: ToolExecutionContext | None = None
     ) -> bool:
@@ -189,6 +209,32 @@ class ToolExecutor:
             name, arguments, execution_context, journal, channel=None, pre_approved=True
         )
 
+    async def execute_for_runtime(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext,
+        *,
+        approved: bool,
+    ) -> ToolResult:
+        """运行完整安全链；ASK 尚未批准时只返回审批需求，不调用处理器。"""
+        return await self._run_chain(
+            name, arguments, execution_context, None, channel=None,
+            pre_approved=approved, runtime_approval=True,
+        )
+
+    async def preflight_for_runtime(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext,
+    ) -> ToolResult:
+        """按真实参数和当前策略判断审批需求，但不启动处理函数。"""
+        return await self._run_chain(
+            name, arguments, execution_context, None, channel=None,
+            pre_approved=False, runtime_approval=True, preflight_only=True,
+        )
+
     def _check_skill(self, tool_name: str, args: dict, journal: Any, status: str) -> None:
         """工具执行后检查是否命中 skill，命中则发射对应 journal 事件。"""
         if not self._skill_parser:
@@ -225,6 +271,8 @@ class ToolExecutor:
         journal: Journal | None,
         channel: Any | None,
         pre_approved: bool,
+        runtime_approval: bool = False,
+        preflight_only: bool = False,
     ) -> ToolResult:
         """固定安全链路实现。
 
@@ -253,6 +301,7 @@ class ToolExecutor:
                     code=ToolErrorCode.INVALID_ARGUMENTS,
                     message=str(exc),
                     error_type=ToolErrorType.VALIDATION,
+                    execution_evidence=ToolExecutionEvidence.NOT_STARTED,
                 )
                 return self._finish(result, name, journal, handler)
         elif schema:
@@ -263,6 +312,7 @@ class ToolExecutor:
                     code=ToolErrorCode.INVALID_ARGUMENTS,
                     message=str(exc),
                     error_type=ToolErrorType.VALIDATION,
+                    execution_evidence=ToolExecutionEvidence.NOT_STARTED,
                 )
                 return self._finish(result, name, journal, handler)
         else:
@@ -286,10 +336,19 @@ class ToolExecutor:
                     scope.workspace_root,
                 ),
                 error_type=ToolErrorType.POLICY,
+                execution_evidence=ToolExecutionEvidence.NOT_STARTED,
             )
             if journal:
                 journal.tool_policy_resolved(name, "deny", outcome.matched_rule, summary)
             return self._finish(result, name, journal, handler)
+
+        if preflight_only:
+            if outcome.decision is PolicyDecision.ASK or (
+                (definition.needs_approval or definition.name in self._approval_commands)
+                and not self._is_unattended_allow(definition.policy_profile, execution_context)
+            ):
+                return ToolResult(approval_required=True, execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+            return ToolResult(execution_evidence=ToolExecutionEvidence.NOT_STARTED)
 
         # ④ 审批：ask 或声明式 needs_approval（且未预先批准）时，经 Approval Port 询问。
         # needs_approval 用于没有资源档案、仍需显式审批的工具（如配置 approval_commands
@@ -298,6 +357,11 @@ class ToolExecutor:
             definition.needs_approval or definition.name in self._approval_commands
         ) and not pre_approved
         if (outcome.decision is PolicyDecision.ASK or needs_explicit_approval) and not pre_approved:
+            if runtime_approval:
+                return ToolResult(
+                    approval_required=True,
+                    execution_evidence=ToolExecutionEvidence.NOT_STARTED,
+                )
             approved = await self._approval.request(summary, channel)
             if journal:
                 journal.tool_approval_outcome(
@@ -308,6 +372,7 @@ class ToolExecutor:
                     code=ToolErrorCode.APPROVAL_DENIED,
                     message="需要审批但未获批准或无交互通道",
                     error_type=ToolErrorType.APPROVAL,
+                    execution_evidence=ToolExecutionEvidence.NOT_STARTED,
                 )
                 return self._finish(result, name, journal, handler)
 
@@ -330,6 +395,12 @@ class ToolExecutor:
             )
         if journal and not result.is_error:
             journal.tool_policy_resolved(name, "allow", outcome.matched_rule, summary)
+        if result.execution_evidence is None:
+            result = dataclasses.replace(result, execution_evidence=ToolExecutionEvidence.UNKNOWN)
+        if not result.is_error and result.execution_evidence is ToolExecutionEvidence.UNKNOWN:
+            result = dataclasses.replace(result, execution_evidence=ToolExecutionEvidence.RETURNED)
+        elif result.is_error and result.execution_evidence is ToolExecutionEvidence.UNKNOWN:
+            result = dataclasses.replace(result, execution_evidence=ToolExecutionEvidence.UNKNOWN)
         return self._finish(result, name, journal, handler)
 
     async def _execute_handler(
@@ -354,6 +425,7 @@ class ToolExecutor:
                 code=ToolErrorCode.TIMEOUT,
                 message=f"错误：工具执行超时（{int(timeout)}秒）",
                 error_type=ToolErrorType.TIMEOUT,
+                execution_evidence=ToolExecutionEvidence.UNKNOWN,
             )
         except ResourceCleanupError:
             raise
@@ -363,6 +435,7 @@ class ToolExecutor:
                 code=ToolErrorCode.EXECUTION_ERROR,
                 message=f"错误：工具调度异常 - {exc}",
                 error_type=ToolErrorType.EXECUTOR,
+                execution_evidence=ToolExecutionEvidence.UNKNOWN,
             )
 
     def _effective_scope(
@@ -413,7 +486,11 @@ class ToolExecutor:
             return ToolExecutionContext(
                 timeout=timeout,
                 agentrun_id=execution_context.agentrun_id,
+                session_id=execution_context.session_id,
                 agent_id=execution_context.agent_id,
+                tool_call_id=execution_context.tool_call_id,
+                attempt=execution_context.attempt,
+                idempotency_key=execution_context.idempotency_key,
                 http_client=http_client,
             )
         return ToolExecutionContext(timeout=timeout, http_client=http_client)
@@ -444,6 +521,7 @@ class ToolExecutor:
             code=ToolErrorCode.TOOL_NOT_FOUND,
             message=f"错误：未找到工具 '{name}'",
             error_type=ToolErrorType.NOT_FOUND,
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED,
         )
 
 

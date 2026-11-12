@@ -30,11 +30,25 @@ class CancellationService:
 
     def register_driver(self, run_id: str, token: CancellationToken, request: CancellationRequest | None) -> None:
         """调用方已持 gate，并从仓储读出首次请求。"""
+        self.reserve_driver(run_id)
+        try:
+            self.bind_driver(run_id, token, request)
+        except Exception:
+            self.unregister_driver(run_id)
+            raise
+
+    def reserve_driver(self, run_id: str) -> None:
+        """调用方已持 gate，先占用唯一驱动权而不绑定执行现场。"""
         if run_id in self._drivers:
             raise ValueError("同一运行不能存在两个驱动")
+        self._drivers.add(run_id)
+
+    def bind_driver(self, run_id: str, token: CancellationToken, request: CancellationRequest | None) -> None:
+        """把已预留的驱动权绑定到恢复后的 token，并重新检查资源和取消。"""
+        if run_id not in self._drivers:
+            raise ValueError("绑定驱动前必须先预留驱动权")
         if request is None:
             self.assert_resources_settled(run_id)
-        self._drivers.add(run_id)
         self._tokens[run_id] = token
         if request is not None:
             self.signal(request)

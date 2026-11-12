@@ -12,6 +12,7 @@ from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.context_budget import TokenCountRequest, TokenCountResult
 from dotclaw.runtime.application.dto import ContextBundle, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus
 from dotclaw.runtime.application.engine import RuntimeEngine
+from tests.runtime_v2.tool_recovery_testkit import file_tool_recovery, ToolPortTestBase
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
 from dotclaw.runtime.application.ports import HistoryCompactorPort, LLMPort, LLMOutputPort, RunPolicyPort, ToolPort
@@ -69,7 +70,7 @@ class FinalLLM(LLMPort):
 
 
 
-class NoTool(ToolPort):
+class NoTool(ToolPortTestBase):
     """防止端到端路径意外进入工具调用。"""
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
@@ -98,6 +99,7 @@ async def test_real_session_history_compression_commits_and_is_injected_on_next_
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=SessionLoopCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=compactor,
     )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
 
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.context_budget import TokenCountErrorCode, TokenCountRequest, TokenCountResult
 from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ContextRefreshSignal, ConversationMessage, ConversationSnapshot, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus
 from dotclaw.runtime.application.engine import RuntimeEngine
+from dotclaw.runtime.application.tool_recovery import ToolRecoveryService
+from tests.runtime_v2.tool_recovery_testkit import ToolPortTestBase
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult, HistoryCompactorUnavailable
 from dotclaw.runtime.application.ports import ContextPort, HistoryCompactorPort, LLMPort, LLMOutputPort, LLMUnavailableError, RunPolicyPort, ToolPort
@@ -62,7 +65,7 @@ class BudgetPolicy(RunPolicyPort):
         )
 
 
-class NoTool(ToolPort):
+class NoTool(ToolPortTestBase):
     """本测试不执行工具。"""
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
@@ -195,7 +198,7 @@ class WaitingApprovalLLM(LLMPort):
 
 
 
-class WaitingApprovalTool(ToolPort):
+class WaitingApprovalTool(ToolPortTestBase):
     """第一次请求审批，获批后返回工具结果。"""
 
     def __init__(self) -> None:
@@ -206,7 +209,12 @@ class WaitingApprovalTool(ToolPort):
         self._calls += 1
         if self._calls == 1:
             return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-e4")
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已审批工具结果")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已审批工具结果",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-e4",
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED)
 
 
 
@@ -233,18 +241,21 @@ def _engine(
 ) -> tuple[RuntimeEngine, InMemoryRunRepository]:
     """使用 E4 所有真实 Port 边界构造 Engine。"""
     run_repository = repository or InMemoryRunRepository()
+    checkpoint_repository = CheckpointRepositoryAdapter(tmp_path)
+    approval_service = ApprovalService(ApprovalRepositoryAdapter(tmp_path))
     engine = RuntimeEngine(
         run_repository,
-        CheckpointRepositoryAdapter(tmp_path),
+        checkpoint_repository,
         BudgetContext(),
         llm,
         tool_port or NoTool(),
         policy_port or BudgetPolicy(),
-        ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
+        approval_service,
         CancellationService(),
         token_counter=counter,
         history_compactor=compactor,
         run_change_notifier=run_change_notifier,
+        tool_recovery=ToolRecoveryService(run_repository, checkpoint_repository, approval_service),
     )
     return engine, run_repository
 

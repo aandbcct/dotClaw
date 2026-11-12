@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Sequence
 
 from dotclaw.runtime.adapters.run_repository import RunRepositoryAdapter
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 from dotclaw.runtime.application.dto import (
     ContextBundle,
     ContextMetadata,
@@ -29,6 +30,7 @@ from dotclaw.runtime.application.dto import (
     ToolInvocation,
     ToolResult,
     ToolResultStatus,
+    ToolRecoveryContract,
 )
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, RunPolicyPort, ToolPort
@@ -418,7 +420,14 @@ class FixedDelayTool(ToolPort):
             call_id=invocation.call.call_id,
             status=ToolResultStatus.COMPLETED,
             output=output,
+            execution_evidence=ToolExecutionEvidence.RETURNED,
         )
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED)
+
+    async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
+        return ToolRecoveryContract()
 
     async def cancel(self, run_id: str) -> None:
         """取消当前工具执行（不阻塞）。"""

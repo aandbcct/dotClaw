@@ -18,6 +18,7 @@ from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointReposi
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine
+from tests.runtime_v2.tool_recovery_testkit import file_tool_recovery, ToolPortTestBase
 from dotclaw.runtime.application.ports import ContextPort, DelegationPort, LLMPort, LLMOutputPort, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.application.execution import RunExecutionView
@@ -127,7 +128,7 @@ class DelegatingLLM(LLMPort):
 
 
 
-class NoToolExecution(ToolPort):
+class NoToolExecution(ToolPortTestBase):
     """确保 delegate 由 DelegationPort 而非 ToolPort 执行。"""
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
@@ -288,6 +289,7 @@ async def test_engine_submits_delegation_and_suspends_parent(tmp_path: Path) -> 
         CancellationService(),
         delegation_port=delegation,
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -339,6 +341,7 @@ async def test_engine_resume_delegation_backfills_once_when_repeated(tmp_path: P
         CancellationService(),
         delegation_port=adapter,
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
         run_change_notifier=notifier,
     )
@@ -393,6 +396,7 @@ async def test_engine_resume_delegation_rejects_mismatched_child_id(tmp_path: Pa
         CancellationService(),
         delegation_port=delegation,
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -436,6 +440,7 @@ async def _submit_then_resume_with_outcome(tmp_path: Path, outcome: RunOutcome) 
         CancellationService(),
         delegation_port=delegation,
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     submit_result: RunResult = await engine.execute(_request())
@@ -511,6 +516,7 @@ async def test_runtime_delegation_adapter_creates_target_run_with_parent_and_roo
     engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(tmp_path), MinimalContext(), ParentChildLLM(),
         NoToolExecution(), FixedPolicy(), ApprovalService(ApprovalRepositoryAdapter(tmp_path)), CancellationService(),
         delegation_port=adapter, token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(), run_change_notifier=notifier)
     coordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     adapter.bind_coordinator(coordinator)
@@ -553,6 +559,7 @@ async def test_runtime_delegation_adapter_executes_real_child_run_through_coordi
         CancellationService(),
         delegation_port=adapter,
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
         run_change_notifier=notifier,
     )
@@ -611,6 +618,7 @@ async def test_parent_cancellation_propagates_to_real_delegated_child_run(tmp_pa
         CancellationService(),
         delegation_port=adapter,
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
         run_change_notifier=notifier,
     )
@@ -654,6 +662,7 @@ async def test_child_run_persists_parent_and_root_relationship(tmp_path: Path) -
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     child_request = RunRequest(
@@ -697,6 +706,7 @@ async def test_engine_delegation_reaches_handoff_target_action(tmp_path: Path) -
         CancellationService(),
         delegation_port=delegation,
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 

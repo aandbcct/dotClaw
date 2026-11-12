@@ -16,6 +16,8 @@ from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointReposi
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.engine import RuntimeEngine, _scan_legacy_tool_activity
+from tests.runtime_v2.tool_recovery_testkit import file_tool_recovery, ToolPortTestBase
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, LLMOutputPort, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.application.execution import RunExecutionView
@@ -114,7 +116,7 @@ class FinalLLM(LLMPort):
 
 
 
-class ToolFake(ToolPort):
+class ToolFake(ToolPortTestBase):
     """正常文本路径无需调用的工具替身。"""
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
@@ -183,6 +185,7 @@ def _engine(root: Path, *, run_change_notifier: RunChangeNotifier | None = None)
         ApprovalService(approval_repository),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(root),
         history_compactor=UnexpectedHistoryCompactor(),
         run_change_notifier=run_change_notifier,
     )
@@ -200,6 +203,7 @@ def test_engine_rejects_missing_context_budget_ports(tmp_path: Path) -> None:
             PolicyPort(),
             ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
             CancellationService(),
+            tool_recovery=file_tool_recovery(tmp_path),
         )
 
 
@@ -285,6 +289,7 @@ async def test_engine_releases_run_scope_only_after_terminal_result(tmp_path: Pa
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -321,7 +326,7 @@ class ApprovalLLM(LLMPort):
 
 
 
-class ApprovalTool(ToolPort):
+class ApprovalTool(ToolPortTestBase):
     """首次要求审批、恢复后完成同一工具调用的替身。"""
 
     def __init__(self) -> None:
@@ -332,7 +337,12 @@ class ApprovalTool(ToolPort):
         self._call_count += 1
         if self._call_count == 1:
             return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-1")
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已执行")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已执行",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-1",
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED)
 
 
 
@@ -414,6 +424,7 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-approval"))
@@ -444,6 +455,7 @@ async def test_approval_events_carry_structured_fields(tmp_path: Path) -> None:
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-fields"))
@@ -478,6 +490,7 @@ async def test_rejected_approval_event_marks_approved_false(tmp_path: Path) -> N
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     await engine.execute(_request("session-reject"))
@@ -516,7 +529,7 @@ class ReActLLM(LLMPort):
 
 
 
-class CompletedTool(ToolPort):
+class CompletedTool(ToolPortTestBase):
     """记录所有工具调用并返回对应的确定性结果。"""
 
     def __init__(self) -> None:
@@ -526,7 +539,8 @@ class CompletedTool(ToolPort):
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """保存调用顺序并返回调用标识对应的结果。"""
         self.calls.append(invocation)
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=f"结果-{invocation.call.call_id}")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=f"结果-{invocation.call.call_id}",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
 
 
 
@@ -567,6 +581,7 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -602,6 +617,7 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -678,6 +694,7 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -714,6 +731,7 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -739,6 +757,7 @@ async def test_rejected_approval_records_decision_and_cancels_without_conversati
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -770,6 +789,7 @@ async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) ->
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-cancel"))

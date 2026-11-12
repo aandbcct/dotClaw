@@ -112,6 +112,10 @@ class RunExecution:
     """仅审批或中断重试时重放已冻结 Context Version，普通下一轮仍重新加载 Slot。"""
     context_budget_decision: ContextBudgetDecision | None = None
     """最近一次业务 LLM 调用前的真实输入预算结论，仅保存不含正文的审计字段。"""
+    tool_batch_id: str | None = None
+    """当前账本工具批次的原始助手消息标识。"""
+    legacy_tool_recovery: bool = False
+    """仅恢复没有账本版本引用的旧检查点时启用旧读取与执行兼容。"""
 
     def view(self) -> RunExecutionView:
         """生成提供给 Port 的只读执行视图。"""

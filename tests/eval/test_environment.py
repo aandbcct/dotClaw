@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from dotclaw.eval.environment import EvalDependencies, EvalEnvironment
 from dotclaw.eval.fixtures import FixtureConfigurationError
 from dotclaw.eval.models import ExecutionMode, FixtureMatchMode
-from dotclaw.runtime.application.dto import ToolResult, ToolResultStatus
+from dotclaw.runtime.application.dto import ToolRecoveryContract, ToolResult, ToolResultStatus
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind
 from dotclaw.runtime.domain.state import Ended, RunOutcome
 
@@ -75,6 +76,14 @@ class _FailTool(_FailIfCalled):
     async def execute(self, invocation, execution):
         self.core_calls += 1
         raise AssertionError("生产工具被调用")
+
+    async def preflight(self, invocation, execution):
+        self.core_calls += 1
+        raise AssertionError("生产工具预检被调用")
+
+    async def describe_recovery(self, call, execution):
+        self.core_calls += 1
+        raise AssertionError("生产工具恢复契约被读取")
 
 
 
@@ -157,7 +166,15 @@ class _RecordTool(_FailTool):
 
     async def execute(self, invocation, execution):
         self.calls += 1
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="real tool result")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="real tool result",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+    async def preflight(self, invocation, execution):
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+
+    async def describe_recovery(self, call, execution):
+        return ToolRecoveryContract()
 
 
 # --------------------------------------------------------------------------- #

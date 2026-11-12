@@ -42,8 +42,13 @@ from ..domain.tool_recovery import (
     ToolProjectionIntent,
 )
 from .approval_service import ApprovalService
-from .dto import ToolRecoveryContract
-from .ports import CheckpointRepository, RunRepository
+from .dto import ToolRecoveryContract, ToolRecoveryDecision, ToolRecoveryPlan
+from ..domain.tool_recovery import ToolRecoveryAction
+from .ports import CheckpointRepository, RunPersistenceError, RunRepository
+
+
+class ToolProjectionPersistenceError(RunPersistenceError):
+    """账本提交意图的条件投影未能完成，待处理意图必须保留。"""
 
 
 class ToolRecoveryService:
@@ -63,6 +68,62 @@ class ToolRecoveryService:
         ledger = await self._runs.load_tool_ledger(session_id, run_id)
         if ledger is not None and ledger.pending_projection is not None:
             await self._apply_projection(ledger)
+
+    async def reconcile(self, run: AgentRun, checkpoint: RunCheckpoint, contracts: Mapping[str, ToolRecoveryContract]) -> ToolRecoveryPlan:
+        """从账本和已投影事实重建当前批次决策；未知执行效果一律阻断。"""
+        await self.recover_projection(run.session_id, run.run_id)
+        ledger = await self._ledger(run.session_id, run.run_id)
+        if ledger is None:
+            if checkpoint.tool_ledger_revision is not None or "tool_batch_id" in checkpoint.pending:
+                raise ValueError("新格式检查点引用的工具账本不存在")
+            raise ValueError("旧格式工具检查点需由兼容读取路径处理")
+        if checkpoint.tool_ledger_revision is not None and checkpoint.tool_ledger_revision > ledger.revision:
+            raise ValueError("检查点工具账本修订号超前")
+        batch_id = checkpoint.pending.get("tool_batch_id")
+        if not isinstance(batch_id, str) or not batch_id:
+            batch_id = next((item.source_message_id for item in reversed(ledger.calls) if item.state not in _TERMINAL), "")
+        batch = tuple(item for item in ledger.calls if item.source_message_id == batch_id)
+        if not batch:
+            raise ValueError("检查点引用的工具批次不在账本中")
+        source = next((item for item in await self._runs.load_messages(run.session_id, run.run_id) if item.message_id == batch_id), None)
+        if source is None or tuple(record.call for record in batch) != source.tool_calls:
+            raise ValueError("工具账本与原始助手消息不一致")
+        decisions: list[ToolRecoveryDecision] = []
+        for record in batch:
+            if record.state in {ToolCallState.SUCCEEDED, ToolCallState.FAILED, ToolCallState.CANCELLED}:
+                decisions.append(ToolRecoveryDecision(record.call.call_id, ToolRecoveryAction.REUSE, "stored_outcome"))
+                continue
+            if record.state is ToolCallState.UNCERTAIN:
+                decisions.append(ToolRecoveryDecision(record.call.call_id, ToolRecoveryAction.BLOCK, record.uncertainty_reason or "uncertain_outcome"))
+                continue
+            contract = contracts[record.call.call_id]
+            frozen_contract = (
+                record.replay_policy, record.side_effect, record.replay_contract_version,
+                record.key_valid_until, record.recovery_max_retries,
+                record.recovery_initial_delay_s, record.recovery_backoff_multiplier,
+                record.recovery_max_delay_s,
+            )
+            current_contract = (
+                contract.policy, contract.side_effect, contract.version, contract.key_valid_until,
+                contract.recovery_max_retries, contract.recovery_initial_delay_s,
+                contract.recovery_backoff_multiplier, contract.recovery_max_delay_s,
+            )
+            if frozen_contract != current_contract:
+                action, reason = ToolRecoveryAction.BLOCK, "recovery_contract_changed"
+            elif record.state is ToolCallState.PENDING:
+                action, reason = ToolRecoveryAction.EXECUTE, "pending_not_started"
+            elif record.state is ToolCallState.STARTED:
+                action, reason = ToolRecoveryAction.BLOCK, "started_outcome_unknown"
+            elif record.state is ToolCallState.WAITING_APPROVAL:
+                action, reason = (ToolRecoveryAction.EXECUTE, "approval_granted") if record.approval_decision is True else (ToolRecoveryAction.WAIT_APPROVAL, "approval_pending")
+            elif record.state is ToolCallState.WAITING_CHILD:
+                action, reason = ToolRecoveryAction.RESUME_CHILD, "delegation_pending"
+            else:
+                action, reason = ToolRecoveryAction.BLOCK, record.uncertainty_reason or "uncertain_outcome"
+            decisions.append(ToolRecoveryDecision(record.call.call_id, action, reason))
+        messages = await self._runs.load_messages(run.session_id, run.run_id)
+        events = await self._runs.load_events(run.session_id, run.run_id)
+        return ToolRecoveryPlan(run, messages, checkpoint, ledger, len(events) + 1, len(messages) + 1, tuple(decisions))
 
     async def plan_batch(
         self,
@@ -126,19 +187,18 @@ class ToolRecoveryService:
         base_run, base_checkpoint = await self._persistent_base(run)
         pending = {"tool_batch_id": source_message.message_id, "pending_call_ids": [r.call.call_id for r in records]}
         target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, pending, AgentAction.EXECUTE_TOOLS, None)
-        return await self._commit_fact(base_ledger, base_run, base_run, base_checkpoint, target_checkpoint)
+        target_run = replace(base_run, state=run.state)
+        return await self._commit_fact(base_ledger, base_run, target_run, base_checkpoint, target_checkpoint)
 
     async def begin_attempt(self, run: AgentRun, call_id: str, checkpoint: RunCheckpoint) -> ToolCallRecord:
         ledger = await self._required_ledger(run, checkpoint)
         record = self._call(ledger, call_id)
-        if record.state not in {ToolCallState.PENDING, ToolCallState.WAITING_APPROVAL, ToolCallState.STARTED}:
+        if record.state not in {ToolCallState.PENDING, ToolCallState.WAITING_APPROVAL}:
             raise ValueError("工具调用当前状态不允许开始执行")
         if record.state is ToolCallState.WAITING_APPROVAL and record.approval_decision is not True:
             raise ValueError("未批准的调用不能开始执行")
-        is_retry = record.state is ToolCallState.STARTED
         updated = replace(
             record, state=ToolCallState.STARTED, attempt=record.attempt + 1,
-            retry_count=record.retry_count + int(is_retry),
             attempt_started_at=utc_now_iso(), updated_at=utc_now_iso(),
         )
         record.validate_transition(updated.state)
@@ -441,21 +501,27 @@ class ToolRecoveryService:
 
     async def _commit_projection(self, ledger: ToolCallLedger, intent: ToolProjectionIntent, expected_revision: int) -> ToolCallLedger:
         pending = replace(ledger, revision=expected_revision + 1, pending_projection=intent)
-        await self._runs.save_tool_ledger(pending, expected_revision=expected_revision)
+        try:
+            await self._runs.save_tool_ledger(pending, expected_revision=expected_revision)
+        except (RunPersistenceError, ValueError) as error:
+            raise ToolProjectionPersistenceError(str(error)) from error
         return await self._apply_projection(pending)
 
     async def _apply_projection(self, ledger: ToolCallLedger) -> ToolCallLedger:
         intent = ledger.pending_projection
         if intent is None:
             return ledger
-        if intent.approval is not None:
-            await self._approvals.ensure_projection(intent.approval)
-        await self._runs.ensure_tool_messages(ledger.session_id, ledger.run_id, intent.messages)
-        await self._runs.ensure_tool_events(ledger.session_id, intent.events)
-        await self._checkpoints.ensure_tool_checkpoint(intent.base_checkpoint, intent.checkpoint)
-        await self._runs.ensure_tool_run(intent.base_run, intent.run)
-        completed = replace(ledger, revision=ledger.revision + 1, pending_projection=None)
-        await self._runs.save_tool_ledger(completed, expected_revision=ledger.revision)
+        try:
+            if intent.approval is not None:
+                await self._approvals.ensure_projection(intent.approval)
+            await self._runs.ensure_tool_messages(ledger.session_id, ledger.run_id, intent.messages)
+            await self._runs.ensure_tool_events(ledger.session_id, intent.events)
+            await self._checkpoints.ensure_tool_checkpoint(intent.base_checkpoint, intent.checkpoint)
+            await self._runs.ensure_tool_run(intent.base_run, intent.run)
+            completed = replace(ledger, revision=ledger.revision + 1, pending_projection=None)
+            await self._runs.save_tool_ledger(completed, expected_revision=ledger.revision)
+        except (RunPersistenceError, ValueError) as error:
+            raise ToolProjectionPersistenceError(str(error)) from error
         return completed
 
     async def _required_ledger(self, run: AgentRun, checkpoint: RunCheckpoint) -> ToolCallLedger:

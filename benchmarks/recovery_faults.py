@@ -9,15 +9,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 
 from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter, SessionConversationProjector
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
-from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot, DelegationRequest, DelegationResult, DelegationSubmission, RunMessage, RunRequest, ToolInvocation, ToolResult, ToolResultStatus
+from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, ConversationMessage, ConversationSnapshot, DelegationRequest, DelegationResult, DelegationSubmission, RunMessage, RunRequest, ToolInvocation, ToolResult, ToolResultStatus, ToolRecoveryContract
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.context_budget import TokenCountRequest, TokenCountResult
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
+from dotclaw.runtime.application.tool_recovery import ToolRecoveryService
 from dotclaw.runtime.application.ports import ContextPort, DelegationPort, HistoryCompactorPort, LLMPort, SuccessCommitFaultPort, ToolPort
 from dotclaw.runtime.domain.context import SuccessCommitFaultPoint, SuccessCommitIntent
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
@@ -140,7 +142,16 @@ class ScriptedTool(ToolPort):
         self._effects.append("tool_effect")
         if self._mode == "tool_after_effect" and not self._resume:
             raise RecoveryInterrupted("tool_after_effect")
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="ok")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="ok",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        if self._mode == "approval_cold_rebuild" and not self._resume:
+            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="recovery-approval")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED)
+
+    async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
+        return ToolRecoveryContract()
 
     async def cancel(self, run_id: str) -> None:
         """替身没有远程请求。"""
@@ -179,10 +190,13 @@ class BoundaryDelegation(DelegationPort):
 def make_engine(root: Path, mode: str, *, resume: bool) -> RuntimeEngine:
     """从同一存储根新装配服务对象，作为 PR4 冷重建唯一入口。"""
     effects = EffectLog(root)
+    runs = RunRepositoryAdapter(root, SessionConversationProjector(SessionManager(root)))
+    checkpoints = CheckpointRepositoryAdapter(root)
+    approvals = ApprovalService(ApprovalRepositoryAdapter(root))
     return RuntimeEngine(
-        RunRepositoryAdapter(root, SessionConversationProjector(SessionManager(root))), CheckpointRepositoryAdapter(root), RecoveryContext(),
+        runs, checkpoints, RecoveryContext(),
         ScriptedLLM(effects, mode, resume=resume), ScriptedTool(effects, mode, resume=resume),
-        RecoveryPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(),
+        RecoveryPolicy(), approvals, CancellationService(), tool_recovery=ToolRecoveryService(runs, checkpoints, approvals),
         token_counter=RecoveryTokenCounter(), history_compactor=RecoveryHistoryCompactor(),
     )
 
@@ -190,10 +204,13 @@ def make_engine(root: Path, mode: str, *, resume: bool) -> RuntimeEngine:
 async def audit_delegation_cold_rebuild(root: Path) -> dict[str, object]:
     """构造父 Run 等待子 Run，冷重建后尝试回灌并返回可追溯失败事实。"""
     session = await SessionManager(root).create(agent_id="recovery-agent")
+    runs = RunRepositoryAdapter(root)
+    checkpoints = CheckpointRepositoryAdapter(root)
+    approvals = ApprovalService(ApprovalRepositoryAdapter(root))
     initial = RuntimeEngine(
-        RunRepositoryAdapter(root), CheckpointRepositoryAdapter(root), RecoveryContext(), BoundaryDelegatingLLM(),
-        ScriptedTool(EffectLog(root), "delegation", resume=False), RecoveryPolicy(), ApprovalService(ApprovalRepositoryAdapter(root)),
-        CancellationService(), delegation_port=BoundaryDelegation(), token_counter=RecoveryTokenCounter(), history_compactor=RecoveryHistoryCompactor(),
+        runs, checkpoints, RecoveryContext(), BoundaryDelegatingLLM(),
+        ScriptedTool(EffectLog(root), "delegation", resume=False), RecoveryPolicy(), approvals,
+        CancellationService(), tool_recovery=ToolRecoveryService(runs, checkpoints, approvals), delegation_port=BoundaryDelegation(), token_counter=RecoveryTokenCounter(), history_compactor=RecoveryHistoryCompactor(),
     )
     waiting = await initial.execute(make_request(session.id))
     checkpoint, _ = await checkpoint_summary(root, session.id, waiting.run_id)

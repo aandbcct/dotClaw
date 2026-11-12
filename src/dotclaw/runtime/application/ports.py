@@ -27,6 +27,10 @@ RUN_SESSION_MISMATCH_REASON = "run_session_mismatch"
 """仅用于完成读取后的归属拒绝，不与操作系统读盘权限错误混用。"""
 
 
+class RunPersistenceError(RuntimeError):
+    """运行持久化读取、写入、解析或条件投影失败。"""
+
+
 class LLMUnavailableError(RuntimeError):
     """业务模型代理重试耗尽后的可恢复外部错误。"""
 
@@ -270,6 +274,9 @@ class ToolPort(Protocol):
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """执行工具或返回审批需求。"""
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        """使用真实参数经过安全链，返回审批需求但不执行处理器。"""
 
     async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
         """只读返回已注册工具的恢复安全契约，不执行工具。"""

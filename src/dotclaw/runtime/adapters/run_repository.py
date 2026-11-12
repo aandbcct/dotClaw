@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from collections.abc import Callable
 
-from ..application.ports import ApprovalRepository, ConversationProjectionPort, SuccessCommitFaultPort
+from ..application.ports import ApprovalRepository, ConversationProjectionPort, RunPersistenceError, SuccessCommitFaultPort
 from ..domain.cancellation import (CancellationRequest, CancellationOrigin, CancellationRecord, CancellationPhase, CancellationEffect, CancellationCommitIntent)
 from ..application.dto import ConversationMessage
 from ..domain.events import RunEvent, RunEventType
@@ -95,7 +95,10 @@ class RunRepositoryAdapter:
 
     async def load_cancellation(self, session_id: str, run_id: str) -> CancellationRecord | None:
         """读取控制记录；不提前补偿未完成的终态提交。"""
-        return await asyncio.to_thread(self._load_cancellation_sync, session_id, run_id)
+        try:
+            return await asyncio.to_thread(self._load_cancellation_sync, session_id, run_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     def _load_cancellation_sync(self, session_id: str, run_id: str) -> CancellationRecord | None:
         run = self._load_run_sync(session_id, run_id)
@@ -186,9 +189,12 @@ class RunRepositoryAdapter:
 
     async def commit_cancellation(self, intent: CancellationCommitIntent) -> None:
         """先保留取消决定，再补偿所有文件和审批副作用。"""
-        await self._validate_cancellation_approvals(intent)
-        await asyncio.to_thread(self._prepare_cancellation_commit_sync, intent)
-        await self._recover_cancellation_commit(intent)
+        try:
+            await self._validate_cancellation_approvals(intent)
+            await asyncio.to_thread(self._prepare_cancellation_commit_sync, intent)
+            await self._recover_cancellation_commit(intent)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def _validate_cancellation_approvals(self, intent: CancellationCommitIntent) -> None:
         if intent.approval_ids and self._approval_repository is None:
@@ -287,12 +293,18 @@ class RunRepositoryAdapter:
 
     async def load_run(self, session_id: str, run_id: str) -> AgentRun | None:
         """读取指定运行摘要；文件不存在时返回 None。"""
-        await self._recover_success_commit(session_id, run_id)
-        return await self._read_run_with_retry(self._load_run_sync, session_id, run_id)
+        try:
+            await self._recover_success_commit(session_id, run_id)
+            return await self._read_run_with_retry(self._load_run_sync, session_id, run_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def find_run(self, run_id: str) -> AgentRun | None:
         """跨 Session 定位运行摘要，供取消和审批恢复使用。"""
-        return await self._read_run_with_retry(self._find_run_sync, run_id)
+        try:
+            return await self._read_run_with_retry(self._find_run_sync, run_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def load_run_snapshot(self, session_id: str, run_id: str) -> AgentRun | None:
         """纯读指定归属，拒绝把其他Session中的同一运行当作不存在。"""
@@ -312,7 +324,10 @@ class RunRepositoryAdapter:
 
     async def save_run(self, run: AgentRun) -> None:
         """原子更新已存在运行的摘要。"""
-        await asyncio.to_thread(self._save_run_sync, run)
+        try:
+            await asyncio.to_thread(self._save_run_sync, run)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def ensure_tool_run(self, base_run: AgentRun, target_run: AgentRun) -> None:
         """仅在运行仍等于提交基线时投影目标运行快照。"""
@@ -320,7 +335,10 @@ class RunRepositoryAdapter:
 
     async def load_tool_ledger(self, session_id: str, run_id: str) -> ToolCallLedger | None:
         """严格读取工具调用账本；文件不存在时返回 None。"""
-        return await asyncio.to_thread(self._load_tool_ledger_sync, session_id, run_id)
+        try:
+            return await asyncio.to_thread(self._load_tool_ledger_sync, session_id, run_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def save_tool_ledger(self, ledger: ToolCallLedger, *, expected_revision: int) -> None:
         """比较当前 revision 后原子替换工具调用账本。"""
@@ -345,7 +363,10 @@ class RunRepositoryAdapter:
 
     async def load_context_versions(self, session_id: str, run_id: str) -> tuple[ContextVersion, ...]:
         """读取按版本连续递增的上下文版本事实。"""
-        return await asyncio.to_thread(self._load_context_versions_sync, session_id, run_id)
+        try:
+            return await asyncio.to_thread(self._load_context_versions_sync, session_id, run_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def set_active_context_version(self, session_id: str, run_id: str, version: int) -> None:
         """保存 Run 当前活动版本引用，引用必须已经存在。"""
@@ -371,15 +392,24 @@ class RunRepositoryAdapter:
 
     async def load_messages(self, session_id: str, run_id: str) -> tuple[RunMessage, ...]:
         """读取完整消息；尚未写入时返回空元组。"""
-        return await asyncio.to_thread(self._load_messages_sync, session_id, run_id)
+        try:
+            return await asyncio.to_thread(self._load_messages_sync, session_id, run_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def append_event(self, session_id: str, event: RunEvent) -> None:
         """在消息已落盘后追加有序事件。"""
-        await asyncio.to_thread(self._append_event_sync, session_id, event)
+        try:
+            await asyncio.to_thread(self._append_event_sync, session_id, event)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def load_events(self, session_id: str, run_id: str) -> tuple[RunEvent, ...]:
         """读取按 sequence 连续排列的运行事件。"""
-        return await asyncio.to_thread(self._load_events_sync, session_id, run_id)
+        try:
+            return await asyncio.to_thread(self._load_events_sync, session_id, run_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RunPersistenceError(str(error)) from error
 
     async def ensure_tool_events(self, session_id: str, events: tuple[RunEvent, ...]) -> None:
         """幂等合并连续工具事件并原子替换完整事件文件。"""

@@ -10,10 +10,15 @@ from enum import IntEnum, StrEnum
 from pathlib import Path
 
 from ...common.utils import validate_path_segment
+from ..application.ports import RunPersistenceError
 from ..domain.facts import JSONMap, JSONValue, require_json_map
 
 
 _IS_WINDOWS = os.name == "nt"
+
+
+class StoragePersistenceError(RunPersistenceError):
+    """文件读取、解析或原子写入失败。"""
 
 
 class StorageFormatVersion(IntEnum):
@@ -46,18 +51,21 @@ def load_json_map(path: Path) -> JSONMap:
     """读取 JSON 对象文件并校验根节点类型。"""
     # Windows的CRT读取共享占用可能只有errno13，不能据此当作文件不存在。
     # 只短暂重试目标权限错误；真实权限不足仍在固定上限后抛原异常。
-    for attempt in range(5):
-        try:
-            raw_text: str = path.read_text(encoding="utf-8")
-            break
-        except PermissionError as error:
-            winerror = getattr(error, "winerror", None)
-            retryable = _IS_WINDOWS and (winerror in (5, 32, 33) or (winerror is None and error.errno == 13))
-            if not retryable or attempt == 4:
-                raise
-            time.sleep(0.005 * (attempt + 1))
-    decoded_value: JSONValue = json.loads(raw_text)
-    return require_json_map(decoded_value)
+    try:
+        for attempt in range(5):
+            try:
+                raw_text: str = path.read_text(encoding="utf-8")
+                break
+            except PermissionError as error:
+                winerror = getattr(error, "winerror", None)
+                retryable = _IS_WINDOWS and (winerror in (5, 32, 33) or (winerror is None and error.errno == 13))
+                if not retryable or attempt == 4:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
+        decoded_value: JSONValue = json.loads(raw_text)
+        return require_json_map(decoded_value)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise StoragePersistenceError(str(error)) from error
 
 
 def write_json_atomic(path: Path, payload: JSONMap) -> None:
@@ -86,9 +94,11 @@ def write_json_atomic(path: Path, payload: JSONMap) -> None:
                 if not _IS_WINDOWS or getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 4:
                     raise
                 time.sleep(0.005 * (attempt + 1))
-    except BaseException:
+    except BaseException as error:
         if temporary_path.exists():
             temporary_path.unlink()
+        if isinstance(error, (OSError, UnicodeError)):
+            raise StoragePersistenceError(str(error)) from error
         raise
 
 
@@ -114,7 +124,9 @@ def write_text_atomic(path: Path, text: str) -> None:
                 if not _IS_WINDOWS or getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 4:
                     raise
                 time.sleep(0.005 * (attempt + 1))
-    except BaseException:
+    except BaseException as error:
         if temporary_path.exists():
             temporary_path.unlink()
+        if isinstance(error, (OSError, UnicodeError)):
+            raise StoragePersistenceError(str(error)) from error
         raise

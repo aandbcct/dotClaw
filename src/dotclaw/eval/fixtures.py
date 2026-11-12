@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from ..common.tool_replay import ToolExecutionEvidence
+
 from ..runtime.application.dto import (
     ContextBundle,
     ContextMetadata,
@@ -19,6 +21,7 @@ from ..runtime.application.dto import (
     ToolInvocation,
     ToolResult,
     ToolResultStatus,
+    ToolRecoveryContract,
 )
 from ..runtime.application.execution import RunExecutionView
 from ..runtime.application.ports import LLMOutputPort
@@ -35,6 +38,7 @@ from ..runtime.domain.facts import (
     RunErrorCode,
     RunMessage,
     RunMessageKind,
+    ToolCall,
 )
 from .models import (
     ApprovalFixture,
@@ -159,6 +163,28 @@ class FixtureToolPort:
         )
         return self._to_result(invocation, fixture)
 
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        """只读取匹配的工具 Fixture，预判审批且不消费 Fixture。"""
+        if self._mode is FixtureMatchMode.STRICT:
+            fixture = self._fixtures[self._cursor] if self._cursor < len(self._fixtures) else None
+            if fixture is None or fixture.tool_name != invocation.call.name or dict(fixture.key_arguments) != dict(invocation.call.arguments):
+                raise FixtureConfigurationError("工具 Fixture 与预检调用不匹配")
+        else:
+            fixture = next((item for item in self._fixtures
+                if item.fixture_id not in self._consumed and item.tool_name == invocation.call.name
+                and _matches_key_arguments(dict(item.key_arguments), dict(invocation.call.arguments))), None)
+            if fixture is None:
+                raise FixtureConfigurationError(f"工具 {invocation.call.name} 没有可用 fixture")
+        if fixture.status is ToolResultStatus.APPROVAL_REQUIRED:
+            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED,
+                approval_id=fixture.approval_id, execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+
+    async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
+        """Fixture 调用固定禁止自动重试。"""
+        return ToolRecoveryContract()
+
     def _match_strict(self, invocation: ToolInvocation) -> ToolFixture:
         """STRICT：按记录顺序精确消费，名称与全部参数都必须一致。"""
         if self._cursor >= len(self._fixtures):
@@ -210,15 +236,19 @@ class FixtureToolPort:
             # 审批已获批准（恢复执行场景）：按已批准处理，返回完成结果而非再次要求审批，
             # 否则引擎恢复后会再次进入审批挂起形成死循环。
             if invocation.approved:
-                return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output)
-            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id=fixture.approval_id)
+                return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output,
+                    execution_evidence=ToolExecutionEvidence.RETURNED)
+            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id=fixture.approval_id,
+                execution_evidence=ToolExecutionEvidence.NOT_STARTED)
         if fixture.status is ToolResultStatus.FAILED:
             return ToolResult(
                 invocation.call.call_id,
                 ToolResultStatus.FAILED,
                 error=RunError(RunErrorCode.TOOL_FAILURE, fixture.error_message or "fixture 声明工具失败"),
+                execution_evidence=ToolExecutionEvidence.RETURNED,
             )
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output)
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output,
+            execution_evidence=ToolExecutionEvidence.RETURNED)
 
     def verify_fully_consumed(self) -> None:
         """校验所有工具 Fixture 均被调用；剩余项视为缺失调用。"""

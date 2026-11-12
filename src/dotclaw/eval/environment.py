@@ -26,8 +26,9 @@ from typing import Any
 from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.context_budget import TokenCountRequest, TokenCountResult
-from ..runtime.application.dto import ConversationSnapshot, RunRequest, RunResult
+from ..runtime.application.dto import ConversationSnapshot, RunRequest, RunResult, ToolRecoveryContract, ToolResult
 from ..runtime.application.engine import RuntimeEngine
+from ..runtime.application.tool_recovery import ToolRecoveryService
 from ..runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
 from ..runtime.adapters.in_memory_run_repository import InMemoryRunRepository
 from ..runtime.adapters.checkpoint_repository import _validate_checkpoint_payload
@@ -235,6 +236,24 @@ class _ToolComposite:
             raise FixtureConfigurationError("未配置工具 fixture 或真实工具端口")
         self.real_served += 1
         return await self._real.execute(invocation, execution)
+
+    async def preflight(self, invocation: Any, execution: Any) -> ToolResult:
+        """Playback 工具 fixture 不执行预检副作用；真实端口继续真实安全检查。"""
+        if self._fixture is not None:
+            try:
+                return await self._fixture.preflight(invocation, execution)
+            except FixtureConfigurationError:
+                if not self._allow_fallback:
+                    raise
+        if self._real is None:
+            raise FixtureConfigurationError("未配置工具 fixture 或真实工具端口")
+        return await self._real.preflight(invocation, execution)
+
+    async def describe_recovery(self, call: Any, execution: Any) -> ToolRecoveryContract:
+        """Fixture 工具默认禁止恢复重试，真实端口提供者声明可核对的契约。"""
+        if self._fixture is not None:
+            return ToolRecoveryContract()
+        return await self._real.describe_recovery(call, execution)
 
 
 
@@ -560,6 +579,9 @@ class EvalEnvironment:
         self.approval_service: ApprovalService = ApprovalService(self.approval_repository)
         self.run_repository: RunRepository = InMemoryRunRepository(self.approval_repository, self.checkpoint_repository)
         self.cancellation_service: CancellationService = CancellationService()
+        self.tool_recovery: ToolRecoveryService = ToolRecoveryService(
+            self.run_repository, self.checkpoint_repository, self.approval_service
+        )
 
         self.engine: RuntimeEngine = RuntimeEngine(
             run_repository=self.run_repository,
@@ -573,6 +595,7 @@ class EvalEnvironment:
             delegation_port=self.delegation_port,
             token_counter=self.token_counter,
             history_compactor=self.history_compactor,
+            tool_recovery=self.tool_recovery,
         )
 
     def verify_fixtures_consumed(self) -> None:
