@@ -55,18 +55,32 @@ class ApprovalRepositoryAdapter:
             return
         if current == record:
             return
-        if (current.approval_id, current.run_id, current.session_id, current.call_id) != (
-            record.approval_id, record.run_id, record.session_id, record.call_id,
-        ) or (current.created_at, current.metadata) != (record.created_at, record.metadata):
+        if (
+            (current.approval_id, current.run_id, current.session_id) != (record.approval_id, record.run_id, record.session_id)
+            or current.call_id not in {None, record.call_id}
+            or (current.created_at, current.metadata) != (record.created_at, record.metadata)
+        ):
             raise ValueError("审批投影身份或不可变字段冲突")
         if current.decision is not None and record.decision is not None:
             if current.status is record.status and current.decision is record.decision:
                 return
             raise ValueError("审批决议已固定，不能改变状态或翻转决议")
-        if current.status is ApprovalStatus.PENDING and record.decision is not None:
+        if current.status is ApprovalStatus.PENDING and (
+            record.decision is not None or (current.call_id is None and record.call_id is not None)
+        ):
+            if record.decision is None and record.status is not ApprovalStatus.PENDING:
+                raise ValueError("审批投影状态与待处理关联不一致")
+            if record.decision is None:
+                write_json_atomic(path, record.to_dict())
+                return
             expected_status = ApprovalStatus.APPROVED if record.decision else ApprovalStatus.REJECTED
             if record.status not in {expected_status, ApprovalStatus.CONSUMED}:
                 raise ValueError("审批投影状态与决议不一致")
+            write_json_atomic(path, record.to_dict())
+            return
+        if current.status is ApprovalStatus.CONSUMED and current.decision is None and record.status is ApprovalStatus.CONSUMED and (
+            record.decision is not None or (current.call_id is None and record.call_id is not None)
+        ):
             write_json_atomic(path, record.to_dict())
             return
         raise ValueError("审批记录已存在相反或不同的投影事实")

@@ -1,6 +1,7 @@
 """工具恢复账本领域模型的静态契约覆盖。"""
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -20,7 +21,7 @@ from dotclaw.runtime.domain.facts import (
     ToolCall,
 )
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
-from dotclaw.runtime.domain.state import AgentRunState, RunOutcome, RunStage, Running
+from dotclaw.runtime.domain.state import AgentRunState, RunOutcome, RunStage, Running, Suspended, SuspendReason
 from dotclaw.runtime.domain.tool_recovery import (
     ToolCallKind,
     ToolCallLedger,
@@ -33,6 +34,9 @@ from dotclaw.runtime.domain.tool_recovery import (
     ToolRecoveryAction,
 )
 from dotclaw.runtime.application.dto import ToolRecoveryContract, ToolRecoveryDecision, ToolRecoveryPlan
+from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter
+from dotclaw.runtime.application.approval_service import ApprovalService
+from dotclaw.runtime.application.tool_recovery import ToolRecoveryService
 
 
 def _run() -> AgentRun:
@@ -285,3 +289,127 @@ def test_cancelled_outcome_may_have_no_message_but_failed_outcome_must_have_erro
         ToolOutcomeSnapshot(
             ToolOutcomeStatus.FAILED, "bad", None, "result-1", "2026-11-12T00:00:00+00:00", ToolEffectCertainty.KNOWN,
         )
+
+
+async def test_legacy_import_requires_full_source_and_exact_empty_result(tmp_path: Path) -> None:
+    approvals = ApprovalRepositoryAdapter(tmp_path)
+    runs = RunRepositoryAdapter(tmp_path, approval_repository=approvals)
+    checkpoints = CheckpointRepositoryAdapter(tmp_path)
+    recovery = ToolRecoveryService(runs, checkpoints, ApprovalService(approvals))
+    run = _run()
+    await runs.create_run(run)
+    call = ToolCall("call-legacy", "lookup", {"query": "x"})
+    source = RunMessage("assistant-1", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(call,))
+    result = RunMessage("result-1", 2, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "", "call-legacy", "lookup")
+    await runs.save_messages(run.session_id, run.run_id, (source, result))
+    events = (
+        RunEvent(run.run_id, 1, RunEventType.TOOL_STARTED, "2026-11-12T00:00:01+00:00", (source.message_id,), data={"call_id": call.call_id, "tool_name": call.name, "source_response_message_id": source.message_id}),
+        RunEvent(run.run_id, 2, RunEventType.TOOL_COMPLETED, "2026-11-12T00:00:02+00:00", (result.message_id,), data={"call_id": call.call_id, "tool_name": call.name, "status": "completed", "result_message_id": result.message_id}),
+    )
+    for event in events:
+        await runs.append_event(run.session_id, event)
+    checkpoint = RunCheckpoint(
+        "legacy-checkpoint", run.run_id, run.session_id, 1, 2, 2,
+        {"tool_calls": [call.to_dict()]}, {}, AgentAction.EXECUTE_TOOLS,
+    )
+    await checkpoints.save(checkpoint)
+
+    ledger = await recovery.import_legacy(run, checkpoint, (source, result), events)
+
+    assert ledger.calls[0].state is ToolCallState.SUCCEEDED
+    assert ledger.calls[0].result is not None and ledger.calls[0].result.output == ""
+    migrated = await checkpoints.load(run.session_id, run.run_id)
+    assert migrated is not None and "tool_calls" not in migrated.pending
+    assert await runs.load_messages(run.session_id, run.run_id) == (source, result)
+    assert await runs.load_events(run.session_id, run.run_id) == events
+
+
+async def test_legacy_import_does_not_infer_success_from_unmatched_result(tmp_path: Path) -> None:
+    approvals = ApprovalRepositoryAdapter(tmp_path)
+    runs = RunRepositoryAdapter(tmp_path, approval_repository=approvals)
+    checkpoints = CheckpointRepositoryAdapter(tmp_path)
+    recovery = ToolRecoveryService(runs, checkpoints, ApprovalService(approvals))
+    run = _run()
+    await runs.create_run(run)
+    call = ToolCall("call-legacy", "lookup", {"query": "x"})
+    source = RunMessage("assistant-1", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(call,))
+    await runs.save_messages(run.session_id, run.run_id, (source,))
+    event = RunEvent(run.run_id, 1, RunEventType.TOOL_COMPLETED, "2026-11-12T00:00:02+00:00", data={"call_id": call.call_id, "status": "completed", "result_message_id": "missing-result"})
+    checkpoint = RunCheckpoint(
+        "legacy-checkpoint", run.run_id, run.session_id, 1, 1, 1,
+        {"tool_calls": [call.to_dict()]}, {}, AgentAction.EXECUTE_TOOLS,
+    )
+    await checkpoints.save(checkpoint)
+
+    ledger = await recovery.import_legacy(run, checkpoint, (source,), (event,))
+
+    assert ledger.calls[0].state is ToolCallState.UNCERTAIN
+    assert ledger.calls[0].result is None
+
+
+async def test_legacy_import_refuses_new_format_checkpoint_without_ledger(tmp_path: Path) -> None:
+    approvals = ApprovalRepositoryAdapter(tmp_path)
+    runs = RunRepositoryAdapter(tmp_path, approval_repository=approvals)
+    recovery = ToolRecoveryService(runs, CheckpointRepositoryAdapter(tmp_path), ApprovalService(approvals))
+    run = _run()
+    checkpoint = RunCheckpoint(
+        "new-checkpoint", run.run_id, run.session_id, 1, 0, 0,
+        {"tool_batch_id": "assistant-1", "pending_call_ids": []}, {}, AgentAction.EXECUTE_TOOLS,
+    )
+
+    with pytest.raises(ValueError, match="禁止降级"):
+        await recovery.import_legacy(run, checkpoint, (), ())
+
+
+async def test_legacy_suspended_delegation_imports_verified_child_as_waiting_child(tmp_path: Path) -> None:
+    approvals = ApprovalRepositoryAdapter(tmp_path)
+    runs = RunRepositoryAdapter(tmp_path, approval_repository=approvals)
+    checkpoints = CheckpointRepositoryAdapter(tmp_path)
+    recovery = ToolRecoveryService(runs, checkpoints, ApprovalService(approvals))
+    parent = replace(
+        _run(),
+        state=AgentRunState(Suspended(SuspendReason.DELEGATION, "child-1", RunStage.EXECUTING_TOOLS)),
+        root_run_id="run-1",
+    )
+    call = ToolCall("delegate-1", "delegate", {
+        "target_agent_id": "agent-child", "title": "检查", "objective": "检查目标",
+    })
+    parent_input = RunMessage("input-1", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "父任务")
+    source = RunMessage("assistant-1", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(call,))
+    await runs.create_run(parent)
+    await runs.save_messages(parent.session_id, parent.run_id, (parent_input, source))
+    child = replace(
+        _run(), run_id="child-1", session_id="child-session", agent_id="agent-child",
+        parent_run_id=parent.run_id, root_run_id=parent.run_id, delegation_task_id="task-1",
+        input_message_id="child-input",
+    )
+    child_input = RunMessage(
+        "child-input", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "任务：检查\n\n目标：检查目标",
+    )
+    await runs.create_run(child)
+    await runs.save_messages(child.session_id, child.run_id, (child_input,))
+    events = (
+        RunEvent(parent.run_id, 1, RunEventType.DELEGATION_REQUESTED, "2026-11-12T00:00:01+00:00", data={
+            "tool_call_id": call.call_id, "target_agent_id": "agent-child",
+        }),
+        RunEvent(parent.run_id, 2, RunEventType.DELEGATION_SUBMITTED, "2026-11-12T00:00:02+00:00", data={
+            "child_run_id": child.run_id,
+        }),
+    )
+    for event in events:
+        await runs.append_event(parent.session_id, event)
+    checkpoint = RunCheckpoint(
+        "legacy-delegation", parent.run_id, parent.session_id, 1, 2, 2,
+        {"source_tool_call_id": call.call_id, "child_run_id": child.run_id}, {}, AgentAction.SUSPEND,
+    )
+    await checkpoints.save(checkpoint)
+
+    ledger = await recovery.import_legacy(parent, checkpoint, (parent_input, source), events)
+
+    assert ledger.calls[0].state is ToolCallState.WAITING_CHILD
+    assert ledger.calls[0].child_run_id == child.run_id
+    migrated = await checkpoints.load(parent.session_id, parent.run_id)
+    assert migrated is not None
+    assert migrated.pending["tool_batch_id"] == source.message_id
+    assert migrated.pending["pending_call_ids"] == [call.call_id]
+    assert "tool_calls" not in migrated.pending

@@ -426,6 +426,41 @@ def test_historical_approval_without_data_emits_issue():
     assert any(i.kind is TraceIssueKind.MISSING_EVENT_PAIR for i in trace.issues)
 
 
+def test_recovery_blocked_preserves_uncertainty_reason_on_one_tool_span():
+    source = make_message(
+        "msg-source", 1, RunMessageKind.LLM_RESPONSE,
+        tool_calls=(ToolCall("call-1", "write", {}),),
+    )
+    events = (
+        make_event("run-1", 1, RunEventType.TOOL_STARTED, data={"call_id": "call-1", "tool_name": "write"}),
+        make_event("run-1", 2, RunEventType.TOOL_RECOVERY_BLOCKED, message_ids=("msg-source",), data={
+            "call_id": "call-1", "reason": "started_outcome_unknown", "attempt": 1,
+            "source_response_message_id": "msg-source",
+        }),
+        make_event("run-1", 3, RunEventType.RUN_FAILED),
+    )
+
+    trace = assemble_trace(make_run(outcome=RunOutcome.FAILED), events, (source,), (make_context_version(1),))
+    tool_spans = [span for span in trace.spans if span.kind is SpanKind.TOOL]
+
+    assert len(tool_spans) == 1
+    assert tool_spans[0].status is TraceSpanStatus.INCOMPLETE
+    assert tool_spans[0].attributes["uncertainty_reason"] == "started_outcome_unknown"
+
+
+def test_approval_trace_does_not_coerce_non_boolean_decision():
+    events = (
+        make_event("run-1", 1, RunEventType.WAITING_APPROVAL, data={"approval_id": "approval-1", "call_id": "call-1"}),
+        make_event("run-1", 2, RunEventType.APPROVAL_RESOLVED, data={"approval_id": "approval-1", "approved": "false"}),
+    )
+
+    trace = assemble_trace(make_run(), events, (), (make_context_version(1),))
+
+    assert any(issue.kind is TraceIssueKind.CONFLICTING_REFERENCE for issue in trace.issues)
+    approval = next(span for span in trace.spans if span.kind is SpanKind.APPROVAL)
+    assert approval.status is TraceSpanStatus.WAITING
+
+
 def test_all_five_span_kinds_share_run_parent():
     messages = (
         make_message("msg-input", 1, RunMessageKind.USER_INPUT, role=MessageRole.USER),

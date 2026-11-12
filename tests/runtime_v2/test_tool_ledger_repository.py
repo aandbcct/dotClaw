@@ -186,11 +186,12 @@ async def _assert_approval_repository_contract(repository: ApprovalRepository) -
 
     legacy = ApprovalRecord("approval-legacy", "run-1", "session-1", ApprovalStatus.CONSUMED, "2026-11-12T00:00:00+00:00")
     await repository.ensure(legacy)
-    for status in (ApprovalStatus.APPROVED, ApprovalStatus.CONSUMED):
-        with pytest.raises(ValueError):
-            await repository.ensure(
-                replace(legacy, status=status, call_id="call-1", decision=True, resolved_at="2026-11-12T00:00:02+00:00")
-            )
+    resolved_legacy = replace(legacy, status=ApprovalStatus.CONSUMED, call_id="call-1", decision=True, resolved_at="2026-11-12T00:00:02+00:00")
+    await repository.ensure(resolved_legacy)
+    await repository.ensure(resolved_legacy)
+    assert await repository.load("approval-legacy") == resolved_legacy
+    with pytest.raises(ValueError):
+        await repository.ensure(replace(resolved_legacy, decision=False))
 
 
 async def test_file_and_fixture_memory_approval_repositories_share_ensure_contract(tmp_path: Path) -> None:

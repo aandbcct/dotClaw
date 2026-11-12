@@ -316,7 +316,7 @@ class RunStepResponse(BaseModel):
     id: str
     sequence: int
     kind: Literal["model", "tool"]
-    status: Literal["running", "completed", "failed", "cancelled", "approval_required", "interrupted"]
+    status: Literal["running", "completed", "failed", "cancelled", "approval_required", "interrupted", "uncertain"]
     started_at: str = ""
     completed_at: str = ""
     call_id: str | None = None

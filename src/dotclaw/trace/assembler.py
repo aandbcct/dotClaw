@@ -46,6 +46,7 @@ _SUPPORTED_EVENTS = frozenset(
         RunEventType.LLM_COMPLETED,
         RunEventType.TOOL_STARTED,
         RunEventType.TOOL_COMPLETED,
+        RunEventType.TOOL_RECOVERY_BLOCKED,
         RunEventType.WAITING_APPROVAL,
         RunEventType.APPROVAL_RESOLVED,
         RunEventType.DELEGATION_REQUESTED,
@@ -371,6 +372,40 @@ def assemble_trace(
                     open_tools.pop(call_id, None)
                     terminal_tool_calls.add(call_id)
 
+        elif event_type is RunEventType.TOOL_RECOVERY_BLOCKED:
+            call_id = data.get("call_id")
+            if not isinstance(call_id, str):
+                issues.append(TraceIssue(
+                    kind=TraceIssueKind.CONFLICTING_REFERENCE,
+                    evidence="TOOL_RECOVERY_BLOCKED 缺少 call_id",
+                    event_sequence=event.sequence,
+                ))
+                continue
+            span = open_tools.pop(call_id, None)
+            if span is None:
+                source_id = data.get("source_response_message_id")
+                source_message = message_index.get(source_id) if isinstance(source_id, str) else None
+                source_call = next((call for call in source_message.tool_calls if call.call_id == call_id), None) if source_message is not None else None
+                span = _PendingSpan(
+                    span_id=f"tool:{call_id}", kind=SpanKind.TOOL,
+                    parent_span_id=run_span_id, started_at="", status=TraceSpanStatus.INCOMPLETE,
+                    start_event_sequence=None, message_ids=[source_id] if isinstance(source_id, str) else [],
+                    context_version=None, attributes={"call_id": call_id},
+                )
+                if source_call is not None:
+                    span.attributes["tool_name"] = source_call.name
+                pending.append(span)
+            span.ended_at = event.occurred_at
+            span.end_event_sequence = event.sequence
+            span.status = TraceSpanStatus.INCOMPLETE
+            span.attributes = {
+                **span.attributes,
+                "recovery_blocked": True,
+                "uncertainty_reason": data.get("reason", "unknown"),
+                "attempt": data.get("attempt", 0),
+            }
+            terminal_tool_calls.add(call_id)
+
         elif event_type is RunEventType.WAITING_APPROVAL:
             approval_id = data.get("approval_id")
             call_id = data.get("call_id")
@@ -446,7 +481,14 @@ def assemble_trace(
 
         elif event_type is RunEventType.APPROVAL_RESOLVED:
             approval_id = data.get("approval_id")
-            approved = bool(data.get("approved", False))
+            approved = data.get("approved")
+            if type(approved) is not bool:
+                issues.append(TraceIssue(
+                    kind=TraceIssueKind.CONFLICTING_REFERENCE,
+                    evidence=f"APPROVAL_RESOLVED 缺少布尔 approved 证据（approval_id={approval_id}）",
+                    event_sequence=event.sequence,
+                ))
+                continue
             span = open_approvals.get(approval_id) if approval_id is not None else None
             if span is None:
                 issues.append(

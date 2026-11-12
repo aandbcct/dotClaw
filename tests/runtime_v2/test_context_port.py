@@ -25,6 +25,7 @@ from dotclaw.context import (
 from dotclaw.runtime.application.dto import ContextBundle, ConversationMessage, ConversationSnapshot, RunRequest
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
 from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent, ToolDefinitionsSlotContent
+from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
@@ -380,3 +381,26 @@ async def test_signal_payload_filtering_and_owner_key_isolation() -> None:
     assert instances[0].received_payloads == [False]
     assert instances[1].received_payloads == [True]
     assert [slot.refreshes for slot in instances] == [0, 1]
+
+
+def test_legacy_approval_filter_removes_only_exact_fake_result_and_keeps_empty_result() -> None:
+    from dotclaw.context.provider import _filter_legacy_approval_results, _validate_tool_message_pairs
+    from dotclaw.runtime.domain.facts import ToolCall
+
+    source = RunMessage(
+        "source", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+        tool_calls=(ToolCall("call-1", "lookup", {}),),
+    )
+    fake = RunMessage("fake", 2, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "approval required", "call-1")
+    actual_empty = RunMessage("actual", 3, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "", "call-1")
+    approval = RunEvent(
+        "run-1", 1, RunEventType.TOOL_COMPLETED, "t1", ("fake",),
+        data={"call_id": "call-1", "status": "approval_required", "result_message_id": "fake"},
+    )
+
+    filtered = _filter_legacy_approval_results((source, fake, actual_empty), (approval,))
+    assert tuple(message.message_id for message in filtered) == ("source", "actual")
+    _validate_tool_message_pairs(filtered)
+    broken = replace(approval, message_ids=("source", "missing-fake"), data={"call_id": "call-1", "status": "approval_required"})
+    with pytest.raises(ValueError, match="消息不存在"):
+        _filter_legacy_approval_results((source,), (broken,))

@@ -91,3 +91,17 @@ def test_preflight_approval_without_start_uses_source_tool_call():
     assert (activity.tools[0].name, activity.tools[0].status, activity.tools[0].arguments, activity.tools[0].completed_at) == (
         "danger", "approval_required", {"path": "demo.txt"}, None,
     )
+
+
+def test_recovery_blocked_is_displayed_as_uncertain_with_external_effect_warning():
+    event = RunEvent(
+        "r", 1, RunEventType.TOOL_RECOVERY_BLOCKED, "t1", data={
+            "call_id": "call-a", "tool_name": "write", "reason": "legacy_execution_unproven", "attempt": 1,
+        },
+    )
+
+    activity = _run_activity(_run(RunOutcome.FAILED), (event,), (), False)
+
+    assert activity.status == "failed"
+    assert activity.steps[0].status == "uncertain"
+    assert "外部操作可能已生效" in activity.tools[0].error

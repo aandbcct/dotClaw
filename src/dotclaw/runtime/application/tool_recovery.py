@@ -31,7 +31,7 @@ from ..domain.facts import (
     RunMessageKind,
     utc_now_iso,
 )
-from ...common.tool_replay import ToolExecutionEvidence
+from ...common.tool_replay import ToolExecutionEvidence, ToolReplayPolicy, ToolSideEffect
 from ..domain.state import Ended, RunOutcome, Running, RunStage, Suspended, SuspendReason, transition
 from ..domain.tool_recovery import (
     ToolCallKind,
@@ -70,6 +70,291 @@ class ToolRecoveryService:
         ledger = await self._runs.load_tool_ledger(session_id, run_id)
         if ledger is not None and ledger.pending_projection is not None:
             await self._apply_projection(ledger)
+
+    async def import_legacy(
+        self,
+        run: AgentRun,
+        checkpoint: RunCheckpoint,
+        messages: tuple[RunMessage, ...],
+        events: tuple[RunEvent, ...],
+    ) -> ToolCallLedger:
+        """只把无新协议引用的旧工具事实一次性迁入账本与新检查点。"""
+        self._assert_run(run, checkpoint)
+        if run.state.is_ended():
+            raise ValueError("已终态旧运行保持只读")
+        if await self._ledger(run.session_id, run.run_id) is not None:
+            raise ValueError("已有工具账本的运行不能走旧格式导入")
+        if checkpoint.tool_ledger_revision is not None or any(
+            key in checkpoint.pending for key in ("tool_batch_id", "pending_call_ids")
+        ) or any(
+            event.event_type is RunEventType.TOOL_RECOVERY_BLOCKED
+            or event.data.get("tool_protocol_version") is not None
+            or event.data.get("commit_id") is not None
+            for event in events
+        ):
+            raise ValueError("新格式工具事实缺失账本，禁止降级为旧格式导入")
+
+        sources = tuple(
+            message for message in messages
+            if message.role is MessageRole.ASSISTANT and message.tool_calls
+        )
+        if not sources:
+            raise ValueError("旧工具恢复缺少原始助手批次")
+        source_by_id = {message.message_id: message for message in sources}
+        if len(source_by_id) != len(sources):
+            raise ValueError("旧助手工具批次身份不唯一")
+        calls_by_id = {
+            call.call_id: (source, ordinal, call)
+            for source in sources
+            for ordinal, call in enumerate(source.tool_calls)
+        }
+        if sum(len(source.tool_calls) for source in sources) != len(calls_by_id):
+            raise ValueError("旧工具调用 ID 跨批次重复，不能安全导入")
+
+        legacy_pending = checkpoint.pending.get("tool_calls")
+        pending_ids: tuple[str, ...] = ()
+        pending_entries: list[dict] | None = None
+        if isinstance(legacy_pending, list):
+            pending_entries = legacy_pending
+            pending_ids = tuple(
+                item["call_id"] for item in legacy_pending
+                if isinstance(item, dict) and isinstance(item.get("call_id"), str)
+            )
+            if len(pending_ids) != len(legacy_pending):
+                raise ValueError("旧检查点待执行调用格式不完整")
+        elif isinstance(checkpoint.pending.get("call_id"), str):
+            pending_ids = (checkpoint.pending["call_id"],)
+        if not pending_ids and isinstance(checkpoint.pending.get("source_tool_call_id"), str):
+            pending_ids = (checkpoint.pending["source_tool_call_id"],)
+        if pending_ids:
+            if any(call_id not in calls_by_id for call_id in pending_ids):
+                raise ValueError("旧检查点待执行调用不属于原始助手批次")
+            pending_sources = {calls_by_id[call_id][0].message_id for call_id in pending_ids}
+            if len(pending_sources) != 1:
+                raise ValueError("旧检查点待执行调用跨越多个助手批次")
+            pending_source = calls_by_id[pending_ids[0]][0]
+            start = calls_by_id[pending_ids[0]][1]
+            expected_suffix = tuple(call.call_id for call in pending_source.tool_calls[start:])
+            if pending_entries and tuple(pending_ids) != expected_suffix:
+                raise ValueError("旧检查点待执行调用不是原始助手批次的完整后缀")
+            if pending_entries and any(
+                item != pending_source.tool_calls[start + offset].to_dict()
+                for offset, item in enumerate(pending_entries)
+            ):
+                raise ValueError("旧检查点调用参数与原始助手批次不一致")
+            if not pending_entries:
+                pending_ids = expected_suffix
+
+        approval_events: dict[str, RunEvent] = {}
+        terminal_events: dict[str, RunEvent] = {}
+        started_events: dict[str, list[RunEvent]] = {}
+        submitted_events: dict[str, RunEvent] = {}
+        for event in events:
+            call_id = event.data.get("call_id")
+            if event.event_type in {RunEventType.TOOL_STARTED, RunEventType.TOOL_COMPLETED, RunEventType.WAITING_APPROVAL, RunEventType.DELEGATION_SUBMITTED}:
+                if not isinstance(call_id, str) or call_id not in calls_by_id:
+                    continue
+                source, _, _ = calls_by_id[call_id]
+                source_id = event.data.get("source_response_message_id") or event.data.get("source_message_id")
+                if source_id is not None and source_id != source.message_id:
+                    raise ValueError("旧工具事件与助手批次来源不一致")
+            if event.event_type is RunEventType.TOOL_STARTED and isinstance(call_id, str) and call_id in calls_by_id:
+                started_events.setdefault(call_id, []).append(event)
+            elif event.event_type is RunEventType.WAITING_APPROVAL and isinstance(call_id, str) and call_id in calls_by_id:
+                approval_id = event.data.get("approval_id")
+                if isinstance(approval_id, str):
+                    approval_events[call_id] = event
+            elif event.event_type is RunEventType.TOOL_COMPLETED and isinstance(call_id, str) and call_id in calls_by_id:
+                if event.data.get("status") in {"completed", "failed", "cancelled"}:
+                    terminal_events[call_id] = event
+                elif event.data.get("status") == "approval_required":
+                    approval_id = event.data.get("approval_id")
+                    if isinstance(approval_id, str):
+                        approval_events[call_id] = event
+            elif event.event_type is RunEventType.DELEGATION_SUBMITTED and isinstance(call_id, str) and call_id in calls_by_id:
+                submitted_events[call_id] = event
+
+        approval_decisions: dict[str, tuple[bool, RunEvent]] = {}
+        for event in events:
+            if event.event_type is not RunEventType.APPROVAL_RESOLVED:
+                continue
+            approval_id = event.data.get("approval_id")
+            call_id = event.data.get("call_id")
+            approved = event.data.get("approved")
+            if isinstance(approval_id, str) and type(approved) is bool:
+                if not isinstance(call_id, str):
+                    call_id = next((candidate for candidate, wait_event in approval_events.items() if wait_event.data.get("approval_id") == approval_id), None)
+                wait = approval_events.get(call_id) if isinstance(call_id, str) else None
+                if wait is not None and wait.data.get("approval_id") == approval_id:
+                    approval_decisions[call_id] = (approved, event)
+
+        submitted_child_ids: dict[str, str] = {
+            call_id: str(event.data["child_run_id"])
+            for call_id, event in submitted_events.items()
+            if isinstance(event.data.get("child_run_id"), str)
+        }
+        requested_calls: list[str] = []
+        for event in events:
+            if event.event_type is RunEventType.DELEGATION_REQUESTED:
+                call_id = event.data.get("tool_call_id")
+                if isinstance(call_id, str) and call_id in calls_by_id:
+                    requested_calls.append(call_id)
+            elif event.event_type is RunEventType.DELEGATION_SUBMITTED:
+                child_id = event.data.get("child_run_id")
+                call_id = event.data.get("call_id")
+                if not isinstance(call_id, str):
+                    call_id = next((candidate for candidate in reversed(requested_calls) if candidate not in submitted_child_ids), None)
+                if isinstance(call_id, str) and call_id in calls_by_id and isinstance(child_id, str):
+                    submitted_child_ids[call_id] = child_id
+
+        message_index = {message.message_id: message for message in messages}
+        records: list[ToolCallRecord] = []
+        approval_projection: ApprovalRecord | None = None
+        now = utc_now_iso()
+        for source in sources:
+            for ordinal, call in enumerate(source.tool_calls):
+                kind = ToolCallKind.DELEGATION if call.name == "delegate" else ToolCallKind.ORDINARY
+                terminal = terminal_events.get(call.call_id)
+                wait = approval_events.get(call.call_id)
+                decision = approval_decisions.get(call.call_id)
+                result = None
+                state = ToolCallState.PENDING if call.call_id in pending_ids else ToolCallState.UNCERTAIN
+                attempt = len(started_events.get(call.call_id, ()))
+                uncertainty_reason = None if state is ToolCallState.PENDING else "legacy_execution_unproven"
+                approval_id = wait.data.get("approval_id") if wait is not None else None
+                approval_decision = decision[0] if decision is not None else None
+                child_run_id = None
+
+                if terminal is not None:
+                    result_id = terminal.data.get("result_message_id")
+                    result_message = message_index.get(result_id) if isinstance(result_id, str) else None
+                    message_kind = RunMessageKind.TOOL_RESULT
+                    child_outcome = None
+                    valid_result = (
+                        isinstance(result_id, str)
+                        and result_message is not None
+                        and result_message.role is MessageRole.TOOL
+                        and result_message.tool_call_id == call.call_id
+                    )
+                    if kind is ToolCallKind.DELEGATION and valid_result:
+                        message_kind = RunMessageKind.DELEGATION_RESULT
+                        completed_delegation = next(
+                            (event for event in events if event.event_type is RunEventType.DELEGATION_COMPLETED and result_message.message_id in event.message_ids),
+                            None,
+                        )
+                        raw_child_id = completed_delegation.data.get("child_run_id") if completed_delegation is not None else None
+                        child = await self._runs.find_run(raw_child_id) if isinstance(raw_child_id, str) else None
+                        raw_outcome = completed_delegation.data.get("outcome") if completed_delegation is not None else None
+                        if child is None or child.parent_run_id != run.run_id or child.state.outcome() is None or raw_outcome != child.state.outcome().value:
+                            valid_result = False
+                        else:
+                            child_run_id = child.run_id
+                            child_outcome = child.state.outcome()
+                    if (
+                        not valid_result
+                        or result_message.kind is not message_kind
+                    ):
+                        state = ToolCallState.UNCERTAIN
+                        uncertainty_reason = "legacy_terminal_result_unmatched"
+                    else:
+                        status = terminal.data["status"]
+                        if status == "cancelled":
+                            state = ToolCallState.UNCERTAIN
+                            uncertainty_reason = "legacy_cancelled_effect_unproven"
+                        else:
+                            result = ToolOutcomeSnapshot(
+                                ToolOutcomeStatus(status), result_message.content,
+                                RunError(RunErrorCode.TOOL_FAILURE, str(terminal.data.get("error_summary") or result_message.content)) if status == "failed" else None,
+                                result_message.message_id, terminal.occurred_at, ToolEffectCertainty.KNOWN,
+                                message_kind=message_kind, child_outcome=child_outcome,
+                            )
+                            state = {"completed": ToolCallState.SUCCEEDED, "failed": ToolCallState.FAILED}[status]
+                            uncertainty_reason = None
+                elif kind is ToolCallKind.DELEGATION:
+                    raw_child_id = submitted_child_ids.get(call.call_id)
+                    if raw_child_id is None and checkpoint.pending.get("source_tool_call_id") == call.call_id:
+                        raw_child_id = checkpoint.pending.get("child_run_id")
+                    child = await self._runs.find_run(raw_child_id) if isinstance(raw_child_id, str) else None
+                    child_messages = await self._runs.load_messages(child.session_id, child.run_id) if child is not None else ()
+                    child_input = next((message for message in child_messages if child is not None and message.message_id == child.input_message_id), None)
+                    args = call.arguments
+                    expected_input = f"任务：{args.get('title')}\n\n目标：{args.get('objective')}"
+                    if (
+                        child is not None
+                        and child.parent_run_id == run.run_id
+                        and child.root_run_id == (run.root_run_id or run.run_id)
+                        and child.agent_id == args.get("target_agent_id")
+                        and child_input is not None
+                        and child_input.role is MessageRole.USER
+                        and child_input.content == expected_input
+                        and bool(child.delegation_task_id)
+                    ):
+                        child_run_id = child.run_id
+                        state = ToolCallState.WAITING_CHILD
+                        uncertainty_reason = None
+                    elif attempt:
+                        state = ToolCallState.UNCERTAIN
+                        uncertainty_reason = "legacy_delegation_identity_unproven"
+                    elif call.call_id in pending_ids:
+                        state = ToolCallState.PENDING
+                        uncertainty_reason = None
+                elif wait is not None:
+                    state = ToolCallState.WAITING_APPROVAL
+                    uncertainty_reason = None
+                elif attempt:
+                    state = ToolCallState.STARTED
+                    uncertainty_reason = None
+
+                if wait is not None and isinstance(approval_id, str):
+                    approval_record = await self._approvals.find(approval_id)
+                    if approval_record is not None:
+                        if (approval_record.run_id, approval_record.session_id) != (run.run_id, run.session_id) or approval_record.call_id not in {None, call.call_id}:
+                            raise ValueError("旧审批记录与等待事件关联不一致")
+                        resolved_decision = decision[0] if decision is not None else approval_record.decision
+                        if approval_record.decision is not None and decision is not None and approval_record.decision is not decision[0]:
+                            raise ValueError("旧审批仓储与 APPROVAL_RESOLVED 事件决议冲突")
+                        if approval_record.status in {ApprovalStatus.PENDING, ApprovalStatus.CONSUMED} and (
+                            approval_record.call_id is None or (resolved_decision is not None and approval_record.decision is None)
+                        ):
+                            approval_projection = replace(
+                                approval_record,
+                                status=ApprovalStatus.CONSUMED if resolved_decision is not None else approval_record.status,
+                                call_id=call.call_id,
+                                decision=resolved_decision,
+                                resolved_at=decision[1].occurred_at if decision is not None else approval_record.resolved_at,
+                            )
+                records.append(ToolCallRecord(
+                    run.run_id, call, source.message_id, ordinal, kind, state,
+                    attempt=attempt, replay_policy=ToolReplayPolicy.NO_AUTO_RETRY,
+                    side_effect=ToolSideEffect.UNKNOWN, approval_id=approval_id,
+                    approval_decision=approval_decision, child_run_id=child_run_id,
+                    result=result, uncertainty_reason=uncertainty_reason, updated_at=now,
+                ))
+
+        active_records = [record for record in records if record.state not in _TERMINAL]
+        current_source_id = None
+        for call_id in pending_ids:
+            source = calls_by_id.get(call_id, (None,))[0]
+            if source is not None:
+                current_source_id = source.message_id
+                break
+        if current_source_id is None and isinstance(checkpoint.pending.get("source_tool_call_id"), str):
+            source = calls_by_id.get(checkpoint.pending["source_tool_call_id"], (None,))[0]
+            current_source_id = source.message_id if source is not None else None
+        if current_source_id is None:
+            active_source_ids = {item.source_message_id for item in active_records}
+            current_source_id = next((source.message_id for source in reversed(sources) if source.message_id in active_source_ids), None)
+        if current_source_id is None:
+            raise ValueError("舊檢查點無法關聯到原始助手批次")
+        current_batch = tuple(record for record in records if record.source_message_id == current_source_id)
+        target_pending = {
+            "tool_batch_id": current_source_id,
+            "pending_call_ids": [record.call.call_id for record in current_batch if record.state not in _TERMINAL],
+        }
+        base_run, base_checkpoint = await self._persistent_base(run)
+        target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, target_pending, AgentAction.EXECUTE_TOOLS, True)
+        ledger = ToolCallLedger(run.session_id, run.run_id, 1, tuple(records))
+        return await self._commit_fact(ledger, base_run, base_run, base_checkpoint, target_checkpoint, approval=approval_projection)
 
     async def reconcile(self, run: AgentRun, checkpoint: RunCheckpoint, contracts: Mapping[str, ToolRecoveryContract]) -> ToolRecoveryPlan:
         """从账本和已投影事实重建当前批次决策；未知执行效果一律阻断。"""
@@ -120,7 +405,12 @@ class ToolRecoveryService:
                 contract.recovery_backoff_multiplier, contract.recovery_max_delay_s,
                 contract.execution_scope,
             )
-            if frozen_contract != current_contract:
+            legacy_unfrozen = (
+                record.replay_contract_version == ""
+                and record.replay_policy is ToolReplayPolicy.NO_AUTO_RETRY
+                and record.side_effect is ToolSideEffect.UNKNOWN
+            )
+            if frozen_contract != current_contract and not legacy_unfrozen:
                 action, reason = ToolRecoveryAction.BLOCK, "recovery_contract_changed"
             elif record.state is ToolCallState.PENDING:
                 action, reason = ToolRecoveryAction.EXECUTE, "pending_not_started"
@@ -217,7 +507,13 @@ class ToolRecoveryService:
         if record.state not in {ToolCallState.PENDING, ToolCallState.STARTED, ToolCallState.WAITING_APPROVAL}:
             raise ValueError("工具调用当前状态不允许开始执行")
         retry = record.state is ToolCallState.STARTED
-        if record.kind is ToolCallKind.ORDINARY and (retry or contract is not None):
+        legacy_first_attempt = (
+            not retry
+            and record.replay_contract_version == ""
+            and record.replay_policy is ToolReplayPolicy.NO_AUTO_RETRY
+            and record.side_effect is ToolSideEffect.UNKNOWN
+        )
+        if record.kind is ToolCallKind.ORDINARY and (retry or contract is not None) and not legacy_first_attempt:
             if contract is None or (
                 record.replay_policy, record.side_effect, record.replay_contract_version,
                 record.key_valid_until,
@@ -565,7 +861,7 @@ class ToolRecoveryService:
         updated = replace(record, state=ToolCallState.UNCERTAIN, uncertainty_reason=reason, last_execution_evidence=record.last_execution_evidence, updated_at=utc_now_iso())
         calls = tuple(updated if item.call.call_id == call_id else item for item in ledger.calls)
         base_run, base_checkpoint = await self._persistent_base(run)
-        error = RunError(RunErrorCode.TOOL_OUTCOME_UNCERTAIN, reason)
+        error = RunError(RunErrorCode.TOOL_OUTCOME_UNCERTAIN, "工具结果待确认：外部操作可能已生效，请先核对。")
         target_run = self._failed_run_target(base_run, error)
         existing_events = await self._runs.load_events(run.session_id, run.run_id)
         blocked_event = RunEvent(run.run_id, len(existing_events) + 1, RunEventType.TOOL_RECOVERY_BLOCKED, utc_now_iso(), (record.source_message_id,), "工具结果不确定，已阻止自动执行", {"call_id": call_id, "tool_name": record.call.name, "source_response_message_id": record.source_message_id, "reason": reason, "attempt": record.attempt})

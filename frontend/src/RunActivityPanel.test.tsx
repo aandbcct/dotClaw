@@ -29,6 +29,19 @@ it("取消清理阻塞只显示待完成提示并禁审批，远端未知仅在�
   expect(screen.getByText("本地已停止，远端执行结果未确认。")).toBeTruthy();
 });
 
+it("恢复阻断展示结果待确认并提示核对，不提供恢复按钮", () => {
+  const uncertain = {
+    ...activity,
+    status: "failed",
+    tools: [{ ...activity.tools[0], status: "uncertain", error: "工具结果待确认：外部操作可能已生效，请先核对。" }],
+    steps: [{ ...activity.steps![1], status: "uncertain" }],
+  };
+  render(<RunActivityPanel {...actions()} message={message} activities={[uncertain]} canControl />);
+  expect(screen.getByText("结果待确认")).toBeTruthy();
+  expect(screen.getByText(/外部操作可能已生效，请先核对/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "恢复运行" })).toBeNull();
+});
+
 it("无正文立即显示真实处理反馈，思考首次展开后尊重手动折叠，完成折叠不反复关闭", async () => {
   const user = userEvent.setup(), callbacks = actions();
   const { rerender } = render(<RunActivityPanel {...callbacks} message={message} activities={[activity]} canControl={false} />);

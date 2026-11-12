@@ -751,6 +751,7 @@ def _run_activity(
         if event.event_type not in {
             RunEventType.TOOL_STARTED,
             RunEventType.TOOL_COMPLETED,
+            RunEventType.TOOL_RECOVERY_BLOCKED,
             RunEventType.WAITING_APPROVAL,
             RunEventType.APPROVAL_RESOLVED,
         }:
@@ -783,6 +784,10 @@ def _run_activity(
             current.error = ""
         elif event.event_type is RunEventType.APPROVAL_RESOLVED:
             continue
+        elif event.event_type is RunEventType.TOOL_RECOVERY_BLOCKED:
+            current.completed_at = event.occurred_at
+            current.status = "uncertain"
+            current.error = "工具结果待确认：外部操作可能已生效，请先核对。"
         elif event.data.get("status") == "approval_required":
             current.status = "approval_required"
             current.completed_at = None
@@ -871,6 +876,7 @@ def _run_steps(run: AgentRun, events: tuple[RunEvent, ...], *, terminal_committe
         if event.event_type not in {
             RunEventType.LLM_STARTED, RunEventType.LLM_COMPLETED,
             RunEventType.TOOL_STARTED, RunEventType.TOOL_COMPLETED,
+            RunEventType.TOOL_RECOVERY_BLOCKED,
             RunEventType.WAITING_APPROVAL, RunEventType.APPROVAL_RESOLVED,
         }:
             continue
@@ -903,6 +909,10 @@ def _run_steps(run: AgentRun, events: tuple[RunEvent, ...], *, terminal_committe
             current.completed_at = None
             current.result = None
             current.error = None
+        elif event.event_type is RunEventType.TOOL_RECOVERY_BLOCKED:
+            current.completed_at = event.occurred_at
+            current.status = "uncertain"
+            current.error = str(event.data.get("reason") or "结果待确认")
         else:
             current.completed_at = event.occurred_at
             value = str(event.data.get("status", "completed"))

@@ -363,11 +363,26 @@ class RuntimeEngine:
             run = await self._run_repository.load_run(run.session_id, run.run_id)
             if run is None:
                 raise RunPersistenceError("审批投影后运行不存在")
-            committing_result = await self._pending_success_result_locked(run)
             checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
-            await self._tool_recovery.decide_approval(run, approval_id, approved, checkpoint)
+            ledger = await self._run_repository.load_tool_ledger(run.session_id, run.run_id)
+            if ledger is not None:
+                await self._tool_recovery.decide_approval(run, approval_id, approved, checkpoint)
+            committing_result = await self._pending_success_result_locked(run)
             if committing_result is not None:
                 return committing_result
+            if run.state.is_ended():
+                return await self._result_from_run(run)
+            if checkpoint is not None and ledger is None:
+                messages = await self._run_repository.load_messages(run.session_id, run.run_id)
+                events = await self._run_repository.load_events(run.session_id, run.run_id)
+                try:
+                    await self._tool_recovery.import_legacy(run, checkpoint, messages, events)
+                except ValueError as error:
+                    raise RunPersistenceError(str(error)) from error
+                checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                await self._tool_recovery.decide_approval(run, approval_id, approved, checkpoint)
+            elif ledger is None:
+                raise RunPersistenceError("审批关联运行缺少工具账本和活动检查点")
             cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
             if not approved and cancellation is None:
                 await self._request_cancel_locked(run.run_id, "工具审批被拒绝", CancellationOrigin.USER, None)
@@ -415,6 +430,35 @@ class RuntimeEngine:
             return RunResult(parent_run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "父运行或检查点不存在"))
         state: AgentRunState = parent_run.state
         ledger = await self._run_repository.load_tool_ledger(parent_run.session_id, parent_run_id)
+        if ledger is None and isinstance(state.mode, Suspended) and state.mode.reason is SuspendReason.DELEGATION:
+            async with self._cancellation_service.gate(parent_run_id):
+                await self._tool_recovery.recover_projection(parent_run.session_id, parent_run_id)
+                latest = await self._run_repository.load_run(parent_run.session_id, parent_run_id)
+                current_checkpoint = await self._checkpoint_repository.load(parent_run.session_id, parent_run_id)
+                if latest is None or current_checkpoint is None:
+                    raise RunPersistenceError("旧委派迁移时父运行或检查点不存在")
+                if latest.state.is_ended():
+                    return await self._result_from_run(latest)
+                if await self._run_repository.load_cancellation(latest.session_id, latest.run_id) is not None:
+                    return RunResult(parent_run_id, latest.state, control_status="cancelling")
+                ledger = await self._run_repository.load_tool_ledger(latest.session_id, latest.run_id)
+                if ledger is None:
+                    if not (isinstance(latest.state.mode, Suspended) and latest.state.mode.reason is SuspendReason.DELEGATION):
+                        return RunResult(parent_run_id, latest.state)
+                    messages = await self._run_repository.load_messages(latest.session_id, latest.run_id)
+                    events = await self._run_repository.load_events(latest.session_id, latest.run_id)
+                    try:
+                        await self._tool_recovery.import_legacy(latest, current_checkpoint, messages, events)
+                    except ValueError as error:
+                        raise RunPersistenceError(str(error)) from error
+                parent_run = await self._run_repository.load_run(latest.session_id, latest.run_id)
+                checkpoint = await self._checkpoint_repository.load(latest.session_id, latest.run_id)
+                if parent_run is None or checkpoint is None:
+                    raise RunPersistenceError("旧委派迁移后父运行或检查点不存在")
+                ledger = await self._run_repository.load_tool_ledger(latest.session_id, latest.run_id)
+                if ledger is None:
+                    raise RunPersistenceError("旧委派迁移后工具账本不存在")
+                state = parent_run.state
         if ledger is None and not (isinstance(state.mode, Suspended) and state.mode.reason is SuspendReason.DELEGATION):
             return RunResult(parent_run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "父运行不处于 delegation 挂起"))
         child_result = await self._delegation_port.result(child_run_id) if self._delegation_port is not None else None
@@ -764,6 +808,36 @@ class RuntimeEngine:
         if version is None:
             return RunResult(run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "checkpoint 引用的 Context Version 不存在")), False
         messages: tuple[RunMessage, ...] = await self._run_repository.load_messages(run.session_id, run.run_id)
+        events: tuple[RunEvent, ...] = await self._run_repository.load_events(run.session_id, run.run_id)
+        if resume_action is AgentAction.EXECUTE_TOOLS and checkpoint.tool_ledger_revision is None:
+            existing_ledger = await self._run_repository.load_tool_ledger(run.session_id, run.run_id)
+            if existing_ledger is None:
+                async with self._cancellation_service.gate(run_id):
+                    current_run = await self._run_repository.load_run(run.session_id, run.run_id)
+                    current_checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                    if current_run is None or current_checkpoint is None:
+                        raise RunPersistenceError("旧格式导入时运行或检查点不存在")
+                    if current_run.state.is_ended():
+                        return await self._result_from_run(current_run), False
+                    try:
+                        await self._tool_recovery.import_legacy(
+                            current_run, current_checkpoint, messages, events,
+                        )
+                    except ValueError as error:
+                        raise RunPersistenceError(str(error)) from error
+                    run = current_run
+                    checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                    if checkpoint is None or checkpoint.tool_ledger_revision is None:
+                        raise RunPersistenceError("旧格式导入未生成新账本检查点")
+                    messages = await self._run_repository.load_messages(run.session_id, run.run_id)
+                    events = await self._run_repository.load_events(run.session_id, run.run_id)
+                    resume_action = checkpoint.action
+                    resume_stage = RunStage.EXECUTING_TOOLS
+                    batch_id = checkpoint.pending.get("tool_batch_id")
+                    source = next((item for item in messages if item.message_id == batch_id), None)
+                    if source is None:
+                        raise RunPersistenceError("旧格式导入后缺少原始工具批次")
+                    resume_pending_calls = source.tool_calls
         if resume_action is AgentAction.EXECUTE_TOOLS and checkpoint.tool_ledger_revision is not None:
             batch_id = checkpoint.pending.get("tool_batch_id")
             source = next((item for item in messages if item.message_id == batch_id), None)
@@ -797,6 +871,7 @@ class RuntimeEngine:
             resume_action,
             message_cursor=checkpoint.message_sequence,
             run_messages=messages,
+            run_events=events,
             active_context_version=version,
             staged_history_compressions=run.staged_history_compressions,
             replay_active_context=checkpoint.replay_context is not False,
