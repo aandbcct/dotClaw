@@ -4,7 +4,7 @@ from __future__ import annotations
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
 
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
-from dotclaw.runtime.domain.events import RunEventType
+from dotclaw.runtime.domain.events import RunEvent, RunEventType, ToolAuditStatus, is_terminal_tool_event
 
 import asyncio
 import json
@@ -15,7 +15,7 @@ import pytest
 from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
-from dotclaw.runtime.application.engine import RuntimeEngine
+from dotclaw.runtime.application.engine import RuntimeEngine, _scan_legacy_tool_activity
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, LLMOutputPort, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.application.execution import RunExecutionView
@@ -48,6 +48,22 @@ from dotclaw.context import (
 )
 from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent
 from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
+
+
+def test_legacy_approval_completion_is_waiting_not_terminal() -> None:
+    """旧审批假终态继续表示等待，只有明确执行终态才关闭调用。"""
+    approval = RunEvent("run", 1, RunEventType.TOOL_COMPLETED, "now", data={
+        "call_id": "call", "status": ToolAuditStatus.APPROVAL_REQUIRED.value,
+    })
+    completion = RunEvent("run", 2, RunEventType.TOOL_COMPLETED, "now", data={
+        "call_id": "call", "status": ToolAuditStatus.COMPLETED.value,
+    })
+
+    assert not is_terminal_tool_event(approval)
+    activity = _scan_legacy_tool_activity((approval,))
+    assert "call" in activity.waiting
+    assert "call" not in activity.terminal_call_ids
+    assert is_terminal_tool_event(completion)
 
 
 class PolicyPort(RunPolicyPort):
@@ -440,8 +456,13 @@ async def test_approval_events_carry_structured_fields(tmp_path: Path) -> None:
     resolved_event = next(event for event in events if event.event_type is RunEventType.APPROVAL_RESOLVED)
     assert waiting_event.data.get("approval_id") == "approval-1"
     assert waiting_event.data.get("call_id") == "call-1"
+    assert waiting_event.data.get("tool_event_semantics") == 2
+    assert waiting_event.message_ids == ("tool-request",)
+    messages = await run_repository.load_messages("session-fields", waiting.run_id)
+    assert not any(message.kind is RunMessageKind.TOOL_RESULT for message in messages)
     assert resolved_event.data.get("approval_id") == "approval-1"
     assert resolved_event.data.get("approved") is True
+    assert resolved_event.data.get("tool_event_semantics") == 2
 
 
 async def test_rejected_approval_event_marks_approved_false(tmp_path: Path) -> None:

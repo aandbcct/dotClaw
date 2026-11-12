@@ -47,11 +47,14 @@ async def test_tool_executor_adapter_requires_approval_without_channel_and_execu
     invocation = ToolInvocation("run-1", ToolCall("call-1", "dangerous", {}))
 
     waiting = await port.execute(invocation, _execution())
-    completed = await port.execute(invocation, _execution())
-    repeated = await port.execute(invocation, _execution())
+    repeated_waiting = await port.execute(invocation, _execution())
+    assert executions == []
+    completed = await port.execute(ToolInvocation("run-1", invocation.call, approved=True), _execution())
+    repeated = await port.execute(ToolInvocation("run-1", invocation.call, approved=True), _execution())
 
     assert waiting.status is ToolResultStatus.APPROVAL_REQUIRED
     assert waiting.approval_id
+    assert repeated_waiting.status is ToolResultStatus.APPROVAL_REQUIRED
     assert completed.status is ToolResultStatus.COMPLETED
     assert completed.output == "完成"
     assert repeated.status is ToolResultStatus.FAILED
@@ -76,14 +79,13 @@ async def test_clear_run_removes_run_keys_from_cache() -> None:
     port: ToolExecutorAdapter = ToolExecutorAdapter(executor)
     invocation = ToolInvocation("run-9", ToolCall("call-9", "dangerous", {}))
 
-    # 走完审批后执行，缓存写入 _waiting_calls / _executed_calls。
+    # 走完审批后执行，只有已执行调用保存在短期缓存中。
     await port.execute(invocation, _execution())  # APPROVAL_REQUIRED
-    await port.execute(invocation, _execution())  # COMPLETED
+    await port.execute(ToolInvocation("run-9", invocation.call, approved=True), _execution())  # COMPLETED
     assert ("run-9", "call-9") in port._executed_calls
 
     # 模拟 Run 终态清理：调用 clear_run 后该 Run 的缓存键必须被移除。
     await port.clear_run("run-9")
-    assert ("run-9", "call-9") not in port._waiting_calls
     assert ("run-9", "call-9") not in port._executed_calls
 
 

@@ -15,6 +15,7 @@ from ..domain.facts import (
 )
 from ..domain.state import AgentRunState, Ended, RunOutcome
 from ..domain.context import ContextOwner, ContextRefreshReason, ContextSlotSnapshot
+from ..domain.events import RunEvent
 
 
 @dataclass(frozen=True)
@@ -235,6 +236,15 @@ class ToolResult:
     output: str = ""
     approval_id: str | None = None
     error: RunError | None = None
+
+
+@dataclass(frozen=True)
+class ToolActivityScan:
+    """按历史事件解释出的工具活动，不作为持久账本。"""
+
+    active: dict[str, RunEvent]
+    waiting: dict[str, RunEvent]
+    terminal_call_ids: frozenset[str]
 
 
 @dataclass(frozen=True)

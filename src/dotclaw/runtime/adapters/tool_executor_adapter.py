@@ -18,15 +18,13 @@ class ToolExecutorAdapter(ToolPort):
     def __init__(self, executor: ToolExecutor) -> None:
         """绑定既有工具执行器。"""
         self._executor: ToolExecutor = executor
-        self._waiting_calls: set[tuple[str, str]] = set()
         self._executed_calls: set[tuple[str, str]] = set()
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """返回审批需求或执行已获准的调用，不向 Channel 提问。
 
         审批恢复权威来自持久化 checkpoint：当 ``invocation.approved`` 为真时，
-        该调用已在重启前的审批中被批准，适配器直接执行，不再依赖进程内
-        ``_waiting_calls`` 集合（开发计划阶段4）。
+        该调用已由上层审批状态确认，适配器直接执行。
         """
         key = (invocation.run_id, invocation.call.call_id)
         if key in self._executed_calls:
@@ -42,14 +40,12 @@ class ToolExecutorAdapter(ToolPort):
                 agent_id=execution.policy.agent_id,
             ),
         )
-        if not invocation.approved and requires_approval and key not in self._waiting_calls:
-            self._waiting_calls.add(key)
+        if not invocation.approved and requires_approval:
             return ToolResult(
                 call_id=invocation.call.call_id,
                 status=ToolResultStatus.APPROVAL_REQUIRED,
                 approval_id=_approval_id(invocation.run_id, invocation.call.call_id),
             )
-        self._waiting_calls.discard(key)
         self._executed_calls.add(key)
         legacy_result = await self._executor.execute_approved(
             invocation.call.name,
@@ -70,7 +66,6 @@ class ToolExecutorAdapter(ToolPort):
 
     async def clear_run(self, run_id: str) -> None:
         """Run 终态时清理其进程内短生命周期缓存，避免 Adapter 累积内存状态。"""
-        self._waiting_calls = {key for key in self._waiting_calls if key[0] != run_id}
         self._executed_calls = {key for key in self._executed_calls if key[0] != run_id}
 
 

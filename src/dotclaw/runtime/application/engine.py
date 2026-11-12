@@ -33,6 +33,7 @@ from ..domain.events import (
     ToolAuditStatus,
     ToolBatchCompleted,
     ToolBatchFailed,
+    is_terminal_tool_event,
 )
 from ..domain.context import (
     ContextContributionKind,
@@ -101,6 +102,7 @@ from .dto import (
     ToolInvocation,
     ToolResult,
     ToolResultStatus,
+    ToolActivityScan,
 )
 from .history_compaction import ConversationBatch, HistoryCompactorUnavailable, compact_in_batches, select_oldest_conversations
 from .ports import CheckpointRepository, ContextPort, DelegationPort, HistoryCompactorPort, InvalidLLMResponseError, LLMPort, LLMOutputPort, LLMUnavailableError, RunPolicyPort, RunRepository, TokenCounterPort, ToolPort
@@ -420,6 +422,7 @@ class RuntimeEngine:
             {
                 "approval_id": approval_id,
                 "approved": approved,
+                "tool_event_semantics": 2,
             },
         )
         await self._register_driver(execution)
@@ -647,17 +650,14 @@ class RuntimeEngine:
                     if self._cancellation_service.has_driver(run.run_id):
                         return
                     events = await self._run_repository.load_events(run.session_id, run.run_id)
-                    opened = {}
+                    activity = _scan_legacy_tool_activity(events)
+                    opened = {call_id: event.data.get("tool_name", "") for call_id, event in activity.active.items()}
                     open_llm = False
                     for event in events:
                         if event.event_type is RunEventType.LLM_STARTED:
                             open_llm = True
                         elif event.event_type is RunEventType.LLM_COMPLETED:
                             open_llm = False
-                        elif event.event_type is RunEventType.TOOL_STARTED:
-                            opened[event.data.get("call_id")] = event.data.get("tool_name", "")
-                        elif event.event_type is RunEventType.TOOL_COMPLETED:
-                            opened.pop(event.data.get("call_id"), None)
                     known_io = {"builtin.files.read_text", "builtin.files.write_text", "builtin.files.list_directory",
                         "builtin.memory.read", "builtin.memory.write", "builtin.math.calculate", "builtin.system.get_info", "builtin.system.get_time"}
                     remote = lambda name: isinstance(name, str) and name.startswith(("mcp.", "builtin.web.", "builtin.weather."))
@@ -990,23 +990,27 @@ class RuntimeEngine:
             events = await self._run_repository.load_events(run.session_id, run_id)
             pending = []
             open_llm = False
-            open_tools = {}
+            activity = _scan_legacy_tool_activity(events)
+            open_tools = dict(activity.active)
+            open_tools.update(activity.waiting)
             for event in events:
                 if event.event_type is RunEventType.LLM_STARTED:
                     open_llm = True
                 elif event.event_type is RunEventType.LLM_COMPLETED:
                     open_llm = False
-                elif event.event_type is RunEventType.TOOL_STARTED:
-                    open_tools[event.data.get("call_id")] = event
-                elif event.event_type is RunEventType.TOOL_COMPLETED:
-                    open_tools.pop(event.data.get("call_id"), None)
             now = utc_now_iso()
             def add(event_type: RunEventType, data: JSONMap) -> None:
                 pending.append(RunEvent(run_id, len(events) + len(pending) + 1, event_type, now, data=data))
             if open_llm:
                 add(RunEventType.LLM_COMPLETED, {"completion_kind": "cancelled"})
             for call_id, started in open_tools.items():
-                add(RunEventType.TOOL_COMPLETED, {"call_id": call_id, "tool_name": started.data.get("tool_name", ""), "status": "cancelled"})
+                add(RunEventType.TOOL_COMPLETED, {
+                    "call_id": call_id,
+                    "tool_name": started.data.get("tool_name", ""),
+                    "status": "cancelled",
+                    "effect_certainty": "unknown" if call_id in activity.active else "known",
+                    "tool_event_semantics": 2,
+                })
             add(RunEventType.CANCEL_REQUESTED, {"request_id": record.request.request_id})
             pending[-1] = replace(pending[-1], occurred_at=record.request.requested_at)
             add(RunEventType.RUN_CANCELLED, {"request_id": record.request.request_id})
@@ -1188,6 +1192,11 @@ class RuntimeEngine:
             except Exception as error:
                 event_number = await self._tool_completed_event(run, event_number, tool_call, None, ToolAuditStatus.FAILED, _safe_error_summary(error))
                 return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, f"工具调用失败：{error}", RunErrorCode.TOOL_FAILURE)
+            if tool_result.status is ToolResultStatus.APPROVAL_REQUIRED:
+                return run, sequence, event_number, pending_calls, await self._suspend_action(
+                    execution, run, messages, sequence, event_number, tool_call, tool_calls, tool_index, tool_result,
+                    _source_response_message_id(messages, tool_call.call_id),
+                )
             sequence += 1
             run = _with_tool_statistic(run)
             tool_message: RunMessage = RunMessage(
@@ -1206,10 +1215,6 @@ class RuntimeEngine:
             if tool_result.status is ToolResultStatus.FAILED:
                 error = tool_result.error.message if tool_result.error is not None else tool_result.output or "工具执行失败"
                 return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, error, RunErrorCode.TOOL_FAILURE)
-            if tool_result.status is ToolResultStatus.APPROVAL_REQUIRED:
-                return run, sequence, event_number, pending_calls, await self._suspend_action(
-                    execution, run, messages, sequence, event_number, tool_call, tool_calls, tool_index, tool_result,
-                )
             completed_message_ids.append(tool_message.message_id)
         batch_transition = await self._apply_transition(execution, run, ToolBatchCompleted(tuple(completed_message_ids)), event_number)
         if batch_transition is None:
@@ -1230,6 +1235,7 @@ class RuntimeEngine:
         tool_calls: tuple[ToolCall, ...],
         tool_index: int,
         tool_result: ToolResult,
+        source_message_id: str,
     ) -> RunResult:
         """执行审批挂起动作：经 ToolApprovalRequired 迁移到 AgentRunState(mode=Suspended(APPROVAL)) 并持久化检查点。"""
         record = await self._approval_service.create(run.run_id, run.session_id, tool_result.approval_id)
@@ -1268,11 +1274,12 @@ class RuntimeEngine:
             run,
             event_number,
             RunEventType.WAITING_APPROVAL,
-            (messages[-1].message_id,),
+            (source_message_id,),
             "等待工具审批",
             {
                 "approval_id": record.approval_id,
                 "call_id": tool_call.call_id,
+                "tool_event_semantics": 2,
             },
         )
         return RunResult(run.run_id, suspend_transition.state, approval_id=record.approval_id)
@@ -1699,12 +1706,14 @@ class RuntimeEngine:
         """在任何 ToolPort 或委派调用前写入无参数正文的开始审计事件。"""
         source_id: str = _source_response_message_id(messages, tool_call.call_id)
         ids: tuple[str, ...] = (source_id,) if source_id else ()
-        return await self._event(run, event_sequence, RunEventType.TOOL_STARTED, ids, "工具调用开始", {"source_response_message_id": source_id, "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": ToolAuditStatus.STARTED.value})
+        return await self._event(run, event_sequence, RunEventType.TOOL_STARTED, ids, "工具调用开始", {"source_response_message_id": source_id, "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": ToolAuditStatus.STARTED.value, "tool_event_semantics": 2})
 
     async def _tool_completed_event(self, run: AgentRun, event_sequence: int, tool_call: ToolCall, result_message_id: str | None, status: ToolAuditStatus, error_summary: str = "") -> int:
-        """为成功、审批和异常路径写入唯一的完成审计事件。"""
+        """为真实终态写入完成审计事件。"""
+        if status is ToolAuditStatus.APPROVAL_REQUIRED:
+            raise ValueError("审批等待不能写入工具终态事件")
         ids: tuple[str, ...] = (result_message_id,) if result_message_id is not None else ()
-        return await self._event(run, event_sequence, RunEventType.TOOL_COMPLETED, ids, "工具调用完成", {"result_message_id": result_message_id or "", "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": status.value, "error_summary": error_summary})
+        return await self._event(run, event_sequence, RunEventType.TOOL_COMPLETED, ids, "工具调用完成", {"result_message_id": result_message_id or "", "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": status.value, "error_summary": error_summary, "tool_event_semantics": 2})
 
     async def _append_context_version(
         self,
@@ -2245,6 +2254,52 @@ def _tool_audit_status(status: ToolResultStatus) -> ToolAuditStatus:
     if status is ToolResultStatus.APPROVAL_REQUIRED:
         return ToolAuditStatus.APPROVAL_REQUIRED
     return ToolAuditStatus.FAILED
+
+
+def _scan_legacy_tool_activity(events: tuple[RunEvent, ...]) -> ToolActivityScan:
+    """统一解释旧事件与语义2事件中的执行、审批等待和终态。"""
+    active: dict[str, RunEvent] = {}
+    waiting: dict[str, RunEvent] = {}
+    terminal_call_ids: set[str] = set()
+    approval_calls: dict[str, str] = {}
+    previous_sequence = 0
+    for event in events:
+        if event.sequence <= previous_sequence:
+            raise ValueError("工具活动事件序号必须严格递增")
+        previous_sequence = event.sequence
+        call_id = event.data.get("call_id")
+        if event.event_type is RunEventType.TOOL_STARTED and isinstance(call_id, str):
+            waiting.pop(call_id, None)
+            active[call_id] = event
+        elif event.event_type is RunEventType.WAITING_APPROVAL and isinstance(call_id, str):
+            active.pop(call_id, None)
+            if call_id not in terminal_call_ids:
+                waiting[call_id] = event
+                approval_id = event.data.get("approval_id")
+                if isinstance(approval_id, str):
+                    approval_calls[approval_id] = call_id
+        elif (
+            event.event_type is RunEventType.TOOL_COMPLETED
+            and event.data.get("status") == ToolAuditStatus.APPROVAL_REQUIRED.value
+            and isinstance(call_id, str)
+        ):
+            active.pop(call_id, None)
+            if call_id not in terminal_call_ids:
+                waiting[call_id] = event
+                approval_id = event.data.get("approval_id")
+                if isinstance(approval_id, str):
+                    approval_calls[approval_id] = call_id
+        elif event.event_type is RunEventType.APPROVAL_RESOLVED:
+            approval_id = event.data.get("approval_id")
+            resolved_call_id = approval_calls.get(approval_id)
+            if resolved_call_id is not None and event.data.get("approved") is not False:
+                approval_calls.pop(approval_id)
+                waiting.pop(resolved_call_id, None)
+        elif is_terminal_tool_event(event) and isinstance(call_id, str):
+            active.pop(call_id, None)
+            waiting.pop(call_id, None)
+            terminal_call_ids.add(call_id)
+    return ToolActivityScan(active, waiting, frozenset(terminal_call_ids))
 
 
 def _with_llm_statistics(run: AgentRun, response: RunMessage) -> AgentRun:

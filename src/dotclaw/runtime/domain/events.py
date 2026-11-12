@@ -72,6 +72,18 @@ class RunEvent:
         }
 
 
+def is_terminal_tool_event(event: RunEvent) -> bool:
+    """判断工具事件是否表示真实终态；旧审批假终态仍按非终态读取。"""
+    if event.event_type is not RunEventType.TOOL_COMPLETED:
+        return False
+    status = event.data.get("status")
+    if status == ToolAuditStatus.APPROVAL_REQUIRED.value:
+        return False
+    if status in {ToolAuditStatus.COMPLETED.value, ToolAuditStatus.FAILED.value, ToolAuditStatus.CANCELLED.value}:
+        return True
+    raise ValueError(f"未知工具终态状态：{status!r}")
+
+
 @dataclass(frozen=True)
 class RunStarted:
     """新运行开始事件。"""
