@@ -4,9 +4,9 @@ from dataclasses import replace
 
 import pytest
 
-from dotclaw.channel.web.app import _run_activity
+from dotclaw.channel.web.app import _run_activity, _run_steps
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
-from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, AgentRun, MessageRole, RunMessage, RunMessageKind, ToolCall
 from dotclaw.runtime.domain.state import AgentRunState, Ended, RunOutcome, Suspended, SuspendReason, RunStage
 
 
@@ -58,3 +58,36 @@ def test_approval_projection_only_uses_current_approval_event(approval, call_id)
     result = _run_activity(run, events, (), False)
     assert result.approval_call_id == call_id
     assert _run_activity(_run(), events, (), False).approval_call_id is None
+
+
+def test_approval_resume_updates_one_tool_step_until_real_completion():
+    events = (
+        RunEvent("r", 3, RunEventType.TOOL_STARTED, "t3", data={"call_id": "call-a", "tool_name": "danger"}),
+        RunEvent("r", 4, RunEventType.WAITING_APPROVAL, "t4", data={"call_id": "call-a", "approval_id": "approval-a"}),
+        RunEvent("r", 5, RunEventType.APPROVAL_RESOLVED, "t5", data={"approval_id": "approval-a", "approved": True}),
+        RunEvent("r", 6, RunEventType.TOOL_STARTED, "t6", data={"call_id": "call-a", "tool_name": "danger"}),
+        RunEvent("r", 7, RunEventType.TOOL_COMPLETED, "t7", data={"call_id": "call-a", "status": "completed", "result_message_id": "result-a"}),
+    )
+
+    steps = _run_steps(_run(), events)
+    activity = _run_activity(_run(), events, (), False)
+
+    assert len(steps) == 1
+    assert (steps[0].id, steps[0].status, steps[0].started_at, steps[0].completed_at) == ("r:3", "completed", "t3", "t7")
+    assert len(activity.tools) == 1
+    assert (activity.tools[0].call_id, activity.tools[0].status, activity.tools[0].completed_at) == ("call-a", "completed", "t7")
+
+
+def test_preflight_approval_without_start_uses_source_tool_call():
+    source = RunMessage(
+        "source", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
+        tool_calls=(ToolCall("call-a", "danger", {"path": "demo.txt"}),),
+    )
+    waiting = RunEvent("r", 1, RunEventType.WAITING_APPROVAL, "t1", message_ids=("source",), data={"call_id": "call-a", "approval_id": "approval-a"})
+
+    activity = _run_activity(_run(), (waiting,), (source,), False)
+
+    assert len(activity.tools) == 1
+    assert (activity.tools[0].name, activity.tools[0].status, activity.tools[0].arguments, activity.tools[0].completed_at) == (
+        "danger", "approval_required", {"path": "demo.txt"}, None,
+    )

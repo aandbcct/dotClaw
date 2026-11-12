@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from dotclaw.runtime.application.dto import ToolResultStatus
@@ -10,9 +12,11 @@ from dotclaw.runtime.domain.state import RunOutcome
 from dotclaw.eval.draft import (
     DRAFT_SCHEMA_VERSION,
     EvalCaseDraft,
+    _tool_output,
     trace_to_eval_case_draft,
 )
 from dotclaw.eval.models import EvalCaseValidationError
+from dotclaw.trace import SpanKind
 
 from .helpers import build_case, make_terminal_trace
 
@@ -88,6 +92,27 @@ def test_tool_fixtures_are_extracted() -> None:
     assert fixtures[1].output == "allowed"
     assert fixtures[0].fixture_id == "tool-c1"
     assert fixtures[1].fixture_id == "tool-c2"
+
+
+def test_approved_tool_output_uses_terminal_span_reference():
+    trace = make_terminal_trace("run-approval-output")
+    span = next(
+        item for item in trace.spans
+        if item.kind is SpanKind.TOOL and item.attributes.get("call_id") == "c2"
+    )
+    approval_only = replace(
+        span,
+        message_ids=("msg-llm2",),
+        attributes={**span.attributes, "waiting_approval": False, "result_message_id": ""},
+    )
+    completed = replace(
+        approval_only,
+        message_ids=("msg-llm2", "msg-tool2"),
+        attributes={**approval_only.attributes, "result_message_id": "msg-tool2"},
+    )
+
+    assert _tool_output(trace, approval_only) == ""
+    assert _tool_output(trace, completed) == "allowed"
 
 
 def test_approval_fixtures_are_extracted() -> None:

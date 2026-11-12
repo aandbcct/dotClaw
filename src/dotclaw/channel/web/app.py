@@ -751,6 +751,8 @@ def _run_activity(
         if event.event_type not in {
             RunEventType.TOOL_STARTED,
             RunEventType.TOOL_COMPLETED,
+            RunEventType.WAITING_APPROVAL,
+            RunEventType.APPROVAL_RESOLVED,
         }:
             continue
         call_id = str(event.data.get("call_id", ""))
@@ -761,15 +763,31 @@ def _run_activity(
         if current is None:
             current = ToolExecutionResponse(
                 call_id=call_id,
-                name=str(event.data.get("tool_name", "工具")),
+                name=str(event.data.get("tool_name") or (call.name if call is not None else "工具")),
                 status="running",
                 started_at=event.occurred_at if event.event_type is RunEventType.TOOL_STARTED else "",
                 arguments={} if call is None else call.arguments,
             )
             steps[call_id] = current
         if event.event_type is RunEventType.TOOL_STARTED:
+            current.name = str(event.data.get("tool_name") or current.name)
             current.started_at = current.started_at or event.occurred_at
             current.status = "running"
+            current.completed_at = None
+            current.result = ""
+            current.error = ""
+        elif event.event_type is RunEventType.WAITING_APPROVAL:
+            current.status = "approval_required"
+            current.completed_at = None
+            current.result = ""
+            current.error = ""
+        elif event.event_type is RunEventType.APPROVAL_RESOLVED:
+            continue
+        elif event.data.get("status") == "approval_required":
+            current.status = "approval_required"
+            current.completed_at = None
+            current.result = ""
+            current.error = ""
         else:
             current.completed_at = event.occurred_at
             current.status = str(event.data.get("status", "completed"))
@@ -850,14 +868,23 @@ def _run_steps(run: AgentRun, events: tuple[RunEvent, ...], *, terminal_committe
         if event.sequence in seen:
             continue
         seen.add(event.sequence)
-        if event.event_type not in {RunEventType.LLM_STARTED, RunEventType.LLM_COMPLETED, RunEventType.TOOL_STARTED, RunEventType.TOOL_COMPLETED}:
+        if event.event_type not in {
+            RunEventType.LLM_STARTED, RunEventType.LLM_COMPLETED,
+            RunEventType.TOOL_STARTED, RunEventType.TOOL_COMPLETED,
+            RunEventType.WAITING_APPROVAL, RunEventType.APPROVAL_RESOLVED,
+        }:
             continue
         is_model = event.event_type in {RunEventType.LLM_STARTED, RunEventType.LLM_COMPLETED}
         started = event.event_type in {RunEventType.LLM_STARTED, RunEventType.TOOL_STARTED}
         call_id = None if is_model else str(event.data.get("call_id", ""))
         if not is_model and not call_id:
             continue
-        current = None if started else (models.pop(0) if is_model and models else tools.get(call_id or ""))
+        if is_model:
+            current = models.pop(0) if not started and models else None
+        else:
+            current = tools.get(call_id or "")
+        if event.event_type is RunEventType.APPROVAL_RESOLVED:
+            continue
         if current is None:
             current = RunStepResponse(id=f"{run.run_id}:{event.sequence}", sequence=event.sequence, kind="model" if is_model else "tool", status="running", started_at=event.occurred_at if started else "", call_id=call_id)
             steps.append(current)
@@ -866,6 +893,16 @@ def _run_steps(run: AgentRun, events: tuple[RunEvent, ...], *, terminal_committe
                 models.append(current)
             else:
                 tools[call_id or ""] = current
+                current.status = "running"
+                current.completed_at = None
+                current.result = None
+                current.error = None
+        elif event.event_type is RunEventType.WAITING_APPROVAL or event.data.get("status") == "approval_required":
+            tools[call_id or ""] = current
+            current.status = "approval_required"
+            current.completed_at = None
+            current.result = None
+            current.error = None
         else:
             current.completed_at = event.occurred_at
             value = str(event.data.get("status", "completed"))

@@ -186,25 +186,13 @@ def _tool_key_arguments(trace: RunTrace, span: object) -> dict[str, object]:
 
 
 def _tool_output(trace: RunTrace, span: object) -> str:
-    """读取工具结果正文。
-
-    工具 Span 通常挂载「源响应消息 + 结果消息」两条；但经审批闭合的工具调用由
-    ``APPROVAL_RESOLVED`` 结束 Span，重放产生的 ``TOOL_COMPLETED`` 被组装期视为
-    良性重复而跳过，结果消息不会挂到 Span 上。此时按 ``call_id`` 回查工具结果消息，
-    保证冻结的工具输出不因审批而丢失。
-    """
-    message_ids = getattr(span, "message_ids", ())  # type: ignore[attr-defined]
-    if len(message_ids) >= 2:
-        result = message_by_id(trace, message_ids[-1])
-        if result is not None:
-            return result.content
-    call_id = span.attributes.get("call_id") if hasattr(span, "attributes") else None  # type: ignore[attr-defined]
-    if not call_id:
+    """只读取工具 Span 终态事件明确引用的结果消息。"""
+    attributes = span.attributes if hasattr(span, "attributes") else {}  # type: ignore[attr-defined]
+    result_id = attributes.get("result_message_id")
+    if not isinstance(result_id, str):
         return ""
-    for message in trace.messages:
-        if message.kind is RunMessageKind.TOOL_RESULT and message.tool_call_id == call_id:
-            return message.content
-    return ""
+    result = message_by_id(trace, result_id)
+    return result.content if result is not None else ""
 
 
 def _delegation_output(trace: RunTrace, span: object) -> str:

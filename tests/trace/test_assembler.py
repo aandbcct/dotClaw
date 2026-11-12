@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from .helpers import make_context_version, make_event, make_message, make_run
 
 from dotclaw.runtime.domain.events import RunEventType
-from dotclaw.runtime.domain.facts import MessageRole, RunMessageKind
+from dotclaw.runtime.domain.facts import MessageRole, RunMessageKind, ToolCall
+from dotclaw.eval.draft import _tool_output
 from dotclaw.runtime.domain.state import RunOutcome
 from dotclaw.trace import SpanKind, TraceIssueKind, TraceSpanStatus, assemble_trace
 from dotclaw.trace.models import RunTrace
@@ -119,16 +120,21 @@ def test_approval_approved_and_rejected():
 
     def build(approved: bool, outcome: RunOutcome):
         run = make_run(outcome=outcome)
-        events = (
+        events = [
             make_event("run-1", 1, RunEventType.RUN_STARTED, message_ids=("msg-input",)),
             make_event("run-1", 2, RunEventType.LLM_STARTED, data={"call_index": 1, "model_id": "model-1", "context_version": 1}),
             make_event("run-1", 3, RunEventType.LLM_COMPLETED, message_ids=("msg-llm",)),
             make_event("run-1", 4, RunEventType.TOOL_STARTED, data={"source_response_message_id": "msg-llm", "call_id": "call-1", "tool_name": "danger", "status": "started"}),
             make_event("run-1", 5, RunEventType.WAITING_APPROVAL, message_ids=("msg-tool",), data={"approval_id": "apr-1", "call_id": "call-1"}),
             make_event("run-1", 6, RunEventType.APPROVAL_RESOLVED, data={"approval_id": "apr-1", "approved": approved}),
-            make_event("run-1", 7, RunEventType.RUN_COMPLETED, message_ids=("msg-tool",)),
-        )
-        return assemble_trace(run, events, messages, (make_context_version(1),))
+        ]
+        if approved:
+            events.extend((
+                make_event("run-1", 7, RunEventType.TOOL_STARTED, data={"source_response_message_id": "msg-llm", "call_id": "call-1", "tool_name": "danger", "status": "started"}),
+                make_event("run-1", 8, RunEventType.TOOL_COMPLETED, data={"result_message_id": "msg-tool", "call_id": "call-1", "tool_name": "danger", "status": "completed"}),
+            ))
+        events.append(make_event("run-1", len(events) + 1, RunEventType.RUN_COMPLETED, message_ids=("msg-tool",)))
+        return assemble_trace(run, tuple(events), messages, (make_context_version(1),))
 
     ok = build(True, RunOutcome.COMPLETED)
     appr = _find_span(ok, "approval:apr-1")
@@ -142,6 +148,118 @@ def test_approval_approved_and_rejected():
     appr_r = _find_span(rejected, "approval:apr-1")
     assert appr_r.status is TraceSpanStatus.CANCELLED
     assert appr_r.attributes.get("approved") is False
+    tool_r = _find_span(rejected, "tool:call-1")
+    assert tool_r.status is TraceSpanStatus.INCOMPLETE
+    assert tool_r.ended_at is None
+
+
+def test_semantics_two_keeps_one_tool_span_open_across_approval():
+    messages = (
+        make_message("msg-input", 1, RunMessageKind.USER_INPUT, role=MessageRole.USER),
+        make_message("msg-llm", 2, RunMessageKind.LLM_RESPONSE, content="need approval"),
+        make_message("msg-tool", 3, RunMessageKind.TOOL_RESULT, content="real result"),
+    )
+    run = make_run()
+    events = (
+        make_event("run-1", 1, RunEventType.RUN_STARTED),
+        make_event("run-1", 2, RunEventType.LLM_STARTED, data={"call_index": 1, "context_version": 1}),
+        make_event("run-1", 3, RunEventType.LLM_COMPLETED, message_ids=("msg-llm",)),
+        make_event("run-1", 4, RunEventType.TOOL_STARTED, data={"source_response_message_id": "msg-llm", "call_id": "call-1", "tool_name": "danger", "status": "started", "tool_event_semantics": 2}),
+        make_event("run-1", 5, RunEventType.WAITING_APPROVAL, message_ids=("msg-llm",), data={"approval_id": "apr-1", "call_id": "call-1", "tool_event_semantics": 2}),
+        make_event("run-1", 6, RunEventType.APPROVAL_RESOLVED, data={"approval_id": "apr-1", "approved": True, "tool_event_semantics": 2}),
+        make_event("run-1", 7, RunEventType.TOOL_STARTED, data={"source_response_message_id": "msg-llm", "call_id": "call-1", "tool_name": "danger", "status": "started", "tool_event_semantics": 2}),
+        make_event("run-1", 8, RunEventType.TOOL_COMPLETED, data={"call_id": "call-1", "status": "completed", "result_message_id": "msg-tool", "tool_event_semantics": 2}),
+        make_event("run-1", 9, RunEventType.RUN_COMPLETED),
+    )
+
+    trace = assemble_trace(run, events, messages, (make_context_version(1),))
+    tools = [span for span in trace.spans if span.kind is SpanKind.TOOL]
+
+    assert len(tools) == 1
+    assert tools[0].status is TraceSpanStatus.COMPLETED
+    assert tools[0].start_event_sequence == 4
+    assert tools[0].end_event_sequence == 8
+    assert tools[0].message_ids == ("msg-llm", "msg-tool")
+    assert tools[0].attributes["waiting_approval"] is False
+
+
+def test_legacy_approval_flow_uses_real_terminal_result_not_fake_approval_output():
+    messages = (
+        make_message("msg-input", 1, RunMessageKind.USER_INPUT, role=MessageRole.USER),
+        make_message("msg-llm", 2, RunMessageKind.LLM_RESPONSE, tool_calls=(ToolCall("call-1", "danger", {}),)),
+        make_message("msg-fake", 3, RunMessageKind.TOOL_RESULT, role=MessageRole.TOOL, content="fake approval output", tool_call_id="call-1"),
+        make_message("msg-real", 4, RunMessageKind.TOOL_RESULT, role=MessageRole.TOOL, content="real execution output", tool_call_id="call-1"),
+    )
+    events = (
+        make_event("run-1", 1, RunEventType.RUN_STARTED),
+        make_event("run-1", 2, RunEventType.LLM_STARTED, data={"call_index": 1, "context_version": 1}),
+        make_event("run-1", 3, RunEventType.LLM_COMPLETED, message_ids=("msg-llm",)),
+        make_event("run-1", 4, RunEventType.TOOL_STARTED, data={"source_response_message_id": "msg-llm", "call_id": "call-1", "tool_name": "danger", "status": "started"}),
+        make_event("run-1", 5, RunEventType.TOOL_COMPLETED, data={"result_message_id": "msg-fake", "call_id": "call-1", "tool_name": "danger", "status": "approval_required"}),
+        make_event("run-1", 6, RunEventType.WAITING_APPROVAL, message_ids=("msg-fake",), data={"approval_id": "apr-1", "call_id": "call-1"}),
+        make_event("run-1", 7, RunEventType.APPROVAL_RESOLVED, data={"approval_id": "apr-1", "approved": True}),
+        make_event("run-1", 8, RunEventType.TOOL_STARTED, data={"source_response_message_id": "msg-llm", "call_id": "call-1", "tool_name": "danger", "status": "started"}),
+        make_event("run-1", 9, RunEventType.TOOL_COMPLETED, data={"result_message_id": "msg-real", "call_id": "call-1", "tool_name": "danger", "status": "completed"}),
+        make_event("run-1", 10, RunEventType.RUN_COMPLETED),
+    )
+
+    trace = assemble_trace(make_run(), events, messages, (make_context_version(1),))
+    tools = [span for span in trace.spans if span.kind is SpanKind.TOOL]
+
+    assert len(tools) == 1
+    assert tools[0].status is TraceSpanStatus.COMPLETED
+    assert tools[0].message_ids == ("msg-llm", "msg-real")
+    assert _tool_output(trace, tools[0]) == "real execution output"
+
+
+def test_waiting_approval_without_start_builds_tool_span_from_source_message():
+    messages = (
+        make_message("msg-input", 1, RunMessageKind.USER_INPUT, role=MessageRole.USER),
+        make_message("msg-llm", 2, RunMessageKind.LLM_RESPONSE, tool_calls=(ToolCall("call-1", "danger", {}),)),
+        make_message("msg-real", 3, RunMessageKind.TOOL_RESULT, role=MessageRole.TOOL, content="result", tool_call_id="call-1"),
+    )
+    events = (
+        make_event("run-1", 1, RunEventType.RUN_STARTED),
+        make_event("run-1", 2, RunEventType.LLM_STARTED, data={"call_index": 1, "context_version": 1}),
+        make_event("run-1", 3, RunEventType.LLM_COMPLETED, message_ids=("msg-llm",)),
+        make_event("run-1", 4, RunEventType.WAITING_APPROVAL, message_ids=("msg-llm",), data={"approval_id": "apr-1", "call_id": "call-1", "tool_event_semantics": 2}),
+        make_event("run-1", 5, RunEventType.APPROVAL_RESOLVED, data={"approval_id": "apr-1", "approved": True, "tool_event_semantics": 2}),
+        make_event("run-1", 6, RunEventType.TOOL_STARTED, data={"call_id": "call-1", "tool_name": "danger", "source_response_message_id": "msg-llm", "tool_event_semantics": 2}),
+        make_event("run-1", 7, RunEventType.TOOL_COMPLETED, data={"call_id": "call-1", "status": "completed", "result_message_id": "msg-real", "tool_event_semantics": 2}),
+        make_event("run-1", 8, RunEventType.RUN_COMPLETED),
+    )
+
+    trace = assemble_trace(make_run(), events, messages, (make_context_version(1),))
+    tools = [span for span in trace.spans if span.kind is SpanKind.TOOL]
+
+    assert len(tools) == 1
+    assert tools[0].attributes["tool_name"] == "danger"
+    assert tools[0].message_ids == ("msg-llm", "msg-real")
+
+
+def test_legacy_rejection_waits_for_semantics_two_cancellation_terminal():
+    messages = (
+        make_message("msg-input", 1, RunMessageKind.USER_INPUT, role=MessageRole.USER),
+        make_message("msg-llm", 2, RunMessageKind.LLM_RESPONSE, tool_calls=(ToolCall("call-1", "danger", {}),)),
+    )
+    events = (
+        make_event("run-1", 1, RunEventType.RUN_STARTED),
+        make_event("run-1", 2, RunEventType.LLM_STARTED, data={"call_index": 1, "context_version": 1}),
+        make_event("run-1", 3, RunEventType.LLM_COMPLETED, message_ids=("msg-llm",)),
+        make_event("run-1", 4, RunEventType.TOOL_STARTED, data={"source_response_message_id": "msg-llm", "call_id": "call-1", "tool_name": "danger", "status": "started"}),
+        make_event("run-1", 5, RunEventType.WAITING_APPROVAL, message_ids=("msg-llm",), data={"approval_id": "apr-1", "call_id": "call-1"}),
+        make_event("run-1", 6, RunEventType.APPROVAL_RESOLVED, data={"approval_id": "apr-1", "approved": False}),
+        make_event("run-1", 7, RunEventType.TOOL_COMPLETED, data={"call_id": "call-1", "tool_name": "danger", "status": "cancelled", "tool_event_semantics": 2}),
+        make_event("run-1", 8, RunEventType.RUN_CANCELLED),
+    )
+
+    trace = assemble_trace(make_run(outcome=RunOutcome.CANCELLED), events, messages, (make_context_version(1),))
+    tools = [span for span in trace.spans if span.kind is SpanKind.TOOL]
+
+    assert len(tools) == 1
+    assert tools[0].status is TraceSpanStatus.CANCELLED
+    assert tools[0].end_event_sequence == 7
+    assert not any(issue.kind is TraceIssueKind.MISSING_EVENT_PAIR for issue in trace.issues)
 
 
 def test_delegation_full_flow():

@@ -172,8 +172,8 @@ def assemble_trace(
     open_tools: dict[str, _PendingSpan] = {}
     open_approvals: dict[str, _PendingSpan] = {}
     pending_delegation: _PendingSpan | None = None
-    approval_to_tool: dict[str, str] = {}
     resolved_tool_calls: set[str] = set()
+    terminal_tool_calls: set[str] = set()
 
     for event in sorted(events, key=lambda item: item.sequence):
         event_type = event.event_type
@@ -279,13 +279,22 @@ def assemble_trace(
             call_id = data.get("call_id")
             tool_name = data.get("tool_name")
             source_id = data.get("source_response_message_id")
-            if call_id is not None and call_id in open_tools:
+            existing_span = open_tools.get(call_id) if call_id is not None else None
+            if existing_span is not None and existing_span.attributes.get("waiting_approval") is True:
+                existing_span.attributes = {**existing_span.attributes, "status": data.get("status", "started"), "waiting_approval": False}
+                existing_span.status = TraceSpanStatus.INCOMPLETE
+                existing_span.ended_at = None
+                existing_span.end_event_sequence = None
+                if source_id and source_id not in existing_span.message_ids:
+                    existing_span.message_ids.append(source_id)
+                continue
+            if existing_span is not None:
                 issues.append(
                     TraceIssue(
                         kind=TraceIssueKind.CONFLICTING_REFERENCE,
                         evidence=f"工具调用 {call_id} 重复开始",
                         event_sequence=event.sequence,
-                        span_id=open_tools[call_id].span_id,
+                        span_id=existing_span.span_id,
                     )
                 )
             span_id = f"tool:{call_id}" if call_id is not None else f"tool:{event.sequence}"
@@ -337,12 +346,16 @@ def assemble_trace(
                         event_sequence=event.sequence,
                     )
                 )
+            elif status_str == "approval_required":
+                span.status = TraceSpanStatus.WAITING
+                span.attributes = {**span.attributes, "status": status_str, "waiting_approval": True}
             else:
                 span.ended_at = event.occurred_at
                 span.end_event_sequence = event.sequence
                 span.status = _TOOL_STATUS_MAP.get(status_str, TraceSpanStatus.INCOMPLETE)
                 span.attributes = {**span.attributes, "status": status_str}
                 if result_id:
+                    span.attributes = {**span.attributes, "result_message_id": result_id}
                     span.message_ids.append(result_id)
                     if result_id not in message_index:
                         issues.append(
@@ -356,6 +369,7 @@ def assemble_trace(
                         )
                 if call_id is not None:
                     open_tools.pop(call_id, None)
+                    terminal_tool_calls.add(call_id)
 
         elif event_type is RunEventType.WAITING_APPROVAL:
             approval_id = data.get("approval_id")
@@ -388,11 +402,47 @@ def assemble_trace(
             )
             if event.message_ids:
                 appr_span.message_ids.append(event.message_ids[0])
+            linked_tool = open_tools.get(call_id) if call_id is not None else None
+            if linked_tool is None and call_id is not None and call_id not in terminal_tool_calls:
+                source_id = event.message_ids[0] if event.message_ids else None
+                source_message = message_index.get(source_id) if source_id is not None else None
+                source_call = next(
+                    (call for call in source_message.tool_calls if call.call_id == call_id),
+                    None,
+                ) if source_message is not None else None
+                tool_attributes: dict[str, object] = {
+                    "call_id": call_id,
+                    "status": "approval_required",
+                    "waiting_approval": True,
+                }
+                if source_call is not None:
+                    tool_attributes["tool_name"] = source_call.name
+                linked_tool = _PendingSpan(
+                    span_id=f"tool:{call_id}",
+                    kind=SpanKind.TOOL,
+                    parent_span_id=run_span_id,
+                    started_at=event.occurred_at,
+                    status=TraceSpanStatus.WAITING,
+                    start_event_sequence=event.sequence,
+                    message_ids=[source_id] if source_id is not None else [],
+                    context_version=None,
+                    attributes=tool_attributes,
+                )
+                pending.append(linked_tool)
+                open_tools[call_id] = linked_tool
+                if source_id is not None and source_id not in message_index:
+                    issues.append(TraceIssue(
+                        kind=TraceIssueKind.MISSING_MESSAGE,
+                        evidence=f"审批等待源响应消息 {source_id} 不在消息事实中",
+                        message_id=source_id,
+                        event_sequence=event.sequence,
+                        span_id=linked_tool.span_id,
+                    ))
+            if linked_tool is not None:
+                linked_tool.attributes = {**linked_tool.attributes, "waiting_approval": True}
             pending.append(appr_span)
             if approval_id is not None:
                 open_approvals[approval_id] = appr_span
-                if call_id is not None:
-                    approval_to_tool[approval_id] = call_id
 
         elif event_type is RunEventType.APPROVAL_RESOLVED:
             approval_id = data.get("approval_id")
@@ -413,16 +463,7 @@ def assemble_trace(
                 span.attributes = {**span.attributes, "approved": approved}
                 if approval_id is not None:
                     open_approvals.pop(approval_id, None)
-                # 审批决议闭合其关联的工具调用：引擎在审批通过后重放工具并回灌 TOOL_COMPLETED，
-                # 该 TOOL_COMPLETED 视为已决议的良性重复，组装期跳过而非记缺失。
-                linked_call = approval_to_tool.get(approval_id) if approval_id is not None else None
-                if linked_call is not None:
-                    tool_span = open_tools.pop(linked_call, None)
-                    if tool_span is not None:
-                        tool_span.ended_at = event.occurred_at
-                        tool_span.end_event_sequence = event.sequence
-                        tool_span.status = TraceSpanStatus.COMPLETED if approved else TraceSpanStatus.CANCELLED
-                        resolved_tool_calls.add(linked_call)
+                # 审批决议只关闭审批跨度；工具跨度等待开始或最终取消/完成事件。
 
         elif event_type is RunEventType.DELEGATION_REQUESTED:
             tool_call_id = data.get("tool_call_id")
