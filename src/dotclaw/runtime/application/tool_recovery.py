@@ -37,6 +37,7 @@ from ..domain.tool_recovery import (
     ToolCallLedger,
     ToolCallRecord,
     ToolCallState,
+    ToolEffectCertainty,
     ToolOutcomeSnapshot,
     ToolOutcomeStatus,
     ToolProjectionIntent,
@@ -290,6 +291,43 @@ class ToolRecoveryService:
             message_ids,
         )
         return await self._commit_fact(replace(ledger, calls=calls), base_run, target_run, base_checkpoint, target_checkpoint, messages=messages, events=(event,))
+
+    async def cancel_unfinished(self, run: AgentRun, checkpoint: RunCheckpoint) -> ToolCallLedger:
+        """将取消收尾时账本中的非终态调用标为取消，并保留未知效果证据。"""
+        ledger = await self._required_ledger(run, checkpoint)
+        unfinished = tuple(item for item in ledger.calls if item.state not in _TERMINAL)
+        if not unfinished:
+            return ledger
+        now = utc_now_iso()
+        calls = list(ledger.calls)
+        events = await self._runs.load_events(run.session_id, run.run_id)
+        new_events: list[RunEvent] = []
+        for record in unfinished:
+            record.validate_transition(ToolCallState.CANCELLED)
+            certainty = ToolEffectCertainty.UNKNOWN if record.state in {
+                ToolCallState.STARTED, ToolCallState.WAITING_CHILD, ToolCallState.UNCERTAIN,
+            } or record.last_execution_evidence is ToolExecutionEvidence.UNKNOWN else ToolEffectCertainty.KNOWN
+            outcome = ToolOutcomeSnapshot(
+                ToolOutcomeStatus.CANCELLED, "", None, None, now, certainty,
+                message_kind=RunMessageKind.DELEGATION_RESULT if record.kind is ToolCallKind.DELEGATION else RunMessageKind.TOOL_RESULT,
+            )
+            updated = replace(record, state=ToolCallState.CANCELLED, result=outcome, updated_at=now)
+            calls[calls.index(record)] = updated
+            new_events.append(RunEvent(
+                run.run_id, len(events) + len(new_events) + 1, RunEventType.TOOL_COMPLETED, now,
+                message_ids=(record.source_message_id,), summary="工具调用因运行取消而收口",
+                data={"call_id": record.call.call_id, "tool_name": record.call.name,
+                    "status": "cancelled", "effect_certainty": certainty.value,
+                    "source_response_message_id": record.source_message_id, "attempt": record.attempt},
+            ))
+        base_run, base_checkpoint = await self._persistent_base(run)
+        pending = dict(base_checkpoint.pending if base_checkpoint else {})
+        pending["pending_call_ids"] = [item.call.call_id for item in calls if item.state not in _TERMINAL]
+        target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, pending, checkpoint.action, None)
+        return await self._commit_fact(
+            replace(ledger, calls=tuple(calls)), base_run, base_run, base_checkpoint, target_checkpoint,
+            events=tuple(new_events),
+        )
 
     async def complete_batch(self, run: AgentRun, batch_id: str, checkpoint: RunCheckpoint) -> ToolCallLedger:
         ledger = await self._required_ledger(run, checkpoint)

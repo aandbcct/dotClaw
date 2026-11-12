@@ -362,6 +362,7 @@ async def test_shutdown_timeout_keeps_resource_and_run_nonterminal(tmp_path):
     assert engine._cancellation_service.pending_operations(request.run_id)
     release.set()
     await asyncio.wait_for(work, 2)
+    await asyncio.gather(*tuple(coordinator._cancellation_jobs.values()))
     assert (await repository.find_run(request.run_id)).state.outcome() is RunOutcome.CANCELLED
 
 

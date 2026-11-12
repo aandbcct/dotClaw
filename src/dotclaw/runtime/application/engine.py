@@ -559,6 +559,7 @@ class RuntimeEngine:
                 continue
             async with self._cancellation_service.gate(run.run_id):
                 async def recover_control() -> None:
+                    await self._tool_recovery.recover_projection(run.session_id, run.run_id)
                     record = await self._run_repository.load_cancellation(run.session_id, run.run_id)
                     if record is None:
                         parent_record = requested.get(run.parent_run_id)
@@ -570,8 +571,7 @@ class RuntimeEngine:
                     if self._cancellation_service.has_driver(run.run_id):
                         return
                     events = await self._run_repository.load_events(run.session_id, run.run_id)
-                    activity = _scan_legacy_tool_activity(events)
-                    opened = {call_id: event.data.get("tool_name", "") for call_id, event in activity.active.items()}
+                    ledger = await self._run_repository.load_tool_ledger(run.session_id, run.run_id)
                     open_llm = False
                     for event in events:
                         if event.event_type is RunEventType.LLM_STARTED:
@@ -581,8 +581,17 @@ class RuntimeEngine:
                     known_io = {"builtin.files.read_text", "builtin.files.write_text", "builtin.files.list_directory",
                         "builtin.memory.read", "builtin.memory.write", "builtin.math.calculate", "builtin.system.get_info", "builtin.system.get_time"}
                     remote = lambda name: isinstance(name, str) and name.startswith(("mcp.", "builtin.web.", "builtin.weather."))
-                    unverified = any(name not in known_io and not remote(name) for name in opened.values())
                     known_local = known_io | {"builtin.process.execute"}
+                    if ledger is None:
+                        activity = _scan_legacy_tool_activity(events)
+                        opened = {call_id: event.data.get("tool_name", "") for call_id, event in activity.active.items()}
+                        unverified = any(name not in known_io and not remote(name) for name in opened.values())
+                    else:
+                        active_records = tuple(item for item in ledger.calls if item.state in {
+                            ToolCallState.STARTED, ToolCallState.UNCERTAIN,
+                        })
+                        opened = {item.call.call_id: item.call.name for item in active_records}
+                        unverified = any(name not in known_io and not remote(name) for name in opened.values())
                     effect = CancellationEffect.REMOTE_UNKNOWN if open_llm or any(name not in known_local for name in opened.values()) else record.effect
                     phase = CancellationPhase.BLOCKED if unverified or record.diagnostic_code == "orphaned_tool_cleanup_unverified" else CancellationPhase.DRAINING
                     diagnostic = "orphaned_tool_cleanup_unverified" if phase is CancellationPhase.BLOCKED else None
@@ -666,7 +675,7 @@ class RuntimeEngine:
     async def _resume_reserved_run(self, run_id: str, run: AgentRun, output_port: LLMOutputPort | None) -> tuple[RunResult, bool]:
         """在调用方已预留驱动权时补齐投影、重建执行现场并绑定恢复令牌。"""
         async with self._cancellation_service.gate(run_id):
-            await self._tool_recovery.recover_projection(run.session_id, run_id)
+            await _await_control(self._tool_recovery.recover_projection(run.session_id, run_id))
             run = await _await_control(self._run_repository.load_run(run.session_id, run_id))
             if run is None:
                 raise RunPersistenceError("恢复投影后运行不存在")
@@ -954,21 +963,36 @@ class RuntimeEngine:
                 raise ValueError("取消运行不存在")
             if self._cancellation_service.has_driver(run_id):
                 return RunResult(run_id, run.state, error=RunError(RunErrorCode.CANCELLED, "驱动仍在收尾取消"), control_status="cancelling")
-            await self._tool_recovery.recover_projection(run.session_id, run_id)
+            await _await_control(self._tool_recovery.recover_projection(run.session_id, run_id))
             run = await _await_control(self._run_repository.load_run(run.session_id, run_id))
             if run is None:
                 raise ValueError("取消投影后运行不存在")
-            async def recover_control():
-                await self._run_repository.recover_cancellation_commit(run.session_id, run_id)
-                current_run = await self._run_repository.load_run(run.session_id, run_id)
-                current_record = await self._run_repository.load_cancellation(run.session_id, run_id)
-                if current_run.state.is_ended() and current_record is not None and current_record.phase is CancellationPhase.SETTLED:
-                    self._cancellation_service.clear_settled(run_id)
-                    self._run_change_notifier.notify(run_id)
-                return current_run, current_record
-            run, record = await _await_control(recover_control())
-            if run.state.is_ended():
-                recovered_result = RunResult(run_id, run.state, error=run.error)
+            pending_cancel_commit = await self._run_repository.has_pending_cancellation_commit(run.session_id, run_id)
+            if run.state.is_ended() and not pending_cancel_commit:
+                recovered_result = await self._result_from_run(run)
+            else:
+                record = await self._run_repository.load_cancellation(run.session_id, run_id)
+                if record is None:
+                    raise ValueError("运行尚未请求取消")
+            if pending_cancel_commit:
+                ledger = await self._run_repository.load_tool_ledger(run.session_id, run_id)
+                if ledger is not None:
+                    checkpoint = await self._checkpoint_repository.load(run.session_id, run_id)
+                    if checkpoint is None and any(item.state not in {
+                        ToolCallState.SUCCEEDED, ToolCallState.FAILED, ToolCallState.CANCELLED,
+                    } for item in ledger.calls):
+                        raise RunPersistenceError("待取消提交的新格式运行缺少工具检查点")
+                    if checkpoint is not None:
+                        await _await_control(self._tool_recovery.cancel_unfinished(run, checkpoint))
+                await _await_control(self._run_repository.recover_cancellation_commit(run.session_id, run_id))
+                run = await _await_control(self._run_repository.load_run(run.session_id, run_id))
+                record = await self._run_repository.load_cancellation(run.session_id, run_id)
+                if run.state.is_ended():
+                    if record is not None and record.phase is CancellationPhase.SETTLED:
+                        self._cancellation_service.clear_settled(run_id)
+                    recovered_result = await self._result_from_run(run)
+                elif record is None:
+                    raise ValueError("运行尚未请求取消")
             elif record is None:
                 raise ValueError("运行尚未请求取消")
         if recovered_result is not None:
@@ -977,7 +1001,7 @@ class RuntimeEngine:
         await self.refresh_cancellation_progress(run_id)
         current_progress = await self._run_repository.load_cancellation(run.session_id, run_id)
         if self._cancellation_service.pending_operations(run_id) or current_progress.diagnostic_code == "orphaned_tool_cleanup_unverified":
-            return RunResult(run_id, run.state, error=RunError(RunErrorCode.CANCELLED, "资源清理尚未完成"))
+            return RunResult(run_id, run.state, error=RunError(RunErrorCode.CANCELLED, "资源清理尚未完成"), control_status="cancelling")
         children = await self._run_repository.list_child_runs(run_id)
         pending_children = tuple(child for child in children if not child.state.is_ended())
         if pending_children and self._delegation_port is None:
@@ -988,18 +1012,32 @@ class RuntimeEngine:
         async with self._cancellation_service.gate(run_id):
             run = await _await_control(self._run_repository.load_run(run.session_id, run_id))
             record = await self._run_repository.load_cancellation(run.session_id, run_id)
-            await self._tool_recovery.recover_projection(run.session_id, run_id)
+            if self._cancellation_service.has_driver(run_id):
+                return RunResult(run_id, run.state, error=RunError(RunErrorCode.CANCELLED, "驱动仍在收尾取消"), control_status="cancelling")
+            await _await_control(self._tool_recovery.recover_projection(run.session_id, run_id))
             run = await _await_control(self._run_repository.load_run(run.session_id, run_id))
             if run is None:
                 raise ValueError("取消终态投影前运行不存在")
             if run.state.is_ended():
                 return RunResult(run_id, run.state, error=run.error)
+            if record is None:
+                raise ValueError("取消请求在收尾期间消失")
+            ledger = await self._run_repository.load_tool_ledger(run.session_id, run_id)
+            if ledger is not None:
+                checkpoint = await self._checkpoint_repository.load(run.session_id, run_id)
+                if checkpoint is None:
+                    raise RunPersistenceError("新格式取消运行缺少工具检查点")
+                await _await_control(self._tool_recovery.cancel_unfinished(run, checkpoint))
             events = await self._run_repository.load_events(run.session_id, run_id)
             pending = []
             open_llm = False
-            activity = _scan_legacy_tool_activity(events)
-            open_tools = dict(activity.active)
-            open_tools.update(activity.waiting)
+            open_tools = {}
+            uncertain_legacy_calls = set()
+            if ledger is None:
+                activity = _scan_legacy_tool_activity(events)
+                open_tools = dict(activity.active)
+                open_tools.update(activity.waiting)
+                uncertain_legacy_calls = set(activity.active)
             for event in events:
                 if event.event_type is RunEventType.LLM_STARTED:
                     open_llm = True
@@ -1015,7 +1053,7 @@ class RuntimeEngine:
                     "call_id": call_id,
                     "tool_name": started.data.get("tool_name", ""),
                     "status": "cancelled",
-                    "effect_certainty": "unknown" if call_id in activity.active else "known",
+                    "effect_certainty": "unknown" if call_id in uncertain_legacy_calls else "known",
                     "tool_event_semantics": 2,
                 })
             add(RunEventType.CANCEL_REQUESTED, {"request_id": record.request.request_id})
@@ -1416,9 +1454,19 @@ class RuntimeEngine:
             utc_now_iso(), ToolEffectCertainty.KNOWN, tool_error_code=result.tool_error_code,
             tool_error_type=result.tool_error_type,
         )
-        async with self._cancellation_service.gate(run.run_id):
-            await self._tool_recovery.commit_outcome(run, record.call.call_id, snapshot, checkpoint)
+        await _await_control(self._commit_observed_tool_result(run, record.call.call_id, snapshot, checkpoint))
         return ToolStepResult(ToolStepKind.COMPLETED, outcome=snapshot)
+
+    async def _commit_observed_tool_result(
+        self,
+        run: AgentRun,
+        call_id: str,
+        outcome: ToolOutcomeSnapshot,
+        checkpoint: RunCheckpoint,
+    ) -> None:
+        """持运行短锁并等待已观察工具结果的完整账本投影提交。"""
+        async with self._cancellation_service.gate(run.run_id):
+            await self._tool_recovery.commit_outcome(run, call_id, outcome, checkpoint)
 
     async def _reload_tool_execution(self, execution: RunExecution, run_id: str) -> tuple[AgentRun, tuple[RunMessage, ...], RunCheckpoint, int]:
         """投影后同步真实运行、消息、检查点与下一事件序号到驱动现场。"""
@@ -1987,11 +2035,15 @@ class RuntimeEngine:
         return context_version
 
     async def _finish_cancelled(self, run: AgentRun, reason: str) -> RunResult:
-        """统一委托持久化取消提交，审批拒绝也先保存明确请求。"""
+        """活驱动只报告取消已受理，终态由释放 Session 租约后的协调器收尾。"""
         record = await self._run_repository.load_cancellation(run.session_id, run.run_id)
         if record is None:
             await self.request_cancel(run.run_id, reason or "运行已取消")
-        return await self.complete_cancellation(run.run_id)
+        current = await self._run_repository.load_run(run.session_id, run.run_id)
+        if current is None:
+            raise ValueError("取消驱动退出时运行不存在")
+        return RunResult(run.run_id, current.state,
+            error=RunError(RunErrorCode.CANCELLED, reason or "运行已取消"), control_status="cancelling")
 
     async def _suspend_on_unavailable(
         self,

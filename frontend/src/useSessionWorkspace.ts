@@ -299,7 +299,9 @@ export function useSessionWorkspace() {
       return;
     }
     const completed = event.event === "run.completed";
-    const phase: RunPhase = completed ? "completed" : event.event === "run.cancelled" ? "cancelled" : event.event === "run.suspended" ? "suspended" : "failed";
+    const suspendedStatus = event.event === "run.suspended" ? field(event.data, "status") : null;
+    const phase: RunPhase = completed ? "completed" : event.event === "run.cancelled" ? "cancelled"
+      : event.event === "run.suspended" ? suspendedStatus === "cancelling" ? "stopping" : suspendedStatus === "recoverable" ? "recoverable" : "suspended" : "failed";
     const final = event.data.final_message;
     const finalText = final && typeof final === "object" && "content" in final && typeof final.content === "string" ? final.content : "";
     const rawError = event.data.error;
@@ -307,19 +309,19 @@ export function useSessionWorkspace() {
     const code = rawError && typeof rawError === "object" && "code" in rawError ? String(rawError.code) : "";
     const retryable = Boolean(rawError && typeof rawError === "object" && "retryable" in rawError && rawError.retryable === true);
     const unknown = event.event === "stream.error";
-    if (runId && phase !== "suspended" && !unknown && !retryable) {
+    if (runId && event.event !== "run.suspended" && !unknown && !retryable) {
       terminal.current.add(runId); stopObservation(id);
     }
     if (!unknown) factVersions.current.set(id, (factVersions.current.get(id) || 0) + 1);
     patch(id, (view) => {
       const prior = runId ? view.activitiesByRunId[runId] : null;
-      const activity: RunActivity | null = runId && !unknown ? { ...prior, run_id: runId, tools: prior?.tools || [], status: phase === "suspended" ? field(event.data, "status") || "waiting_approval" : phase,
+      const activity: RunActivity | null = runId && !unknown ? { ...prior, run_id: runId, tools: prior?.tools || [], status: event.event === "run.suspended" ? suspendedStatus || "waiting_approval" : phase,
         approval_id: field(event.data, "approval_id") || null, approval_call_id: prior?.approval_id === field(event.data, "approval_id") ? prior.approval_call_id : null, child_run_id: field(event.data, "child_run_id") || null,
-        error: phase === "failed" ? { code, message: message || "运行失败，请查看执行记录", retryable } : null } : view.activity;
+        error: phase === "failed" || phase === "recoverable" ? { code, message: message || (phase === "recoverable" ? "工具结果待确认，外部操作可能已生效，请先核对。" : "运行失败，请查看执行记录"), retryable } : null } : view.activity;
       return {
       ...view, phase: unknown ? current.phase === "stopping" ? "stopping" : "running" : phase, detached: unknown, submissionStage: "idle", activity,
       activitiesByRunId: activity ? { ...view.activitiesByRunId, [activity.run_id]: activity } : view.activitiesByRunId,
-      error: unknown ? (message || "消息连接异常") + "；结果待确认，请查询运行状态，不要重复发送。" : phase === "failed" ? message || "运行失败，请查看执行记录" : "",
+      error: unknown ? (message || "消息连接异常") + "；结果待确认，请查询运行状态，不要重复发送。" : phase === "failed" || phase === "recoverable" ? message || (phase === "recoverable" ? "工具结果待确认，外部操作可能已生效，请先核对。" : "运行失败，请查看执行记录") : "",
       errorCode: code, retryable, statusError: "",
       messages: view.messages.map((item) => item.id === messageId ? { ...item, pending: false, content: item.content || finalText, run_ids: runId ? Array.from(new Set([...(item.run_ids || []), runId])) : item.run_ids } : item),
     }; });

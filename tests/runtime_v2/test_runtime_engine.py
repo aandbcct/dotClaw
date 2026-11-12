@@ -49,6 +49,7 @@ from dotclaw.context import (
     build_context_provider,
 )
 from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent
+from dotclaw.runtime.domain.tool_recovery import ToolCallState, ToolEffectCertainty
 from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
 
 
@@ -864,8 +865,129 @@ async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) ->
     cancelled = await run_repository.load_run("session-cancel", waiting.run_id)
     assert cancelled is not None
     assert cancelled.state.outcome().value == "cancelled"
+    ledger = await run_repository.load_tool_ledger("session-cancel", waiting.run_id)
+    assert ledger is not None
+    call = next(item for item in ledger.calls if item.call.call_id == "call-1")
+    assert call.state is ToolCallState.CANCELLED
+    assert call.result is not None and call.result.effect_certainty is ToolEffectCertainty.KNOWN
     assert await run_repository.load_conversation("session-cancel") == ()
     assert await CheckpointRepositoryAdapter(tmp_path).load("session-cancel", waiting.run_id) is None
+
+
+async def test_cancel_started_ledger_call_keeps_unknown_effect_evidence(tmp_path: Path) -> None:
+    run_repository = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
+    engine = RuntimeEngine(
+        run_repository, CheckpointRepositoryAdapter(tmp_path), ContextFake(), ApprovalLLM(), ApprovalTool(),
+        PolicyPort(), ApprovalService(ApprovalRepositoryAdapter(tmp_path)), CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(), tool_recovery=file_tool_recovery(tmp_path),
+        history_compactor=UnexpectedHistoryCompactor(),
+    )
+    waiting = await engine.execute(_request("session-cancel-started"))
+    run = await run_repository.load_run(waiting.session_id, waiting.run_id)
+    checkpoint = await CheckpointRepositoryAdapter(tmp_path).load(waiting.session_id, waiting.run_id)
+    assert run is not None and checkpoint is not None
+    async with engine._cancellation_service.gate(run.run_id):
+        await engine._tool_recovery.decide_approval(run, "approval-1", True, checkpoint)
+    run = await run_repository.load_run(waiting.session_id, waiting.run_id)
+    checkpoint = await CheckpointRepositoryAdapter(tmp_path).load(waiting.session_id, waiting.run_id)
+    assert run is not None and checkpoint is not None
+    async with engine._cancellation_service.gate(run.run_id):
+        await engine._tool_recovery.begin_attempt(run, "call-1", checkpoint)
+
+    await engine.request_cancel(waiting.run_id, "开始后取消")
+    result = await engine.complete_cancellation(waiting.run_id)
+
+    ledger = await run_repository.load_tool_ledger(waiting.session_id, waiting.run_id)
+    assert ledger is not None
+    call = next(item for item in ledger.calls if item.call.call_id == "call-1")
+    assert result.state.outcome() is RunOutcome.CANCELLED
+    assert call.state is ToolCallState.CANCELLED
+    assert call.result is not None and call.result.effect_certainty is ToolEffectCertainty.UNKNOWN
+
+
+async def test_cancel_waits_for_observed_tool_result_projection(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port = ReActLLM()
+    engine._tool_port = CompletedTool()
+    projection_started, allow_projection = asyncio.Event(), asyncio.Event()
+    commit_outcome = engine._tool_recovery.commit_outcome
+
+    async def blocked_commit(run, call_id, outcome, checkpoint):
+        projection_started.set()
+        await allow_projection.wait()
+        return await commit_outcome(run, call_id, outcome, checkpoint)
+
+    engine._tool_recovery.commit_outcome = blocked_commit
+    task = asyncio.create_task(engine.execute(_request("session-observed-result-cancel")))
+    try:
+        await asyncio.wait_for(projection_started.wait(), 2)
+        active = await engine.active_run("session-observed-result-cancel")
+        assert active is not None
+        cancel_task = asyncio.create_task(engine.request_cancel(active.run_id, "结果返回后取消"))
+        await asyncio.sleep(0)
+        assert not cancel_task.done()
+        allow_projection.set()
+        await cancel_task
+        result = await task
+        assert result.control_status == "cancelling"
+        cancelled = await engine.complete_cancellation(active.run_id)
+    finally:
+        allow_projection.set()
+        if not task.done():
+            await task
+
+    ledger = await engine._run_repository.load_tool_ledger(active.session_id, active.run_id)
+    assert cancelled.state.outcome() is RunOutcome.CANCELLED
+    assert ledger is not None
+    calls = {item.call.call_id: item for item in ledger.calls}
+    assert calls["call-1"].state is ToolCallState.SUCCEEDED
+    assert calls["call-1"].result is not None and calls["call-1"].result.status.value == "completed"
+    assert calls["call-2"].state is ToolCallState.CANCELLED
+
+
+async def test_driver_cancellation_while_waiting_for_result_gate_keeps_observed_result(tmp_path: Path) -> None:
+    """驱动在等待结果提交短锁时取消，也必须等账本投影完整提交。"""
+    engine = _engine(tmp_path)
+    engine._llm_port = ReActLLM()
+    tool = CompletedTool()
+    engine._tool_port = tool
+    tool_started, allow_tool_return = asyncio.Event(), asyncio.Event()
+
+    async def delayed_execute(invocation, execution):
+        tool.calls.append(invocation)
+        tool_started.set()
+        await allow_tool_return.wait()
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+            output=f"结果-{invocation.call.call_id}", execution_evidence=ToolExecutionEvidence.RETURNED)
+
+    tool.execute = delayed_execute
+    task = asyncio.create_task(engine.execute(_request("session-result-gate-driver-cancel")))
+    run_id = None
+    gate = None
+    try:
+        await tool_started.wait()
+        active = await engine.active_run("session-result-gate-driver-cancel")
+        assert active is not None
+        run_id = active.run_id
+        gate = engine._cancellation_service.gate(run_id)
+        await gate.acquire()
+        allow_tool_return.set()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        gate.release()
+        await task
+    finally:
+        allow_tool_return.set()
+        if gate is not None and gate.locked():
+            gate.release()
+        if not task.done():
+            await task
+
+    ledger = await engine._run_repository.load_tool_ledger(active.session_id, run_id)
+    assert ledger is not None
+    assert next(item for item in ledger.calls if item.call.call_id == "call-1").state is ToolCallState.SUCCEEDED
 
 
 class OrderedEngine:

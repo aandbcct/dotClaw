@@ -139,7 +139,10 @@ class SessionRunCoordinator:
         key = "submission:" + str(id(task))
         self._driver_tasks[key] = task
         try:
-            return await self._engine.execute(request, output_port)
+            result = await self._engine.execute(request, output_port)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(result.run_id)
+            return result
         finally:
             if self._driver_tasks.get(key) is task:
                 self._driver_tasks.pop(key, None)
@@ -200,7 +203,10 @@ class SessionRunCoordinator:
         lock = await self._get_lock(session_id)
         async with lock:
             self._assert_accepting_business()
-            return await self._engine.start_prepared(run_id)
+            result = await self._engine.start_prepared(run_id)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(run_id)
+            return result
 
     async def start_prepared(self, run_id: str) -> RunResult:
         self.schedule_prepared(run_id)
@@ -221,10 +227,7 @@ class SessionRunCoordinator:
     async def recover_cancellations(self) -> None:
         """先注册所有可观察的恢复作业；资源未知的运行不会阻塞宿主启动。"""
         for run_id in await self._engine.recover_cancellations():
-            if run_id not in self._cancellation_jobs:
-                job = asyncio.create_task(self._drain_cancelled_run(run_id))
-                self._cancellation_jobs[run_id] = job
-                job.add_done_callback(lambda completed, target=run_id: self._cancellation_job_done(target, completed))
+            self._schedule_cancellation_drain(run_id)
 
     async def confirm_cancellation_cleanup(self, run_id: str, reason: str) -> RunResult:
         session_id = await self._engine.get_run_session_id(run_id)
@@ -257,34 +260,51 @@ class SessionRunCoordinator:
         session_id: str | None = await self._engine.get_approval_session_id(approval_id)
         if session_id is None:
             self._assert_accepting_business()
-            return await self._engine.resolve_approval(approval_id, approved, output_port)
+            result = await self._engine.resolve_approval(approval_id, approved, output_port)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(result.run_id)
+            return result
         lock: asyncio.Lock = await self._get_lock(session_id)
         async with lock:
             self._assert_accepting_business()
-            return await self._engine.resolve_approval(approval_id, approved, output_port)
+            result = await self._engine.resolve_approval(approval_id, approved, output_port)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(result.run_id)
+            return result
 
     async def resume_delegation(self, child_run_id: str, output_port: LLMOutputPort | None = None) -> RunResult:
         """在 delegation 父运行所属 Session 的租约内恢复父运行；output_port 为本恢复运行级端口。"""
         session_id: str | None = await self._engine.get_delegation_session_id(child_run_id)
         if session_id is None:
             self._assert_accepting_business()
-            return await self._engine.resume_delegation(child_run_id, output_port)
+            result = await self._engine.resume_delegation(child_run_id, output_port)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(result.run_id)
+            return result
         lock: asyncio.Lock = await self._get_lock(session_id)
         async with lock:
             self._assert_accepting_business()
-            return await self._engine.resume_delegation(child_run_id, output_port)
+            result = await self._engine.resume_delegation(child_run_id, output_port)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(result.run_id)
+            return result
 
     async def cancel(self, run_id: str, reason: str, *, origin: CancellationOrigin = CancellationOrigin.USER,
                      parent_request_id: str | None = None) -> CancellationReceipt:
         """受理立即返回，协调器只持有补收尾作业。"""
         receipt = await self._engine.request_cancel(run_id, reason, origin, parent_request_id)
         if receipt.disposition in (CancellationDisposition.ACCEPTED, CancellationDisposition.ALREADY_REQUESTED):
-            current = self._cancellation_jobs.get(run_id)
-            if current is None or current.done():
-                job = asyncio.create_task(self._drain_cancelled_run(run_id))
-                self._cancellation_jobs[run_id] = job
-                job.add_done_callback(lambda completed: self._cancellation_job_done(run_id, completed))
+            self._schedule_cancellation_drain(run_id)
         return receipt
+
+    def _schedule_cancellation_drain(self, run_id: str) -> None:
+        """去重登记取消收尾；作业会在驱动释放 Session 租约后继续。"""
+        current = self._cancellation_jobs.get(run_id)
+        if current is not None and not current.done():
+            return
+        job = asyncio.create_task(self._drain_cancelled_run(run_id))
+        self._cancellation_jobs[run_id] = job
+        job.add_done_callback(lambda completed: self._cancellation_job_done(run_id, completed))
 
     def _cancellation_job_done(self, run_id: str, job: asyncio.Task[None]) -> None:
         if self._cancellation_jobs.get(run_id) is job:
@@ -324,11 +344,17 @@ class SessionRunCoordinator:
         session_id: str | None = await self._engine.get_run_session_id(run_id)
         if session_id is None:
             self._assert_accepting_business()
-            return await self._engine.resume_run(run_id, output_port)
+            result = await self._engine.resume_run(run_id, output_port)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(run_id)
+            return result
         lock: asyncio.Lock = await self._get_lock(session_id)
         async with lock:
             self._assert_accepting_business()
-            return await self._engine.resume_run(run_id, output_port)
+            result = await self._engine.resume_run(run_id, output_port)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(run_id)
+            return result
 
     async def abandon_run(self, run_id: str, *, only_recoverable: bool = False) -> RunResult:
         """在所属 Session 锁内显式放弃未结束 Run。"""
@@ -336,7 +362,10 @@ class SessionRunCoordinator:
         if session_id is None:
             if only_recoverable:
                 raise RunNotRecoverableError("运行不存在或不可恢复")
-            return await self._engine.abandon_run(run_id)
+            result = await self._engine.abandon_run(run_id)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(run_id)
+            return result
         lock: asyncio.Lock = await self._get_lock(session_id)
         if only_recoverable and lock.locked():
             raise SessionBusyError("会话正在运行，不能放弃")
@@ -345,7 +374,10 @@ class SessionRunCoordinator:
                 active = await self._engine.active_run(session_id)
                 if active is None or active.run_id != run_id or active.state.is_ended() or active.state.is_waiting_approval() or active.state.is_waiting_delegation():
                     raise RunNotRecoverableError("只能放弃当前可恢复运行")
-            return await self._engine.abandon_run(run_id)
+            result = await self._engine.abandon_run(run_id)
+            if result.control_status == "cancelling":
+                self._schedule_cancellation_drain(run_id)
+            return result
 
     async def _prepare_new_request(self, session_id: str) -> RunResult | None:
         """以持久化占用表保证跨进程 Session 串行；任意非终态 Run 拒绝普通请求。"""

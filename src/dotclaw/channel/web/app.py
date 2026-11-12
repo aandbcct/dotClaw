@@ -918,11 +918,16 @@ def _run_steps(run: AgentRun, events: tuple[RunEvent, ...], *, terminal_committe
 
 
 def _result_event(session_id: str, result: RunResult) -> SSEEvent:
-    """把 Runtime 结果归一化为 Web 唯一终态事件。"""
+    """把 Runtime 结果映射为完成、失败、取消或非终态挂起事件。"""
     common: JSONMap = {
         "session_id": session_id,
         "run_id": result.run_id,
     }
+    if not result.state.is_ended() and result.control_status in {"cancelling", "recoverable"}:
+        common["status"] = result.control_status
+        if result.error is not None:
+            common["error"] = result.error.to_dict()
+        return SSEEvent(event=SSEEventType.RUN_SUSPENDED, data=common)
     outcome = result.state.outcome()
     if outcome is RunOutcome.COMPLETED:
         common.update(

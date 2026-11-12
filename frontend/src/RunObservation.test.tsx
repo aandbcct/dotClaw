@@ -80,6 +80,18 @@ it("正常60秒只有一条状态流且零周期activity请求，202保持正在
   expect(state.channels).toHaveLength(1);
 });
 
+it.each([["cancelling", "stopping"], ["recoverable", "recoverable"]] as const)("run.suspended status=%s 映射为 %s 且保持状态观察", async (status, phase) => {
+  const state = setup();
+  const { result } = renderHook(useSessionWorkspace);
+  await flush();
+
+  await act(async () => { state.channels[0].event("run.suspended", { run_id: "run-a", status, error: { code: "control", message: "控制处理中" } }); });
+
+  expect(result.current.views.a.phase).toBe(phase);
+  expect(result.current.views.a.activity?.status).toBe(status);
+  expect(state.channels[0].signal.aborted).toBe(false);
+});
+
 it("断流立即GET对账，按1/2/4/8秒重试，恢复后停止降级请求", async () => {
   const state = setup();
   renderHook(useSessionWorkspace);
