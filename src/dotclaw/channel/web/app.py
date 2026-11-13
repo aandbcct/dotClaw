@@ -901,18 +901,13 @@ def _run_steps(run: AgentRun, events: tuple[RunEvent, ...], *, terminal_committe
                 tools[call_id or ""] = current
                 current.status = "running"
                 current.completed_at = None
-                current.result = None
-                current.error = None
         elif event.event_type is RunEventType.WAITING_APPROVAL or event.data.get("status") == "approval_required":
             tools[call_id or ""] = current
             current.status = "approval_required"
             current.completed_at = None
-            current.result = None
-            current.error = None
         elif event.event_type is RunEventType.TOOL_RECOVERY_BLOCKED:
             current.completed_at = event.occurred_at
             current.status = "uncertain"
-            current.error = str(event.data.get("reason") or "结果待确认")
         else:
             current.completed_at = event.occurred_at
             value = str(event.data.get("status", "completed"))
