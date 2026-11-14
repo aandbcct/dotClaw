@@ -11,6 +11,7 @@ import pytest
 from dotclaw.runtime.adapters import RunRepositoryAdapter, InMemoryRunRepository
 from dotclaw.runtime.adapters.approval_repository import ApprovalRepositoryAdapter
 from dotclaw.runtime.adapters import run_repository as file_module
+from dotclaw.runtime.application.ports import RunPersistenceError
 from dotclaw.runtime.domain.cancellation import (
     CancellationRequest, CancellationOrigin, CancellationPhase, CancellationEffect,
     CancellationRecord, CancellationCommitIntent,
@@ -92,8 +93,11 @@ async def test_single_run_recovery_never_replays_other_runs(repository, monkeypa
     with monkeypatch.context() as patch:
         patch.setattr(repository, "_recover_cancellation_commit", failed)
         for intent in (_intent(run, record), _intent(other, other_record)):
-            with pytest.raises(OSError):
+            expected_error = OSError if isinstance(repository, InMemoryRunRepository) else RunPersistenceError
+            with pytest.raises(expected_error) as captured:
                 await repository.commit_cancellation(intent)
+            if not isinstance(repository, InMemoryRunRepository):
+                assert isinstance(captured.value.__cause__, OSError)
     assert await repository.has_pending_cancellation_commit("session", "run")
     assert await repository.has_pending_cancellation_commit("session", "other")
     await repository.recover_cancellation_commit("session", "run")
@@ -132,8 +136,11 @@ async def test_existing_terminal_event_blocks_cancellation(repository) -> None:
     await repository.append_event("session", RunEvent("run", 1, RunEventType.RUN_COMPLETED, NOW))
     intent = _intent(run, record)
     intent = replace(intent, events=tuple(replace(event, sequence=event.sequence + 1) for event in intent.events))
-    with pytest.raises(ValueError, match="终态事件"):
+    expected_error = ValueError if isinstance(repository, InMemoryRunRepository) else RunPersistenceError
+    with pytest.raises(expected_error, match="终态事件") as captured:
         await repository.commit_cancellation(intent)
+    if not isinstance(repository, InMemoryRunRepository):
+        assert isinstance(captured.value.__cause__, ValueError)
 
 
 async def test_event_conflict_rejected_before_intent(repository) -> None:
@@ -141,8 +148,11 @@ async def test_event_conflict_rejected_before_intent(repository) -> None:
     await repository.create_run(run)
     await repository.save_cancellation("session", record, expected_revision=0)
     await repository.append_event("session", RunEvent("run", 1, RunEventType.RUN_STARTED, NOW))
-    with pytest.raises(ValueError):
+    expected_error = ValueError if isinstance(repository, InMemoryRunRepository) else RunPersistenceError
+    with pytest.raises(expected_error) as captured:
         await repository.commit_cancellation(_intent(run, record))
+    if not isinstance(repository, InMemoryRunRepository):
+        assert isinstance(captured.value.__cause__, ValueError)
     assert (await repository.load_run("session", "run")).state == run.state
 
 
@@ -151,13 +161,19 @@ async def test_missing_approval_dependency_and_wrong_ownership(repository, tmp_p
     await repository.create_run(run)
     await repository.save_cancellation("session", record, expected_revision=0)
     intent = _intent(run, record, ("approval",))
-    with pytest.raises(ValueError, match="未注入审批"):
+    expected_error = ValueError if isinstance(repository, InMemoryRunRepository) else RunPersistenceError
+    with pytest.raises(expected_error, match="未注入审批") as captured:
         await repository.commit_cancellation(intent)
+    if not isinstance(repository, InMemoryRunRepository):
+        assert isinstance(captured.value.__cause__, ValueError)
     approvals = ApprovalRepositoryAdapter(tmp_path)
     await approvals.create(ApprovalRecord("approval", "other", "session", ApprovalStatus.PENDING, NOW))
     repository._approval_repository = approvals
-    with pytest.raises(ValueError, match="审批不属于"):
+    expected_error = ValueError if isinstance(repository, InMemoryRunRepository) else RunPersistenceError
+    with pytest.raises(expected_error, match="审批不属于") as captured:
         await repository.commit_cancellation(intent)
+    if not isinstance(repository, InMemoryRunRepository):
+        assert isinstance(captured.value.__cause__, ValueError)
     assert await repository.load_events("session", "run") == ()
 
 
@@ -188,8 +204,9 @@ async def test_file_recovery_after_every_commit_boundary(tmp_path, monkeypatch, 
                 original(*args)
             raise OSError("模拟文件边界中断")
         monkeypatch.setattr(repository, method, interrupted)
-    with pytest.raises(OSError):
+    with pytest.raises(RunPersistenceError) as captured:
         await repository.commit_cancellation(intent)
+    assert isinstance(captured.value.__cause__, OSError)
     assert (directory / "cancel_commit.json").exists()
     # 使用新的适配器模拟重启，不复用故障实例的内存状态。
     recovered = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
@@ -256,8 +273,9 @@ async def test_cancel_event_batch_failure_preserves_original_file(tmp_path, monk
                     raise OSError("替换事件文件前中断")
                 return original_replace(source, target, *args, **kwargs)
             patch.setattr(file_module.os, "replace", interrupted_replace)
-        with pytest.raises(OSError):
+        with pytest.raises(RunPersistenceError) as captured:
             await repository.commit_cancellation(intent)
+        assert isinstance(captured.value.__cause__, OSError)
     assert path.read_bytes() == original_bytes
     assert await repository.load_events("session", "run") == (previous,)
     assert path.with_name("cancel_commit.json").exists()
@@ -323,8 +341,9 @@ async def test_recovery_rejects_modified_existing_event(tmp_path, monkeypatch) -
     def failed(*args):
         raise OSError("提交终态前中断")
     monkeypatch.setattr(repository, "_save_run_sync", failed)
-    with pytest.raises(OSError):
+    with pytest.raises(RunPersistenceError) as captured:
         await repository.commit_cancellation(intent)
+    assert isinstance(captured.value.__cause__, OSError)
     path = tmp_path / "session" / "agent_runs" / "run" / "events.jsonl"
     lines = path.read_text(encoding="utf-8").splitlines()
     event = json.loads(lines[0])

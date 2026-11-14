@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pytest
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
 
 from pathlib import Path
@@ -39,6 +40,7 @@ from dotclaw.runtime.application.dto import (
     ToolResultStatus,
 )
 from dotclaw.runtime.domain.context import ContextOwner
+from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot,
     AgentRun,
@@ -485,7 +487,9 @@ async def test_engine_resume_delegation_rejects_mismatched_child_id(tmp_path: Pa
 
     # 传入错误子运行标识：find_run 成功但 control_id 不匹配，状态机拒绝。
     mismatch: RunResult = await engine.resume_delegation("child-B")
-    assert mismatch.state.outcome() is RunOutcome.FAILED
+    assert mismatch.error is not None and mismatch.error.code is RunErrorCode.INVALID_STATE
+    assert mismatch.state.is_waiting_delegation()
+    assert mismatch.state.mode.control_id == "child-A"
     parent_run = await repository.load_run("parent-session", submit_result.run_id)
     assert parent_run is not None
     assert parent_run.state.is_waiting_delegation()
@@ -611,7 +615,7 @@ async def test_engine_resume_delegation_with_failed_child_writes_result_message(
         message for message in messages if message["kind"] == "delegation_result"
     )
     assert len(result_messages) == 1
-    assert result_messages[0]["metadata"]["child_run_id"] == "child-run"
+    assert result_messages[0]["tool_call_id"] == "call-delegate"
 
 
 async def test_engine_resume_delegation_with_abandoned_child_writes_result_message(tmp_path: Path) -> None:
@@ -623,7 +627,7 @@ async def test_engine_resume_delegation_with_abandoned_child_writes_result_messa
         message for message in messages if message["kind"] == "delegation_result"
     )
     assert len(result_messages) == 1
-    assert result_messages[0]["metadata"]["child_run_id"] == "child-run"
+    assert result_messages[0]["tool_call_id"] == "call-delegate"
 
 
 async def test_engine_resume_delegation_with_cancelled_child_writes_result_message(tmp_path: Path) -> None:
@@ -635,7 +639,7 @@ async def test_engine_resume_delegation_with_cancelled_child_writes_result_messa
         message for message in messages if message["kind"] == "delegation_result"
     )
     assert len(result_messages) == 1
-    assert result_messages[0]["metadata"]["child_run_id"] == "child-run"
+    assert result_messages[0]["tool_call_id"] == "call-delegate"
 
 
 async def test_runtime_delegation_adapter_creates_target_run_with_parent_and_root(tmp_path: Path) -> None:
@@ -821,11 +825,10 @@ async def test_child_run_persists_parent_and_root_relationship(tmp_path: Path) -
 
 
 async def test_engine_delegation_reaches_handoff_target_action(tmp_path: Path) -> None:
-    """阶段3核心链路：delegation 实际经 DelegationRequested→HANDOFF_TARGET→DelegationSubmitted 可达。
+    """阶段3核心链路：工具批次按序提交 delegation 并挂起父运行。
 
-    证明 HANDOFF_TARGET 不再是仅存在于领域状态机的死契约：模型发出 delegate 调用后，Engine 先
-    发送 ``delegation_requested`` 审计、经 ``HANDOFF_TARGET`` 动作提交子运行，最终持久化为
-    ``Suspended(DELEGATION)``，且事件序列严格包含 requested→submitted 两段。
+    新工具协议由 assistant 批次和 TOOL_STARTED 记录调用事实，提交子运行后写入
+    ``delegation_submitted``，最终持久化为 ``Suspended(DELEGATION)``。
     """
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     delegation = CompletedDelegation(repository)
@@ -849,16 +852,13 @@ async def test_engine_delegation_reaches_handoff_target_action(tmp_path: Path) -
     events: list[JSONMap] = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
     event_types: list[str] = [event["event_type"] for event in events]
 
-    # HANDOFF_TARGET 链路的可达性证据：先有 requested（模型派发意图），后有 submitted（子运行落地）。
-    assert event_types.count("delegation_requested") == 1
+    # 工具调用开始后才记录子运行提交；模型请求本身保存在 assistant 消息中。
+    assert event_types.count("tool_started") == 1
     assert event_types.count("delegation_submitted") == 1
-    assert event_types.index("delegation_requested") < event_types.index("delegation_submitted")
-    # requested 事件必须记录模型触发派发的工具调用与目标 Agent，证明它来自真实 delegate 调用。
-    requested_event: JSONMap = next(event for event in events if event["event_type"] == "delegation_requested")
-    assert requested_event["data"] == {
-        "tool_call_id": "call-delegate",
-        "target_agent_id": "target-agent",
-    }
+    assert event_types.index("tool_started") < event_types.index("delegation_submitted")
+    submitted_event: JSONMap = next(event for event in events if event["event_type"] == "delegation_submitted")
+    assert submitted_event["data"]["call_id"] == "call-delegate"
+    assert submitted_event["data"]["child_run_id"] == "child-run"
 
     # 提交后父运行持久化为 Suspended(DELEGATION)，HANDOFF_TARGET 动作已实际执行。
     assert result.state.is_waiting_delegation()

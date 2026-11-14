@@ -17,14 +17,18 @@ function channel(signal: AbortSignal) {
     push(activity: RunActivity) { controller.enqueue(new TextEncoder().encode(`id: e${activity.event_sequence}-c${activity.control_revision}\nevent: run.snapshot\ndata: ${JSON.stringify(activity)}\n\n`)); },
     close() { controller.close(); }, fail() { controller.error(new Error("断流")); } };
 }
-function setup() {
+function setup(captureSubmissions = false) {
   vi.useFakeTimers();
   vi.spyOn(Math, "random").mockReturnValue(0.5);
   const channels: ReturnType<typeof channel>[] = [];
+  const submissions: ReturnType<typeof channel>[] = [];
   let activity: RunActivity | null = initial;
   let nextActivity: Promise<Response> | undefined;
   const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (captureSubmissions && url.endsWith("/messages") && init?.method === "POST") {
+      const value = channel(init.signal as AbortSignal); submissions.push(value); return value.response;
+    }
     if (url.endsWith("/sessions")) return json([session, { ...session, id: "b" }]);
     if (url.endsWith("/events")) { const value = channel(init!.signal as AbortSignal); channels.push(value); return value.response; }
     if (url.includes("/activity")) {
@@ -36,7 +40,7 @@ function setup() {
     return json({ ...session, id: url.endsWith("/b") ? "b" : "a", messages: [] });
   });
   vi.stubGlobal("fetch", fetcher);
-  return { channels, fetcher, setActivity(value: RunActivity | null) { activity = value; }, deferActivity(value: Promise<Response>) { nextActivity = value; } };
+  return { channels, submissions, fetcher, setActivity(value: RunActivity | null) { activity = value; }, deferActivity(value: Promise<Response>) { nextActivity = value; } };
 }
 async function flush() { await act(async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); }); }
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear(); });
@@ -81,11 +85,22 @@ it("正常60秒只有一条状态流且零周期activity请求，202保持正在
 });
 
 it.each([["cancelling", "stopping"], ["recoverable", "recoverable"]] as const)("run.suspended status=%s 映射为 %s 且保持状态观察", async (status, phase) => {
-  const state = setup();
+  const state = setup(true);
+  state.setActivity(null);
   const { result } = renderHook(useSessionWorkspace);
   await flush();
 
-  await act(async () => { state.channels[0].event("run.suspended", { run_id: "run-a", status, error: { code: "control", message: "控制处理中" } }); });
+  let sending: Promise<void>;
+  await act(async () => { sending = result.current.send("a", "控制状态测试"); });
+  await flush();
+  // 挂起事件来自提交响应，观察流只传 run.snapshot。
+  await act(async () => {
+    state.submissions[0].event("run.accepted", { session_id: "a", run_id: "run-a" });
+    state.setActivity({ ...initial, status });
+    state.submissions[0].event("run.suspended", { run_id: "run-a", status, error: { code: "control", message: "控制处理中" } });
+    state.submissions[0].close();
+    await sending;
+  });
 
   expect(result.current.views.a.phase).toBe(phase);
   expect(result.current.views.a.activity?.status).toBe(status);

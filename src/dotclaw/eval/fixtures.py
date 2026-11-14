@@ -175,6 +175,7 @@ class FixtureToolPort:
                 and _matches_key_arguments(dict(item.key_arguments), dict(invocation.call.arguments))), None)
             if fixture is None:
                 raise FixtureConfigurationError(f"工具 {invocation.call.name} 没有可用 fixture")
+        self._served.add(fixture.fixture_id)
         if fixture.status is ToolResultStatus.APPROVAL_REQUIRED:
             return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED,
                 approval_id=fixture.approval_id, execution_evidence=ToolExecutionEvidence.NOT_STARTED)

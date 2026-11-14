@@ -89,7 +89,7 @@ def test_preflight_approval_without_start_uses_source_tool_call():
 
     assert len(activity.tools) == 1
     assert (activity.tools[0].name, activity.tools[0].status, activity.tools[0].arguments, activity.tools[0].completed_at) == (
-        "danger", "approval_required", {"path": "demo.txt"}, None,
+        "danger", "approval_required", {"path": "demo.txt"}, "",
     )
 
 

@@ -100,8 +100,8 @@ def test_schemas_required_and_defaults(handlers) -> None:
     assert mw.parameters["required"] == ["content"]
 
     # 无参工具：空 required。
-    assert handlers["builtin.system.get_info"].definition().parameters["required"] == []
-    assert handlers["builtin.system.get_time"].definition().parameters["required"] == []
+    assert handlers["builtin.system.get_info"].definition().parameters.get("required", []) == []
+    assert handlers["builtin.system.get_time"].definition().parameters.get("required", []) == []
 
 
 async def test_read_write_text(handlers, tmp_path) -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+import pytest
+
 from dotclaw.context import (
     ContextCacheScope,
     ContextContribution,
@@ -26,7 +28,7 @@ from dotclaw.runtime.application.dto import ContextBundle, ConversationMessage, 
 from dotclaw.runtime.application.execution import RunBudget, RunExecution
 from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent, ToolDefinitionsSlotContent
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
-from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, ToolCall
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
 
@@ -186,12 +188,13 @@ async def test_bound_slots_are_snapshotted_and_unenabled_slot_is_absent() -> Non
 async def test_run_messages_slot_only_snapshots_identifiers_and_tools_stay_structured() -> None:
     """RunMessagesSlot 不复制正文，实际工具 Schema 仅进入 ContextBundle.tools。"""
     request = _request()
+    source = RunMessage("assistant-1", 1, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(ToolCall("call-1", "lookup", {}),))
     run_message = RunMessage("tool-result-1", 2, RunMessageKind.TOOL_RESULT, MessageRole.TOOL, "私有工具输出", tool_call_id="call-1")
-    bundle = await build_context_provider(ContextDependencies()).build(request, _execution(request, (run_message,)).view())
+    bundle = await build_context_provider(ContextDependencies()).build(request, _execution(request, (source, run_message)).view())
 
     tools_snapshot = next(snapshot for snapshot in bundle.metadata.slot_snapshots if snapshot.slot_id == "tools")
     assert all(snapshot.slot_id != "run_messages" for snapshot in bundle.metadata.slot_snapshots)
-    assert bundle.metadata.fact_reference_message_ids == ("tool-result-1",)
+    assert bundle.metadata.fact_reference_message_ids == ("assistant-1", "tool-result-1")
     assert tools_snapshot.status is ContextSlotStatus.INCLUDED
     assert isinstance(tools_snapshot.content, ToolDefinitionsSlotContent)
     assert [item.to_dict() for item in tools_snapshot.content.tools] == [tool.to_dict() for tool in bundle.tools]

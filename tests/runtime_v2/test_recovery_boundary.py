@@ -44,6 +44,7 @@ from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.facts import (
     AgentPolicySnapshot,
     MessageRole,
+    RunErrorCode,
     RunMessageKind,
     ToolCall,
 )
@@ -147,7 +148,7 @@ def _engine(root: Path, llm: LLMPort, tool: ToolPort) -> RuntimeEngine:
         ApprovalService(ApprovalRepositoryAdapter(root)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
-        tool_recovery=file_tool_recovery(tmp_path),
+        tool_recovery=file_tool_recovery(root),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -185,9 +186,9 @@ async def test_execute_tools_checkpoint_persisted_before_tool_side_effect(tmp_pa
     assert checkpoint is not None
     # 恢复边界：崩溃点前的持久化检查点必须是 EXECUTE_TOOLS，而非旧路径遗留的 INVOKE_LLM。
     assert checkpoint.action is AgentAction.EXECUTE_TOOLS, f"检查点 action 应为 EXECUTE_TOOLS，实际 {checkpoint.action}"
-    assert checkpoint.pending.get("tool_calls") == [
-        {"call_id": "call-1", "name": "lookup", "arguments": {"q": "x"}}
-    ], "EXECUTE_TOOLS 检查点必须携带待执行工具调用"
+    assert checkpoint.pending.get("pending_call_ids") == ["call-1"]
+    ledger = await RunRepositoryAdapter(tmp_path).load_tool_ledger("session-rb", tool.run_id)
+    assert ledger is not None and ledger.calls[0].call.arguments == {"q": "x"}
 
     run_repository = RunRepositoryAdapter(tmp_path)
     run = await run_repository.find_run(tool.run_id)
@@ -196,8 +197,8 @@ async def test_execute_tools_checkpoint_persisted_before_tool_side_effect(tmp_pa
     assert run.state.mode.stage is RunStage.EXECUTING_TOOLS, f"持久化 stage 应为 EXECUTING_TOOLS，实际 {run.state.mode.stage}"
 
 
-async def test_execute_tools_recovery_replays_tools_not_llm(tmp_path: Path) -> None:
-    """EXECUTE_TOOLS 恢复路径必须重放工具轮（工具被调用一次、LLM 仅最终一轮），而非退化回重调 LLM。"""
+async def test_execute_tools_recovery_blocks_unknown_effect_without_replaying(tmp_path: Path) -> None:
+    """已启动工具无可靠结果时应阻断恢复，不能猜测安全并重放副作用。"""
     llm = _ToolCallingLLM()
     tool = _CrashingTool()
     engine = _engine(tmp_path, llm, tool)
@@ -214,11 +215,10 @@ async def test_execute_tools_recovery_replays_tools_not_llm(tmp_path: Path) -> N
     assert result.run_id == tool.run_id
     assert output.accepted == []
 
-    assert result.state.outcome() is RunOutcome.COMPLETED, f"恢复后应完成，实际 {result.state.outcome()}"
-    # 关键证明：工具被重放执行（一次），而不是因为退化回重调 LLM 而丢失工具轮。
-    assert resume_tool.calls == 1, f"恢复应重放工具一次，实际 {resume_tool.calls}"
-    # 恢复路径只调用一次 LLM（产出最终回复）；若退化回重调 LLM 取工具调用，则会是两次。
-    assert resume_llm.calls == 1, f"恢复只应调用一次 LLM 产出最终回复，实际 {resume_llm.calls}"
+    assert result.state.outcome() is RunOutcome.FAILED
+    assert result.error is not None and result.error.code is RunErrorCode.TOOL_OUTCOME_UNCERTAIN
+    assert resume_tool.calls == 0
+    assert resume_llm.calls == 0
 
 
 async def test_tool_batch_completed_checkpoint_persisted_before_llm_side_effect(tmp_path: Path) -> None:

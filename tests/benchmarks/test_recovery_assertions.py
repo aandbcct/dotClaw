@@ -36,10 +36,12 @@ def test_wrong_recovery_boolean_type_is_rejected() -> None:
         BenchmarkSample.from_dict(payload)
 
 
-def test_delegation_cold_rebuild_records_real_failure_evidence(tmp_path: Path) -> None:
-    """实际父 Run 挂起后冷重建回灌失败，保留事件与错误事实。"""
+def test_delegation_cold_rebuild_records_pending_boundary_evidence(tmp_path: Path) -> None:
+    """冷重建缺少委派观察端口时保留完整父子事实并安全挂起。"""
     evidence = asyncio.run(audit_delegation_cold_rebuild(tmp_path))
-    assert evidence["checkpoint_action"] == "suspend"
-    assert evidence["replay_outcome"] == "failed"
-    assert "子运行不存在" in str(evidence["failure"])
+    assert evidence["checkpoint_action"] == "execute_tools"
+    assert evidence["replay_outcome"] is None
+    assert evidence["replay_control_status"] is None
+    assert evidence["failure"] is None
+    assert evidence["child_run_id"] == "boundary-child"
     assert "delegation_submitted" in evidence["event_types"]

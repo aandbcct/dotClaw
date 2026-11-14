@@ -292,7 +292,7 @@ class ToolRecoveryService:
                         child_run_id = child.run_id
                         state = ToolCallState.WAITING_CHILD
                         uncertainty_reason = None
-                    elif attempt:
+                    elif raw_child_id is not None or attempt:
                         state = ToolCallState.UNCERTAIN
                         uncertainty_reason = "legacy_delegation_identity_unproven"
                     elif call.call_id in pending_ids:
@@ -723,7 +723,17 @@ class ToolRecoveryService:
             raise ValueError("当前调用不能进入审批等待")
         record.validate_transition(ToolCallState.WAITING_APPROVAL)
         updated = replace(record, state=ToolCallState.WAITING_APPROVAL, approval_id=approval_id, approval_decision=None, updated_at=utc_now_iso())
-        approval = ApprovalRecord(approval_id, run.run_id, run.session_id, ApprovalStatus.PENDING, utc_now_iso(), call_id=call_id)
+        approval = await self._approvals.find(approval_id)
+        if approval is None:
+            approval = ApprovalRecord(approval_id, run.run_id, run.session_id, ApprovalStatus.PENDING, utc_now_iso(), call_id=call_id)
+        else:
+            if (approval.run_id, approval.session_id) != (run.run_id, run.session_id):
+                raise ValueError("审批记录与工具调用运行不匹配")
+            if approval.status is not ApprovalStatus.PENDING or approval.decision is not None:
+                raise ValueError("审批记录不处于待处理状态")
+            if approval.call_id not in {None, call_id}:
+                raise ValueError("审批记录已关联其他工具调用")
+            approval = replace(approval, call_id=call_id)
         calls = tuple(updated if item.call.call_id == call_id else item for item in ledger.calls)
         base_run, base_checkpoint = await self._persistent_base(run)
         moved = transition(base_run.state, ToolApprovalRequired(approval_id))

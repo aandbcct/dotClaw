@@ -26,7 +26,7 @@ from typing import Any
 from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.context_budget import TokenCountRequest, TokenCountResult
-from ..runtime.application.dto import ConversationSnapshot, RunRequest, RunResult, ToolRecoveryContract, ToolResult
+from ..runtime.application.dto import ConversationSnapshot, DelegationRequest, RunRequest, RunResult, ToolRecoveryContract, ToolResult
 from ..runtime.application.engine import RuntimeEngine
 from ..runtime.application.tool_recovery import ToolRecoveryService
 from ..runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
@@ -45,8 +45,8 @@ from ..runtime.application.ports import (
     ToolPort,
 )
 from ..runtime.domain.events import RunEvent
-from ..runtime.domain.facts import AgentRun, RunCheckpoint, RunMessage
-from ..runtime.domain.state import AgentRunState, Ended
+from ..runtime.domain.facts import AgentRun, RunCheckpoint, RunMessage, RunMessageKind
+from ..runtime.domain.state import AgentRunState, Created, Ended
 from .fixtures import (
     FixtureApprovalRepository,
     FixtureConfigurationError,
@@ -338,11 +338,12 @@ class _PolicyComposite:
 class _DelegationComposite:
     """委派组合端口：优先 Fixture 受理；允许回退时缺失再回退真实端口。"""
 
-    def __init__(self, fixture: FixtureDelegationPort | None, real: DelegationPort | None, allow_fallback: bool) -> None:
+    def __init__(self, fixture: FixtureDelegationPort | None, real: DelegationPort | None, allow_fallback: bool, materialize_fixture_child=None) -> None:
         """绑定 Fixture、可选真实端口与回退开关。"""
         self._fixture: FixtureDelegationPort | None = fixture
         self._real: DelegationPort | None = real
         self._allow_fallback: bool = allow_fallback
+        self._materialize_fixture_child = materialize_fixture_child
         self.fixture_served: int = 0
         self.real_served: int = 0
 
@@ -351,6 +352,8 @@ class _DelegationComposite:
         if self._fixture is not None:
             try:
                 result: Any = await self._fixture.prepare(request)
+                if self._materialize_fixture_child is not None:
+                    await self._materialize_fixture_child(request, result)
                 self.fixture_served += 1
                 return result
             except FixtureConfigurationError:
@@ -587,7 +590,7 @@ class EvalEnvironment:
             self.fixture_approval, deps.approval_repository, allow_fallback
         )
         self.delegation_port: _DelegationComposite | None = (
-            _DelegationComposite(self.fixture_delegation, deps.delegation_port, allow_fallback)
+            _DelegationComposite(self.fixture_delegation, deps.delegation_port, allow_fallback, self._materialize_fixture_child_from_request)
             if (self.fixture_delegation is not None or deps.delegation_port is not None)
             else None
         )
@@ -713,6 +716,38 @@ class EvalEnvironment:
             root_run_id=parent.root_run_id or parent.run_id,
         )
         await self.run_repository.create_run(child)
+
+    async def _materialize_fixture_child_from_request(self, request: DelegationRequest, submission: Any) -> None:
+        """关联前先写入与委派请求相符的最小子运行事实。"""
+        if self.fixture_delegation is None:
+            raise FixtureConfigurationError("委派 Fixture 未装配")
+        fixture = self.fixture_delegation.submitted_fixture(submission.child_run_id)
+        parent = await self.run_repository.find_run(request.parent_run_id)
+        if parent is None:
+            raise FixtureConfigurationError("委派父 Run 不存在")
+        ended = fixture.outcome is not None
+        child = AgentRun(
+            run_id=submission.child_run_id,
+            session_id=fixture.target_session_id or submission.target_session_id,
+            agent_id=fixture.target_agent_id,
+            state=AgentRunState(mode=Ended(fixture.outcome)) if ended else AgentRunState(mode=Created()),
+            started_at="eval-fixture",
+            ended_at="eval-fixture" if ended else None,
+            policy=parent.policy,
+            input_message_id=f"input-{submission.child_run_id}",
+            parent_run_id=parent.run_id,
+            root_run_id=parent.root_run_id or parent.run_id,
+            delegation_task_id=submission.task_id,
+        )
+        await self.run_repository.create_run(child)
+        input_message = RunMessage(
+            child.input_message_id,
+            1,
+            RunMessageKind.USER_INPUT,
+            request.input_message.role,
+            request.input_message.content,
+        )
+        await self.run_repository.save_messages(child.session_id, child.run_id, (input_message,))
 
     def _build_request(self) -> RunRequest:
         """由 Case 的会话与输入消息构造执行请求。"""

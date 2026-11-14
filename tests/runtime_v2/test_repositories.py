@@ -12,7 +12,7 @@ import pytest
 from dotclaw.runtime.adapters import CheckpointRepositoryAdapter, InMemoryRunRepository, RunRepositoryAdapter
 from dotclaw.runtime.adapters.run_repository import _run_event_from_dict
 from dotclaw.runtime.adapters import _file_support as storage
-from dotclaw.runtime.application.ports import RunRepository
+from dotclaw.runtime.application.ports import RunPersistenceError, RunRepository
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.context import (
     ContextContributionKind,
@@ -215,8 +215,9 @@ async def test_v1_and_v2_messages_are_rejected_without_conversion(tmp_path: Path
     path: Path = tmp_path / run.session_id / "agent_runs" / run.run_id / "messages.json"
     for version in (1, 2, 3):
         path.write_text(json.dumps({"run_id": run.run_id, "version": version, "messages": []}), encoding="utf-8")
-        with pytest.raises(ValueError, match="仅支持 v4"):
+        with pytest.raises(RunPersistenceError, match="仅支持 v4") as captured:
             await repository.load_messages(run.session_id, run.run_id)
+        assert isinstance(captured.value.__cause__, ValueError)
 
 
 async def test_checkpoint_writes_and_reads_v4_control_fields(tmp_path: Path) -> None:
@@ -462,7 +463,7 @@ async def test_file_load_events_rejects_corrupted_json(tmp_path: Path) -> None:
     """JSON 损坏时失败。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     _write_events(_events_path(tmp_path), [_event_line("run-1", 1), "{not json"])
-    with pytest.raises(ValueError, match="events.jsonl"):
+    with pytest.raises(RunPersistenceError, match="events.jsonl"):
         await repository.load_events("session-1", "run-1")
 
 
@@ -501,8 +502,9 @@ async def test_find_run_permission_error_exhaustion_is_visible(tmp_path: Path, m
         raise PermissionError("持续文件锁")
 
     monkeypatch.setattr(repository, "_find_run_sync", reader)
-    with pytest.raises(PermissionError):
+    with pytest.raises(RunPersistenceError) as captured:
         await repository.find_run("run-1")
+    assert isinstance(captured.value.__cause__, PermissionError)
 
 
 async def test_find_run_non_permission_error_is_not_retried(tmp_path: Path, monkeypatch) -> None:
@@ -517,8 +519,9 @@ async def test_find_run_non_permission_error_is_not_retried(tmp_path: Path, monk
         raise ValueError("run.json 损坏")
 
     monkeypatch.setattr(repository, "_find_run_sync", reader)
-    with pytest.raises(ValueError, match="损坏"):
+    with pytest.raises(RunPersistenceError, match="损坏") as captured:
         await repository.find_run("run-1")
+    assert isinstance(captured.value.__cause__, ValueError)
     assert attempts == 1
 
 
@@ -526,7 +529,7 @@ async def test_file_load_events_rejects_non_object_root(tmp_path: Path) -> None:
     """根节点不是对象时失败。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     _write_events(_events_path(tmp_path), ["[1, 2, 3]"])
-    with pytest.raises(ValueError, match="events.jsonl"):
+    with pytest.raises(RunPersistenceError, match="events.jsonl"):
         await repository.load_events("session-1", "run-1")
 
 
@@ -534,7 +537,7 @@ async def test_file_load_events_rejects_sequence_not_starting_at_one(tmp_path: P
     """sequence 不从 1 开始时失败。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     _write_events(_events_path(tmp_path), [_event_line("run-1", 2)])
-    with pytest.raises(ValueError, match="events.jsonl"):
+    with pytest.raises(RunPersistenceError, match="events.jsonl"):
         await repository.load_events("session-1", "run-1")
 
 
@@ -542,7 +545,7 @@ async def test_file_load_events_rejects_sequence_gap(tmp_path: Path) -> None:
     """sequence 跳号时失败。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     _write_events(_events_path(tmp_path), [_event_line("run-1", 1), _event_line("run-1", 3)])
-    with pytest.raises(ValueError, match="events.jsonl"):
+    with pytest.raises(RunPersistenceError, match="events.jsonl"):
         await repository.load_events("session-1", "run-1")
 
 
@@ -550,7 +553,7 @@ async def test_file_load_events_rejects_duplicate_sequence(tmp_path: Path) -> No
     """sequence 重复时失败。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     _write_events(_events_path(tmp_path), [_event_line("run-1", 1), _event_line("run-1", 1)])
-    with pytest.raises(ValueError, match="events.jsonl"):
+    with pytest.raises(RunPersistenceError, match="events.jsonl"):
         await repository.load_events("session-1", "run-1")
 
 
@@ -558,7 +561,7 @@ async def test_file_load_events_rejects_mismatched_run_id(tmp_path: Path) -> Non
     """event.run_id 不匹配时失败。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     _write_events(_events_path(tmp_path), [_event_line("other-run", 1)])
-    with pytest.raises(ValueError, match="events.jsonl"):
+    with pytest.raises(RunPersistenceError, match="events.jsonl"):
         await repository.load_events("session-1", "run-1")
 
 
@@ -566,7 +569,7 @@ async def test_file_load_events_rejects_blank_line_in_middle(tmp_path: Path) -> 
     """中间空白行视为文件损坏。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     _write_events(_events_path(tmp_path), [_event_line("run-1", 1), "", _event_line("run-1", 2)])
-    with pytest.raises(ValueError, match="events.jsonl"):
+    with pytest.raises(RunPersistenceError, match="events.jsonl"):
         await repository.load_events("session-1", "run-1")
 
 
@@ -574,7 +577,7 @@ async def test_file_load_events_error_message_includes_line_number(tmp_path: Pat
     """错误信息包含事件行号。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     _write_events(_events_path(tmp_path), [_event_line("run-1", 1), _event_line("run-1", 5)])
-    with pytest.raises(ValueError, match="第 2 行"):
+    with pytest.raises(RunPersistenceError, match="第 2 行"):
         await repository.load_events("session-1", "run-1")
 
 
@@ -582,7 +585,7 @@ async def test_file_load_events_rejects_corrupted_last_line(tmp_path: Path) -> N
     """最后一行 JSON 损坏时失败，不静默返回此前事件。"""
     repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path)
     _write_events(_events_path(tmp_path), [_event_line("run-1", 1), "broken"])
-    with pytest.raises(ValueError, match="events.jsonl"):
+    with pytest.raises(RunPersistenceError, match="events.jsonl"):
         await repository.load_events("session-1", "run-1")
 
 

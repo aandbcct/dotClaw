@@ -177,4 +177,4 @@ async def test_tool_executor_adapter_drives_engine_approval_resume_with_same_run
     assert completed.run_id == waiting.run_id
     assert executions == ["done"]
     assert run is not None
-    assert run.statistics.tool_call_count == 2
+    assert run.statistics.tool_call_count == 1

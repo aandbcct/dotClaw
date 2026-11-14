@@ -9,6 +9,7 @@ from dotclaw.runtime.domain.events import RunEvent, RunEventType, ToolAuditStatu
 
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -368,8 +369,8 @@ async def test_pending_success_result_still_checks_opposite_approval_decision(tm
     engine = _engine(tmp_path)
     engine._llm_port, engine._tool_port = ApprovalLLM(), ApprovalTool()
     waiting = await engine.execute(_request("approval-pending-success-conflict"))
-    run = await engine._run_repository.load_run(waiting.session_id, waiting.run_id)
-    checkpoint = await engine._checkpoint_repository.load(waiting.session_id, waiting.run_id)
+    run = await engine._run_repository.load_run("approval-pending-success-conflict", waiting.run_id)
+    checkpoint = await engine._checkpoint_repository.load("approval-pending-success-conflict", waiting.run_id)
     assert run is not None and checkpoint is not None
     async with engine._cancellation_service.gate(run.run_id):
         await engine._tool_recovery.decide_approval(run, "approval-1", True, checkpoint)
@@ -388,8 +389,8 @@ async def test_resume_completes_refusal_decision_left_before_cancel_request(tmp_
     engine._llm_port, tool = ApprovalLLM(), ApprovalTool()
     engine._tool_port = tool
     waiting = await engine.execute(_request("approval-reject-recover"))
-    run = await engine._run_repository.load_run(waiting.session_id, waiting.run_id)
-    checkpoint = await engine._checkpoint_repository.load(waiting.session_id, waiting.run_id)
+    run = await engine._run_repository.load_run("approval-reject-recover", waiting.run_id)
+    checkpoint = await engine._checkpoint_repository.load("approval-reject-recover", waiting.run_id)
     assert run is not None and checkpoint is not None
     async with engine._cancellation_service.gate(run.run_id):
         await engine._tool_recovery.decide_approval(run, "approval-1", False, checkpoint)
@@ -471,15 +472,16 @@ class ApprovalTool(ToolPortTestBase):
         self._call_count: int = 0
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
-        """按调用次数模拟审批与批准后的真实执行。"""
+        """模拟预检获批后执行同一工具调用。"""
         self._call_count += 1
-        if self._call_count == 1:
-            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-1")
         return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已执行",
             execution_evidence=ToolExecutionEvidence.RETURNED)
 
     async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
-        return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-1",
+        if invocation.call.call_id == "call-1":
+            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-1",
+                execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
             execution_evidence=ToolExecutionEvidence.NOT_STARTED)
 
 
@@ -607,9 +609,11 @@ async def test_approval_events_carry_structured_fields(tmp_path: Path) -> None:
     assert waiting_event.data.get("approval_id") == "approval-1"
     assert waiting_event.data.get("call_id") == "call-1"
     assert waiting_event.data.get("tool_event_semantics") == 2
-    assert waiting_event.message_ids == ("tool-request",)
+    source_message_id = waiting_event.data["source_response_message_id"]
+    assert waiting_event.message_ids == (source_message_id,)
     messages = await run_repository.load_messages("session-fields", waiting.run_id)
-    assert not any(message.kind is RunMessageKind.TOOL_RESULT for message in messages)
+    assert any(message.message_id == source_message_id for message in messages)
+    assert [message.content for message in messages if message.kind is RunMessageKind.TOOL_RESULT] == ["已执行"]
     assert resolved_event.data.get("approval_id") == "approval-1"
     assert resolved_event.data.get("approved") is True
     assert resolved_event.data.get("tool_event_semantics") == 2
@@ -872,8 +876,8 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
     assert second_data["incremental_message_ids"] == [
         "user-1",
         f"response-{result.run_id}-2",
-        f"tool-{result.run_id}-3",
-        f"tool-{result.run_id}-4",
+        f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, result.run_id + ':call-1').hex}",
+        f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, result.run_id + ':call-2').hex}",
     ]
     tool_events: list[JSONMap] = [event for event in events if event["event_type"] in {"tool_started", "tool_completed"}]
     # 每个真实开始的工具单独写开始事件和恢复检查点，后续未执行工具不能伪造开始事实。
@@ -909,7 +913,6 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
         "这是之前的回答。",
         "请查询资料。",
         "我将查询两个来源。",
-        "",
         "已执行",
         "已执行",
     ]
@@ -920,7 +923,7 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
 
 
 async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> None:
-    """审批恢复不得重新计算动态 Slot，后续上下文必须使用首次冻结文本。"""
+    """工具恢复使用冻结 Slot；工具批次结束后的新模型请求刷新 Slot。"""
     llm: ReActLLM = ReActLLM()
     changing_slot: ChangingSystemSlot = ChangingSystemSlot()
     engine: RuntimeEngine = RuntimeEngine(
@@ -941,9 +944,9 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
     completed: RunResult = await engine.resolve_approval(waiting.approval_id or "", approved=True)
 
     assert completed.state.outcome() is RunOutcome.COMPLETED
-    assert changing_slot.calls == 1
+    assert changing_slot.calls == 2
     assert llm.contexts[0].messages[0].content == "system-1"
-    assert llm.contexts[1].messages[0].content == "system-1"
+    assert llm.contexts[1].messages[0].content == "system-2"
 
 
 async def test_rejected_approval_records_decision_and_cancels_without_conversation(tmp_path: Path) -> None:
@@ -1019,13 +1022,13 @@ async def test_cancel_started_ledger_call_keeps_unknown_effect_evidence(tmp_path
         history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-cancel-started"))
-    run = await run_repository.load_run(waiting.session_id, waiting.run_id)
-    checkpoint = await CheckpointRepositoryAdapter(tmp_path).load(waiting.session_id, waiting.run_id)
+    run = await run_repository.load_run("session-cancel-started", waiting.run_id)
+    checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-cancel-started", waiting.run_id)
     assert run is not None and checkpoint is not None
     async with engine._cancellation_service.gate(run.run_id):
         await engine._tool_recovery.decide_approval(run, "approval-1", True, checkpoint)
-    run = await run_repository.load_run(waiting.session_id, waiting.run_id)
-    checkpoint = await CheckpointRepositoryAdapter(tmp_path).load(waiting.session_id, waiting.run_id)
+    run = await run_repository.load_run("session-cancel-started", waiting.run_id)
+    checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-cancel-started", waiting.run_id)
     assert run is not None and checkpoint is not None
     async with engine._cancellation_service.gate(run.run_id):
         await engine._tool_recovery.begin_attempt(run, "call-1", checkpoint)
@@ -1033,7 +1036,7 @@ async def test_cancel_started_ledger_call_keeps_unknown_effect_evidence(tmp_path
     await engine.request_cancel(waiting.run_id, "开始后取消")
     result = await engine.complete_cancellation(waiting.run_id)
 
-    ledger = await run_repository.load_tool_ledger(waiting.session_id, waiting.run_id)
+    ledger = await run_repository.load_tool_ledger("session-cancel-started", waiting.run_id)
     assert ledger is not None
     call = next(item for item in ledger.calls if item.call.call_id == "call-1")
     assert result.state.outcome() is RunOutcome.CANCELLED
@@ -1087,7 +1090,9 @@ async def test_driver_cancellation_while_waiting_for_result_gate_keeps_observed_
     engine._llm_port = ReActLLM()
     tool = CompletedTool()
     engine._tool_port = tool
-    tool_started, allow_tool_return = asyncio.Event(), asyncio.Event()
+    tool_started, allow_tool_return, commit_started, allow_commit = (
+        asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event(),
+    )
 
     async def delayed_execute(invocation, execution):
         tool.calls.append(invocation)
@@ -1097,27 +1102,30 @@ async def test_driver_cancellation_while_waiting_for_result_gate_keeps_observed_
             output=f"结果-{invocation.call.call_id}", execution_evidence=ToolExecutionEvidence.RETURNED)
 
     tool.execute = delayed_execute
+    original_commit = engine._commit_observed_tool_result
+    async def wait_for_result_commit(*args, **kwargs):
+        commit_started.set()
+        await allow_commit.wait()
+        await original_commit(*args, **kwargs)
+    engine._commit_observed_tool_result = wait_for_result_commit
     task = asyncio.create_task(engine.execute(_request("session-result-gate-driver-cancel")))
     run_id = None
-    gate = None
     try:
         await tool_started.wait()
         active = await engine.active_run("session-result-gate-driver-cancel")
         assert active is not None
         run_id = active.run_id
-        gate = engine._cancellation_service.gate(run_id)
-        await gate.acquire()
         allow_tool_return.set()
-        await asyncio.sleep(0)
+        await asyncio.wait_for(commit_started.wait(), 2)
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
-        gate.release()
-        await task
+        allow_commit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     finally:
         allow_tool_return.set()
-        if gate is not None and gate.locked():
-            gate.release()
+        allow_commit.set()
         if not task.done():
             await task
 

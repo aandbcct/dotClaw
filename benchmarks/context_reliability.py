@@ -155,6 +155,8 @@ async def _compression(config: ContextRunConfig) -> list[BenchmarkSample]:
             compression_started = time.perf_counter()
             if outcome == "cancelled":
                 task = asyncio.create_task(engine.execute(request)); await llm.started.wait(); await engine.request_cancel(llm.run_id, "PR6 取消"); result = await task
+                if result.control_status == "cancelling":
+                    result = await engine.complete_cancellation(result.run_id)
             else:
                 result = await engine.execute(request)
             if outcome == "abandoned":

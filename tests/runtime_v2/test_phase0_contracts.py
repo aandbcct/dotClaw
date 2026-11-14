@@ -100,6 +100,13 @@ class _FakeApprovalToolExecutor:
         """返回成功结果，供适配器包装为 Runtime 标准结果。"""
         return ToolResult(output=f"ok:{name}")
 
+    async def execute_for_runtime(
+        self, name: str, arguments: dict, execution_context: ToolExecutionContext, *, approved: bool,
+    ) -> ToolResult:
+        if self.requires_approval(name, execution_context) and not approved:
+            return ToolResult(approval_required=True)
+        return await self.execute_approved(name, arguments, execution_context)
+
 
 def _make_execution_view(run_id: str, agent_id: str) -> RunExecutionView:
     """构造适配 ToolExecutorAdapter.execute 所需的最小执行视图。"""

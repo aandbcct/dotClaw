@@ -117,7 +117,7 @@ async def test_abandon_validation_and_execution_share_lock_against_resume(tmp_pa
         release.set()
         assert (await asyncio.wait_for(abandoned, 2)).state.outcome() is RunOutcome.ABANDONED
         if resumed:
-            assert (await resumed).state.outcome() is RunOutcome.FAILED
+            assert (await resumed).state.outcome() is RunOutcome.ABANDONED
 
 
 async def test_strict_branch_rechecks_current_run_and_preserves_default_branch(tmp_path):

@@ -10,6 +10,7 @@ from dotclaw.eval.environment import InMemoryCheckpointRepository
 from dotclaw.eval.fixtures import FixtureApprovalRepository
 from dotclaw.runtime.adapters import CheckpointRepositoryAdapter, InMemoryRunRepository, RunRepositoryAdapter
 from dotclaw.runtime.adapters._file_support import RunStorageFileName
+from dotclaw.runtime.application.ports import RunPersistenceError
 from dotclaw.runtime.adapters.approval_repository import ApprovalRepositoryAdapter
 from dotclaw.runtime.application.ports import ApprovalRepository, CheckpointRepository, RunRepository
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
@@ -106,11 +107,13 @@ async def test_file_ledger_rejects_corruption_and_wrong_storage_identity(tmp_pat
     await repository.create_run(run)
     path = tmp_path / run.session_id / "agent_runs" / run.run_id / RunStorageFileName.TOOL_CALLS.value
     path.write_text("{broken", encoding="utf-8")
-    with pytest.raises(ValueError):
+    with pytest.raises(RunPersistenceError) as captured:
         await repository.load_tool_ledger(run.session_id, run.run_id)
+    assert captured.value.__cause__ is not None
     path.write_text(json.dumps(ToolCallLedger("other-session", run.run_id, 1, ()).to_dict()), encoding="utf-8")
-    with pytest.raises(ValueError, match="存储路径"):
+    with pytest.raises(RunPersistenceError, match="存储路径") as captured:
         await repository.load_tool_ledger(run.session_id, run.run_id)
+    assert isinstance(captured.value.__cause__, ValueError)
 
 
 async def test_file_event_projection_refuses_damage_without_rewriting_old_bytes(tmp_path: Path) -> None:

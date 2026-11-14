@@ -423,7 +423,7 @@ def test_historical_approval_without_data_emits_issue():
     )
     messages = (make_message("msg-input", 1, RunMessageKind.USER_INPUT, role=MessageRole.USER),)
     trace = assemble_trace(run, events, messages, (make_context_version(1),))
-    assert any(i.kind is TraceIssueKind.MISSING_EVENT_PAIR for i in trace.issues)
+    assert any(i.kind is TraceIssueKind.CONFLICTING_REFERENCE for i in trace.issues)
 
 
 def test_recovery_blocked_preserves_uncertainty_reason_on_one_tool_span():
@@ -458,7 +458,7 @@ def test_approval_trace_does_not_coerce_non_boolean_decision():
 
     assert any(issue.kind is TraceIssueKind.CONFLICTING_REFERENCE for issue in trace.issues)
     approval = next(span for span in trace.spans if span.kind is SpanKind.APPROVAL)
-    assert approval.status is TraceSpanStatus.WAITING
+    assert approval.status is TraceSpanStatus.INCOMPLETE
 
 
 def test_all_five_span_kinds_share_run_parent():

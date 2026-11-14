@@ -266,10 +266,8 @@ async def test_playback_missing_fixture_fails_do_not_silent_succeed() -> None:
         tool_fixtures=(),  # 没有对应的工具 fixture
     )
     env = EvalEnvironment(case)
-    outcome = await env.run()
-    # 未匹配的工具调用必须导致失败，绝不能伪装成完成
-    assert isinstance(outcome.state.mode, Ended)
-    assert outcome.state.mode.outcome is RunOutcome.FAILED
+    with pytest.raises(FixtureConfigurationError):
+        await env.run()
 
 
 async def test_playback_composite_never_falls_back_to_real() -> None:

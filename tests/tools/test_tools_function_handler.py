@@ -12,7 +12,7 @@ from dotclaw.tools.base import (
     ToolResult,
     ToolErrorCode,
 )
-from dotclaw.tools.decorator import get_tool_meta, tool
+from dotclaw.tools.decorator import ToolMeta, get_tool_meta, tool
 from dotclaw.tools.function_handler import FunctionToolHandler
 from dotclaw.tools.schema import validate_args
 from dotclaw.common.resource_errors import ResourceCleanupError

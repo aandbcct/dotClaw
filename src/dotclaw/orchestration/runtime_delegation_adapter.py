@@ -87,6 +87,16 @@ class RuntimeDelegationAdapter(DelegationPort):
                 initial = next((message for message in messages if message.message_id == child.input_message_id), None)
                 if (child.parent_run_id, child.root_run_id, child.agent_id) != (parent.run_id, request.root_run_id, request.target_agent_id) or initial is None or (initial.role, initial.content) != (request.input_message.role, request.input_message.content) or not child.delegation_task_id:
                     raise ValueError("准备失败后发现的稳定子运行与本调用契约冲突")
+                try:
+                    await self._require_coordinator()._engine._prepare_run(child_request)
+                except ValueError:
+                    if not isinstance(child.state.mode, Created) or child.state.is_ended():
+                        raise
+                    await self._require_coordinator().cancel(child_id, "委派子运行准备不完整")
+                    await self._require_coordinator().wait_terminal(child_id)
+                    child = await self._run_repository.find_run(child_id)
+                    if child is None:
+                        raise ValueError("取消不完整委派子运行后记录不存在")
                 await self._restore_projection(child)
                 return DelegationSubmission(child_id, child.delegation_task_id, child.session_id)
             raise

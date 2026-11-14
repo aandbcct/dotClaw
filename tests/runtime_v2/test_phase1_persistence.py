@@ -19,6 +19,7 @@ import pytest
 from dotclaw.runtime.adapters.checkpoint_repository import CheckpointRepositoryAdapter
 from dotclaw.runtime.adapters.in_memory_run_repository import InMemoryRunRepository
 from dotclaw.runtime.adapters.run_repository import RunRepositoryAdapter
+from dotclaw.runtime.application.ports import RunPersistenceError
 from dotclaw.runtime.application.dto import ConversationMessage
 from dotclaw.runtime.domain.context import SuccessCommitIntent
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
@@ -268,5 +269,6 @@ async def test_checkpoint_repository_rejects_non_v4(tmp_path) -> None:
     (tmp_path / "session-1" / "agent_runs" / "run-1" / "checkpoint.json").write_text(
         __import__("json").dumps({"version": 2, "checkpoint_id": "x"}), encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="仅支持 v4"):
+    with pytest.raises(RunPersistenceError, match="仅支持 v4") as captured:
         await CheckpointRepositoryAdapter(tmp_path).load("session-1", "run-1")
+    assert isinstance(captured.value.__cause__, ValueError)

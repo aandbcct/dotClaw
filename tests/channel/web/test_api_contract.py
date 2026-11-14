@@ -635,9 +635,9 @@ async def test_activity_exposes_tool_evidence_and_web_approval_stream() -> None:
         "name": "read_file",
         "status": "approval_required",
         "started_at": "2026-09-01T09:00:01+08:00",
-        "completed_at": "2026-09-01T09:00:02+08:00",
+        "completed_at": "",
         "arguments": {"path": "README.md"},
-        "result": "文件内容",
+        "result": "",
         "error": "",
     }]
     assert decision.status_code == 200

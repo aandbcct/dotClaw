@@ -42,6 +42,8 @@ _SUPPORTED_EVENTS = frozenset(
         RunEventType.RUN_FAILED,
         RunEventType.RUN_CANCELLED,
         RunEventType.RUN_ABANDONED,
+        RunEventType.RUN_RESUMED,
+        RunEventType.CANCEL_REQUESTED,
         RunEventType.LLM_STARTED,
         RunEventType.LLM_COMPLETED,
         RunEventType.TOOL_STARTED,

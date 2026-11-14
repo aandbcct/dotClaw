@@ -263,6 +263,8 @@ async def test_cancellation_effect_uses_resource_scope_and_survives_settlement(t
     from types import SimpleNamespace
     from tests.runtime_v2.test_runtime_engine import _engine, _request
     from dotclaw.runtime.domain.facts import ToolCall
+    from dotclaw.runtime.application.dto import ToolRecoveryContract, ToolResult, ToolResultStatus
+    from dotclaw.common.tool_replay import ToolExecutionEvidence
     engine = _engine(tmp_path)
     entered = asyncio.Event()
     async def blocked(*args):
@@ -277,12 +279,19 @@ async def test_cancellation_effect_uses_resource_scope_and_survives_settlement(t
             return RunMessage("call", 0, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "",
                 tool_calls=(ToolCall("resource", kind, {}),))
         engine._llm_port = SimpleNamespace(complete=model)
-        engine._tool_port = SimpleNamespace(execute=blocked)
+        async def preflight(invocation, execution):
+            return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+                execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+        async def describe_recovery(call, execution):
+            return ToolRecoveryContract()
+        engine._tool_port = SimpleNamespace(execute=blocked, preflight=preflight, describe_recovery=describe_recovery)
     driver = asyncio.create_task(engine.execute(_request("scope")))
     await asyncio.wait_for(entered.wait(), 2)
     run = await engine.active_run("scope")
     await engine.request_cancel(run.run_id, "停止当前请求")
-    assert (await driver).state.outcome() is RunOutcome.CANCELLED
+    pending = await driver
+    assert pending.control_status == "cancelling" and not pending.state.is_ended()
+    assert (await engine.complete_cancellation(run.run_id)).state.outcome() is RunOutcome.CANCELLED
     record = await engine._run_repository.load_cancellation("scope", run.run_id)
     expected = CancellationEffect.LOCAL_ONLY if kind == "builtin.process.execute" else CancellationEffect.REMOTE_UNKNOWN
     assert record.effect is expected

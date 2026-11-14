@@ -172,11 +172,8 @@ async def test_approval_fixture_auto_approves_isolated_run():
     assert approval[0].attributes.get("approval_id") == "apr-1"
     assert approval[0].status is TraceSpanStatus.COMPLETED
     assert approval[0].attributes.get("approved") is True
-    # 审批通过后引擎重放同一工具调用：先有等待中的一次，再有真正执行完成的一次
-    assert [span.status for span in tool_spans(result.trace)] == [
-        TraceSpanStatus.WAITING,
-        TraceSpanStatus.COMPLETED,
-    ]
+    # 审批前后是同一逻辑工具调用，Trace 按 call_id 重建为一个完成 Span。
+    assert [span.status for span in tool_spans(result.trace)] == [TraceSpanStatus.COMPLETED]
 
 
 async def test_approval_fixture_auto_rejects_isolated_run():
@@ -194,7 +191,7 @@ async def test_approval_fixture_auto_rejects_isolated_run():
 
     assert approval_spans(result.trace)[0].status is TraceSpanStatus.CANCELLED
     # 被拒绝的工具不会执行：只留下等待审批的那一个 Span
-    assert [span.status for span in tool_spans(result.trace)] == [TraceSpanStatus.WAITING]
+    assert [span.status for span in tool_spans(result.trace)] == [TraceSpanStatus.CANCELLED]
 
 
 async def test_approval_fixture_consumed_by_isolated_run():

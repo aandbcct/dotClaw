@@ -9,6 +9,8 @@ from dotclaw.runtime.application.run_watch_service import RunWatchService, RunWa
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
 from dotclaw.runtime.adapters import RunRepositoryAdapter, InMemoryRunRepository
+from dotclaw.runtime.adapters._file_support import StoragePersistenceError
+from dotclaw.runtime.application.ports import RunPersistenceError
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.context import SuccessCommitFaultPoint
 from dotclaw.runtime.domain.context import SuccessCommitIntent
@@ -81,9 +83,10 @@ async def test_facade_does_not_hide_corrupt_storage_as_missing_target(tmp_path):
     await repository.create_run(_run())
     service = SessionInteractionService(SessionManager(tmp_path), AgentRegistry(), coordinator, run_repository=repository)
     (tmp_path / "session" / "agent_runs" / "run" / "run.json").write_text("{invalid", encoding="utf-8")
-    with pytest.raises(ValueError):
+    with pytest.raises(StoragePersistenceError) as captured:
         await service.get_run("session", "run")
-    with pytest.raises(ValueError):
+    assert captured.value.__cause__ is not None
+    with pytest.raises(StoragePersistenceError):
         await service.cancel_session("session", "停止", expected_run_id="run")
 
 
@@ -160,8 +163,9 @@ async def test_cancellation_intent_masks_settled_summary_until_intent_deleted(tm
     def fail(*args):
         raise OSError("删除意图前中断")
     monkeypatch.setattr(repository, "_delete_cancellation_intent_sync", fail)
-    with pytest.raises(OSError):
+    with pytest.raises(RunPersistenceError) as captured:
         await repository.commit_cancellation(_intent(run, record))
+    assert isinstance(captured.value.__cause__, OSError)
     watcher = RunWatchService(repository, CancellationService(), RunChangeNotifier(), "one")
     observation = await watcher.snapshot("session", "run")
     assert observation.run.state.is_ended() and not observation.terminal

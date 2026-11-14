@@ -207,7 +207,7 @@ class WaitingApprovalTool(ToolPortTestBase):
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """模拟保存后可恢复的审批工具结果。"""
         self._calls += 1
-        if self._calls == 1:
+        if not invocation.approved:
             return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-e4")
         return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已审批工具结果",
             execution_evidence=ToolExecutionEvidence.RETURNED)

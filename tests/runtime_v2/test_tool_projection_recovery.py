@@ -89,7 +89,7 @@ def _run() -> AgentRun:
 
 def _checkpoint() -> RunCheckpoint:
     return RunCheckpoint(
-        "checkpoint-1", "run-1", "session-1", 1, 0, 0,
+        "checkpoint-1", "run-1", "session-1", 1, 0, 2,
         {"tool_batch_id": "assistant-1", "pending_call_ids": ["call-1"]}, {}, AgentAction.EXECUTE_TOOLS,
     )
 
@@ -106,6 +106,10 @@ async def _seed() -> tuple[_FailingRunRepository, _FailingCheckpointRepository, 
         ToolCallKind.ORDINARY, ToolCallState.PENDING,
     )
     await runs.create_run(run)
+    await runs.save_messages("session-1", "run-1", (
+        RunMessage("input-1", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "query"),
+        RunMessage("assistant-1", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(record.call,)),
+    ))
     await checkpoints.save(checkpoint)
     await runs.save_tool_ledger(ToolCallLedger("session-1", "run-1", 1, (record,)), expected_revision=0)
     return runs, checkpoints, approvals, service, run, checkpoint
@@ -167,6 +171,10 @@ async def test_approval_projection_is_replayed_from_saved_intent() -> None:
         ToolCallKind.ORDINARY, ToolCallState.PENDING,
     )
     await runs.create_run(run)
+    await runs.save_messages("session-1", "run-1", (
+        RunMessage("input-1", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "query"),
+        RunMessage("assistant-1", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(record.call,)),
+    ))
     await checkpoints.save(checkpoint)
     await runs.save_tool_ledger(ToolCallLedger("session-1", "run-1", 1, (record,)), expected_revision=0)
 
@@ -254,6 +262,8 @@ async def test_cancelled_call_without_result_does_not_increment_logical_call_sta
     messages = await runs.load_messages("session-1", "run-1")
     events = await runs.load_events("session-1", "run-1")
     assert persisted_run is not None and persisted_run.statistics.tool_call_count == 0
-    assert messages == ()
+    assert tuple(message.kind for message in messages) == (
+        RunMessageKind.USER_INPUT, RunMessageKind.LLM_RESPONSE,
+    )
     assert events[-1].data["result_message_id"] == ""
     assert events[-1].message_ids == ()

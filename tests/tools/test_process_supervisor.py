@@ -215,8 +215,7 @@ async def test_real_runtime_approved_command_cancellation_reclaims_entire_tree(t
     from types import SimpleNamespace
     from tests.runtime_v2.test_runtime_engine import _engine, _request
     from dotclaw.tools.registry import ToolRegistry
-    from dotclaw.tools.function_handler import FunctionToolHandler
-    from dotclaw.tools.decorator import get_tool_meta
+    from dotclaw.tools.discovery import ToolDiscovery
     from dotclaw.tools.executor import ToolExecutor
     from dotclaw.runtime.adapters.tool_executor_adapter import ToolExecutorAdapter
     from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
@@ -228,7 +227,8 @@ async def test_real_runtime_approved_command_cancellation_reclaims_entire_tree(t
     directory = tmp_path / "tree"
     directory.mkdir()
     registry = ToolRegistry()
-    registry.register(FunctionToolHandler(execute, get_tool_meta(execute)))
+    for handler in ToolDiscovery.discover_builtin():
+        registry.register(handler)
     engine = _engine(tmp_path, run_change_notifier=notifier)
     engine._tool_port = ToolExecutorAdapter(ToolExecutor(registry))
     model_calls = []
@@ -244,7 +244,11 @@ async def test_real_runtime_approved_command_cancellation_reclaims_entire_tree(t
     pids = await _ready(directory, 3)
     try:
         await coordinator.cancel(waiting.run_id, "停止真实命令")
-        assert (await driver).state.outcome() is RunOutcome.CANCELLED
+        cancelled = await driver
+        if cancelled.control_status == "cancelling":
+            await coordinator.wait_terminal(waiting.run_id)
+            cancelled = await engine._run_repository.find_run(waiting.run_id)
+        assert cancelled.state.outcome() is RunOutcome.CANCELLED
         await asyncio.gather(*tuple(coordinator._cancellation_jobs.values()))
         record = await engine._run_repository.load_cancellation("runtime-process", waiting.run_id)
         assert record.effect is CancellationEffect.LOCAL_ONLY

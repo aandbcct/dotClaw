@@ -110,7 +110,7 @@
     {
       "kind": "tool_sequence",
       "target": "tool_name",
-      "expected": ["search", "search"],
+      "expected": ["search"],
       "options": {}
     },
     {

@@ -22,7 +22,7 @@ from ...common.logging_setup import exception_diagnostic
 from ...runtime.application.session_run_coordinator import RunNotRecoverableError, SessionBusyError
 from ...runtime.application.dto import RunResult
 from ...runtime.application.run_watch_service import RunObservation, RunWatchCursor
-from ...runtime.application.ports import RUN_SESSION_MISMATCH_REASON
+from ...runtime.application.ports import RUN_SESSION_MISMATCH_REASON, RunPersistenceError
 from ...runtime.domain.cancellation import CancellationDisposition, CancellationPhase
 from ...runtime.domain.events import RunEvent, RunEventType
 from ...runtime.domain.facts import AgentRun, JSONMap, MessageRole, RunError, RunErrorCode, RunMessage, RunMessageKind
@@ -335,7 +335,7 @@ def create_app(
             return _session_not_found()
         try:
             run = await host.session_interaction.get_run(session_id, run_id)
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RunPersistenceError) as error:
             return _run_storage_error(error)
         if run is None:
             if run_id is not None:
@@ -343,7 +343,7 @@ def create_app(
             return None
         try:
             observation = await host.session_interaction.snapshot_run(session_id, run.run_id)
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RunPersistenceError) as error:
             return _run_storage_error(error)
         return _observation_activity(observation)
 
@@ -360,7 +360,7 @@ def create_app(
             initial = await service.snapshot_run(session_id, run_id)
         except FileNotFoundError:
             return _error_response(404, WebErrorCode.RUN_NOT_FOUND, "运行不存在")
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RunPersistenceError) as error:
             return _run_storage_error(error)
         if cursor is not None and (cursor.event_sequence > initial.cursor.event_sequence
                 or cursor.control_revision > initial.cursor.control_revision):
@@ -372,7 +372,7 @@ def create_app(
                         return
                     yield encode_sse_event(SSEEvent(SSEEventType.RUN_SNAPSHOT,
                         _observation_activity(observation).model_dump(mode="json"), str(observation.cursor)))
-            except (OSError, ValueError) as error:
+            except (OSError, ValueError, RunPersistenceError) as error:
                 logger.error("web.run.watch_failed diagnostic=%s", exception_diagnostic(error))
                 yield encode_sse_event(_stream_error_event(session_id))
         return StreamingResponse(body(), media_type="text/event-stream",
@@ -456,7 +456,7 @@ def create_app(
             return _session_not_found()
         try:
             receipt = await host.session_interaction.cancel_session(session_id, payload.reason, expected_run_id=payload.run_id)
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RunPersistenceError) as error:
             return _run_storage_error(error)
         if receipt.disposition is CancellationDisposition.NOT_FOUND:
             return _error_response(404, WebErrorCode.RUN_NOT_FOUND, "运行不存在")
@@ -774,12 +774,12 @@ def _run_activity(
             current.name = str(event.data.get("tool_name") or current.name)
             current.started_at = current.started_at or event.occurred_at
             current.status = "running"
-            current.completed_at = None
+            current.completed_at = ""
             current.result = ""
             current.error = ""
         elif event.event_type is RunEventType.WAITING_APPROVAL:
             current.status = "approval_required"
-            current.completed_at = None
+            current.completed_at = ""
             current.result = ""
             current.error = ""
         elif event.event_type is RunEventType.APPROVAL_RESOLVED:
@@ -790,7 +790,7 @@ def _run_activity(
             current.error = "工具结果待确认：外部操作可能已生效，请先核对。"
         elif event.data.get("status") == "approval_required":
             current.status = "approval_required"
-            current.completed_at = None
+            current.completed_at = ""
             current.result = ""
             current.error = ""
         else:
@@ -855,7 +855,7 @@ def _observation_activity(observation: RunObservation) -> RunActivityResponse:
     return _run_activity(observation.run, events, observation.messages, observation.executing, observation=observation)
 
 
-def _run_storage_error(error: OSError | ValueError) -> JSONResponse:
+def _run_storage_error(error: OSError | ValueError | RunPersistenceError) -> JSONResponse:
     """归属拒绝只匹配稳定标识；磁盘和格式错误保留服务端失败并脱敏记录。"""
     if isinstance(error, PermissionError) and error.args == (RUN_SESSION_MISMATCH_REASON,):
         return _error_response(404, WebErrorCode.RUN_NOT_FOUND, "运行不属于此会话")
@@ -900,11 +900,11 @@ def _run_steps(run: AgentRun, events: tuple[RunEvent, ...], *, terminal_committe
             else:
                 tools[call_id or ""] = current
                 current.status = "running"
-                current.completed_at = None
+                current.completed_at = ""
         elif event.event_type is RunEventType.WAITING_APPROVAL or event.data.get("status") == "approval_required":
             tools[call_id or ""] = current
             current.status = "approval_required"
-            current.completed_at = None
+            current.completed_at = ""
         elif event.event_type is RunEventType.TOOL_RECOVERY_BLOCKED:
             current.completed_at = event.occurred_at
             current.status = "uncertain"

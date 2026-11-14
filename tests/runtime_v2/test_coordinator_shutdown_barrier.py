@@ -140,7 +140,8 @@ async def test_shutdown_allows_waiting_for_existing_driver_but_refuses_new_start
     coordinator.schedule_prepared(request.run_id)
     observer = asyncio.create_task(coordinator.start_prepared(request.run_id))
     release.set()
-    assert (await asyncio.wait_for(observer, 2)).state.outcome() is RunOutcome.CANCELLED
+    result = await asyncio.wait_for(observer, 2)
+    assert result.control_status == "cancelling" and not result.state.is_ended()
     assert (await coordinator.wait_terminal(request.run_id)).state.outcome() is RunOutcome.CANCELLED
     with pytest.raises(RuntimeError, match="停止"):
         coordinator.schedule_prepared("another-run")

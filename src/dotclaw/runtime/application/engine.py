@@ -354,24 +354,28 @@ class RuntimeEngine:
         record = await self._approval_service.find(approval_id)
         if record is None:
             return RunResult("", AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "审批记录不存在"))
-        run = await self._run_repository.load_run(record.session_id, record.run_id)
+        run = await self._run_repository.find_run(record.run_id)
         if run is None:
             return RunResult(record.run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "审批关联运行不存在"))
         cancellation = None
         async with self._cancellation_service.gate(run.run_id):
             await self._tool_recovery.recover_projection(run.session_id, run.run_id)
-            run = await self._run_repository.load_run(run.session_id, run.run_id)
+            run = await self._run_repository.find_run(run.run_id)
             if run is None:
                 raise RunPersistenceError("审批投影后运行不存在")
             checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
             ledger = await self._run_repository.load_tool_ledger(run.session_id, run.run_id)
             if ledger is not None:
-                await self._tool_recovery.decide_approval(run, approval_id, approved, checkpoint)
+                call = next((item for item in ledger.calls if item.approval_id == approval_id), None)
+                if call is not None and (call.approval_decision is not None or not run.state.is_ended()):
+                    await self._tool_recovery.decide_approval(run, approval_id, approved, checkpoint)
             committing_result = await self._pending_success_result_locked(run)
             if committing_result is not None:
                 return committing_result
             if run.state.is_ended():
-                return await self._result_from_run(run)
+                cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
+                if cancellation is None or cancellation.phase is CancellationPhase.SETTLED:
+                    return await self._result_from_run(run)
             if checkpoint is not None and ledger is None:
                 messages = await self._run_repository.load_messages(run.session_id, run.run_id)
                 events = await self._run_repository.load_events(run.session_id, run.run_id)
@@ -417,8 +421,11 @@ class RuntimeEngine:
             return RunResult(parent_run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "父运行不存在"))
         cancellation_requested = False
         async with self._cancellation_service.gate(parent_run.run_id):
+            committing_result = await self._pending_success_result_locked(parent_run)
+            if committing_result is not None:
+                return committing_result
             await self._tool_recovery.recover_projection(parent_run.session_id, parent_run_id)
-            latest = await self._run_repository.load_run(parent_run.session_id, parent_run_id)
+            latest = await self._run_repository.find_run(parent_run_id)
             if latest is None:
                 return RunResult(parent_run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "父运行不存在"))
             parent_run = latest
@@ -481,6 +488,14 @@ class RuntimeEngine:
                 state = parent_run.state
         if ledger is None and not (isinstance(state.mode, Suspended) and state.mode.reason is SuspendReason.DELEGATION):
             return RunResult(parent_run_id, AgentRunState(mode=Ended(RunOutcome.FAILED)), error=RunError(RunErrorCode.INVALID_STATE, "父运行不处于 delegation 挂起"))
+        expected_child_id = checkpoint.pending.get("child_run_id")
+        if not isinstance(expected_child_id, str) and isinstance(state.mode, Suspended) and state.mode.reason is SuspendReason.DELEGATION:
+            expected_child_id = state.mode.control_id
+        if isinstance(expected_child_id, str) and child_run_id != expected_child_id:
+            return RunResult(
+                parent_run_id, parent_run.state,
+                error=RunError(RunErrorCode.INVALID_STATE, "委派回调子运行与父检查点关联不匹配"),
+            )
         batch_id = checkpoint.pending.get("tool_batch_id")
         uncertain_record = next((
             item for item in ledger.calls
@@ -515,7 +530,7 @@ class RuntimeEngine:
         child_result = await self._delegation_port.result(child_run_id) if self._delegation_port is not None else None
         if child_result is None:
             # 子运行尚未结束：父运行继续挂起，不修改任何持久化状态。
-            return RunResult(parent_run_id, AgentRunState(mode=Suspended(SuspendReason.DELEGATION, child_run_id, RunStage.EXECUTING_TOOLS)), child_run_id=child_run_id)
+            return RunResult(parent_run_id, parent_run.state, child_run_id=child_run_id)
         if ledger is not None:
             async with self._cancellation_service.gate(parent_run_id):
                 await self._tool_recovery.recover_projection(parent_run.session_id, parent_run_id)
@@ -818,13 +833,13 @@ class RuntimeEngine:
     async def _resume_reserved_run(self, run_id: str, run: AgentRun, output_port: LLMOutputPort | None) -> tuple[RunResult, bool]:
         """在调用方已预留驱动权时补齐投影、重建执行现场并绑定恢复令牌。"""
         async with self._cancellation_service.gate(run_id):
-            await _await_control(self._tool_recovery.recover_projection(run.session_id, run_id))
-            run = await _await_control(self._run_repository.load_run(run.session_id, run_id))
-            if run is None:
-                raise RunPersistenceError("恢复投影后运行不存在")
             committing_result = await self._pending_success_result_locked(run)
             if committing_result is not None:
                 return committing_result, False
+            await _await_control(self._tool_recovery.recover_projection(run.session_id, run_id))
+            run = await _await_control(self._run_repository.find_run(run_id))
+            if run is None:
+                raise RunPersistenceError("恢复投影后运行不存在")
             cancellation = await self._run_repository.load_cancellation(run.session_id, run_id)
             if cancellation is None:
                 ledger = await self._run_repository.load_tool_ledger(run.session_id, run_id)
@@ -971,13 +986,13 @@ class RuntimeEngine:
         async with self._cancellation_service.gate(run_id):
             target = await _await_control(self._run_repository.find_run(run_id))
             if target is not None:
-                await self._tool_recovery.recover_projection(target.session_id, run_id)
-                target = await _await_control(self._run_repository.load_run(target.session_id, run_id))
-                if target is None:
-                    raise ValueError("放弃运行投影后运行不存在")
                 committing_result = await self._pending_success_result_locked(target)
                 if committing_result is not None:
                     return committing_result
+                await self._tool_recovery.recover_projection(target.session_id, run_id)
+                target = await _await_control(self._run_repository.find_run(run_id))
+                if target is None:
+                    raise ValueError("放弃运行投影后运行不存在")
             cancellation = await self._run_repository.load_cancellation(target.session_id, run_id) if target else None
             children = await self._run_repository.list_child_runs(run_id)
             if any(not child.state.is_ended() for child in children):
@@ -1176,6 +1191,7 @@ class RuntimeEngine:
             elif record is None:
                 raise ValueError("运行尚未请求取消")
         if recovered_result is not None:
+            self._run_change_notifier.notify(run_id)
             await self._release_run_context_if_terminal(recovered_result)
             return recovered_result
         await self.refresh_cancellation_progress(run_id)
