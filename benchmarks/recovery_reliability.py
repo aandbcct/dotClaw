@@ -16,6 +16,10 @@ from pathlib import Path
 
 from dotclaw.runtime.adapters import RunRepositoryAdapter
 from dotclaw.runtime.domain.context import SuccessCommitFaultPoint
+from dotclaw.runtime.domain.events import RunEventType
+from dotclaw.runtime.domain.state import RunOutcome
+from dotclaw.runtime.domain.tool_recovery import ToolCallKind, ToolCallState
+from dotclaw.runtime.domain.facts import RunErrorCode
 
 from .eval_baseline_models import BenchmarkSample, CapabilityStatus, ExternalEffectStatus, RecoveryFaultScenario, SUITE_RECOVERY
 from .eval_baseline_stats import build_snapshot
@@ -64,8 +68,30 @@ async def run_recovery_sample(root: Path, mode: str, attempt: int, is_warmup: bo
     llm_count, tool_count = effects.count("llm_request"), effects.count("tool_effect")
     status = _external_status(mode, llm_count, tool_count)
     duplicate_count = max(0, tool_count - 1) if mode.startswith("tool_") else max(0, llm_count - 1)
-    expected_tool_results = 2 if mode == "approval_cold_rebuild" else (1 if mode.startswith("tool_") else 0)
+    expected_tool_results = 1 if mode == "approval_cold_rebuild" else (1 if mode == "tool_before_effect" else 0)
     internal_pass = facts.internal_facts_pass and facts.tool_result_count == expected_tool_results
+    if mode == "tool_after_effect":
+        repository = RunRepositoryAdapter(root)
+        run = await repository.find_run(fault.run_id)
+        ledger = await repository.load_tool_ledger(session_id, fault.run_id)
+        events = await repository.load_events(session_id, fault.run_id)
+        blocked_calls = tuple(
+            call for call in ledger.calls
+            if call.kind is ToolCallKind.ORDINARY and call.state is ToolCallState.UNCERTAIN
+            and call.uncertainty_reason == "started_outcome_unknown"
+        ) if ledger is not None else ()
+        control_pass = (
+            run is not None and run.run_id == fault.run_id and run.state.outcome() is RunOutcome.FAILED
+            and run.error is not None and run.error.code is RunErrorCode.TOOL_OUTCOME_UNCERTAIN
+            and before_action == expected_before_action and facts.same_context_version
+            and result.error is not None and result.error.code is RunErrorCode.TOOL_OUTCOME_UNCERTAIN
+        )
+        internal_pass = (
+            len(blocked_calls) == 1 and facts.tool_result_count == 0
+            and sum(event.event_type is RunEventType.TOOL_RECOVERY_BLOCKED for event in events) == 1
+            and sum(event.event_type is RunEventType.TOOL_COMPLETED for event in events) == 0
+            and tool_count == 1
+        )
     scenario = RecoveryFaultScenario(mode)
     return BenchmarkSample(
         dataset=SUITE_RECOVERY, case_id=mode, attempt=attempt, is_warmup=is_warmup,
@@ -130,9 +156,9 @@ async def run_process_sample(root: Path, attempt: int, is_warmup: bool) -> Bench
 
 
 async def delegation_boundary_sample(root: Path, attempt: int, is_warmup: bool) -> BenchmarkSample:
-    """执行真实父 Run（父级运行）挂起、冷重建与回灌失败审计。"""
+    """记录冷重建缺少委派观察端口时保持挂起的已知能力边界。"""
     evidence = await audit_delegation_cold_rebuild(root)
-    reason = str(evidence["failure"])
+    reason = "冷重建缺少委派观察端口；父运行保持挂起，等待原子链路接管。"
     return BenchmarkSample(
         dataset=SUITE_RECOVERY, case_id="delegation_cold_rebuild_boundary", attempt=attempt, is_warmup=is_warmup,
         git_commit=_git_commit(), python_version=sys.version.split()[0], platform=platform.platform(), config_hash="recovery-v1-fixed", eval_schema_version="runtime-v4",

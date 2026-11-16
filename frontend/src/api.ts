@@ -153,7 +153,7 @@ function validateRunActivity(activity: RunActivity): RunActivity {
     || (cancellation.diagnostic !== null && typeof cancellation.diagnostic !== "string"))) throw new ApiError("取消进度格式无效", "invalid_activity", 200);
   if ((activity.event_sequence !== undefined && (!Number.isSafeInteger(activity.event_sequence) || activity.event_sequence < 0)) || (activity.steps !== undefined && (!Array.isArray(activity.steps) || !activity.steps.every((step) =>
     isRecord(step) && typeof step.id === "string" && Boolean(step.id) && Number.isInteger(step.sequence) && step.sequence >= 0 &&
-    ["model", "tool"].includes(step.kind) && ["running", "completed", "failed", "cancelled", "approval_required", "interrupted"].includes(step.status) &&
+    ["model", "tool"].includes(step.kind) && ["running", "completed", "failed", "cancelled", "approval_required", "interrupted", "uncertain"].includes(step.status) &&
     typeof step.started_at === "string" && typeof step.completed_at === "string" && (step.call_id === null || typeof step.call_id === "string")
   )))) throw new ApiError("运行步骤数据格式无效", "invalid_activity", 200);
   return activity;

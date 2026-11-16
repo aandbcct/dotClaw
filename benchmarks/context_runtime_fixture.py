@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import tiktoken
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 
 from dotclaw.context import ContextDependencies, build_context_provider
 from dotclaw.context.ports import UserProfile
@@ -16,10 +17,11 @@ from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointReposi
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.context_budget import TokenCountRequest, TokenCountResult
-from dotclaw.runtime.application.dto import ContextBundle, RunRequest, ToolInvocation, ToolResult, ToolResultStatus
+from dotclaw.runtime.application.dto import ContextBundle, RunRequest, ToolInvocation, ToolResult, ToolResultStatus, ToolRecoveryContract
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.execution import RunExecutionView
 from dotclaw.runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
+from dotclaw.runtime.application.tool_recovery import ToolRecoveryService
 from dotclaw.runtime.application.ports import ContextPort, HistoryCompactorPort, LLMPort, LLMOutputPort, LLMUnavailableError, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.request_factory import create_run_request
 from dotclaw.runtime.domain.context import ContextOwner
@@ -170,6 +172,12 @@ class NoTool(ToolPort):
         """拒绝未预期的工具调用。"""
         return ToolResult(invocation.call.call_id, ToolResultStatus.FAILED)
 
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED)
+
+    async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
+        return ToolRecoveryContract()
+
     async def cancel(self, run_id: str) -> None:
         """PR6 工具端口没有运行资源。"""
 
@@ -191,7 +199,14 @@ class CompletingTool(ToolPort):
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """返回与调用标识精确关联的完成结果。"""
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="PR6 工具结果")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="PR6 工具结果",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED)
+
+    async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
+        return ToolRecoveryContract()
 
     async def cancel(self, run_id: str) -> None:
         """该确定性工具没有额外取消资源。"""
@@ -226,7 +241,9 @@ def build_engine(root: Path, manager: SessionManager, counter: FixedTokenizerCou
     if force_rebuild:
         provider = ForceRebuildContextPort(provider)
     repository = RunRepositoryAdapter(root, SessionConversationProjector(manager))
-    engine = RuntimeEngine(repository, CheckpointRepositoryAdapter(root), provider, llm or CapturingLLM(), tool or NoTool(), BenchmarkPolicy(context_window), ApprovalService(ApprovalRepositoryAdapter(root)), CancellationService(), token_counter=counter, history_compactor=compactor)
+    checkpoints = CheckpointRepositoryAdapter(root)
+    approvals = ApprovalService(ApprovalRepositoryAdapter(root))
+    engine = RuntimeEngine(repository, checkpoints, provider, llm or CapturingLLM(), tool or NoTool(), BenchmarkPolicy(context_window), approvals, CancellationService(), tool_recovery=ToolRecoveryService(repository, checkpoints, approvals), token_counter=counter, history_compactor=compactor)
     return engine, repository
 
 

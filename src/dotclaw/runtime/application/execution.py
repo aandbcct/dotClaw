@@ -8,6 +8,7 @@ from enum import StrEnum
 from ..domain.cancellation import CancellationRequest
 from ..domain.control import AgentAction
 from ..domain.context import ContextVersion, StagedHistoryCompression
+from ..domain.events import RunEvent
 from ..domain.facts import AgentPolicySnapshot, JSONMap, RunMessage, ToolCall
 from dotclaw.runtime.domain.state import AgentRunState
 from .context_budget import ContextBudgetDecision
@@ -24,8 +25,7 @@ class PendingDelegation:
 
     request: DelegationRequest
     tool_call: ToolCall
-    tool_calls: tuple[ToolCall, ...]
-    tool_index: int
+    batch_id: str
 
 
 class PendingControlKind(StrEnum):
@@ -112,6 +112,12 @@ class RunExecution:
     """仅审批或中断重试时重放已冻结 Context Version，普通下一轮仍重新加载 Slot。"""
     context_budget_decision: ContextBudgetDecision | None = None
     """最近一次业务 LLM 调用前的真实输入预算结论，仅保存不含正文的审计字段。"""
+    tool_batch_id: str | None = None
+    """当前账本工具批次的原始助手消息标识。"""
+    legacy_tool_recovery: bool = False
+    """仅恢复没有账本版本引用的旧检查点时启用旧读取与执行兼容。"""
+    run_events: tuple[RunEvent, ...] = ()
+    """Context Provider 用于精确排除旧审批假结果的只读运行事件。"""
 
     def view(self) -> RunExecutionView:
         """生成提供给 Port 的只读执行视图。"""
@@ -124,6 +130,7 @@ class RunExecution:
             message_cursor=self.message_cursor,
             pending_control=self.pending_control,
             run_messages=self.run_messages,
+            run_events=self.run_events,
             active_context_version=self.active_context_version,
             staged_history_compressions=self.staged_history_compressions,
             replay_active_context=self.replay_active_context,
@@ -190,6 +197,8 @@ class RunExecutionView:
     """状态机经 ``transition()`` 计算出的下一项原子动作；供 Port 读取当前阶段。"""
     run_messages: tuple[RunMessage, ...] = ()
     """本 Run 已持久化的消息证据；不包含 Session 可变对象。"""
+    run_events: tuple[RunEvent, ...] = ()
+    """用于兼容读取旧审批消息的事件证据，不写回持久化记录。"""
     active_context_version: ContextVersion | None = None
     """最近一次调用前保存的完整上下文版本；存在时 ContextPort 必须直接重放已冻结 Slot。"""
     staged_history_compressions: tuple[StagedHistoryCompression, ...] = ()

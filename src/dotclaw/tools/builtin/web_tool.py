@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import AfterValidator
 
 from dotclaw.tools.base import ToolContext, ToolErrorCode, ToolResult
 from dotclaw.tools.decorator import ToolPolicy, tool
@@ -26,28 +27,19 @@ _MAX_SNIPPET = 300
 _MAX_TOTAL = 4000
 
 
-class SearchArgs(BaseModel):
-    """搜索参数（显式 Pydantic 模型，严格校验；extra=forbid）。"""
+def _validate_query(value: str) -> str:
+    """清理搜索词首尾空白并保留原长度限制。"""
+    value = value.strip()
+    if not (1 <= len(value) <= 256):
+        raise ValueError("query 需为去除首尾空白后 1–256 字符")
+    return value
 
-    model_config = ConfigDict(extra="forbid")
 
-    query: str
-    max_results: int = 5
-
-    @field_validator("query")
-    @classmethod
-    def _validate_query(cls, v: str) -> str:
-        v = v.strip()
-        if not (1 <= len(v) <= 256):
-            raise ValueError("query 需为去除首尾空白后 1–256 字符")
-        return v
-
-    @field_validator("max_results")
-    @classmethod
-    def _validate_max_results(cls, v: int) -> int:
-        if not (1 <= v <= 5):
-            raise ValueError("max_results 需为 1–5")
-        return v
+def _validate_max_results(value: int) -> int:
+    """保留搜索条数边界校验。"""
+    if not (1 <= value <= 5):
+        raise ValueError("max_results 需为 1–5")
+    return value
 
 
 @tool(
@@ -59,9 +51,12 @@ class SearchArgs(BaseModel):
     policy=ToolPolicy.NETWORK,
     network_service="tavily",
     network_hosts=KNOWN_NETWORK_HOSTS["tavily"],
-    args_model=SearchArgs,
 )
-async def web_search(args: SearchArgs, context: ToolContext) -> ToolResult:
+async def web_search(
+    query: Annotated[str, AfterValidator(_validate_query)],
+    max_results: Annotated[int, AfterValidator(_validate_max_results)] = 5,
+    *, context: ToolContext,
+) -> ToolResult:
     """执行受限网络搜索，返回截断后的稳定业务结果。"""
     client = context.http_client
     if client is None:
@@ -72,7 +67,7 @@ async def web_search(args: SearchArgs, context: ToolContext) -> ToolResult:
 
     provider = TavilyProvider(client)
     try:
-        result = await provider.search(args.query, args.max_results)
+        result = await provider.search(query, max_results)
     except ProviderError as exc:
         return ToolResult.from_error(code=exc.code, message=str(exc))
 
@@ -94,5 +89,5 @@ async def web_search(args: SearchArgs, context: ToolContext) -> ToolResult:
         total += len(piece)
 
     return ToolResult(
-        output=json.dumps({"query": args.query, "results": items}, ensure_ascii=False)
+        output=json.dumps({"query": query, "results": items}, ensure_ascii=False)
     )

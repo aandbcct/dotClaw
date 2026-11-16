@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from ..common.tool_replay import ToolExecutionEvidence
+
 from ..runtime.application.dto import (
     ContextBundle,
     ContextMetadata,
@@ -19,6 +21,7 @@ from ..runtime.application.dto import (
     ToolInvocation,
     ToolResult,
     ToolResultStatus,
+    ToolRecoveryContract,
 )
 from ..runtime.application.execution import RunExecutionView
 from ..runtime.application.ports import LLMOutputPort
@@ -35,6 +38,7 @@ from ..runtime.domain.facts import (
     RunErrorCode,
     RunMessage,
     RunMessageKind,
+    ToolCall,
 )
 from .models import (
     ApprovalFixture,
@@ -159,6 +163,29 @@ class FixtureToolPort:
         )
         return self._to_result(invocation, fixture)
 
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        """只读取匹配的工具 Fixture，预判审批且不消费 Fixture。"""
+        if self._mode is FixtureMatchMode.STRICT:
+            fixture = self._fixtures[self._cursor] if self._cursor < len(self._fixtures) else None
+            if fixture is None or fixture.tool_name != invocation.call.name or dict(fixture.key_arguments) != dict(invocation.call.arguments):
+                raise FixtureConfigurationError("工具 Fixture 与预检调用不匹配")
+        else:
+            fixture = next((item for item in self._fixtures
+                if item.fixture_id not in self._consumed and item.tool_name == invocation.call.name
+                and _matches_key_arguments(dict(item.key_arguments), dict(invocation.call.arguments))), None)
+            if fixture is None:
+                raise FixtureConfigurationError(f"工具 {invocation.call.name} 没有可用 fixture")
+        self._served.add(fixture.fixture_id)
+        if fixture.status is ToolResultStatus.APPROVAL_REQUIRED:
+            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED,
+                approval_id=fixture.approval_id, execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+
+    async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
+        """Fixture 调用固定禁止自动重试。"""
+        return ToolRecoveryContract()
+
     def _match_strict(self, invocation: ToolInvocation) -> ToolFixture:
         """STRICT：按记录顺序精确消费，名称与全部参数都必须一致。"""
         if self._cursor >= len(self._fixtures):
@@ -210,15 +237,19 @@ class FixtureToolPort:
             # 审批已获批准（恢复执行场景）：按已批准处理，返回完成结果而非再次要求审批，
             # 否则引擎恢复后会再次进入审批挂起形成死循环。
             if invocation.approved:
-                return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output)
-            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id=fixture.approval_id)
+                return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output,
+                    execution_evidence=ToolExecutionEvidence.RETURNED)
+            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id=fixture.approval_id,
+                execution_evidence=ToolExecutionEvidence.NOT_STARTED)
         if fixture.status is ToolResultStatus.FAILED:
             return ToolResult(
                 invocation.call.call_id,
                 ToolResultStatus.FAILED,
                 error=RunError(RunErrorCode.TOOL_FAILURE, fixture.error_message or "fixture 声明工具失败"),
+                execution_evidence=ToolExecutionEvidence.RETURNED,
             )
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output)
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=fixture.output,
+            execution_evidence=ToolExecutionEvidence.RETURNED)
 
     def verify_fully_consumed(self) -> None:
         """校验所有工具 Fixture 均被调用；剩余项视为缺失调用。"""
@@ -250,6 +281,44 @@ class FixtureApprovalRepository:
         if record.approval_id in self._records:
             raise FixtureConfigurationError(f"审批 {record.approval_id} 已存在")
         self._records[record.approval_id] = record
+
+    async def ensure(self, record: ApprovalRecord) -> None:
+        """按文件审批仓储相同的身份与决议规则幂等投影。"""
+        current = self._records.get(record.approval_id)
+        if current is None:
+            self._records[record.approval_id] = record
+            return
+        if current == record:
+            return
+        if (
+            (current.approval_id, current.run_id, current.session_id) != (record.approval_id, record.run_id, record.session_id)
+            or current.call_id not in {None, record.call_id}
+            or (current.created_at, current.metadata) != (record.created_at, record.metadata)
+        ):
+            raise ValueError("审批投影身份或不可变字段冲突")
+        if current.decision is not None and record.decision is not None:
+            if current.status is record.status and current.decision is record.decision:
+                return
+            raise ValueError("审批决议已固定，不能改变状态或翻转决议")
+        if current.status is ApprovalStatus.PENDING and (
+            record.decision is not None or (current.call_id is None and record.call_id is not None)
+        ):
+            if record.decision is None and record.status is not ApprovalStatus.PENDING:
+                raise ValueError("审批投影状态与待处理关联不一致")
+            if record.decision is None:
+                self._records[record.approval_id] = record
+                return
+            expected_status = ApprovalStatus.APPROVED if record.decision else ApprovalStatus.REJECTED
+            if record.status not in {expected_status, ApprovalStatus.CONSUMED}:
+                raise ValueError("审批投影状态与决议不一致")
+            self._records[record.approval_id] = record
+            return
+        if current.status is ApprovalStatus.CONSUMED and current.decision is None and record.status is ApprovalStatus.CONSUMED and (
+            record.decision is not None or (current.call_id is None and record.call_id is not None)
+        ):
+            self._records[record.approval_id] = record
+            return
+        raise ValueError("审批记录已存在相反或不同的投影事实")
 
     async def load(self, approval_id: str) -> ApprovalRecord | None:
         """按标识读取审批记录。"""
@@ -359,6 +428,10 @@ class FixtureDelegationPort:
 
     async def start(self, child_run_id: str) -> None:
         """冻结 fixture 没有外部驱动，校验准备归属即可。"""
+        self.submitted_fixture(child_run_id)
+
+    async def resume(self, child_run_id: str) -> None:
+        """冻结 fixture 无需启动恢复驱动，只校验委派归属。"""
         self.submitted_fixture(child_run_id)
 
     async def wait_terminal(self, child_run_id: str) -> DelegationResult:

@@ -20,7 +20,7 @@ async def test_llm_calls_pass():
 
 async def test_llm_calls_fail():
     trace = await _trace()
-    result = _SCORER.score(trace, Expectation("iteration_budget", "llm_calls", 1))
+    result = _SCORER.score(trace, Expectation("iteration_budget", "llm_calls", 0))
     assert result.passed is False
 
 

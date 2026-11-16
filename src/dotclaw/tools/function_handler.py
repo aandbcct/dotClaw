@@ -16,6 +16,7 @@ from collections.abc import Awaitable
 import inspect
 import logging
 from ..common.resource_errors import ResourceCleanupError
+from ..common.tool_replay import ToolExecutionEvidence
 
 from typing import Any, Callable
 
@@ -39,8 +40,8 @@ logger = logging.getLogger("dotclaw.tools.function_handler")
 class FunctionToolHandler(ToolHandler):
     """将 @tool 装饰的本地函数包装为统一的 ToolHandler。
 
-    约定：函数第一个位置参数接收已验证的 args_model 实例（命名通常为 args，
-    args_style="model"），或在签名推导场景下各业务形参直接对应模型字段
+    约定：兼容的显式模型路径将已验证的 args_model 实例传给业务函数；
+    签名推导场景下各业务形参直接对应模型字段
     （args_style="fields"）；可选的 context 参数接收 ToolExecutionContext。
     """
 
@@ -105,14 +106,15 @@ class FunctionToolHandler(ToolHandler):
                     code=ToolErrorCode.INVALID_ARGUMENTS,
                     message=str(exc),
                     error_type=ToolErrorType.VALIDATION,
+                    execution_evidence=ToolExecutionEvidence.NOT_STARTED,
                 )
         validated = arguments
 
         # 按 args_style 把已验证参数打包为函数调用实参。
         kwargs: dict[str, Any] = {}
         if self._meta.args_style == "fields" and model is not None:
-            # 签名推导：模型字段拆包到函数各业务形参。
-            kwargs.update(validated.model_dump())
+            # 签名推导：保留嵌套模型等业务值的原始 Python 类型。
+            kwargs.update({name: getattr(validated, name) for name in validated.__class__.model_fields})
         elif model is not None and self._call_plan["args_param"] is not None:
             # 显式模型：整个模型作为单一 args 形参传入。
             kwargs[self._call_plan["args_param"]] = validated
@@ -131,12 +133,13 @@ class FunctionToolHandler(ToolHandler):
                 code=ToolErrorCode.EXECUTION_ERROR,
                 message=f"工具执行出错: {exc}",
                 error_type=ToolErrorType.EXECUTION,
+                execution_evidence=ToolExecutionEvidence.UNKNOWN,
             )
 
         # 结构化 ToolResult 直接透传；其余返回值转为 output 文本。
         if isinstance(result, ToolResult):
             return result
-        return ToolResult(output=str(result))
+        return ToolResult(output=str(result), execution_evidence=ToolExecutionEvidence.RETURNED)
 
 
 async def _await_io_completion[T](operation: Awaitable[T]) -> T:

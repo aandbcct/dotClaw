@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from typing import Any
 
 import pytest
@@ -17,8 +18,7 @@ import pytest
 from dotclaw.bootstrap._host_components import _build_tools
 from dotclaw.config.settings import Config, NetworkServiceConfig, NetworkToolsConfig
 from dotclaw.tools.base import ToolErrorCode, ToolExecutionContext
-from dotclaw.tools.builtin.web_tool import SearchArgs, web_search
-from dotclaw.tools.builtin.weather_tool import WeatherArgs, get_forecast
+from dotclaw.tools.discovery import ToolDiscovery
 from dotclaw.tools.http_client import (
     HttpClientError,
     ProviderHttpResponse,
@@ -79,6 +79,11 @@ def _ctx(client) -> ToolExecutionContext:
     return ToolExecutionContext(timeout=30.0, http_client=client)
 
 
+@lru_cache
+def _handler(name: str):
+    return next(item for item in ToolDiscovery.discover_builtin() if item.name == name)
+
+
 def _ok(text: str) -> ProviderHttpResponse:
     return ProviderHttpResponse(status_code=200, text=text, headers={})
 
@@ -101,7 +106,7 @@ async def test_tavily_search_success_maps_and_truncates(monkeypatch) -> None:
         ]
     }
     client = FakeHttpClient([_ok(json.dumps(body))])
-    result = await web_search(SearchArgs(query="python", max_results=5), _ctx(client))
+    result = await _handler("builtin.web.search").execute({"query": "python", "max_results": 5}, _ctx(client))
     assert not result.is_error
     data = json.loads(result.output)
     assert data["query"] == "python"
@@ -113,7 +118,7 @@ async def test_tavily_search_request_has_no_extract_crawl_map(monkeypatch) -> No
     """搜索请求体不含 Extract/Crawl/Map 等网页抓取参数（开发计划 §2.5）。"""
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     client = FakeHttpClient([_ok(json.dumps({"results": []}))])
-    await web_search(SearchArgs(query="python"), _ctx(client))
+    await _handler("builtin.web.search").execute({"query": "python"}, _ctx(client))
     sent = client.calls[0]
     assert sent["service"] == "tavily"
     assert sent["method"] == "POST"
@@ -132,7 +137,7 @@ async def test_tavily_search_no_api_key(monkeypatch) -> None:
     """缺失 TAVILY_API_KEY 返回 CONFIGURATION_ERROR，且不读取 YAML。"""
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     client = FakeHttpClient([_ok(json.dumps({"results": []}))])
-    result = await web_search(SearchArgs(query="python"), _ctx(client))
+    result = await _handler("builtin.web.search").execute({"query": "python"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.CONFIGURATION_ERROR.value
     # 未向网络发起请求（缺失密钥在 Provider 内提前拦截）。
@@ -143,7 +148,7 @@ async def test_tavily_search_auth_failure_401(monkeypatch) -> None:
     """401 鉴权失败映射为 CONFIGURATION_ERROR（脱敏，不含密钥）。"""
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     client = FakeHttpClient([ProviderHttpResponse(status_code=401, text="{}", headers={})])
-    result = await web_search(SearchArgs(query="python"), _ctx(client))
+    result = await _handler("builtin.web.search").execute({"query": "python"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.CONFIGURATION_ERROR.value
     assert "TAVILY_API_KEY" not in result.output
@@ -153,7 +158,7 @@ async def test_tavily_search_rate_limited_429(monkeypatch) -> None:
     """429 限流映射为 NETWORK_ERROR。"""
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     client = FakeHttpClient([ProviderHttpResponse(status_code=429, text="{}", headers={})])
-    result = await web_search(SearchArgs(query="python"), _ctx(client))
+    result = await _handler("builtin.web.search").execute({"query": "python"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.NETWORK_ERROR.value
 
@@ -162,7 +167,7 @@ async def test_tavily_search_server_error_5xx(monkeypatch) -> None:
     """5xx 服务错误映射为 NETWORK_ERROR。"""
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     client = FakeHttpClient([ProviderHttpResponse(status_code=502, text="{}", headers={})])
-    result = await web_search(SearchArgs(query="python"), _ctx(client))
+    result = await _handler("builtin.web.search").execute({"query": "python"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.NETWORK_ERROR.value
 
@@ -171,7 +176,7 @@ async def test_tavily_search_malformed_json(monkeypatch) -> None:
     """畸形响应体解析失败映射为 NETWORK_ERROR，且不回显响应正文。"""
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     client = FakeHttpClient([ProviderHttpResponse(status_code=200, text="not-json", headers={})])
-    result = await web_search(SearchArgs(query="python"), _ctx(client))
+    result = await _handler("builtin.web.search").execute({"query": "python"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.NETWORK_ERROR.value
 
@@ -180,7 +185,7 @@ async def test_tavily_search_network_error(monkeypatch) -> None:
     """HttpClient 抛出的脱敏网络异常映射为 NETWORK_ERROR。"""
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     client = FakeHttpClient([], raise_exc=HttpClientError("网络请求失败（api.tavily.com）：ConnectError"))
-    result = await web_search(SearchArgs(query="python"), _ctx(client))
+    result = await _handler("builtin.web.search").execute({"query": "python"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.NETWORK_ERROR.value
 
@@ -189,7 +194,7 @@ async def test_tavily_search_response_too_large(monkeypatch) -> None:
     """响应体超限映射为 RESPONSE_TOO_LARGE（开发计划 §2.6）。"""
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     client = FakeHttpClient([], raise_exc=ResponseTooLargeError("响应体超过最大允许大小"))
-    result = await web_search(SearchArgs(query="python"), _ctx(client))
+    result = await _handler("builtin.web.search").execute({"query": "python"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.RESPONSE_TOO_LARGE.value
 
@@ -205,7 +210,7 @@ async def test_tavily_search_output_truncation(monkeypatch) -> None:
         ]
     }
     client = FakeHttpClient([_ok(json.dumps(body))])
-    result = await web_search(SearchArgs(query="python", max_results=5), _ctx(client))
+    result = await _handler("builtin.web.search").execute({"query": "python", "max_results": 5}, _ctx(client))
     assert not result.is_error
     data = json.loads(result.output)
     for item in data["results"]:
@@ -253,7 +258,7 @@ _UNIQUE = [
 async def test_open_meteo_unique_candidate_returns_forecast(monkeypatch) -> None:
     """唯一候选直接返回预报结构（type=forecast）。"""
     client = FakeHttpClient([_ok(_geo_payload(_UNIQUE)), _ok(_fc_payload())])
-    result = await get_forecast(WeatherArgs(location="Beijing"), _ctx(client))
+    result = await _handler("builtin.weather.get_forecast").execute({"location": "Beijing"}, _ctx(client))
     assert not result.is_error
     data = json.loads(result.output)
     assert data["type"] == "forecast"
@@ -267,7 +272,7 @@ async def test_open_meteo_unique_candidate_returns_forecast(monkeypatch) -> None
 async def test_open_meteo_zero_candidates_returns_no_candidate(monkeypatch) -> None:
     """零候选返回稳定的业务结构（type=no_candidate），不静默猜测。"""
     client = FakeHttpClient([_ok(_geo_payload([]))])
-    result = await get_forecast(WeatherArgs(location="ZZZNotFound"), _ctx(client))
+    result = await _handler("builtin.weather.get_forecast").execute({"location": "ZZZNotFound"}, _ctx(client))
     assert not result.is_error
     data = json.loads(result.output)
     assert data["type"] == "no_candidate"
@@ -281,7 +286,7 @@ async def test_open_meteo_multi_candidate_returns_candidates(monkeypatch) -> Non
         for i in range(9)
     ]
     client = FakeHttpClient([_ok(_geo_payload(many))])
-    result = await get_forecast(WeatherArgs(location="Springfield"), _ctx(client))
+    result = await _handler("builtin.weather.get_forecast").execute({"location": "Springfield"}, _ctx(client))
     assert not result.is_error
     data = json.loads(result.output)
     assert data["type"] == "candidates"
@@ -310,7 +315,7 @@ async def test_open_meteo_top_exact_candidate_returns_forecast(monkeypatch) -> N
         },
     ]
     client = FakeHttpClient([_ok(_geo_payload(guangzhou_candidates)), _ok(_fc_payload())])
-    result = await get_forecast(WeatherArgs(location="Guangzhou"), _ctx(client))
+    result = await _handler("builtin.weather.get_forecast").execute({"location": "Guangzhou"}, _ctx(client))
 
     assert not result.is_error
     data = json.loads(result.output)
@@ -323,7 +328,7 @@ async def test_open_meteo_top_exact_candidate_returns_forecast(monkeypatch) -> N
 async def test_open_meteo_country_code_narrows(monkeypatch) -> None:
     """country_code 被拼入地理编码请求，缩小候选范围（阶段三验收）。"""
     client = FakeHttpClient([_ok(_geo_payload(_UNIQUE)), _ok(_fc_payload())])
-    await get_forecast(WeatherArgs(location="Beijing", country_code="cn"), _ctx(client))
+    await _handler("builtin.weather.get_forecast").execute({"location": "Beijing", "country_code": "cn"}, _ctx(client))
     geo_url = client.calls[0]["url"]
     assert "countryCode=CN" in geo_url
 
@@ -332,14 +337,13 @@ async def test_open_meteo_days_boundary(monkeypatch) -> None:
     """days=1 与 days=7 为合法边界；0 与 8 被 Pydantic 校验拒绝。"""
     # 合法边界应能通过校验并进入 Provider（forecast_days 正确传递）。
     client = FakeHttpClient([_ok(_geo_payload(_UNIQUE)), _ok(_fc_payload())])
-    await get_forecast(WeatherArgs(location="Beijing", days=7), _ctx(client))
+    await _handler("builtin.weather.get_forecast").execute({"location": "Beijing", "days": 7}, _ctx(client))
     assert "forecast_days=7" in client.calls[1]["url"]
 
-    # 非法边界：Pydantic 校验在构造期拒绝。
-    with pytest.raises(Exception):
-        WeatherArgs(location="Beijing", days=0)
-    with pytest.raises(Exception):
-        WeatherArgs(location="Beijing", days=8)
+    # 非法边界：发现器生成的模型在调用处理函数前拒绝。
+    handler = _handler("builtin.weather.get_forecast")
+    assert (await handler.execute({"location": "Beijing", "days": 0}, _ctx(FakeHttpClient()))).is_error
+    assert (await handler.execute({"location": "Beijing", "days": 8}, _ctx(FakeHttpClient()))).is_error
 
 
 async def test_open_meteo_forecast_failure_5xx(monkeypatch) -> None:
@@ -347,7 +351,7 @@ async def test_open_meteo_forecast_failure_5xx(monkeypatch) -> None:
     client = FakeHttpClient(
         [_ok(_geo_payload(_UNIQUE)), ProviderHttpResponse(status_code=500, text="{}", headers={})]
     )
-    result = await get_forecast(WeatherArgs(location="Beijing"), _ctx(client))
+    result = await _handler("builtin.weather.get_forecast").execute({"location": "Beijing"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.NETWORK_ERROR.value
 
@@ -359,7 +363,7 @@ async def test_open_meteo_geocode_failure_4xx(monkeypatch) -> None:
     普通 4xx → NETWORK_ERROR 的路径。
     """
     client = FakeHttpClient([ProviderHttpResponse(status_code=404, text="{}", headers={})])
-    result = await get_forecast(WeatherArgs(location="Beijing"), _ctx(client))
+    result = await _handler("builtin.weather.get_forecast").execute({"location": "Beijing"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.NETWORK_ERROR.value
 
@@ -370,7 +374,7 @@ async def test_open_meteo_passes_retry_once_flag(monkeypatch) -> None:
     实际的一次重试语义由 HttpxHttpClient 在 test_http_client.py 中通过 MockTransport 覆盖。
     """
     client = FakeHttpClient([ProviderHttpResponse(status_code=500, text="{}", headers={})])
-    result = await get_forecast(WeatherArgs(location="Beijing"), _ctx(client))
+    result = await _handler("builtin.weather.get_forecast").execute({"location": "Beijing"}, _ctx(client))
     assert result.is_error
     assert result.error_code == ToolErrorCode.NETWORK_ERROR.value
     # 地理编码请求携带 retry_once=True；Tavily 对应的搜索请求则不传（见下方断言）。
@@ -381,7 +385,7 @@ async def test_tavily_does_not_request_retry(monkeypatch) -> None:
     """Tavily 为避免重复计费，搜索请求不传递 retry_once（由客户端保证不重试）。"""
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     client = FakeHttpClient([_ok(json.dumps({"results": []}))])
-    await web_search(SearchArgs(query="python"), _ctx(client))
+    await _handler("builtin.web.search").execute({"query": "python"}, _ctx(client))
     assert client.calls[0]["retry_once"] is False
 
 

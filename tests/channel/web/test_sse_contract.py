@@ -36,6 +36,7 @@ from dotclaw.runtime.domain.state import (
     Ended,
     RunOutcome,
     RunStage,
+    Running,
     Suspended,
     SuspendReason,
 )
@@ -480,14 +481,26 @@ async def test_http_200_with_session_busy_is_a_failed_run() -> None:
             "run.suspended",
             "waiting_delegation",
         ),
+        (
+            RunResult("run-cancelling", AgentRunState(mode=Running(RunStage.EXECUTING_TOOLS)),
+                error=RunError(RunErrorCode.CANCELLED, "驱动仍在收尾取消"), control_status="cancelling"),
+            "run.suspended",
+            "cancelling",
+        ),
+        (
+            RunResult("run-recoverable", AgentRunState(mode=Running(RunStage.EXECUTING_TOOLS)),
+                error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "工具结果待确认"), control_status="recoverable"),
+            "run.suspended",
+            "recoverable",
+        ),
     ],
 )
-async def test_non_success_results_have_normalized_terminal_events(
+async def test_non_success_results_have_normalized_sse_events(
     result: RunResult,
     expected_event: str,
     expected_status: str,
 ) -> None:
-    """取消与两类挂起状态必须映射为稳定的 Web 终态。"""
+    """取消、等待、控制收尾与恢复状态映射为对应 SSE 事件。"""
     host, _ = _host(result, "session-1")
 
     async with _client(host) as client:

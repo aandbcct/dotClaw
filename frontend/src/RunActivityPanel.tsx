@@ -14,7 +14,7 @@ interface RunActivityPanelProps {
 const LABELS: Record<string, string> = {
   sending: "正在发送", processing: "处理中", thinking: "正在思考", responding: "正在生成", tool_running: "正在执行工具", stopping: "正在停止",
   completed: "已完成", failed: "运行异常", cancelled: "已停止", unknown: "结果待确认", running: "执行中", approval_required: "等待审批",
-  waiting_approval: "等待审批", waiting_delegation: "等待子任务", recoverable: "可恢复", interrupted: "已中断", abandoned: "已放弃",
+  waiting_approval: "等待审批", waiting_delegation: "等待子任务", recoverable: "可恢复", interrupted: "已中断", uncertain: "结果待确认", abandoned: "已放弃",
 };
 const activeStages = new Set(["sending", "processing", "thinking", "responding", "tool_running", "stopping", "waiting_approval", "waiting_delegation", "recoverable", "unknown"]);
 

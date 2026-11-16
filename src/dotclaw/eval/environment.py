@@ -26,10 +26,12 @@ from typing import Any
 from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.context_budget import TokenCountRequest, TokenCountResult
-from ..runtime.application.dto import ConversationSnapshot, RunRequest, RunResult
+from ..runtime.application.dto import ConversationSnapshot, DelegationRequest, RunRequest, RunResult, ToolRecoveryContract, ToolResult
 from ..runtime.application.engine import RuntimeEngine
+from ..runtime.application.tool_recovery import ToolRecoveryService
 from ..runtime.application.history_compaction import HistoryCompactionRequest, HistoryCompactionResult
 from ..runtime.adapters.in_memory_run_repository import InMemoryRunRepository
+from ..runtime.adapters.checkpoint_repository import _validate_checkpoint_payload
 from ..runtime.application.ports import (
     ApprovalRepository,
     CheckpointRepository,
@@ -43,8 +45,8 @@ from ..runtime.application.ports import (
     ToolPort,
 )
 from ..runtime.domain.events import RunEvent
-from ..runtime.domain.facts import AgentRun, RunCheckpoint, RunMessage
-from ..runtime.domain.state import AgentRunState, Ended
+from ..runtime.domain.facts import AgentRun, RunCheckpoint, RunMessage, RunMessageKind
+from ..runtime.domain.state import AgentRunState, Created, Ended
 from .fixtures import (
     FixtureApprovalRepository,
     FixtureConfigurationError,
@@ -85,6 +87,32 @@ class InMemoryCheckpointRepository:
     async def delete(self, session_id: str, run_id: str) -> None:
         """删除已不再需要的检查点。"""
         self._checkpoints.pop((session_id, run_id), None)
+
+    async def ensure_tool_checkpoint(
+        self,
+        base: RunCheckpoint | None,
+        target: RunCheckpoint | None,
+    ) -> None:
+        """按 base/target 条件幂等保存或删除工具投影检查点。"""
+        if base is None and target is None:
+            return
+        if target is not None:
+            _validate_checkpoint_payload(target)
+        reference = target if target is not None else base
+        if base is not None and target is not None and (base.session_id, base.run_id) != (target.session_id, target.run_id):
+            raise ValueError("工具检查点投影的 base/target 身份必须一致")
+        key = (reference.session_id, reference.run_id)
+        current = self._checkpoints.get(key)
+        if current is not None and (current.session_id, current.run_id) != key:
+            raise ValueError("工具检查点存储容器身份不一致")
+        if current == target:
+            return
+        if current != base:
+            raise ValueError("工具检查点投影基线已变化")
+        if target is None:
+            self._checkpoints.pop(key, None)
+        else:
+            self._checkpoints[key] = target
 
 
 class _FixedTokenCounter:
@@ -209,6 +237,24 @@ class _ToolComposite:
         self.real_served += 1
         return await self._real.execute(invocation, execution)
 
+    async def preflight(self, invocation: Any, execution: Any) -> ToolResult:
+        """Playback 工具 fixture 不执行预检副作用；真实端口继续真实安全检查。"""
+        if self._fixture is not None:
+            try:
+                return await self._fixture.preflight(invocation, execution)
+            except FixtureConfigurationError:
+                if not self._allow_fallback:
+                    raise
+        if self._real is None:
+            raise FixtureConfigurationError("未配置工具 fixture 或真实工具端口")
+        return await self._real.preflight(invocation, execution)
+
+    async def describe_recovery(self, call: Any, execution: Any) -> ToolRecoveryContract:
+        """Fixture 工具默认禁止恢复重试，真实端口提供者声明可核对的契约。"""
+        if self._fixture is not None:
+            return ToolRecoveryContract()
+        return await self._real.describe_recovery(call, execution)
+
 
 
 class _ContextComposite:
@@ -292,11 +338,12 @@ class _PolicyComposite:
 class _DelegationComposite:
     """委派组合端口：优先 Fixture 受理；允许回退时缺失再回退真实端口。"""
 
-    def __init__(self, fixture: FixtureDelegationPort | None, real: DelegationPort | None, allow_fallback: bool) -> None:
+    def __init__(self, fixture: FixtureDelegationPort | None, real: DelegationPort | None, allow_fallback: bool, materialize_fixture_child=None) -> None:
         """绑定 Fixture、可选真实端口与回退开关。"""
         self._fixture: FixtureDelegationPort | None = fixture
         self._real: DelegationPort | None = real
         self._allow_fallback: bool = allow_fallback
+        self._materialize_fixture_child = materialize_fixture_child
         self.fixture_served: int = 0
         self.real_served: int = 0
 
@@ -305,6 +352,8 @@ class _DelegationComposite:
         if self._fixture is not None:
             try:
                 result: Any = await self._fixture.prepare(request)
+                if self._materialize_fixture_child is not None:
+                    await self._materialize_fixture_child(request, result)
                 self.fixture_served += 1
                 return result
             except FixtureConfigurationError:
@@ -343,6 +392,22 @@ class _DelegationComposite:
         if self._real is None or not self._allow_fallback:
             raise FixtureConfigurationError("未配置已准备的委派端口")
         await self._real.start(child_run_id)
+
+    async def resume(self, child_run_id: str) -> None:
+        """按子运行归属把恢复请求交给 Fixture 或真实委派端口。"""
+        if self._fixture is not None:
+            try:
+                await self._fixture.resume(child_run_id)
+                return
+            except FixtureConfigurationError:
+                if not self._allow_fallback:
+                    raise
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("未配置委派 fixture，且 Playback 模式禁止回退到真实委派端口")
+        if self._real is None:
+            raise FixtureConfigurationError("未配置委派 fixture 或真实委派端口")
+        self.real_served += 1
+        await self._real.resume(child_run_id)
 
     async def wait_terminal(self, child_run_id: str) -> Any:
         """等待对应端口的真实或冻结终态。"""
@@ -391,6 +456,19 @@ class _ApprovalRepositoryComposite:
             raise FixtureConfigurationError("未配置审批 fixture 或真实审批仓储")
         self.real_served += 1
         await self._real.create(record)
+
+    async def ensure(self, record: Any) -> None:
+        """将冻结审批投影写入当前优先仓储。"""
+        if self._fixture is not None:
+            await self._fixture.ensure(record)
+            self.fixture_served += 1
+            return
+        if not self._allow_fallback:
+            raise FixtureConfigurationError("Playback 模式禁止回退到真实审批仓储")
+        if self._real is None:
+            raise FixtureConfigurationError("未配置审批 fixture 或真实审批仓储")
+        self.real_served += 1
+        await self._real.ensure(record)
 
     async def load(self, approval_id: str) -> Any:
         """优先读取 Fixture 记录；未命中且允许回退时才查询真实仓储。"""
@@ -512,7 +590,7 @@ class EvalEnvironment:
             self.fixture_approval, deps.approval_repository, allow_fallback
         )
         self.delegation_port: _DelegationComposite | None = (
-            _DelegationComposite(self.fixture_delegation, deps.delegation_port, allow_fallback)
+            _DelegationComposite(self.fixture_delegation, deps.delegation_port, allow_fallback, self._materialize_fixture_child_from_request)
             if (self.fixture_delegation is not None or deps.delegation_port is not None)
             else None
         )
@@ -520,6 +598,9 @@ class EvalEnvironment:
         self.approval_service: ApprovalService = ApprovalService(self.approval_repository)
         self.run_repository: RunRepository = InMemoryRunRepository(self.approval_repository, self.checkpoint_repository)
         self.cancellation_service: CancellationService = CancellationService()
+        self.tool_recovery: ToolRecoveryService = ToolRecoveryService(
+            self.run_repository, self.checkpoint_repository, self.approval_service
+        )
 
         self.engine: RuntimeEngine = RuntimeEngine(
             run_repository=self.run_repository,
@@ -533,6 +614,7 @@ class EvalEnvironment:
             delegation_port=self.delegation_port,
             token_counter=self.token_counter,
             history_compactor=self.history_compactor,
+            tool_recovery=self.tool_recovery,
         )
 
     def verify_fixtures_consumed(self) -> None:
@@ -570,7 +652,6 @@ class EvalEnvironment:
                 if child_run_id in resolved_delegations:
                     # 同一子 Run 重复挂起说明 Fixture 或状态异常，停止自动恢复。
                     break
-                await self._materialize_fixture_child(result.run_id, child_run_id)
                 resolved_delegations.add(child_run_id)
                 result = await self.engine.resume_delegation(child_run_id, output_port)
                 continue
@@ -609,31 +690,37 @@ class EvalEnvironment:
             return False
         return result.state.is_waiting_delegation()
 
-    async def _materialize_fixture_child(self, parent_run_id: str, child_run_id: str) -> None:
-        """在隔离仓储创建最小子 Run 事实，使恢复入口走真实父子关联校验。"""
-        if await self.run_repository.find_run(child_run_id) is not None:
-            return
+    async def _materialize_fixture_child_from_request(self, request: DelegationRequest, submission: Any) -> None:
+        """关联前先写入与委派请求相符的最小子运行事实。"""
         if self.fixture_delegation is None:
-            raise FixtureConfigurationError("等待委派恢复但未装配 Delegation Fixture")
-        fixture = self.fixture_delegation.submitted_fixture(child_run_id)
-        if fixture.outcome is None:
-            return
-        parent = await self.run_repository.find_run(parent_run_id)
+            raise FixtureConfigurationError("委派 Fixture 未装配")
+        fixture = self.fixture_delegation.submitted_fixture(submission.child_run_id)
+        parent = await self.run_repository.find_run(request.parent_run_id)
         if parent is None:
             raise FixtureConfigurationError("委派父 Run 不存在")
+        ended = fixture.outcome is not None
         child = AgentRun(
-            run_id=child_run_id,
-            session_id=fixture.target_session_id or f"session-{fixture.target_agent_id}",
+            run_id=submission.child_run_id,
+            session_id=fixture.target_session_id or submission.target_session_id,
             agent_id=fixture.target_agent_id,
-            state=AgentRunState(mode=Ended(fixture.outcome)),
+            state=AgentRunState(mode=Ended(fixture.outcome)) if ended else AgentRunState(mode=Created()),
             started_at="eval-fixture",
-            ended_at="eval-fixture",
+            ended_at="eval-fixture" if ended else None,
             policy=parent.policy,
-            input_message_id=f"input-{child_run_id}",
+            input_message_id=f"input-{submission.child_run_id}",
             parent_run_id=parent.run_id,
             root_run_id=parent.root_run_id or parent.run_id,
+            delegation_task_id=submission.task_id,
         )
         await self.run_repository.create_run(child)
+        input_message = RunMessage(
+            child.input_message_id,
+            1,
+            RunMessageKind.USER_INPUT,
+            request.input_message.role,
+            request.input_message.content,
+        )
+        await self.run_repository.save_messages(child.session_id, child.run_id, (input_message,))
 
     def _build_request(self) -> RunRequest:
         """由 Case 的会话与输入消息构造执行请求。"""

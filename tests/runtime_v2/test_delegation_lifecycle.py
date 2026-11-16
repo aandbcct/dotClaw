@@ -27,6 +27,7 @@ from tests.runtime_v2.test_delegation_port import ParentChildLLM
 from tests.runtime_v2.test_e5_success_commit_recovery import _prepare_pending_success, FaultInjector, SuccessCommitInterrupted
 from dotclaw.runtime.domain.context import SuccessCommitFaultPoint
 from dotclaw.runtime.application.operation import RunOperationKind
+from dotclaw.runtime.application.ports import RunPersistenceError
 
 
 def _stack(root, model=None):
@@ -230,14 +231,23 @@ async def test_prepare_failure_compensates_only_new_session_and_never_duplicates
     request = DelegationRequest("parent", "parent", "target-agent", parent.user_message,
         source_agent_id="parent-agent", source_session_id=parent.session_id)
     original = coordinator._prepare_child_run_locked
+    injected = False
     async def fail(request):
+        nonlocal injected
         if failure == "after_create":
-            await original(request)
+            child_id = await original(request)
+            if injected:
+                return child_id
+            injected = True
         raise OSError("准备故障屏障")
     monkeypatch.setattr(coordinator, "_prepare_child_run_locked", fail)
     async with engine._cancellation_service.gate(parent.run_id):
-        with pytest.raises(OSError):
-            await adapter.prepare(request)
+        if failure == "before_create":
+            with pytest.raises(OSError):
+                await adapter.prepare(request)
+        else:
+            submission = await adapter.prepare(request)
+            assert submission.child_run_id == (await repository.list_child_runs("parent"))[0].run_id
     children = await repository.list_child_runs("parent")
     task = await dispatcher.broker.latest_task_for_source(parent.session_id)
     if failure == "before_create":
@@ -245,7 +255,8 @@ async def test_prepare_failure_compensates_only_new_session_and_never_duplicates
         assert not (tmp_path / task.target.session_id).exists()
     else:
         assert len(children) == 1
-        await asyncio.wait_for(coordinator.wait_terminal(children[0].run_id), 2)
+        assert isinstance(children[0].state.mode, Created)
+        assert await engine._checkpoint_repository.load(children[0].session_id, children[0].run_id) is not None
         assert (await adapter.prepare(request)).child_run_id == children[0].run_id
         assert len(await repository.list_child_runs("parent")) == 1
 
@@ -273,7 +284,7 @@ async def test_prepare_parent_gate_persists_association_before_cancel_and_start(
     assert len(children) == 1
     assert children[0].state.outcome() is RunOutcome.CANCELLED
     events = await repository.load_events(children[0].session_id, children[0].run_id)
-    assert not any(event.event_type is RunEventType.LLM_STARTED for event in events)
+    assert not any(event.event_type is RunEventType.LLM_STARTED for event in events), events
 
 
 @pytest.mark.parametrize("boundary", ["child_checkpoint", "parent_checkpoint", "start"])
@@ -290,15 +301,34 @@ async def test_handoff_fault_windows_stop_prepared_children_without_running_them
             failed = True
             raise OSError("checkpoint故障窗口")
         await original(checkpoint)
+    original_projection = engine._tool_recovery._checkpoints.ensure_tool_checkpoint
+    async def ensure_tool_checkpoint(base, target):
+        nonlocal failed
+        if boundary == "parent_checkpoint" and target is not None and "child_run_id" in target.pending and not failed:
+            failed = True
+            cause = OSError("parent checkpoint故障窗口")
+            raise RunPersistenceError(str(cause)) from cause
+        await original_projection(base, target)
     async def fail_start(child_run_id):
         raise OSError("启动安排故障窗口")
     monkeypatch.setattr(engine._checkpoint_repository, "save", save)
+    monkeypatch.setattr(engine._tool_recovery._checkpoints, "save", save)
+    monkeypatch.setattr(engine._tool_recovery._checkpoints, "ensure_tool_checkpoint", ensure_tool_checkpoint)
     if boundary == "start":
-        monkeypatch.setattr(adapter, "start", fail_start)
-    await coordinator.submit(replace(_node("parent"), agent_id="parent-agent"))
+        monkeypatch.setattr(adapter, "resume", fail_start)
+    if boundary == "start":
+        with pytest.raises(OSError, match="启动安排故障窗口"):
+            await coordinator.submit(replace(_node("parent"), agent_id="parent-agent"))
+    else:
+        await coordinator.submit(replace(_node("parent"), agent_id="parent-agent"))
+    assert failed is (boundary != "start")
     children = await repository.list_child_runs("parent")
     assert len(children) == 1
     child = children[0]
+    events = await repository.load_events(child.session_id, child.run_id)
+    assert not any(event.event_type is RunEventType.LLM_STARTED for event in events)
+    if boundary != "child_checkpoint":
+        await coordinator.cancel(child.run_id, "父关联或子启动故障收尾")
     await asyncio.wait_for(adapter.wait_terminal(child.run_id), 2)
     events = await repository.load_events(child.session_id, child.run_id)
     assert not any(event.event_type is RunEventType.LLM_STARTED for event in events)
@@ -362,6 +392,7 @@ async def test_shutdown_timeout_keeps_resource_and_run_nonterminal(tmp_path):
     assert engine._cancellation_service.pending_operations(request.run_id)
     release.set()
     await asyncio.wait_for(work, 2)
+    await asyncio.gather(*tuple(coordinator._cancellation_jobs.values()))
     assert (await repository.find_run(request.run_id)).state.outcome() is RunOutcome.CANCELLED
 
 

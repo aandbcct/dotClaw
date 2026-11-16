@@ -3,11 +3,13 @@
 from __future__ import annotations
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
 
+from dotclaw.runtime.domain.control import AgentAction
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
-from dotclaw.runtime.domain.events import RunEventType
+from dotclaw.runtime.domain.events import RunEvent, RunEventType, ToolAuditStatus, ToolBatchFailed, is_terminal_tool_event
 
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -15,7 +17,9 @@ import pytest
 from dotclaw.runtime.adapters import ApprovalRepositoryAdapter, CheckpointRepositoryAdapter, RunRepositoryAdapter
 from dotclaw.runtime.application.approval_service import ApprovalService
 from dotclaw.runtime.application.cancellation_service import CancellationService
-from dotclaw.runtime.application.engine import RuntimeEngine
+from dotclaw.runtime.application.engine import RuntimeEngine, _scan_legacy_tool_activity
+from tests.runtime_v2.tool_recovery_testkit import file_tool_recovery, ToolPortTestBase
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 from dotclaw.runtime.application.ports import ContextPort, LLMPort, LLMOutputPort, RunPolicyPort, ToolPort
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.application.execution import RunExecutionView
@@ -24,7 +28,7 @@ from dotclaw.runtime.application.dto import (
     ContextRefreshSignal, LLMOutputEvent, LLMOutputKind, RunAcceptedEvent, RunRequest, RunResult, ToolInvocation, ToolResult, ToolResultStatus,
 )
 from dotclaw.runtime.domain.facts import (
-    AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind, ToolCall,
+    AgentPolicySnapshot, AgentRun, JSONMap, JSONValue, MessageRole, RunCheckpoint, RunError, RunErrorCode, RunMessage, RunMessageKind, ToolCall,
     require_json_map,
 )
 from dotclaw.context import (
@@ -46,8 +50,39 @@ from dotclaw.context import (
     RunMessagesSlot,
     build_context_provider,
 )
-from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, TextSlotContent
+from dotclaw.runtime.domain.context import ContextContributionKind, ContextOwner, ContextPersistenceMode, ContextSlotStatus, ContextVersion, TextSlotContent
+from dotclaw.runtime.domain.tool_recovery import ToolCallState, ToolEffectCertainty
+from dotclaw.runtime.domain.state import transition
 from tests.runtime_v2.context_budget_fakes import AlwaysWithinBudgetCounter, UnexpectedHistoryCompactor
+
+
+def test_legacy_approval_completion_is_waiting_not_terminal() -> None:
+    """旧审批假终态继续表示等待，只有明确执行终态才关闭调用。"""
+    approval = RunEvent("run", 1, RunEventType.TOOL_COMPLETED, "now", data={
+        "call_id": "call", "status": ToolAuditStatus.APPROVAL_REQUIRED.value,
+    })
+    completion = RunEvent("run", 2, RunEventType.TOOL_COMPLETED, "now", data={
+        "call_id": "call", "status": ToolAuditStatus.COMPLETED.value,
+    })
+
+    assert not is_terminal_tool_event(approval)
+    activity = _scan_legacy_tool_activity((approval,))
+    assert "call" in activity.waiting
+    assert "call" not in activity.terminal_call_ids
+    assert is_terminal_tool_event(completion)
+
+
+def test_tool_batch_failure_from_tool_stage_delegation_suspension_is_terminal() -> None:
+    """旧委派恢复中的工具不确定结果可经状态机收口并保留 iteration。"""
+    suspended = AgentRunState(
+        Suspended(SuspendReason.DELEGATION, "child", RunStage.EXECUTING_TOOLS), iteration=3,
+    )
+
+    result = transition(suspended, ToolBatchFailed(RunError(RunErrorCode.TOOL_OUTCOME_UNCERTAIN, "结果待确认")))
+
+    assert result.state.outcome() is RunOutcome.FAILED
+    assert result.state.iteration == 3
+    assert result.action is AgentAction.FINALIZE
 
 
 class PolicyPort(RunPolicyPort):
@@ -98,7 +133,7 @@ class FinalLLM(LLMPort):
 
 
 
-class ToolFake(ToolPort):
+class ToolFake(ToolPortTestBase):
     """正常文本路径无需调用的工具替身。"""
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
@@ -167,6 +202,7 @@ def _engine(root: Path, *, run_change_notifier: RunChangeNotifier | None = None)
         ApprovalService(approval_repository),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(root),
         history_compactor=UnexpectedHistoryCompactor(),
         run_change_notifier=run_change_notifier,
     )
@@ -184,6 +220,7 @@ def test_engine_rejects_missing_context_budget_ports(tmp_path: Path) -> None:
             PolicyPort(),
             ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
             CancellationService(),
+            tool_recovery=file_tool_recovery(tmp_path),
         )
 
 
@@ -198,6 +235,63 @@ async def test_engine_completes_clarification_as_normal_conversation(tmp_path: P
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
     conversation = await run_repository.load_conversation("session-1")
     assert conversation[0].content == "请补充信息"
+
+
+@pytest.mark.parametrize("tool_name", ["lookup", "delegate"])
+async def test_legacy_unmatched_ordinary_and_delegation_outcomes_fail_uncertain_on_engine_resume(
+    tmp_path: Path, tool_name: str,
+) -> None:
+    """旧批次结果证据不完整时，普通和委派调用都由 Engine 收口为真实 uncertain 失败。"""
+    engine = _engine(tmp_path)
+    run = AgentRun(
+        run_id=f"legacy-{tool_name}", session_id="legacy-session", agent_id="agent-1",
+        state=AgentRunState(Running(RunStage.EXECUTING_TOOLS)), started_at="2026-11-12T00:00:00+00:00",
+        policy=AgentPolicySnapshot("agent-1", "identity-v1", "model-v1", 8), input_message_id="input",
+    )
+    call = ToolCall(
+        "legacy-call", tool_name,
+        {"target_agent_id": "agent-child", "title": "旧任务", "objective": "核验旧结果"} if tool_name == "delegate" else {"query": "x"},
+    )
+    input_message = RunMessage("input", 1, RunMessageKind.USER_INPUT, MessageRole.USER, "恢复旧运行")
+    source = RunMessage("assistant", 2, RunMessageKind.LLM_RESPONSE, MessageRole.ASSISTANT, "", tool_calls=(call,))
+    repository = engine._run_repository
+    await repository.create_run(run)
+    await repository.save_messages(run.session_id, run.run_id, (input_message, source))
+    await repository.append_context_version(run.session_id, run.run_id, ContextVersion(
+        1, "2026-11-12T00:00:00+00:00", (), "content-hash", "schema-hash",
+    ))
+    await repository.set_active_context_version(run.session_id, run.run_id, 1)
+    started = RunEvent(run.run_id, 1, RunEventType.TOOL_STARTED, "2026-11-12T00:00:01+00:00", (source.message_id,), data={
+        "call_id": call.call_id, "tool_name": call.name, "source_response_message_id": source.message_id,
+    })
+    if tool_name == "delegate":
+        legacy_event = RunEvent(run.run_id, 2, RunEventType.DELEGATION_REQUESTED, "2026-11-12T00:00:02+00:00", (source.message_id,), data={
+            "tool_call_id": call.call_id, "target_agent_id": "agent-child",
+        })
+    else:
+        legacy_event = RunEvent(run.run_id, 2, RunEventType.TOOL_COMPLETED, "2026-11-12T00:00:02+00:00", data={
+            "call_id": call.call_id, "tool_name": call.name, "status": "completed", "result_message_id": "missing-result",
+        })
+    await repository.append_event(run.session_id, started)
+    await repository.append_event(run.session_id, legacy_event)
+    old_checkpoint = RunCheckpoint(
+        f"checkpoint-{run.run_id}", run.run_id, run.session_id, 1, 2, 2,
+        {"tool_calls": [call.to_dict()]}, {}, AgentAction.EXECUTE_TOOLS,
+        active_context_version=1,
+    )
+    await engine._checkpoint_repository.save(old_checkpoint)
+
+    result = await engine.resume_run(run.run_id)
+
+    assert result.state.outcome() is RunOutcome.FAILED
+    assert result.error is not None and result.error.code is RunErrorCode.TOOL_OUTCOME_UNCERTAIN
+    assert await engine._checkpoint_repository.load(run.session_id, run.run_id) is None
+    failed = await repository.load_run(run.session_id, run.run_id)
+    assert failed is not None and failed.error is not None
+    assert failed.error.code is RunErrorCode.TOOL_OUTCOME_UNCERTAIN
+    ledger = await repository.load_tool_ledger(run.session_id, run.run_id)
+    assert ledger is not None and ledger.calls[0].state is ToolCallState.UNCERTAIN
+    await engine._tool_recovery.block_uncertain(failed, call.call_id, ledger.calls[0].uncertainty_reason or "legacy_execution_unproven", old_checkpoint)
 
 
 async def test_acceptance_is_persisted_before_blocked_model_output(tmp_path: Path) -> None:
@@ -256,6 +350,71 @@ async def test_approval_resume_keeps_id_without_second_acceptance(tmp_path: Path
     assert [event.run_id for event in output.accepted] == [waiting.run_id]
 
 
+async def test_approval_same_decision_reentry_returns_terminal_and_opposite_conflicts(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port, engine._tool_port = ApprovalLLM(), ApprovalTool()
+    waiting = await engine.execute(_request("approval-repeat"))
+    completed = await engine.resolve_approval("approval-1", True)
+
+    repeated = await engine.resolve_approval("approval-1", True)
+
+    assert repeated.run_id == waiting.run_id
+    assert repeated.state == completed.state
+    assert await engine.get_approval_session_id("approval-1") == "approval-repeat"
+    with pytest.raises(ValueError, match="相反|不可翻转"):
+        await engine.resolve_approval("approval-1", False)
+
+
+async def test_pending_success_result_still_checks_opposite_approval_decision(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port, engine._tool_port = ApprovalLLM(), ApprovalTool()
+    waiting = await engine.execute(_request("approval-pending-success-conflict"))
+    run = await engine._run_repository.load_run("approval-pending-success-conflict", waiting.run_id)
+    checkpoint = await engine._checkpoint_repository.load("approval-pending-success-conflict", waiting.run_id)
+    assert run is not None and checkpoint is not None
+    async with engine._cancellation_service.gate(run.run_id):
+        await engine._tool_recovery.decide_approval(run, "approval-1", True, checkpoint)
+    engine._pending_success_result_locked = AsyncMock(return_value=RunResult(
+        waiting.run_id,
+        AgentRunState(mode=Ended(RunOutcome.FAILED)),
+        error=RunError(RunErrorCode.PERSISTENCE_FAILURE, "结果仍待提交"),
+    ))
+
+    with pytest.raises(ValueError, match="不可翻转|相反"):
+        await engine.resolve_approval("approval-1", False)
+
+
+async def test_resume_completes_refusal_decision_left_before_cancel_request(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port, tool = ApprovalLLM(), ApprovalTool()
+    engine._tool_port = tool
+    waiting = await engine.execute(_request("approval-reject-recover"))
+    run = await engine._run_repository.load_run("approval-reject-recover", waiting.run_id)
+    checkpoint = await engine._checkpoint_repository.load("approval-reject-recover", waiting.run_id)
+    assert run is not None and checkpoint is not None
+    async with engine._cancellation_service.gate(run.run_id):
+        await engine._tool_recovery.decide_approval(run, "approval-1", False, checkpoint)
+
+    assert await engine._run_repository.load_cancellation(run.session_id, run.run_id) is None
+    result = await engine.resume_run(run.run_id)
+
+    assert result.state.outcome() is RunOutcome.CANCELLED
+    assert tool._call_count == 0
+
+
+async def test_accepted_cancellation_prevents_approved_tool_start(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port, tool = ApprovalLLM(), ApprovalTool()
+    engine._tool_port = tool
+    waiting = await engine.execute(_request("approval-cancel-priority"))
+    await engine.request_cancel(waiting.run_id, "先受理取消")
+
+    result = await engine.resolve_approval("approval-1", True)
+
+    assert result.state.outcome() is RunOutcome.CANCELLED
+    assert tool._call_count == 0
+
+
 async def test_engine_releases_run_scope_only_after_terminal_result(tmp_path: Path) -> None:
     """Run 完成后 Engine 必须通过 ContextPort 释放对应 Run Owner 缓存。"""
     context_port = ContextFake()
@@ -269,6 +428,7 @@ async def test_engine_releases_run_scope_only_after_terminal_result(tmp_path: Pa
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -305,18 +465,24 @@ class ApprovalLLM(LLMPort):
 
 
 
-class ApprovalTool(ToolPort):
+class ApprovalTool(ToolPortTestBase):
     """首次要求审批、恢复后完成同一工具调用的替身。"""
 
     def __init__(self) -> None:
         self._call_count: int = 0
 
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
-        """按调用次数模拟审批与批准后的真实执行。"""
+        """模拟预检获批后执行同一工具调用。"""
         self._call_count += 1
-        if self._call_count == 1:
-            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-1")
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已执行")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="已执行",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        if invocation.call.call_id == "call-1":
+            return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED, approval_id="approval-1",
+                execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED)
 
 
 
@@ -398,6 +564,7 @@ async def test_approval_resume_reuses_run_id_and_keeps_event_sequence(tmp_path: 
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-approval"))
@@ -428,6 +595,7 @@ async def test_approval_events_carry_structured_fields(tmp_path: Path) -> None:
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-fields"))
@@ -440,8 +608,15 @@ async def test_approval_events_carry_structured_fields(tmp_path: Path) -> None:
     resolved_event = next(event for event in events if event.event_type is RunEventType.APPROVAL_RESOLVED)
     assert waiting_event.data.get("approval_id") == "approval-1"
     assert waiting_event.data.get("call_id") == "call-1"
+    assert waiting_event.data.get("tool_event_semantics") == 2
+    source_message_id = waiting_event.data["source_response_message_id"]
+    assert waiting_event.message_ids == (source_message_id,)
+    messages = await run_repository.load_messages("session-fields", waiting.run_id)
+    assert any(message.message_id == source_message_id for message in messages)
+    assert [message.content for message in messages if message.kind is RunMessageKind.TOOL_RESULT] == ["已执行"]
     assert resolved_event.data.get("approval_id") == "approval-1"
     assert resolved_event.data.get("approved") is True
+    assert resolved_event.data.get("tool_event_semantics") == 2
 
 
 async def test_rejected_approval_event_marks_approved_false(tmp_path: Path) -> None:
@@ -457,6 +632,7 @@ async def test_rejected_approval_event_marks_approved_false(tmp_path: Path) -> N
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     await engine.execute(_request("session-reject"))
@@ -495,7 +671,7 @@ class ReActLLM(LLMPort):
 
 
 
-class CompletedTool(ToolPort):
+class CompletedTool(ToolPortTestBase):
     """记录所有工具调用并返回对应的确定性结果。"""
 
     def __init__(self) -> None:
@@ -505,7 +681,72 @@ class CompletedTool(ToolPort):
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """保存调用顺序并返回调用标识对应的结果。"""
         self.calls.append(invocation)
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=f"结果-{invocation.call.call_id}")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output=f"结果-{invocation.call.call_id}",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+
+class PreflightFailedTool(ToolPortTestBase):
+    """在处理函数启动前返回确定失败的工具替身。"""
+
+    def __init__(self, error_code: str) -> None:
+        self.error_code = error_code
+        self.execute_calls = 0
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(
+            invocation.call.call_id, ToolResultStatus.FAILED, output="预检拒绝",
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED, tool_error_code=self.error_code,
+        )
+
+    async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        self.execute_calls += 1
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="不应执行",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+
+class NotStartedExecutionFailureTool(ToolPortTestBase):
+    """处理函数明确报告尚未开始副作用的失败结果。"""
+
+    async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(
+            invocation.call.call_id, ToolResultStatus.FAILED, output="执行前拒绝",
+            error=RunError(RunErrorCode.TOOL_FAILURE, "执行前拒绝"),
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED,
+        )
+
+
+@pytest.mark.parametrize("error_code", ["INVALID_ARGUMENTS", "POLICY_DENIED"])
+async def test_preflight_not_started_failure_is_committed_without_handler(error_code: str, tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port = ApprovalLLM()
+    tool = PreflightFailedTool(error_code)
+    engine._tool_port = tool
+
+    result = await engine.execute(_request(f"preflight-{error_code}"))
+
+    assert result.state.outcome() is RunOutcome.FAILED
+    assert result.error is not None and result.error.code is RunErrorCode.TOOL_FAILURE
+    run = await engine._run_repository.find_run(result.run_id)
+    ledger = await engine._run_repository.load_tool_ledger("preflight-" + error_code, result.run_id)
+    assert run is not None and run.error is not None and run.error.code is RunErrorCode.TOOL_FAILURE
+    assert ledger is not None and ledger.calls[0].state is ToolCallState.FAILED
+    assert ledger.calls[0].result is not None and ledger.calls[0].result.tool_error_code == error_code
+    assert tool.execute_calls == 0
+
+
+async def test_execute_failed_not_started_is_committed_as_reliable_failure(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port = ApprovalLLM()
+    engine._tool_port = NotStartedExecutionFailureTool()
+
+    result = await engine.execute(_request("execute-not-started-failure"))
+
+    assert result.state.outcome() is RunOutcome.FAILED
+    assert result.error is not None and result.error.code is RunErrorCode.TOOL_FAILURE
+    ledger = await engine._run_repository.load_tool_ledger("execute-not-started-failure", result.run_id)
+    assert ledger is not None and ledger.calls[0].state is ToolCallState.FAILED
+    assert ledger.calls[0].result is not None
+    assert ledger.calls[0].result.effect_certainty.value == "known"
 
 
 
@@ -546,6 +787,7 @@ async def test_react_context_contains_all_tool_calls_and_results_in_next_llm_rou
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -581,6 +823,7 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -633,8 +876,8 @@ async def test_engine_appends_context_versions_and_audits_llm_calls_without_requ
     assert second_data["incremental_message_ids"] == [
         "user-1",
         f"response-{result.run_id}-2",
-        f"tool-{result.run_id}-3",
-        f"tool-{result.run_id}-4",
+        f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, result.run_id + ':call-1').hex}",
+        f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, result.run_id + ':call-2').hex}",
     ]
     tool_events: list[JSONMap] = [event for event in events if event["event_type"] in {"tool_started", "tool_completed"}]
     # 每个真实开始的工具单独写开始事件和恢复检查点，后续未执行工具不能伪造开始事实。
@@ -657,6 +900,7 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -669,7 +913,6 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
         "这是之前的回答。",
         "请查询资料。",
         "我将查询两个来源。",
-        "",
         "已执行",
         "已执行",
     ]
@@ -680,7 +923,7 @@ async def test_approval_resume_rebuilds_conversation_and_react_context(tmp_path:
 
 
 async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> None:
-    """审批恢复不得重新计算动态 Slot，后续上下文必须使用首次冻结文本。"""
+    """工具恢复使用冻结 Slot；工具批次结束后的新模型请求刷新 Slot。"""
     llm: ReActLLM = ReActLLM()
     changing_slot: ChangingSystemSlot = ChangingSystemSlot()
     engine: RuntimeEngine = RuntimeEngine(
@@ -693,6 +936,7 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -700,9 +944,9 @@ async def test_approval_resume_replays_frozen_system_slots(tmp_path: Path) -> No
     completed: RunResult = await engine.resolve_approval(waiting.approval_id or "", approved=True)
 
     assert completed.state.outcome() is RunOutcome.COMPLETED
-    assert changing_slot.calls == 1
+    assert changing_slot.calls == 2
     assert llm.contexts[0].messages[0].content == "system-1"
-    assert llm.contexts[1].messages[0].content == "system-1"
+    assert llm.contexts[1].messages[0].content == "system-2"
 
 
 async def test_rejected_approval_records_decision_and_cancels_without_conversation(tmp_path: Path) -> None:
@@ -718,6 +962,7 @@ async def test_rejected_approval_records_decision_and_cancels_without_conversati
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
 
@@ -749,6 +994,7 @@ async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) ->
         ApprovalService(ApprovalRepositoryAdapter(tmp_path)),
         CancellationService(),
         token_counter=AlwaysWithinBudgetCounter(),
+        tool_recovery=file_tool_recovery(tmp_path),
         history_compactor=UnexpectedHistoryCompactor(),
     )
     waiting = await engine.execute(_request("session-cancel"))
@@ -758,8 +1004,134 @@ async def test_cancel_waiting_run_does_not_write_conversation(tmp_path: Path) ->
     cancelled = await run_repository.load_run("session-cancel", waiting.run_id)
     assert cancelled is not None
     assert cancelled.state.outcome().value == "cancelled"
+    ledger = await run_repository.load_tool_ledger("session-cancel", waiting.run_id)
+    assert ledger is not None
+    call = next(item for item in ledger.calls if item.call.call_id == "call-1")
+    assert call.state is ToolCallState.CANCELLED
+    assert call.result is not None and call.result.effect_certainty is ToolEffectCertainty.KNOWN
     assert await run_repository.load_conversation("session-cancel") == ()
     assert await CheckpointRepositoryAdapter(tmp_path).load("session-cancel", waiting.run_id) is None
+
+
+async def test_cancel_started_ledger_call_keeps_unknown_effect_evidence(tmp_path: Path) -> None:
+    run_repository = RunRepositoryAdapter(tmp_path, approval_repository=ApprovalRepositoryAdapter(tmp_path))
+    engine = RuntimeEngine(
+        run_repository, CheckpointRepositoryAdapter(tmp_path), ContextFake(), ApprovalLLM(), ApprovalTool(),
+        PolicyPort(), ApprovalService(ApprovalRepositoryAdapter(tmp_path)), CancellationService(),
+        token_counter=AlwaysWithinBudgetCounter(), tool_recovery=file_tool_recovery(tmp_path),
+        history_compactor=UnexpectedHistoryCompactor(),
+    )
+    waiting = await engine.execute(_request("session-cancel-started"))
+    run = await run_repository.load_run("session-cancel-started", waiting.run_id)
+    checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-cancel-started", waiting.run_id)
+    assert run is not None and checkpoint is not None
+    async with engine._cancellation_service.gate(run.run_id):
+        await engine._tool_recovery.decide_approval(run, "approval-1", True, checkpoint)
+    run = await run_repository.load_run("session-cancel-started", waiting.run_id)
+    checkpoint = await CheckpointRepositoryAdapter(tmp_path).load("session-cancel-started", waiting.run_id)
+    assert run is not None and checkpoint is not None
+    async with engine._cancellation_service.gate(run.run_id):
+        await engine._tool_recovery.begin_attempt(run, "call-1", checkpoint)
+
+    await engine.request_cancel(waiting.run_id, "开始后取消")
+    result = await engine.complete_cancellation(waiting.run_id)
+
+    ledger = await run_repository.load_tool_ledger("session-cancel-started", waiting.run_id)
+    assert ledger is not None
+    call = next(item for item in ledger.calls if item.call.call_id == "call-1")
+    assert result.state.outcome() is RunOutcome.CANCELLED
+    assert call.state is ToolCallState.CANCELLED
+    assert call.result is not None and call.result.effect_certainty is ToolEffectCertainty.UNKNOWN
+
+
+async def test_cancel_waits_for_observed_tool_result_projection(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._llm_port = ReActLLM()
+    engine._tool_port = CompletedTool()
+    projection_started, allow_projection = asyncio.Event(), asyncio.Event()
+    commit_outcome = engine._tool_recovery.commit_outcome
+
+    async def blocked_commit(run, call_id, outcome, checkpoint):
+        projection_started.set()
+        await allow_projection.wait()
+        return await commit_outcome(run, call_id, outcome, checkpoint)
+
+    engine._tool_recovery.commit_outcome = blocked_commit
+    task = asyncio.create_task(engine.execute(_request("session-observed-result-cancel")))
+    try:
+        await asyncio.wait_for(projection_started.wait(), 2)
+        active = await engine.active_run("session-observed-result-cancel")
+        assert active is not None
+        cancel_task = asyncio.create_task(engine.request_cancel(active.run_id, "结果返回后取消"))
+        await asyncio.sleep(0)
+        assert not cancel_task.done()
+        allow_projection.set()
+        await cancel_task
+        result = await task
+        assert result.control_status == "cancelling"
+        cancelled = await engine.complete_cancellation(active.run_id)
+    finally:
+        allow_projection.set()
+        if not task.done():
+            await task
+
+    ledger = await engine._run_repository.load_tool_ledger(active.session_id, active.run_id)
+    assert cancelled.state.outcome() is RunOutcome.CANCELLED
+    assert ledger is not None
+    calls = {item.call.call_id: item for item in ledger.calls}
+    assert calls["call-1"].state is ToolCallState.SUCCEEDED
+    assert calls["call-1"].result is not None and calls["call-1"].result.status.value == "completed"
+    assert calls["call-2"].state is ToolCallState.CANCELLED
+
+
+async def test_driver_cancellation_while_waiting_for_result_gate_keeps_observed_result(tmp_path: Path) -> None:
+    """驱动在等待结果提交短锁时取消，也必须等账本投影完整提交。"""
+    engine = _engine(tmp_path)
+    engine._llm_port = ReActLLM()
+    tool = CompletedTool()
+    engine._tool_port = tool
+    tool_started, allow_tool_return, commit_started, allow_commit = (
+        asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event(),
+    )
+
+    async def delayed_execute(invocation, execution):
+        tool.calls.append(invocation)
+        tool_started.set()
+        await allow_tool_return.wait()
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+            output=f"结果-{invocation.call.call_id}", execution_evidence=ToolExecutionEvidence.RETURNED)
+
+    tool.execute = delayed_execute
+    original_commit = engine._commit_observed_tool_result
+    async def wait_for_result_commit(*args, **kwargs):
+        commit_started.set()
+        await allow_commit.wait()
+        await original_commit(*args, **kwargs)
+    engine._commit_observed_tool_result = wait_for_result_commit
+    task = asyncio.create_task(engine.execute(_request("session-result-gate-driver-cancel")))
+    run_id = None
+    try:
+        await tool_started.wait()
+        active = await engine.active_run("session-result-gate-driver-cancel")
+        assert active is not None
+        run_id = active.run_id
+        allow_tool_return.set()
+        await asyncio.wait_for(commit_started.wait(), 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        allow_commit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        allow_tool_return.set()
+        allow_commit.set()
+        if not task.done():
+            await task
+
+    ledger = await engine._run_repository.load_tool_ledger(active.session_id, run_id)
+    assert ledger is not None
+    assert next(item for item in ledger.calls if item.call.call_id == "call-1").state is ToolCallState.SUCCEEDED
 
 
 class OrderedEngine:

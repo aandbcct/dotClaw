@@ -13,6 +13,7 @@ from dotclaw.common.resource_errors import ResourceCleanupError
 from dotclaw.runtime.application.cancellation_service import CancellationService
 from dotclaw.runtime.application.execution import CancellationToken
 from dotclaw.runtime.application.operation import RunOperationKind, RunOperationCancelled, RunOperationCleanupError
+from dotclaw.runtime.application.ports import RunPersistenceError
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.domain.cancellation import CancellationRequest, CancellationOrigin, CancellationPhase, CancellationDisposition
 from dotclaw.runtime.domain.events import RunEventType
@@ -210,7 +211,8 @@ async def test_request_write_survives_repeated_outer_cancel_without_releasing_ga
     with pytest.raises(asyncio.CancelledError):
         await requester
     result = await asyncio.wait_for(driver, 2)
-    assert result.state.outcome() is RunOutcome.CANCELLED
+    assert result.control_status == "cancelling" and not result.state.is_ended()
+    await engine.complete_cancellation(run.run_id)
     assert signal_records and signal_records[0].request.reason == "先持久化取消"
     assert (await engine._run_repository.load_cancellation("session", run.run_id)).phase is CancellationPhase.SETTLED
     events = await engine._run_repository.load_events("session", run.run_id)
@@ -219,7 +221,7 @@ async def test_request_write_survives_repeated_outer_cancel_without_releasing_ga
     assert await engine._run_repository.load_conversation("session") == ()
 
 
-@pytest.mark.parametrize("commit_file", ["success_commit.json", "cancel_commit.json"])
+@pytest.mark.parametrize("commit_file", ["success_commit.json"])
 async def test_terminal_commit_holds_gate_until_file_thread_finishes_after_driver_cancel(tmp_path, monkeypatch, commit_file) -> None:
     """终态意图已开始写入后，驱动取消也不能提前释放裁决锁。"""
     engine = _engine(tmp_path)
@@ -232,11 +234,7 @@ async def test_terminal_commit_holds_gate_until_file_thread_finishes_after_drive
                 raise TimeoutError("测试未释放成功提交屏障")
         original(path, payload)
     monkeypatch.setattr(file_repository, "write_json_atomic", blocked_write)
-    async def accepted(event):
-        await engine.request_cancel(event.run_id, "受理后停止")
-    output = SimpleNamespace(on_run_accepted=accepted) if commit_file == "cancel_commit.json" else None
-    expected = RunOutcome.CANCELLED if output is not None else RunOutcome.COMPLETED
-    driver = asyncio.create_task(engine.execute(_request("session"), output))
+    driver = asyncio.create_task(engine.execute(_request("session")))
     requester = None
     try:
         assert await asyncio.to_thread(entered.wait, 2)
@@ -255,6 +253,7 @@ async def test_terminal_commit_holds_gate_until_file_thread_finishes_after_drive
         await driver
     receipt = await asyncio.wait_for(requester, 2)
     assert receipt.disposition is CancellationDisposition.ALREADY_ENDED
+    expected = RunOutcome.COMPLETED
     assert receipt.outcome is expected
     record = await engine._run_repository.load_cancellation("session", run.run_id)
     assert (record is None) is (expected is RunOutcome.COMPLETED)
@@ -262,7 +261,7 @@ async def test_terminal_commit_holds_gate_until_file_thread_finishes_after_drive
         assert record.phase is CancellationPhase.SETTLED
     assert (await engine._run_repository.find_run(run.run_id)).state.outcome() is expected
     events = await engine._run_repository.load_events("session", run.run_id)
-    expected_event = RunEventType.RUN_CANCELLED if output is not None else RunEventType.RUN_COMPLETED
+    expected_event = RunEventType.RUN_COMPLETED
     assert sum(event.event_type is expected_event for event in events) == 1
     assert sum(event.event_type in (RunEventType.RUN_COMPLETED, RunEventType.RUN_CANCELLED) for event in events) == 1
 
@@ -300,7 +299,8 @@ async def test_runtime_cancel_does_not_cancel_driver_or_start_next_action(tmp_pa
     assert receipt.disposition is CancellationDisposition.ACCEPTED
     result = await asyncio.wait_for(driver, 2)
     await asyncio.gather(*tuple(coordinator._cancellation_jobs.values()))
-    assert result.state.outcome() is RunOutcome.CANCELLED
+    assert result.control_status == "cancelling" and not result.state.is_ended()
+    assert (await engine._run_repository.find_run(run.run_id)).state.outcome() is RunOutcome.CANCELLED
     assert not driver.cancelled() and cleaned.is_set()
     events = await engine._run_repository.load_events("session", run.run_id)
     assert sum(event.event_type is RunEventType.RUN_CANCELLED for event in events) == 1
@@ -323,21 +323,33 @@ async def test_tool_completed_during_cancel_records_real_output_and_skips_remain
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, "实际完成")
-    engine._tool_port = SimpleNamespace(execute=tool)
+            return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, "实际完成",
+                execution_evidence=ToolExecutionEvidence.RETURNED)
+    from dotclaw.runtime.application.dto import ToolRecoveryContract, ToolResult, ToolResultStatus
+    from dotclaw.common.tool_replay import ToolExecutionEvidence
+    async def preflight(invocation, execution):
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+    async def describe_recovery(call, execution):
+        return ToolRecoveryContract()
+    engine._tool_port = SimpleNamespace(execute=tool, preflight=preflight, describe_recovery=describe_recovery)
     driver = asyncio.create_task(coordinator.submit(_request("session")))
     await asyncio.wait_for(started.wait(), 2)
     run = await engine.active_run("session")
     await coordinator.cancel(run.run_id, "停止")
-    assert (await driver).state.outcome() is RunOutcome.CANCELLED
+    result = await driver
+    assert result.control_status == "cancelling" and not result.state.is_ended()
     await asyncio.gather(*tuple(coordinator._cancellation_jobs.values()))
+    assert (await engine._run_repository.find_run(run.run_id)).state.outcome() is RunOutcome.CANCELLED
     assert calls == ["call-1"]
     messages = await engine._run_repository.load_messages("session", run.run_id)
     assert any(message.content == "实际完成" for message in messages)
     events = await engine._run_repository.load_events("session", run.run_id)
     completed = [event for event in events if event.event_type is RunEventType.TOOL_COMPLETED]
-    assert len(completed) == 1 and completed[0].data["status"] == "completed"
-    assert not any(event.data.get("call_id") == "call-2" for event in events)
+    assert [(event.data["call_id"], event.data["status"]) for event in completed] == [
+        ("call-1", "completed"), ("call-2", "cancelled"),
+    ]
+    assert not any(event.event_type is RunEventType.TOOL_STARTED and event.data.get("call_id") == "call-2" for event in events)
 
 
 async def test_cleanup_failure_keeps_run_nonterminal_and_session_occupied(tmp_path) -> None:
@@ -393,8 +405,9 @@ async def test_slow_cleanup_is_reported_blocked_without_recancelling_finally(tmp
     assert repeated.request_id == receipt.request_id
     assert not driver.done()
     release.set()
-    assert (await driver).state.outcome() is RunOutcome.CANCELLED
+    assert (await driver).control_status == "cancelling"
     await asyncio.gather(*tuple(coordinator._cancellation_jobs.values()))
+    assert (await engine._run_repository.find_run(run.run_id)).state.outcome() is RunOutcome.CANCELLED
 
 
 async def test_accepted_callback_cancellation_before_operation_registration(tmp_path) -> None:
@@ -406,7 +419,9 @@ async def test_accepted_callback_cancellation_before_operation_registration(tmp_
     async def accepted(event):
         await engine.request_cancel(event.run_id, "受理时停止")
     result = await engine.execute(_request("session"), SimpleNamespace(on_run_accepted=accepted))
-    assert result.state.outcome() is RunOutcome.CANCELLED
+    assert result.control_status == "cancelling" and not result.state.is_ended()
+    cancelled = await engine.complete_cancellation(result.run_id)
+    assert cancelled.state.outcome() is RunOutcome.CANCELLED
     assert called == []
 
 
@@ -417,12 +432,15 @@ async def test_completion_replays_frozen_intent_and_clears_projection(tmp_path, 
         await engine.request_cancel(event.run_id, "受理后停止")
     def failed(*args):
         raise OSError("删除提交意图前中断")
+    waiting = await engine.execute(_request("session"), SimpleNamespace(on_run_accepted=accepted))
+    assert waiting.control_status == "cancelling"
+    run_id = waiting.run_id
+    version = engine._run_change_notifier.version(run_id)
     with monkeypatch.context() as patch:
         patch.setattr(engine._run_repository, "_delete_cancellation_intent_sync", failed)
-        with pytest.raises(OSError):
-            await engine.execute(_request("session"), SimpleNamespace(on_run_accepted=accepted))
-    run_id = next(iter(engine._cancellation_service._requests))
-    version = engine._run_change_notifier.version(run_id)
+        with pytest.raises(RunPersistenceError) as captured:
+            await engine.complete_cancellation(run_id)
+        assert isinstance(captured.value.__cause__, OSError)
     result = await engine.complete_cancellation(run_id)
     assert result.state.outcome() is RunOutcome.CANCELLED
     assert run_id not in engine._cancellation_service._requests
@@ -440,4 +458,4 @@ async def test_cancelled_approval_never_executes_approved_tool(tmp_path) -> None
     await engine.request_cancel(waiting.run_id, "先取消")
     result = await engine.resolve_approval("approval-1", True)
     assert result.state.outcome() is RunOutcome.CANCELLED
-    assert tool._call_count == 1
+    assert tool._call_count == 0

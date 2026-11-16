@@ -34,6 +34,14 @@ class ApprovalService:
             return None
         return record
 
+    async def find(self, approval_id: str) -> ApprovalRecord | None:
+        """读取审批记录，包括已持久化决议，供恢复核对身份。"""
+        return await self._repository.load(approval_id)
+
+    async def ensure_projection(self, record: ApprovalRecord) -> None:
+        """幂等委托审批投影；不在服务层产生或改变决议。"""
+        await self._repository.ensure(record)
+
     async def consume(self, approval_id: str) -> ApprovalRecord | None:
         """原子消费审批记录，防止重复恢复同一 Run。"""
         return await self._repository.consume(approval_id)

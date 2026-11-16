@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from hashlib import sha256
 
 from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, RunRequest, ToolDefinition
@@ -18,6 +19,8 @@ from dotclaw.runtime.domain.context import (
     ToolDefinitionsSlotContent,
 )
 from dotclaw.runtime.domain.facts import JSONMap, JSONValue, MessageRole, RunMessage, RunMessageKind
+from dotclaw.runtime.domain.events import RunEvent, RunEventType
+from dotclaw.runtime.domain.control import AgentAction
 
 from .contracts import ContextContribution, ContextOwnerSnapshot, ContextSlotBinding
 from .plan_resolver import ContextPlanResolver
@@ -42,9 +45,13 @@ class ContextProvider:
         plan = self._resolver.resolve(owner_data)
         contributions: tuple[ContextContribution, ...] = await self._manager.load_plan(plan)
         snapshots: tuple[ContextSlotSnapshot, ...] = _snapshots(plan.bindings, contributions)
-        messages: tuple[RunMessage, ...] = _messages_from_contributions(execution.run_id, contributions, execution.run_messages)
+        context_run_messages = _filter_legacy_approval_results(execution.run_messages, execution.run_events)
+        messages: tuple[RunMessage, ...] = _messages_from_contributions(execution.run_id, contributions, context_run_messages)
+        if execution.action is AgentAction.INVOKE_LLM:
+            _validate_tool_message_pairs(messages)
         tools: tuple[ToolDefinition, ...] = _tools_from_contributions(contributions)
-        fact_ids: tuple[str, ...] = _fact_reference_ids(contributions)
+        visible_ids = {message.message_id for message in context_run_messages}
+        fact_ids: tuple[str, ...] = tuple(message_id for message_id in _fact_reference_ids(contributions) if message_id in visible_ids)
         return ContextBundle(messages, tools, ContextMetadata(0, tuple(binding.descriptor.slot_id for binding in plan.bindings), slot_snapshots=snapshots, fact_reference_message_ids=fact_ids))
 
     async def release_scope(self, owner: ContextOwner, owner_key: str) -> None:
@@ -126,10 +133,65 @@ def _bundle_from_active_version(execution: RunExecutionView) -> ContextBundle:
     contributions: list[ContextContribution] = []
     for slot in active:
         contributions.append(ContextContribution(slot.contribution_kind, slot.status, slot.content, slot.error_code))
-    fact_content: RunMessageReferencesSlotContent = RunMessageReferencesSlotContent(tuple(message.message_id for message in execution.run_messages))
+    context_run_messages = _filter_legacy_approval_results(execution.run_messages, execution.run_events)
+    fact_content: RunMessageReferencesSlotContent = RunMessageReferencesSlotContent(tuple(message.message_id for message in context_run_messages))
     contributions.append(ContextContribution(ContextContributionKind.RUN_MESSAGE_REFERENCES, ContextSlotStatus.INCLUDED if fact_content.message_ids else ContextSlotStatus.EMPTY, fact_content))
     frozen: tuple[ContextContribution, ...] = tuple(contributions)
-    return ContextBundle(_messages_from_contributions(execution.run_id, frozen, execution.run_messages), _tools_from_contributions(frozen), ContextMetadata(0, tuple(slot.slot_id for slot in active), slot_snapshots=active, fact_reference_message_ids=fact_content.message_ids))
+    messages = _messages_from_contributions(execution.run_id, frozen, context_run_messages)
+    if execution.action is AgentAction.INVOKE_LLM:
+        _validate_tool_message_pairs(messages)
+    return ContextBundle(messages, _tools_from_contributions(frozen), ContextMetadata(0, tuple(slot.slot_id for slot in active), slot_snapshots=active, fact_reference_message_ids=fact_content.message_ids))
+
+
+def _filter_legacy_approval_results(messages: tuple[RunMessage, ...], events: tuple[RunEvent, ...]) -> tuple[RunMessage, ...]:
+    """仅从模型输入中排除旧审批事件精确引用的假工具结果。"""
+    indexed = {message.message_id: message for message in messages}
+    excluded: set[str] = set()
+    for event in events:
+        if (
+            event.event_type is not RunEventType.TOOL_COMPLETED
+            or event.data.get("status") != "approval_required"
+            or event.data.get("tool_protocol_version") is not None
+            or event.data.get("commit_id") is not None
+        ):
+            continue
+        call_id = event.data.get("call_id")
+        if not isinstance(call_id, str):
+            raise ValueError("旧审批假结果事件缺少 call_id")
+        source_id = event.data.get("source_response_message_id")
+        if not isinstance(source_id, str):
+            source_id = next((message.message_id for message in messages if message.role is MessageRole.ASSISTANT and any(call.call_id == call_id for call in message.tool_calls)), None)
+        explicit_result_id = event.data.get("result_message_id")
+        references = set(event.message_ids)
+        if explicit_result_id is not None and explicit_result_id != "":
+            if not isinstance(explicit_result_id, str):
+                raise ValueError("旧审批假结果引用格式无效")
+            references.add(explicit_result_id)
+        for message_id in references:
+            message = indexed.get(message_id)
+            if message is None:
+                if message_id != source_id:
+                    raise ValueError("旧审批事件引用的消息不存在")
+                continue
+            if message.kind is RunMessageKind.TOOL_RESULT and message.role is MessageRole.TOOL:
+                if message.tool_call_id != call_id:
+                    raise ValueError("旧审批事件引用了其他工具调用的结果消息")
+                excluded.add(message_id)
+            elif message_id != source_id:
+                raise ValueError("旧审批事件引用未匹配源助手或假工具结果消息")
+    return tuple(message for message in messages if message.message_id not in excluded)
+
+
+def _validate_tool_message_pairs(messages: tuple[RunMessage, ...]) -> None:
+    """进入模型前核对助手工具调用与真实结果严格配对。"""
+    call_ids = [call.call_id for message in messages if message.role is MessageRole.ASSISTANT for call in message.tool_calls]
+    result_ids = [message.tool_call_id for message in messages if message.role is MessageRole.TOOL and message.tool_call_id]
+    call_counts = Counter(call_ids)
+    result_counts = Counter(result_ids)
+    if any(count != 1 for count in call_counts.values()) or any(result_counts.get(call_id, 0) != 1 for call_id in call_counts):
+        raise ValueError("模型上下文中的助手工具调用缺少唯一真实结果")
+    if any(call_id not in call_counts for call_id in result_counts):
+        raise ValueError("模型上下文包含没有来源助手调用的工具结果")
 
 
 def _snapshots(bindings: tuple[ContextSlotBinding, ...], contributions: tuple[ContextContribution, ...]) -> tuple[ContextSlotSnapshot, ...]:

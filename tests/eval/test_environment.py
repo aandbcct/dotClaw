@@ -10,9 +10,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from dotclaw.eval.environment import EvalDependencies, EvalEnvironment
 from dotclaw.eval.fixtures import FixtureConfigurationError
 from dotclaw.eval.models import ExecutionMode, FixtureMatchMode
-from dotclaw.runtime.application.dto import ToolResult, ToolResultStatus
+from dotclaw.runtime.application.dto import ToolRecoveryContract, ToolResult, ToolResultStatus
+from dotclaw.common.tool_replay import ToolExecutionEvidence
 from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind
-from dotclaw.runtime.domain.state import Ended, RunOutcome
+from dotclaw.runtime.domain.state import Created, Ended, RunOutcome
 
 from helpers import (
     build_case,
@@ -51,6 +52,38 @@ async def test_environment_resumes_fixture_delegation_to_terminal() -> None:
     assert any(message.kind is RunMessageKind.DELEGATION_RESULT for message in outcome.messages)
 
 
+@pytest.mark.asyncio
+async def test_environment_materializes_unfinished_fixture_child_before_parent_resume() -> None:
+    """未结束子 Fixture 在父运行恢复前已有 Created 子运行与输入消息。"""
+    delegate = tool_call(
+        "delegate-pending",
+        "delegate",
+        {"target_agent_id": "agent-review", "title": "审阅", "objective": "检查冻结材料"},
+    )
+    case = build_case(
+        context_fixtures=(context_fixture("ctx-pending-1"),),
+        llm_fixture=make_llm_fixture(
+            "llm-pending",
+            (llm_response("pending-request", tool_calls=(delegate,)),),
+        ),
+        delegation_fixtures=(
+            delegation_fixture("delegation-pending", "agent-review", "child-pending"),
+        ),
+    )
+
+    outcome = await EvalEnvironment(case).run()
+    outcome.assert_fully_consumed()
+
+    assert outcome.result.child_run_id == "child-pending"
+    assert outcome.state.is_waiting_delegation()
+    child = await outcome.environment.run_repository.find_run("child-pending")
+    assert child is not None
+    assert isinstance(child.state.mode, Created)
+    child_messages = await outcome.environment.run_repository.load_messages(child.session_id, child.run_id)
+    assert len(child_messages) == 1
+    assert child_messages[0].content == "任务：审阅\n\n目标：检查冻结材料"
+
+
 # --------------------------------------------------------------------------- #
 # 被调用即失败的替身：core 方法记录并抛错，生命周期方法仅记录
 # --------------------------------------------------------------------------- #
@@ -75,6 +108,14 @@ class _FailTool(_FailIfCalled):
     async def execute(self, invocation, execution):
         self.core_calls += 1
         raise AssertionError("生产工具被调用")
+
+    async def preflight(self, invocation, execution):
+        self.core_calls += 1
+        raise AssertionError("生产工具预检被调用")
+
+    async def describe_recovery(self, call, execution):
+        self.core_calls += 1
+        raise AssertionError("生产工具恢复契约被读取")
 
 
 
@@ -157,7 +198,15 @@ class _RecordTool(_FailTool):
 
     async def execute(self, invocation, execution):
         self.calls += 1
-        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="real tool result")
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, output="real tool result",
+            execution_evidence=ToolExecutionEvidence.RETURNED)
+
+    async def preflight(self, invocation, execution):
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+
+    async def describe_recovery(self, call, execution):
+        return ToolRecoveryContract()
 
 
 # --------------------------------------------------------------------------- #
@@ -249,10 +298,8 @@ async def test_playback_missing_fixture_fails_do_not_silent_succeed() -> None:
         tool_fixtures=(),  # 没有对应的工具 fixture
     )
     env = EvalEnvironment(case)
-    outcome = await env.run()
-    # 未匹配的工具调用必须导致失败，绝不能伪装成完成
-    assert isinstance(outcome.state.mode, Ended)
-    assert outcome.state.mode.outcome is RunOutcome.FAILED
+    with pytest.raises(FixtureConfigurationError):
+        await env.run()
 
 
 async def test_playback_composite_never_falls_back_to_real() -> None:

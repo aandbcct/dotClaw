@@ -13,6 +13,7 @@ from typing import Any, Callable, TypeVar
 from pydantic import BaseModel
 
 from .base import ToolDefinition, ToolExecutionContext, ToolSource
+from ..common.tool_replay import ToolReplayPolicy, ToolSideEffect
 
 
 class ToolPolicy(str, Enum):
@@ -54,6 +55,13 @@ class ToolMeta:
     path_param: str | None = None
     network_service: str | None = None        # 网络类静态声明：Provider 服务标识
     network_hosts: list[str] = field(default_factory=list)  # 网络类静态声明：精确主机集合
+    replay_policy: ToolReplayPolicy = ToolReplayPolicy.NO_AUTO_RETRY
+    replay_contract_version: str = ""
+    side_effect: ToolSideEffect = ToolSideEffect.UNKNOWN
+    recovery_max_retries: int = 0
+    recovery_initial_delay_s: float = 1.0
+    recovery_backoff_multiplier: float = 2.0
+    recovery_max_delay_s: float = 30.0
 
     def build_definition(self) -> ToolDefinition:
         """由元数据构造面向 LLM 的 ToolDefinition。
@@ -79,6 +87,13 @@ class ToolMeta:
             path_param=self.path_param,
             network_service=self.network_service,
             network_hosts=list(self.network_hosts),
+            replay_policy=self.replay_policy,
+            replay_contract_version=self.replay_contract_version,
+            side_effect=self.side_effect,
+            recovery_max_retries=self.recovery_max_retries,
+            recovery_initial_delay_s=self.recovery_initial_delay_s,
+            recovery_backoff_multiplier=self.recovery_backoff_multiplier,
+            recovery_max_delay_s=self.recovery_max_delay_s,
         )
 
 
@@ -98,17 +113,24 @@ def tool(
     path_param: str | None = None,
     network_service: str | None = None,
     network_hosts: list[str] | None = None,
+    replay_policy: ToolReplayPolicy = ToolReplayPolicy.NO_AUTO_RETRY,
+    replay_contract_version: str = "",
+    side_effect: ToolSideEffect = ToolSideEffect.UNKNOWN,
+    recovery_max_retries: int = 0,
+    recovery_initial_delay_s: float = 1.0,
+    recovery_backoff_multiplier: float = 2.0,
+    recovery_max_delay_s: float = 30.0,
 ) -> Callable[[FuncT], FuncT]:
     """声明一个工具的元数据。
 
-    用法：
-        @tool(name="builtin.files.read_text", args_model=ReadTextArgs,
-              policy=ToolPolicy.WORKSPACE_READ)
-        async def read_text(args: ReadTextArgs, context: ToolExecutionContext) -> str:
+    新工具优先直接声明业务参数：
+        @tool(name="builtin.files.read_text", policy=ToolPolicy.WORKSPACE_READ)
+        async def read_text(path: Annotated[str, Field(description="路径")], *,
+                            context: ToolExecutionContext) -> str:
             ...
 
-        @tool(name="builtin.web.search", args_model=SearchArgs,
-              policy=ToolPolicy.NETWORK,
+    旧自定义工具仍可通过 args_model 保持兼容：
+        @tool(name="custom.web.search", args_model=SearchArgs, policy=ToolPolicy.NETWORK,
               network_service="tavily", network_hosts=["api.tavily.com"])
         async def search(args: SearchArgs, context: ToolExecutionContext) -> str:
             ...
@@ -131,6 +153,13 @@ def tool(
             path_param=path_param,
             network_service=network_service,
             network_hosts=list(network_hosts or []),
+            replay_policy=replay_policy,
+            replay_contract_version=replay_contract_version,
+            side_effect=side_effect,
+            recovery_max_retries=recovery_max_retries,
+            recovery_initial_delay_s=recovery_initial_delay_s,
+            recovery_backoff_multiplier=recovery_backoff_multiplier,
+            recovery_max_delay_s=recovery_max_delay_s,
         )
         func.__tool_meta__ = meta  # type: ignore[attr-defined]
         return func

@@ -18,8 +18,8 @@ async def zero_arg() -> str:
 
 
 @tool(name="sample.basic_fields", description="基础类型参数（由签名推导）")
-async def basic_fields(path: str, count: int = 3, context: ToolContext = None) -> str:
-    """全部业务参数为 str/int，含字面量默认值；context 形参被推导忽略。"""
+async def basic_fields(path: str, count: int = 3, *, context: ToolContext) -> str:
+    """全部业务参数为 str/int，含签名默认值；上下文不进入模型。"""
     return f"{path}:{count}"
 
 

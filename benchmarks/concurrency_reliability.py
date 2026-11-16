@@ -40,6 +40,7 @@ from dotclaw.runtime.application.dto import (
 from dotclaw.runtime.application.engine import RuntimeEngine
 from dotclaw.runtime.application.session_run_coordinator import SessionRunCoordinator
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
+from dotclaw.runtime.application.tool_recovery import ToolRecoveryService
 from dotclaw.runtime.domain.facts import MessageRole
 
 from .concurrency_assertions import (
@@ -158,15 +159,19 @@ def _build_engine(
     run_change_notifier: RunChangeNotifier,
 ) -> RuntimeEngine:
     """组装最小 Benchmark RuntimeEngine。"""
+    run_repository = RunRepositoryAdapter(root)
+    checkpoint_repository = CheckpointRepositoryAdapter(root)
+    approval_service = ApprovalService(ApprovalRepositoryAdapter(root))
     return RuntimeEngine(
-        run_repository=RunRepositoryAdapter(root),
-        checkpoint_repository=CheckpointRepositoryAdapter(root),
+        run_repository=run_repository,
+        checkpoint_repository=checkpoint_repository,
         context_port=context_port,
         llm_port=llm_port,
         tool_port=tool_port,
         policy_port=FixedPolicy(),
-        approval_service=ApprovalService(ApprovalRepositoryAdapter(root)),
+        approval_service=approval_service,
         cancellation_service=CancellationService(),
+        tool_recovery=ToolRecoveryService(run_repository, checkpoint_repository, approval_service),
         token_counter=_AlwaysWithinBudgetCounter(),
         history_compactor=_UnexpectedHistoryCompactor(),
         run_change_notifier=run_change_notifier,

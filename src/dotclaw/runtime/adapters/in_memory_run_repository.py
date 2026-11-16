@@ -13,6 +13,7 @@ from ..domain.context import ContextVersion, StagedHistoryCompression, StagedHis
 from ..domain.events import RunEvent
 from ..domain.facts import AgentRun, MessageRole, RunMessage
 from ..domain.state import Ended, RunOutcome
+from ..domain.tool_recovery import ToolCallLedger
 
 
 class InMemoryRunRepository:
@@ -28,6 +29,7 @@ class InMemoryRunRepository:
         self._messages: dict[tuple[str, str], tuple[RunMessage, ...]] = {}
         self._context_versions: dict[tuple[str, str], tuple[ContextVersion, ...]] = {}
         self._events: dict[tuple[str, str], tuple[RunEvent, ...]] = {}
+        self._tool_ledgers: dict[tuple[str, str], ToolCallLedger] = {}
         self._conversations: dict[str, tuple[ConversationMessage, ...]] = {}
 
     async def load_cancellation(self, session_id: str, run_id: str) -> CancellationRecord | None:
@@ -166,10 +168,71 @@ class InMemoryRunRepository:
             raise FileNotFoundError(f"运行 {run.run_id} 尚未创建")
         self._runs[key] = run
 
+    async def ensure_tool_run(self, base_run: AgentRun, target_run: AgentRun) -> None:
+        """仅在运行仍等于提交基线时投影目标运行快照。"""
+        key = (base_run.session_id, base_run.run_id)
+        if (target_run.session_id, target_run.run_id) != key:
+            raise ValueError("工具运行投影的 base/target 身份必须一致")
+        current = self._runs.get(key)
+        if current is None:
+            raise FileNotFoundError(f"运行 {base_run.run_id} 尚未创建")
+        if (current.session_id, current.run_id) != key:
+            raise ValueError("工具运行投影容器身份不一致")
+        if current == target_run:
+            return
+        if current != base_run:
+            raise ValueError("工具运行投影基线已变化")
+        self._runs[key] = target_run
+
+    async def load_tool_ledger(self, session_id: str, run_id: str) -> ToolCallLedger | None:
+        """读取内存工具调用账本。"""
+        ledger = self._tool_ledgers.get((session_id, run_id))
+        if ledger is not None and (ledger.session_id, ledger.run_id) != (session_id, run_id):
+            raise ValueError("工具账本身份与存储容器不一致")
+        return ledger
+
+    async def save_tool_ledger(self, ledger: ToolCallLedger, *, expected_revision: int) -> None:
+        """按预期修订号保存下一账本版本。"""
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0:
+            raise ValueError("expected_revision 必须是非负整数")
+        key = (ledger.session_id, ledger.run_id)
+        current = self._tool_ledgers.get(key)
+        if current is not None and (current.session_id, current.run_id) != key:
+            raise ValueError("工具账本身份与存储容器不一致")
+        current_revision = 0 if current is None else current.revision
+        if current_revision != expected_revision:
+            raise ValueError("工具账本 revision 冲突")
+        if ledger.revision != expected_revision + 1:
+            raise ValueError("目标工具账本 revision 必须恰好递增 1")
+        self._tool_ledgers[key] = ledger
+
     async def save_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
         """替换连续且唯一的 Run Message 序列。"""
         _validate_messages(messages)
         self._messages[(session_id, run_id)] = messages
+
+    async def ensure_tool_messages(self, session_id: str, run_id: str, messages: tuple[RunMessage, ...]) -> None:
+        """按稳定消息 ID 与完整内容幂等补写连续消息。"""
+        key = (session_id, run_id)
+        current = self._messages.get(key, ())
+        by_id = {message.message_id: message for message in current}
+        merged = list(current)
+        for message in messages:
+            if not message.message_id or not isinstance(message.sequence, int) or isinstance(message.sequence, bool) or message.sequence < 1:
+                raise ValueError("工具消息必须包含 ID 和正整数 sequence")
+            existing = by_id.get(message.message_id)
+            if existing is not None:
+                if existing != message:
+                    raise ValueError("同一工具消息 ID 对应的完整内容冲突")
+                continue
+            expected_sequence = len(merged) + 1
+            if message.sequence != expected_sequence:
+                raise ValueError(f"工具消息序号必须连续；期望 {expected_sequence}，实际为 {message.sequence}")
+            merged.append(message)
+            by_id[message.message_id] = message
+        result = tuple(merged)
+        _validate_messages(result)
+        self._messages[key] = result
 
     async def append_context_version(
         self,
@@ -250,6 +313,37 @@ class InMemoryRunRepository:
     async def load_events(self, session_id: str, run_id: str) -> tuple[RunEvent, ...]:
         """读取已追加的事件；隔离容器仅供测试，不构成生产第二事实源。"""
         return self._events.get((session_id, run_id), ())
+
+    async def ensure_tool_events(self, session_id: str, events: tuple[RunEvent, ...]) -> None:
+        """按序号幂等合并事件；内存实现与文件仓储使用相同前缀规则。"""
+        if not events:
+            return
+        run_id = events[0].run_id
+        if any(event.run_id != run_id for event in events):
+            raise ValueError("一次工具事件投影只能属于一个运行")
+        key = (session_id, run_id)
+        existing = self._events.get(key, ())
+        if any(
+            event.run_id != run_id or event.sequence != index
+            for index, event in enumerate(existing, start=1)
+        ):
+            raise ValueError("已有事件不是连续前缀")
+        message_ids = {message.message_id for message in self._messages.get(key, ())}
+        merged = list(existing)
+        for event in events:
+            if not isinstance(event.sequence, int) or isinstance(event.sequence, bool) or event.sequence < 1:
+                raise ValueError("工具事件 sequence 必须是正整数")
+            if any(message_id not in message_ids for message_id in event.message_ids):
+                raise ValueError("工具事件引用了尚未持久化的消息")
+            if event.sequence <= len(merged):
+                if merged[event.sequence - 1] != event:
+                    raise ValueError("同序号工具事件内容冲突")
+                continue
+            expected_sequence = len(merged) + 1
+            if event.sequence != expected_sequence:
+                raise ValueError(f"工具事件序号必须连续；期望 {expected_sequence}，实际为 {event.sequence}")
+            merged.append(event)
+        self._events[key] = tuple(merged)
 
     async def commit_success(
         self,

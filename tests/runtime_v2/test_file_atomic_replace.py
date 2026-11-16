@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from dotclaw.runtime.adapters import _file_support as support
+from dotclaw.runtime.adapters._file_support import StoragePersistenceError
 
 
 def _permission(code: int) -> PermissionError:
@@ -50,9 +51,9 @@ def test_persistent_windows_sharing_error_raises_original_after_five_attempts(tm
     monkeypatch.setattr(support, "_IS_WINDOWS", True)
     monkeypatch.setattr(support.os, "replace", occupied)
     monkeypatch.setattr(support.time, "sleep", sleeps.append)
-    with pytest.raises(PermissionError) as captured:
+    with pytest.raises(StoragePersistenceError) as captured:
         support.write_json_atomic(target, {"new": True})
-    assert captured.value is error
+    assert captured.value.__cause__ is error
     assert len(attempts) == 5 and len(set(attempts)) == 1 and len(sleeps) == 4
     assert json.loads(target.read_text(encoding="utf-8")) == {"old": True}
     assert not attempts[0].exists()
@@ -69,8 +70,23 @@ def test_non_target_errors_are_never_retried(tmp_path, monkeypatch, case):
     monkeypatch.setattr(support, "_IS_WINDOWS", case != "non_windows")
     monkeypatch.setattr(support.os, "replace", fail)
     monkeypatch.setattr(support.time, "sleep", sleeps.append)
-    with pytest.raises(OSError) as captured:
+    with pytest.raises(StoragePersistenceError) as captured:
         support.write_json_atomic(target, {"new": True})
-    assert captured.value is error
+    assert captured.value.__cause__ is error
     assert len(attempts) == 1 and sleeps == []
     assert not target.exists()
+
+
+def test_atomic_text_replace_keeps_previous_complete_file_when_replace_fails(tmp_path, monkeypatch):
+    target = tmp_path / "events.jsonl"
+    target.write_text('{"sequence":1}\n', encoding="utf-8")
+
+    def fail_replace(source, destination):
+        raise OSError("模拟原子替换前故障")
+
+    monkeypatch.setattr(support.os, "replace", fail_replace)
+    with pytest.raises(StoragePersistenceError, match="替换前故障") as captured:
+        support.write_text_atomic(target, '{"sequence":1}\n{"sequence":2}\n')
+    assert isinstance(captured.value.__cause__, OSError)
+    assert target.read_text(encoding="utf-8") == '{"sequence":1}\n'
+    assert not tuple(tmp_path.glob("*.tmp"))

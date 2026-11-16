@@ -29,6 +29,7 @@ from ..runtime.adapters import (
 from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.engine import RuntimeEngine
+from ..runtime.application.tool_recovery import ToolRecoveryService
 from ..runtime.application.run_change_notifier import RunChangeNotifier
 from ..runtime.application.run_watch_service import RunWatchService
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
@@ -102,10 +103,13 @@ def build_runtime_services(
     )
     notifier = RunChangeNotifier()
     cancellation_service = CancellationService()
+    checkpoint_repository = CheckpointRepositoryAdapter(storage_root)
+    approval_service = ApprovalService(approval_repository)
+    tool_recovery = ToolRecoveryService(run_repository, checkpoint_repository, approval_service)
     watch_service = RunWatchService(run_repository, cancellation_service, notifier, uuid4().hex)
     engine = RuntimeEngine(
         run_repository=run_repository,
-        checkpoint_repository=CheckpointRepositoryAdapter(storage_root),
+        checkpoint_repository=checkpoint_repository,
         context_port=context_port,
         llm_port=LLMProxyAdapter(llm_proxy),
         tool_port=ToolExecutorAdapter(tool_executor),
@@ -117,12 +121,13 @@ def build_runtime_services(
             agent_registry,
             load_router_config(project_root / "model_router_config.yaml"),
         ),
-        approval_service=ApprovalService(approval_repository),
+        approval_service=approval_service,
         cancellation_service=cancellation_service,
         run_change_notifier=notifier,
         delegation_port=delegation_port,
         token_counter=TiktokenTokenCounter(),
         history_compactor=LLMContextCompactor(llm_proxy),
+        tool_recovery=tool_recovery,
     )
     coordinator: SessionRunCoordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     delegation_port.bind_coordinator(coordinator)

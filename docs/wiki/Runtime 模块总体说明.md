@@ -1045,8 +1045,8 @@ Tool 模块负责：
 
 - 稳定 approval_id 由 run_id 和 call_id 生成；
 - `approved=True` 时依据持久化 Checkpoint 执行；
-- Adapter 内集合不是审批恢复权威；
-- Run 终态时由 Engine 调用可选 `clear_run()`；
+- 工具可靠恢复后，Adapter 不再持有调用去重缓存，持久调用账本负责恢复事实；
+- 2026-11-16 清理删除无状态的 `clear_run()` 及其动态调用；Run 终态仍释放上下文并结算委派结果；
 - Tool 细粒度错误目前统一映射为 `RunErrorCode.TOOL_FAILURE`；
 - 不具备真实运行中 Tool 句柄取消。
 

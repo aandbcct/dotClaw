@@ -10,6 +10,7 @@ import pytest
 
 from dotclaw.runtime.application.run_change_notifier import RunChangeNotifier
 from dotclaw.runtime.application.dto import RunResult
+from dotclaw.runtime.application.ports import RunPersistenceError
 from dotclaw.runtime.domain.context import SuccessCommitFaultPoint
 from dotclaw.runtime.domain.state import RunOutcome
 from tests.runtime_v2.test_runtime_engine import _engine, _request, BlockedLLM
@@ -92,7 +93,9 @@ async def test_real_http_watch_disconnect_reconnect_and_cancellation_waits_for_c
                 latency = (time.perf_counter() - committed[-1]) * 1000
                 record_property("committed_to_observed_ms", latency)
                 assert latency < 500
-            assert (await work).state.outcome() is RunOutcome.CANCELLED
+            pending = await work
+            assert pending.control_status == "cancelling"
+            assert (await service.coordinator.wait_terminal(run.run_id)).state.outcome() is RunOutcome.CANCELLED
     finally:
         cleanup_release.set()
         model.release.set()
@@ -184,8 +187,9 @@ async def test_pending_cancellation_retry_returns_202_and_replays_frozen_intent(
     def interrupted(*args):
         raise OSError("意图删除前中断")
     monkeypatch.setattr(repository, "_delete_cancellation_intent_sync", interrupted)
-    with pytest.raises(OSError):
+    with pytest.raises(RunPersistenceError) as captured:
         await repository.commit_cancellation(_intent(run, record))
+    assert isinstance(captured.value.__cause__, OSError)
     assert (await repository.load_run_snapshot("session", "run")).state.is_ended()
     monkeypatch.setattr(repository, "_delete_cancellation_intent_sync", original)
     async with _live_http_client(host, asyncio.Event()) as client:
@@ -218,8 +222,9 @@ async def test_pending_cancellation_without_record_is_explicit_inconsistency(tmp
     def interrupted(*args):
         raise OSError("保留意图")
     monkeypatch.setattr(repository, "_delete_cancellation_intent_sync", interrupted)
-    with pytest.raises(OSError):
+    with pytest.raises(RunPersistenceError) as captured:
         await repository.commit_cancellation(_intent(run, record))
+    assert isinstance(captured.value.__cause__, OSError)
     (tmp_path / "session" / "agent_runs" / "run" / "cancellation.json").unlink()
     with pytest.raises(RuntimeError, match="持久化事实不一致"):
         await service.coordinator.cancel("run", "不允许伪造原请求")

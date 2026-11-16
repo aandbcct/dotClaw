@@ -91,7 +91,7 @@ async def test_narrowed_agent_requires_approval_then_executes() -> None:
     # 首次审批前不得执行工具（证伪"预检绕过导致直接执行"）。
     assert first.status is ToolResultStatus.APPROVAL_REQUIRED
     assert _executions == []
-    second = await port.execute(invocation, execution)
+    second = await port.execute(ToolInvocation("run-1", invocation.call, approved=True), execution)
     # 二次（获批）才执行一次。
     assert second.status is ToolResultStatus.COMPLETED
     assert len(_executions) == 1

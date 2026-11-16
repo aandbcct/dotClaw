@@ -330,6 +330,10 @@ def format_run_result(result: RunResult) -> str:
     """
     if result.final_message is not None:
         return result.final_message.content
+    if result.control_status == "cancelling":
+        return f"运行正在停止，取消收尾处理中：{result.run_id}"
+    if result.control_status == "recoverable":
+        return f"工具结果待确认，运行可恢复：{result.run_id}。请先核对外部操作是否已生效。"
     if result.state.is_waiting_approval():
         return f"运行等待审批：{result.run_id}"
     if result.state.is_abandoned():

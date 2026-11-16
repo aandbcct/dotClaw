@@ -56,7 +56,7 @@ export interface RunStep {
   id: string;
   sequence: number;
   kind: "model" | "tool";
-  status: "running" | "completed" | "failed" | "cancelled" | "approval_required" | "interrupted";
+  status: "running" | "completed" | "failed" | "cancelled" | "approval_required" | "interrupted" | "uncertain";
   started_at: string;
   completed_at: string;
   call_id: string | null;

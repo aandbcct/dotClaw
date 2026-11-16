@@ -13,8 +13,10 @@ from dotclaw.runtime.application.dto import (
     ToolInvocation,
     ToolResult,
     ToolResultStatus,
+    ToolRecoveryContract,
 )
-from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind
+from dotclaw.common.tool_replay import ToolExecutionEvidence
+from dotclaw.runtime.domain.facts import AgentPolicySnapshot, MessageRole, RunMessage, RunMessageKind, ToolCall
 from dotclaw.runtime.domain.context import ContextOwner
 from dotclaw.runtime.domain.state import AgentRunState, Created, Running, Suspended, Ended, RunStage, SuspendReason, RunOutcome
 
@@ -65,6 +67,13 @@ class FakeToolPort:
     async def execute(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """返回成功的标准工具结果。"""
         return ToolResult(call_id=invocation.call.call_id, status=ToolResultStatus.COMPLETED)
+
+    async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
+        return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED,
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+
+    async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
+        return ToolRecoveryContract()
 
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from dotclaw.runtime.adapters import _file_support as storage
+from dotclaw.runtime.adapters._file_support import StoragePersistenceError
 from dotclaw.runtime.adapters import RunRepositoryAdapter
 from tests.runtime_v2.test_cancellation_persistence import _run
 
@@ -44,9 +45,9 @@ def test_permanent_windows_read_permission_error_raises_original_after_five_atte
     monkeypatch.setattr(storage, "_IS_WINDOWS", True)
     monkeypatch.setattr(storage.time, "sleep", waits.append)
     monkeypatch.setattr(Path, "read_text", blocked)
-    with pytest.raises(PermissionError) as captured:
+    with pytest.raises(StoragePersistenceError) as captured:
         storage.load_json_map(tmp_path / "value.json")
-    assert captured.value is error
+    assert captured.value.__cause__ is error
     assert len(calls) == 5 and waits == [0.005, 0.01, 0.015, 0.02]
 
 
@@ -61,9 +62,9 @@ def test_non_target_errors_are_not_retried(tmp_path, monkeypatch, windows, error
     monkeypatch.setattr(storage, "_IS_WINDOWS", windows)
     monkeypatch.setattr(storage.time, "sleep", waits.append)
     monkeypatch.setattr(Path, "read_text", blocked)
-    with pytest.raises(type(error)) as captured:
+    with pytest.raises(StoragePersistenceError) as captured:
         storage.load_json_map(tmp_path / "value.json")
-    assert captured.value is error and len(calls) == 1 and waits == []
+    assert captured.value.__cause__ is error and len(calls) == 1 and waits == []
 
 
 def test_corrupt_json_is_never_retried(tmp_path, monkeypatch):
@@ -74,8 +75,9 @@ def test_corrupt_json_is_never_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "_IS_WINDOWS", True)
     monkeypatch.setattr(storage.time, "sleep", waits.append)
     monkeypatch.setattr(Path, "read_text", corrupt)
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(StoragePersistenceError) as captured:
         storage.load_json_map(tmp_path / "value.json")
+    assert isinstance(captured.value.__cause__, json.JSONDecodeError)
     assert calls == [1] and waits == []
 
 
@@ -90,6 +92,6 @@ async def test_run_snapshot_does_not_multiply_read_retry_limit(tmp_path, monkeyp
     monkeypatch.setattr(storage, "_IS_WINDOWS", True)
     monkeypatch.setattr(storage.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(Path, "read_text", blocked)
-    with pytest.raises(PermissionError) as captured:
+    with pytest.raises(StoragePersistenceError) as captured:
         await repository.load_run_snapshot("session", "run")
-    assert captured.value is error and len(calls) == 5
+    assert captured.value.__cause__ is error and len(calls) == 5
