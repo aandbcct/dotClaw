@@ -62,25 +62,6 @@ async def test_tool_executor_adapter_requires_approval_and_has_no_process_local_
     assert executions == ["done", "done"]
 
 
-async def test_clear_run_remains_noop_compatibility_method() -> None:
-    """clear_run 为旧调用方保留无状态兼容入口。"""
-
-    @tool(name="dangerous", description="危险操作", needs_approval=True)
-    async def dangerous() -> str:
-        return "完成"
-
-    registry = ToolRegistry()
-    registry.register(FunctionToolHandler(dangerous, get_tool_meta(dangerous)))
-    executor = ToolExecutor(registry, ApprovalManager())
-    port: ToolExecutorAdapter = ToolExecutorAdapter(executor)
-    invocation = ToolInvocation("run-9", ToolCall("call-9", "dangerous", {}))
-
-    # 走完审批后执行。
-    await port.execute(invocation, _execution())  # APPROVAL_REQUIRED
-    await port.execute(ToolInvocation("run-9", invocation.call, approved=True), _execution())  # COMPLETED
-    await port.clear_run("run-9")
-
-
 class FixedPolicy(RunPolicyPort):
     """为 Port bridge 集成测试提供固定策略。"""
 

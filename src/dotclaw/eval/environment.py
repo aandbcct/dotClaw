@@ -652,7 +652,6 @@ class EvalEnvironment:
                 if child_run_id in resolved_delegations:
                     # 同一子 Run 重复挂起说明 Fixture 或状态异常，停止自动恢复。
                     break
-                await self._materialize_fixture_child(result.run_id, child_run_id)
                 resolved_delegations.add(child_run_id)
                 result = await self.engine.resume_delegation(child_run_id, output_port)
                 continue
@@ -690,32 +689,6 @@ class EvalEnvironment:
         if result.child_run_id is None:
             return False
         return result.state.is_waiting_delegation()
-
-    async def _materialize_fixture_child(self, parent_run_id: str, child_run_id: str) -> None:
-        """在隔离仓储创建最小子 Run 事实，使恢复入口走真实父子关联校验。"""
-        if await self.run_repository.find_run(child_run_id) is not None:
-            return
-        if self.fixture_delegation is None:
-            raise FixtureConfigurationError("等待委派恢复但未装配 Delegation Fixture")
-        fixture = self.fixture_delegation.submitted_fixture(child_run_id)
-        if fixture.outcome is None:
-            return
-        parent = await self.run_repository.find_run(parent_run_id)
-        if parent is None:
-            raise FixtureConfigurationError("委派父 Run 不存在")
-        child = AgentRun(
-            run_id=child_run_id,
-            session_id=fixture.target_session_id or f"session-{fixture.target_agent_id}",
-            agent_id=fixture.target_agent_id,
-            state=AgentRunState(mode=Ended(fixture.outcome)),
-            started_at="eval-fixture",
-            ended_at="eval-fixture",
-            policy=parent.policy,
-            input_message_id=f"input-{child_run_id}",
-            parent_run_id=parent.run_id,
-            root_run_id=parent.root_run_id or parent.run_id,
-        )
-        await self.run_repository.create_run(child)
 
     async def _materialize_fixture_child_from_request(self, request: DelegationRequest, submission: Any) -> None:
         """关联前先写入与委派请求相符的最小子运行事实。"""

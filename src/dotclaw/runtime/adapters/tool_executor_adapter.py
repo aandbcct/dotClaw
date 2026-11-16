@@ -77,10 +77,6 @@ class ToolExecutorAdapter(ToolPort):
             attempt=invocation.attempt, idempotency_key=invocation.idempotency_key,
         )
 
-    async def clear_run(self, run_id: str) -> None:
-        """兼容旧调用方；账本负责防止恢复时重复调用。"""
-        return None
-
     async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
         """从已注册工具读取冻结前恢复契约，未知工具按禁止重试处理。"""
         return self._executor.describe_recovery(call.name, ToolExecutionContext(

@@ -1273,13 +1273,9 @@ class RuntimeEngine:
         return result
 
     async def _release_run_context_if_terminal(self, result: RunResult) -> None:
-        """仅在 Run 终态释放 Run Owner 的私有 Slot 实例，并清理工具端口的进程内缓存。"""
+        """仅在 Run 终态释放 Run Owner 的私有 Slot 实例。"""
         if result.state.is_ended():
             await self._context_port.release_scope(ContextOwner.RUN, result.run_id)
-            # 可选能力：工具端口若缓存了本 Run 的恢复状态，终态时清理，避免 Adapter 内存累积。
-            clear_run = getattr(self._tool_port, "clear_run", None)
-            if clear_run is not None:
-                await clear_run(result.run_id)
             run = await self._run_repository.find_run(result.run_id)
             if run is not None and run.parent_run_id and self._delegation_port is not None:
                 await self._delegation_port.result(run.run_id)
@@ -2789,55 +2785,6 @@ def _conversation_from_context_version(context_version: ContextVersion) -> Conve
     messages: tuple[ConversationMessage, ...] = tuple(ConversationMessage(message.message_id, message.role, message.content, message.created_at) for message in conversation_slot.content.messages)
     compression: HistoryCompressionSnapshot | None = HistoryCompressionSnapshot(1, "", summary, _hash_text(summary)) if summary else None
     return ConversationSnapshot("", messages, 0, compression)
-
-
-def _conversation_snapshot_from_dict(data: JSONMap) -> ConversationSnapshot:
-    """从 Context Version 的严格 JSON 载荷恢复 ConversationSnapshot。"""
-    raw_messages: JSONValue | None = data.get("messages")
-    if not isinstance(raw_messages, list):
-        raise ValueError("Conversation 载荷缺少 messages 数组")
-    messages: list[ConversationMessage] = []
-    raw_message: JSONValue
-    for raw_message in raw_messages:
-        if not isinstance(raw_message, dict):
-            raise ValueError("Conversation 消息必须是对象")
-        message_id: JSONValue | None = raw_message.get("id")
-        role: JSONValue | None = raw_message.get("role")
-        content: JSONValue | None = raw_message.get("content")
-        created_at: JSONValue | None = raw_message.get("created_at")
-        if not all(isinstance(value, str) for value in (message_id, role, content, created_at)):
-            raise ValueError("Conversation 消息字段必须是字符串")
-        messages.append(ConversationMessage(
-            message_id=message_id,
-            role=MessageRole(role),
-            content=content,
-            created_at=created_at,
-        ))
-    raw_compression: JSONValue | None = data.get("compressed_history")
-    compression: HistoryCompressionSnapshot | None = None
-    if raw_compression is not None:
-        if not isinstance(raw_compression, dict):
-            raise ValueError("compressed_history 必须是对象或 null")
-        raw_version: JSONValue | None = raw_compression.get("compression_version")
-        raw_covered: JSONValue | None = raw_compression.get("covered_through_conversation_id")
-        raw_content: JSONValue | None = raw_compression.get("content")
-        raw_hash: JSONValue | None = raw_compression.get("content_hash")
-        if (
-            not isinstance(raw_version, int)
-            or isinstance(raw_version, bool)
-            or not all(isinstance(value, str) for value in (raw_covered, raw_content, raw_hash))
-        ):
-            raise ValueError("compressed_history 字段无效")
-        compression = HistoryCompressionSnapshot(raw_version, raw_covered, raw_content, raw_hash)
-    raw_session_id: JSONValue | None = data.get("session_id")
-    raw_version: JSONValue | None = data.get("version")
-    if (
-        not isinstance(raw_session_id, str)
-        or not isinstance(raw_version, int)
-        or isinstance(raw_version, bool)
-    ):
-        raise ValueError("Conversation 载荷缺少 session_id 或 version")
-    return ConversationSnapshot(raw_session_id, tuple(messages), raw_version, compression)
 
 
 def _hash_text(content: str) -> str:

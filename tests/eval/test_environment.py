@@ -13,7 +13,7 @@ from dotclaw.eval.models import ExecutionMode, FixtureMatchMode
 from dotclaw.runtime.application.dto import ToolRecoveryContract, ToolResult, ToolResultStatus
 from dotclaw.common.tool_replay import ToolExecutionEvidence
 from dotclaw.runtime.domain.facts import MessageRole, RunMessage, RunMessageKind
-from dotclaw.runtime.domain.state import Ended, RunOutcome
+from dotclaw.runtime.domain.state import Created, Ended, RunOutcome
 
 from helpers import (
     build_case,
@@ -50,6 +50,38 @@ async def test_environment_resumes_fixture_delegation_to_terminal() -> None:
 
     assert outcome.state.outcome() is RunOutcome.COMPLETED
     assert any(message.kind is RunMessageKind.DELEGATION_RESULT for message in outcome.messages)
+
+
+@pytest.mark.asyncio
+async def test_environment_materializes_unfinished_fixture_child_before_parent_resume() -> None:
+    """未结束子 Fixture 在父运行恢复前已有 Created 子运行与输入消息。"""
+    delegate = tool_call(
+        "delegate-pending",
+        "delegate",
+        {"target_agent_id": "agent-review", "title": "审阅", "objective": "检查冻结材料"},
+    )
+    case = build_case(
+        context_fixtures=(context_fixture("ctx-pending-1"),),
+        llm_fixture=make_llm_fixture(
+            "llm-pending",
+            (llm_response("pending-request", tool_calls=(delegate,)),),
+        ),
+        delegation_fixtures=(
+            delegation_fixture("delegation-pending", "agent-review", "child-pending"),
+        ),
+    )
+
+    outcome = await EvalEnvironment(case).run()
+    outcome.assert_fully_consumed()
+
+    assert outcome.result.child_run_id == "child-pending"
+    assert outcome.state.is_waiting_delegation()
+    child = await outcome.environment.run_repository.find_run("child-pending")
+    assert child is not None
+    assert isinstance(child.state.mode, Created)
+    child_messages = await outcome.environment.run_repository.load_messages(child.session_id, child.run_id)
+    assert len(child_messages) == 1
+    assert child_messages[0].content == "任务：审阅\n\n目标：检查冻结材料"
 
 
 # --------------------------------------------------------------------------- #
