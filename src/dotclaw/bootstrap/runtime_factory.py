@@ -30,6 +30,7 @@ from ..runtime.application.approval_service import ApprovalService
 from ..runtime.application.cancellation_service import CancellationService
 from ..runtime.application.engine import RuntimeEngine
 from ..runtime.application.tool_recovery import ToolRecoveryService
+from ..runtime.application.tool_correction import ConsecutiveFailurePolicy
 from ..runtime.application.run_change_notifier import RunChangeNotifier
 from ..runtime.application.run_watch_service import RunWatchService
 from ..runtime.application.session_run_coordinator import SessionRunCoordinator
@@ -128,6 +129,7 @@ def build_runtime_services(
         token_counter=TiktokenTokenCounter(),
         history_compactor=LLMContextCompactor(llm_proxy),
         tool_recovery=tool_recovery,
+        repeat_policy=ConsecutiveFailurePolicy(),
     )
     coordinator: SessionRunCoordinator = SessionRunCoordinator(engine, run_change_notifier=notifier)
     delegation_port.bind_coordinator(coordinator)

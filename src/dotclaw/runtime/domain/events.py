@@ -29,6 +29,7 @@ class RunEventType(StrEnum):
     DELEGATION_COMPLETED = "delegation_completed"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
+    ITERATION_LIMIT_REACHED = "iteration_limit_reached"
     CANCELLATION_CLEANUP_CONFIRMED = "cancellation_cleanup_confirmed"
     CANCEL_REQUESTED = "cancel_requested"
     RUN_CANCELLED = "run_cancelled"
@@ -122,6 +123,19 @@ class TimeoutReached:
 
     timeout_ms: int
     occurred_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class IterationLimitReached:
+    """模型逻辑轮数超过冻结预算。"""
+
+    limit: int
+    iteration: int
+    occurred_at: str = field(default_factory=utc_now_iso)
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in (self.limit, self.iteration)):
+            raise ValueError("模型轮数预算和当前轮次必须是整数")
 
 
 # ============================================================================
@@ -220,5 +234,6 @@ AgentRunEvent = (
     | DelegationCompleted
     | CancelRequested
     | TimeoutReached
+    | IterationLimitReached
     | AbandonRequested
 )

@@ -63,6 +63,7 @@ class RunErrorCode(StrEnum):
     PROCESS_RESTART = "process_restart"
     TOOL_OUTCOME_UNCERTAIN = "tool_outcome_uncertain"
     TOOL_RECOVERY_RETRY_EXHAUSTED = "tool_recovery_retry_exhausted"
+    ITERATION_LIMIT = "iteration_limit"
 
 
 class ApprovalStatus(StrEnum):

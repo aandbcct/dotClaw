@@ -48,6 +48,9 @@ class AgentIdentity:
     max_loop_steps: int = 10
     """ReAct 循环最大迭代次数。"""
 
+    tool_repeat_failure_limit: int = 3
+    """同一工具和规范化参数的连续执行失败上限。"""
+
     workspace: str = ""
     """工作目录。用于 system prompt 中 {workspace} 占位符替换。"""
 
@@ -158,12 +161,21 @@ def load_agent_config(
             for k, v in raw_policy_rules.items()
             if isinstance(k, str) and str(v) in ("allow", "ask", "deny")
         } or None
+    max_loop_steps = raw.get("max_loop_steps", 10)
+    tool_repeat_failure_limit = raw.get("tool_repeat_failure_limit", 3)
+    for field_name, value, minimum in (
+        ("max_loop_steps", max_loop_steps, 0),
+        ("tool_repeat_failure_limit", tool_repeat_failure_limit, 1),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            raise ValueError(f"{field_name} 必须是大于等于 {minimum} 的整数")
     return AgentIdentity(
         agent_id=raw.get("agent_id", agent_id),
         agent_name=str(raw.get("agent_name", "DotClaw")),
         workspace=str(raw.get("workspace", ".")),
         allowed_tools=list(raw.get("allowed_tools", [])),
-        max_loop_steps=int(raw.get("max_loop_steps", 10)),
+        max_loop_steps=max_loop_steps,
+        tool_repeat_failure_limit=tool_repeat_failure_limit,
         agent_prompt=str(raw.get("agent_prompt", "")),
         description=str(raw.get("description", "")),
         tags=list(raw.get("tags", [])),

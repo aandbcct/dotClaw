@@ -40,6 +40,7 @@ _SUPPORTED_EVENTS = frozenset(
         RunEventType.RUN_STARTED,
         RunEventType.RUN_COMPLETED,
         RunEventType.RUN_FAILED,
+        RunEventType.ITERATION_LIMIT_REACHED,
         RunEventType.RUN_CANCELLED,
         RunEventType.RUN_ABANDONED,
         RunEventType.RUN_RESUMED,
@@ -197,6 +198,9 @@ def assemble_trace(
             if run_span.start_event_sequence is None:
                 run_span.start_event_sequence = event.sequence
 
+        elif event_type is RunEventType.ITERATION_LIMIT_REACHED:
+            run_span.attributes = {**run_span.attributes, "iteration_limit": data.get("limit"), "iteration": data.get("iteration")}
+
         elif event_type in {
             RunEventType.RUN_COMPLETED,
             RunEventType.RUN_FAILED,
@@ -286,6 +290,8 @@ def assemble_trace(
             if existing_span is not None and existing_span.attributes.get("waiting_approval") is True:
                 existing_span.attributes = {**existing_span.attributes, "status": data.get("status", "started"), "waiting_approval": False}
                 existing_span.status = TraceSpanStatus.INCOMPLETE
+                existing_span.started_at = event.occurred_at
+                existing_span.start_event_sequence = event.sequence
                 existing_span.ended_at = None
                 existing_span.end_event_sequence = None
                 if source_id and source_id not in existing_span.message_ids:
@@ -342,14 +348,43 @@ def assemble_trace(
             status_str = data.get("status", "completed")
             span = open_tools.get(call_id) if call_id is not None else None
             if span is None:
-                issues.append(
-                    TraceIssue(
-                        kind=TraceIssueKind.MISSING_EVENT_PAIR,
-                        evidence=f"TOOL_COMPLETED 缺少对应的 TOOL_STARTED（call_id={call_id}）",
-                        event_sequence=event.sequence,
-                    )
+                source_id = data.get("source_response_message_id")
+                protocol = data.get("tool_protocol_version", 0)
+                origin = data.get("origin")
+                evidence = data.get("execution_evidence")
+                no_start_result = (
+                    isinstance(protocol, int) and not isinstance(protocol, bool) and protocol >= 2
+                    and origin in {"preflight", "approval", "guard"}
+                    and evidence == "not_started"
+                    and isinstance(call_id, str)
                 )
-            elif status_str == "approval_required":
+                if no_start_result:
+                    source_message = message_index.get(source_id) if isinstance(source_id, str) else None
+                    source_call = next((call for call in source_message.tool_calls if call.call_id == call_id), None) if source_message is not None else None
+                    attributes: dict[str, object] = {"call_id": call_id, "status": status_str, "origin": origin, "execution_evidence": evidence}
+                    if source_call is not None:
+                        attributes["tool_name"] = source_call.name
+                    span = _PendingSpan(
+                        span_id=f"tool:{call_id}", kind=SpanKind.TOOL, parent_span_id=run_span_id,
+                        started_at="", status=_TOOL_STATUS_MAP.get(status_str, TraceSpanStatus.INCOMPLETE),
+                        start_event_sequence=None, message_ids=[source_id] if isinstance(source_id, str) else [],
+                        context_version=None, attributes=attributes,
+                    )
+                    pending.append(span)
+                    if isinstance(source_id, str) and source_id not in message_index:
+                        issues.append(TraceIssue(kind=TraceIssueKind.MISSING_MESSAGE,
+                            evidence=f"工具源响应消息 {source_id} 不在消息事实中", message_id=source_id,
+                            event_sequence=event.sequence, span_id=span.span_id))
+                else:
+                    issues.append(
+                        TraceIssue(
+                            kind=TraceIssueKind.MISSING_EVENT_PAIR,
+                            evidence=f"TOOL_COMPLETED 缺少对应的 TOOL_STARTED（call_id={call_id}）",
+                            event_sequence=event.sequence,
+                        )
+                    )
+                    continue
+            if status_str == "approval_required":
                 span.status = TraceSpanStatus.WAITING
                 span.attributes = {**span.attributes, "status": status_str, "waiting_approval": True}
             else:
@@ -383,7 +418,7 @@ def assemble_trace(
                     event_sequence=event.sequence,
                 ))
                 continue
-            span = open_tools.pop(call_id, None)
+            span = open_tools.get(call_id)
             if span is None:
                 source_id = data.get("source_response_message_id")
                 source_message = message_index.get(source_id) if isinstance(source_id, str) else None
@@ -397,16 +432,22 @@ def assemble_trace(
                 if source_call is not None:
                     span.attributes["tool_name"] = source_call.name
                 pending.append(span)
-            span.ended_at = event.occurred_at
-            span.end_event_sequence = event.sequence
-            span.status = TraceSpanStatus.INCOMPLETE
+                open_tools[call_id] = span
+            protocol = data.get("tool_protocol_version", 0)
+            if not isinstance(protocol, int) or isinstance(protocol, bool) or protocol < 2:
+                span = open_tools.pop(call_id)
+                span.ended_at = event.occurred_at
+                span.end_event_sequence = event.sequence
+                span.status = TraceSpanStatus.INCOMPLETE
+                terminal_tool_calls.add(call_id)
+                continue
             span.attributes = {
                 **span.attributes,
                 "recovery_blocked": True,
                 "uncertainty_reason": data.get("reason", "unknown"),
                 "attempt": data.get("attempt", 0),
             }
-            terminal_tool_calls.add(call_id)
+            span.status = TraceSpanStatus.INCOMPLETE
 
         elif event_type is RunEventType.WAITING_APPROVAL:
             approval_id = data.get("approval_id")
@@ -458,9 +499,9 @@ def assemble_trace(
                     span_id=f"tool:{call_id}",
                     kind=SpanKind.TOOL,
                     parent_span_id=run_span_id,
-                    started_at=event.occurred_at,
+                    started_at="",
                     status=TraceSpanStatus.WAITING,
-                    start_event_sequence=event.sequence,
+                    start_event_sequence=None,
                     message_ids=[source_id] if source_id is not None else [],
                     context_version=None,
                     attributes=tool_attributes,
@@ -505,6 +546,12 @@ def assemble_trace(
                 span.end_event_sequence = event.sequence
                 span.status = TraceSpanStatus.COMPLETED if approved else TraceSpanStatus.CANCELLED
                 span.attributes = {**span.attributes, "approved": approved}
+                if not approved:
+                    call_id = span.attributes.get("call_id")
+                    tool_span = open_tools.get(call_id) if isinstance(call_id, str) else None
+                    if tool_span is not None and tool_span.attributes.get("waiting_approval") is True:
+                        tool_span.started_at = ""
+                        tool_span.start_event_sequence = None
                 if approval_id is not None:
                     open_approvals.pop(approval_id, None)
                 # 审批决议只关闭审批跨度；工具跨度等待开始或最终取消/完成事件。

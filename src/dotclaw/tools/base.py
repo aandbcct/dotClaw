@@ -129,6 +129,7 @@ class ToolResult:
     metadata: dict = field(default_factory=dict)  # 扩展字段
     execution_evidence: ToolExecutionEvidence | None = None
     approval_required: bool = False
+    approval_operation_keys: tuple[str, ...] = ()
 
     @classmethod
     def from_error(

@@ -22,8 +22,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-import logging
 import os
+import logging
 from pathlib import Path
 from ..common.resource_errors import ResourceCleanupError
 
@@ -242,12 +242,27 @@ class ToolExecutor:
         name: str,
         arguments: dict[str, Any],
         execution_context: ToolExecutionContext,
+        *,
+        approved: bool = False,
     ) -> ToolResult:
         """按真实参数和当前策略判断审批需求，但不启动处理函数。"""
         return await self._run_chain(
             name, arguments, execution_context, None, channel=None,
-            pre_approved=False, runtime_approval=True, preflight_only=True,
+            pre_approved=approved, runtime_approval=True, preflight_only=True,
         )
+
+    def _approval_operation_keys(self, requests: list[CapabilityRequest]) -> tuple[str, ...]:
+        """从已解析的文件资源生成稳定审批键。"""
+        keys = {
+            json.dumps(
+                [request.kind.value, os.path.normcase(request.absolute_path)],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            for request in requests
+            if request.kind.value in {"file.read", "file.write"} and request.absolute_path is not None
+        }
+        return tuple(sorted(keys))
 
     def _check_skill(self, tool_name: str, args: dict, journal: Any, status: str) -> None:
         """工具执行后检查是否命中 skill，命中则发射对应 journal 事件。"""
@@ -337,6 +352,7 @@ class ToolExecutor:
             definition, validated, self._policy_scope.workspace_root
         )
         summary = _summarize_requests(requests)
+        approval_operation_keys = self._approval_operation_keys(requests)
 
         # ③ Policy Engine：计算决策（按当前 Run 的 Agent 冻结作用域，P1 修复）。
         scope = self._effective_scope(execution_context)
@@ -357,12 +373,13 @@ class ToolExecutor:
             return self._finish(result, name, journal, handler)
 
         if preflight_only:
-            if outcome.decision is PolicyDecision.ASK or (
+            if (outcome.decision is PolicyDecision.ASK and not pre_approved) or (
                 (definition.needs_approval or definition.name in self._approval_commands)
                 and not self._is_unattended_allow(definition.policy_profile, execution_context)
+                and not pre_approved
             ):
-                return ToolResult(approval_required=True, execution_evidence=ToolExecutionEvidence.NOT_STARTED)
-            return ToolResult(execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+                return ToolResult(approval_required=True, execution_evidence=ToolExecutionEvidence.NOT_STARTED, approval_operation_keys=approval_operation_keys)
+            return ToolResult(execution_evidence=ToolExecutionEvidence.NOT_STARTED, approval_operation_keys=approval_operation_keys)
 
         # ④ 审批：ask 或声明式 needs_approval（且未预先批准）时，经 Approval Port 询问。
         # needs_approval 用于没有资源档案、仍需显式审批的工具（如配置 approval_commands
@@ -375,6 +392,7 @@ class ToolExecutor:
                 return ToolResult(
                     approval_required=True,
                     execution_evidence=ToolExecutionEvidence.NOT_STARTED,
+                    approval_operation_keys=approval_operation_keys,
                 )
             approved = await self._approval.request(summary, channel)
             if journal:
@@ -388,6 +406,7 @@ class ToolExecutor:
                     error_type=ToolErrorType.APPROVAL,
                     execution_evidence=ToolExecutionEvidence.NOT_STARTED,
                 )
+                result = dataclasses.replace(result, approval_operation_keys=approval_operation_keys)
                 return self._finish(result, name, journal, handler)
 
         # ⑤ Handler 执行（超时控制）。

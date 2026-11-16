@@ -911,7 +911,7 @@ def _run_steps(run: AgentRun, events: tuple[RunEvent, ...], *, terminal_committe
         else:
             current.completed_at = event.occurred_at
             value = str(event.data.get("status", "completed"))
-            current.status = value if value in {"completed", "failed", "cancelled", "approval_required"} else "interrupted"
+            current.status = value if value in {"completed", "failed", "cancelled", "approval_required", "uncertain"} else "interrupted"
             if not is_model:
                 tools.pop(call_id or "", None)
     if run.state.is_ended() and terminal_committed:
