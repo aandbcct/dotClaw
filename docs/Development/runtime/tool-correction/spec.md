@@ -333,7 +333,6 @@ begin_attempt之后再次验证若返回NOT_STARTED，保留已写attempt/TOOL_S
 ```python
 async def _finish_iteration_limit(
     self, execution: RunExecution, run: AgentRun,
-    messages: tuple[RunMessage, ...], event_number: int,
 ) -> RunResult: ...
 ```
 

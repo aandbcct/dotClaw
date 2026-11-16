@@ -19,10 +19,8 @@ logger = logging.getLogger(__name__)
 
 from ..domain.events import (
     AbandonRequested,
-    AgentRunEvent,
     CancelRequested,
     DelegationCompleted,
-    DelegationRequested,
     DelegationSubmitted,
     LLMCallFailed,
     LLMResponseProduced,
@@ -30,7 +28,6 @@ from ..domain.events import (
     RunEventType,
     RunStarted,
     ToolAuditStatus,
-    ToolBatchCompleted,
     ToolBatchFailed,
     is_terminal_tool_event,
 )
@@ -52,7 +49,6 @@ from ..domain.context import (
 from dotclaw.runtime.application.execution import PendingDelegation, RunBudget, RunExecution
 from ..domain.facts import (
     AgentRun,
-    ApprovalRecord,
     HistoryCompressionSnapshot,
     JSONMap,
     JSONValue,
@@ -75,7 +71,6 @@ from ..domain.state import (
     RunOutcome,
     RunStage,
     Running,
-    StateTransition,
     Suspended,
     SuspendReason,
     transition,
@@ -94,13 +89,11 @@ from .dto import (
     ConversationMessage,
     ConversationSnapshot,
     DelegationRequest,
-    DelegationResult,
     DelegationSubmission,
     RunRequest,
     RunAcceptedEvent,
     RunResult,
     ToolInvocation,
-    ToolResult,
     ToolResultStatus,
     ToolActivityScan,
     ToolRecoveryContract,
@@ -1326,9 +1319,7 @@ class RuntimeEngine:
                 continue
             if action is AgentAction.INVOKE_LLM:
                 if execution.budget.max_iterations and execution.state.iteration > execution.budget.max_iterations:
-                    return await self._finish_iteration_limit(
-                        execution, run, tuple(messages), event_number,
-                    )
+                    return await self._finish_iteration_limit(execution, run)
                 run, sequence, event_number, pending_calls, terminal = await self._invoke_llm_action(
                     execution, run, messages, sequence, event_number, output_port,
                 )
@@ -1360,8 +1351,6 @@ class RuntimeEngine:
         self,
         execution: RunExecution,
         run: AgentRun,
-        messages: tuple[RunMessage, ...],
-        event_number: int,
     ) -> RunResult:
         """不再调用模型，原子保存预算终态并优先处理已受理取消。"""
         cancellation = None
@@ -2271,12 +2260,6 @@ class RuntimeEngine:
         await self._run_repository.append_event(run.session_id, event)
         self._run_change_notifier.notify(run.run_id)
         return next_sequence
-
-    async def _tool_started_event(self, run: AgentRun, event_sequence: int, messages: list[RunMessage], tool_call: ToolCall) -> int:
-        """在任何 ToolPort 或委派调用前写入无参数正文的开始审计事件。"""
-        source_id: str = _source_response_message_id(messages, tool_call.call_id)
-        ids: tuple[str, ...] = (source_id,) if source_id else ()
-        return await self._event(run, event_sequence, RunEventType.TOOL_STARTED, ids, "工具调用开始", {"source_response_message_id": source_id, "call_id": tool_call.call_id, "tool_name": tool_call.name, "status": ToolAuditStatus.STARTED.value, "tool_event_semantics": 2})
 
     async def _tool_completed_event(self, run: AgentRun, event_sequence: int, tool_call: ToolCall, result_message_id: str | None, status: ToolAuditStatus, error_summary: str = "") -> int:
         """为真实终态写入完成审计事件。"""
