@@ -381,4 +381,3 @@ async def test_projection_failure_is_compensated_after_recovery_service_rebuild(
     assert sum(event.event_type.value == "tool_completed" for event in events) == 1
     assert persisted_run is not None and persisted_run.statistics.tool_call_count == 1
     assert ledger is not None and ledger.pending_projection is None and ledger.calls[0].retry_count == 0
-
