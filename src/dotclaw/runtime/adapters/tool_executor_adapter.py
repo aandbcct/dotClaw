@@ -61,7 +61,8 @@ class ToolExecutorAdapter(ToolPort):
     async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """用真实参数和安全策略检查审批需求，不启动处理函数。"""
         result = await self._executor.preflight_for_runtime(
-            invocation.call.name, invocation.call.arguments, self._context(invocation, execution)
+            invocation.call.name, invocation.call.arguments, self._context(invocation, execution),
+            approved=invocation.approved,
         )
         if result.approval_required:
             return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED,

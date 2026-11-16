@@ -11,6 +11,7 @@ from typing import Mapping
 from ..domain.control import AgentAction
 from ..domain.events import (
     ApprovalGranted,
+    ApprovalRejected,
     DelegationCompleted,
     DelegationSubmitted,
     RunEvent,
@@ -648,6 +649,9 @@ class ToolRecoveryService:
         all_pending = [item.call.call_id for item in calls if not item.is_settled]
         pending = dict(base_checkpoint.pending if base_checkpoint else {})
         pending["pending_call_ids"] = all_pending
+        resolved_approval_id = approval.approval_id if approval is not None else record.approval_id
+        if resolved_approval_id is not None and pending.get("approval_id") == resolved_approval_id:
+            pending.pop("approval_id", None)
         if not all_pending:
             pending.pop("approval_id", None)
             pending.pop("child_run_id", None)
@@ -695,6 +699,27 @@ class ToolRecoveryService:
             message_ids,
         )
         events = (event,)
+        if approval is not None and outcome.status is ToolOutcomeStatus.FAILED and outcome.tool_error_code == "APPROVAL_DENIED":
+            existing = await self._runs.load_events(run.session_id, run.run_id)
+            already_resolved = any(item.event_type is RunEventType.APPROVAL_RESOLVED
+                and item.data.get("approval_id") == approval.approval_id
+                and item.data.get("approved") is False for item in existing)
+            approval_event = await self._event(
+                base_run, RunEventType.APPROVAL_RESOLVED,
+                {"approval_id": approval.approval_id, "call_id": call_id, "tool_name": record.call.name,
+                 "source_response_message_id": record.source_message_id, "attempt": record.attempt, "approved": False},
+                "审批拒绝已提交", (record.source_message_id,),
+            )
+            events = (event,) if already_resolved else (approval_event, replace(event, sequence=event.sequence + 1))
+        elif outcome.status is ToolOutcomeStatus.UNCERTAIN:
+            blocked_event = await self._event(
+                base_run, RunEventType.TOOL_RECOVERY_BLOCKED,
+                {"call_id": call_id, "tool_name": record.call.name,
+                 "source_response_message_id": record.source_message_id,
+                 "reason": record.uncertainty_reason or "tool_effect_unknown", "attempt": record.attempt},
+                "工具结果未知，已封禁该工具", (record.source_message_id,),
+            )
+            events = (blocked_event, replace(event, sequence=event.sequence + 1))
         if record.kind is ToolCallKind.DELEGATION:
             if outcome.status is not ToolOutcomeStatus.COMPLETED or outcome.message_kind is not RunMessageKind.DELEGATION_RESULT or record.child_run_id is None or outcome.message_id is None:
                 raise ValueError("委派调用必须以 DELEGATION_RESULT 和稳定子运行结局提交")
@@ -709,6 +734,8 @@ class ToolRecoveryService:
                 {"child_run_id": record.child_run_id, "outcome": outcome.child_outcome.value if outcome.child_outcome else ""},
             )
             events = (event, delegation_event)
+        if target_state is not None and isinstance(target_state.mode, Running) and target_state.mode.stage is RunStage.EXECUTING_TOOLS:
+            target_checkpoint = replace(target_checkpoint, action=AgentAction.EXECUTE_TOOLS)
         return await self._commit_fact(
             replace(ledger, calls=calls), base_run, target_run, base_checkpoint, target_checkpoint,
             messages=messages, events=events, approval=approval,
@@ -778,15 +805,17 @@ class ToolRecoveryService:
         target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, {}, AgentAction.INVOKE_LLM, False)
         return await self._commit_fact(ledger, base_run, target_run, base_checkpoint, target_checkpoint)
 
-    async def wait_approval(self, run: AgentRun, call_id: str, approval_id: str, checkpoint: RunCheckpoint) -> ToolCallLedger:
+    async def wait_approval(self, run: AgentRun, call_id: str, approval_id: str, checkpoint: RunCheckpoint, *, operation_keys: tuple[str, ...] = ()) -> ToolCallLedger:
         ledger = await self._required_ledger(run, checkpoint)
         record = self._call(ledger, call_id)
         if record.state is ToolCallState.WAITING_APPROVAL and record.approval_id == approval_id:
+            if record.approval_operation_keys and record.approval_operation_keys != operation_keys:
+                raise ValueError("同一审批等待不能更改冻结操作键")
             return ledger
         if record.state not in {ToolCallState.PENDING, ToolCallState.STARTED}:
             raise ValueError("当前调用不能进入审批等待")
         record.validate_transition(ToolCallState.WAITING_APPROVAL)
-        updated = replace(record, state=ToolCallState.WAITING_APPROVAL, approval_id=approval_id, approval_decision=None, updated_at=utc_now_iso())
+        updated = replace(record, state=ToolCallState.WAITING_APPROVAL, approval_id=approval_id, approval_decision=None, approval_operation_keys=operation_keys, updated_at=utc_now_iso())
         approval = await self._approvals.find(approval_id)
         if approval is None:
             approval = ApprovalRecord(approval_id, run.run_id, run.session_id, ApprovalStatus.PENDING, utc_now_iso(), call_id=call_id)
@@ -855,11 +884,43 @@ class ToolRecoveryService:
         updated = replace(record, approval_decision=approved, updated_at=utc_now_iso())
         calls = tuple(updated if item.call.call_id == record.call.call_id else item for item in ledger.calls)
         base_run, base_checkpoint = await self._persistent_base(run)
-        moved = transition(base_run.state, ApprovalGranted(approval_id)) if approved else None
-        target_run = base_run if moved is None else replace(base_run, state=moved.state)
-        events = (await self._event(base_run, RunEventType.APPROVAL_RESOLVED, {"approval_id": approval_id, "call_id": record.call.call_id, "tool_name": record.call.name, "source_response_message_id": record.source_message_id, "attempt": record.attempt, "approved": approved}, "审批决议已持久化", (record.source_message_id,)),)
-        target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, dict(base_checkpoint.pending if base_checkpoint else {}), AgentAction.EXECUTE_TOOLS if approved else AgentAction.SUSPEND, None)
-        return await self._commit_fact(replace(ledger, calls=calls), base_run, target_run, base_checkpoint, target_checkpoint, events=events, approval=resolved)
+        if approved:
+            moved = transition(base_run.state, ApprovalGranted(approval_id))
+            target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, dict(base_checkpoint.pending if base_checkpoint else {}), AgentAction.EXECUTE_TOOLS, None)
+            event = await self._event(base_run, RunEventType.APPROVAL_RESOLVED, {"approval_id": approval_id, "call_id": record.call.call_id, "tool_name": record.call.name, "source_response_message_id": record.source_message_id, "attempt": record.attempt, "approved": True}, "审批决议已持久化", (record.source_message_id,))
+            return await self._commit_fact(replace(ledger, calls=calls), base_run, replace(base_run, state=moved.state), base_checkpoint, target_checkpoint, events=(event,), approval=resolved)
+        outcome = ToolOutcomeSnapshot(
+            ToolOutcomeStatus.FAILED, "工具审批被拒绝，未执行。",
+            RunError(RunErrorCode.TOOL_FAILURE, "工具审批被拒绝，未执行。"),
+            f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, run.run_id + ':' + record.call.call_id).hex}",
+            utc_now_iso(), ToolEffectCertainty.KNOWN,
+            tool_error_code="APPROVAL_DENIED", origin=ToolOutcomeOrigin.APPROVAL,
+            execution_evidence=ToolExecutionEvidence.NOT_STARTED,
+        )
+        target = transition(base_run.state, ApprovalRejected(approval_id)).state
+        return await self._commit_result(run, replace(ledger, calls=calls), updated, outcome, checkpoint, approval=resolved, target_state=target)
+
+    async def materialize_rejected_approval(self, run: AgentRun, call_id: str, checkpoint: RunCheckpoint) -> ToolCallLedger:
+        """补齐旧版本已拒绝但尚无调用结果的活动审批。"""
+        if run.state.is_ended():
+            raise ValueError("已结束运行不能补齐或复活旧拒绝审批")
+        ledger = await self._required_ledger(run, checkpoint)
+        record = self._call(ledger, call_id)
+        if record.state is not ToolCallState.WAITING_APPROVAL or record.approval_decision is not False:
+            raise ValueError("调用不是待补齐的拒绝审批")
+        if record.result is not None:
+            return ledger
+        approval = await self._approvals.find(record.approval_id)
+        if approval is None or approval.decision is not False or approval.status is not ApprovalStatus.CONSUMED:
+            raise ValueError("旧拒绝审批缺少已消费的拒绝事实")
+        outcome = ToolOutcomeSnapshot(
+            ToolOutcomeStatus.FAILED, "工具审批被拒绝，未执行。",
+            RunError(RunErrorCode.TOOL_FAILURE, "工具审批被拒绝，未执行。"),
+            f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, run.run_id + ':' + call_id).hex}", utc_now_iso(),
+            ToolEffectCertainty.KNOWN, tool_error_code="APPROVAL_DENIED",
+            origin=ToolOutcomeOrigin.APPROVAL, execution_evidence=ToolExecutionEvidence.NOT_STARTED,
+        )
+        return await self._commit_result(run, ledger, record, outcome, checkpoint, approval=approval, target_state=transition(run.state, ApprovalRejected(record.approval_id)).state)
 
     async def attach_child(self, run: AgentRun, call_id: str, child_run_id: str, checkpoint: RunCheckpoint) -> ToolCallLedger:
         ledger = await self._required_ledger(run, checkpoint)
@@ -924,7 +985,7 @@ class ToolRecoveryService:
         target_checkpoint = self._next_checkpoint(base_checkpoint, checkpoint, dict(base_checkpoint.pending if base_checkpoint else {}), AgentAction.EXECUTE_TOOLS, None)
         return await self._commit_fact(replace(ledger, calls=calls), base_run, base_run, base_checkpoint, target_checkpoint)
 
-    async def block_uncertain(self, run: AgentRun, call_id: str, reason: str, checkpoint: RunCheckpoint) -> ToolCallLedger:
+    async def block_uncertain(self, run: AgentRun, call_id: str, reason: str, checkpoint: RunCheckpoint, *, outcome: ToolOutcomeSnapshot | None = None) -> ToolCallLedger:
         ledger = await self._required_ledger(run, checkpoint)
         record = self._call(ledger, call_id)
         if record.state is ToolCallState.UNCERTAIN:
@@ -941,18 +1002,20 @@ class ToolRecoveryService:
         calls = tuple(updated if item.call.call_id == call_id else item for item in ledger.calls)
         if record.state is not ToolCallState.UNCERTAIN:
             base_run, base_checkpoint = await self._persistent_base(run)
-        error = RunError(RunErrorCode.TOOL_OUTCOME_UNCERTAIN, "工具结果待确认：外部操作可能已生效，请先核对。")
         if base_run.state.is_ended():
-            if base_run.state.outcome() is not RunOutcome.FAILED:
-                raise ValueError("工具不确定结果不能覆盖其他运行终态")
-            target_run = base_run
-        else:
-            target_run = self._failed_run_target(base_run, error)
-        existing_events = await self._runs.load_events(run.session_id, run.run_id)
-        new_events = [RunEvent(run.run_id, len(existing_events) + 1, RunEventType.TOOL_RECOVERY_BLOCKED, utc_now_iso(), (record.source_message_id,), "工具结果不确定，已阻止自动执行", {"call_id": call_id, "tool_name": record.call.name, "source_response_message_id": record.source_message_id, "reason": reason, "attempt": record.attempt})]
-        if not base_run.state.is_ended():
-            new_events.append(RunEvent(run.run_id, len(existing_events) + 2, RunEventType.RUN_FAILED, utc_now_iso(), (), reason, {"error_code": error.code.value}))
-        return await self._commit_fact(replace(ledger, calls=calls), base_run, target_run, base_checkpoint, None, events=tuple(new_events))
+            return ledger
+        source = outcome
+        if source is None:
+            error = record.last_error or RunError(RunErrorCode.TOOL_OUTCOME_UNCERTAIN, reason)
+            source = ToolOutcomeSnapshot(ToolOutcomeStatus.UNCERTAIN, error.message, error,
+                f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, run.run_id + ':' + call_id).hex}",
+                utc_now_iso(), ToolEffectCertainty.UNKNOWN, tool_error_code=record.last_tool_error_code or "TOOL_OUTCOME_UNCERTAIN",
+                tool_error_type=record.last_tool_error_type, origin=ToolOutcomeOrigin.RECOVERY,
+                execution_evidence=ToolExecutionEvidence.UNKNOWN)
+        if source.status is not ToolOutcomeStatus.UNCERTAIN or source.effect_certainty is not ToolEffectCertainty.UNKNOWN or source.execution_evidence is not ToolExecutionEvidence.UNKNOWN:
+            raise ValueError("封禁工具必须提交 UNKNOWN/UNCERTAIN 结果")
+        source = replace(source, origin=ToolOutcomeOrigin.EXECUTION if outcome is not None else ToolOutcomeOrigin.RECOVERY)
+        return await self._commit_result(run, replace(ledger, calls=calls), updated, source, checkpoint)
 
     def _failed_run_target(self, base_run: AgentRun, error: RunError) -> AgentRun:
         return replace(base_run, state=transition(base_run.state, ToolBatchFailed(error)).state, ended_at=utc_now_iso(), error=error)
