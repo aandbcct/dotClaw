@@ -6,6 +6,8 @@
 > 编写基准：《dotClaw Wiki 编写规范与验收准则 v1.1》  
 > 上级导航：[dotClaw 开发者 Wiki](./README.md)
 
+> **实现更新（2026-11-16）**：本文原扫描基线仍是 2026-07 的 `master`。工具纠错与总轮数预算的当前实现补充以 `feat/toolCorrection@d5d7dfd` 为准；下方 §8.3 中关于轮数上限、审批拒绝和工具错误回灌的旧观察已由本文 §8.5 更新，不代表当前代码状态。本文未记录动态端到端验证结果。
+
 > **状态模型说明**：本文档状态机相关章节（第 4/5/6/8 节）已按「状态机分层重构」**之后**的口径编写。当前唯一持久化控制状态位于 `domain/state.py` 的 `AgentRunState`，状态迁移由纯函数 `transition()` 定义，是合法状态变化的唯一事实来源。详细设计与迁移计划见 `docs/Development/runtime/statemachine/状态机分层重构总体设计.md` 与 `状态机分层重构开发计划.md`。
 
 
@@ -1813,27 +1815,25 @@ data/sessions/
 
 `transition()` 已是唯一迁移事实来源，`_drive()` 直接按 `AgentAction` 分支选择执行器。其中 `DelegationRequested` 返回 `HANDOFF_TARGET` 且状态保持 `Running(EXECUTING_TOOLS)`，委派提交后 `DelegationSubmitted` 进入 `Suspended(DELEGATION)`；旧模型中独立的等待委派阶段已统一为 `Suspended(DELEGATION)` 与 `control_id` 校验。
 
-#### R3. 循环、超时和部分状态字段未贯通
+#### R3. 超时和部分状态字段未贯通
 
-`max_iterations` 被写入 `RunBudget`，但 `_drive()` 没有根据它终止循环；`timeout_ms`、`TimeoutReached` 和 `RunErrorCode.TIMEOUT` 也未形成运行控制闭环。`retry_count`、`truncate_count` 和 `loop_fingerprint` 没有稳定更新，Checkpoint 恢复也未完整重建这些字段。
+`max_iterations` 已在 `_drive()` 的下一次模型调用前执行：默认 10，0 关闭，正整数上限以 `ITERATION_LIMIT_REACHED` 和 `iteration_limit` 失败结束；达到上限的最后一轮工具批次会先收完，不再追加总结模型调用。`timeout_ms`、`TimeoutReached` 和部分 `retry_count`、`truncate_count`、`loop_fingerprint` 统计仍未形成完整闭环。
 
 #### R4. Session 并发控制不是跨进程 lease
 
 进程内 `asyncio.Lock` 与文件型活动 Run 检查不是原子条件写。两个进程可能同时通过检查，代码中“持久化占用保证跨进程串行”的表述超过当前能力。
 
-#### R5. 审批消费与恢复不是原子边界
+#### R5. 审批和恢复仍依赖单机补偿投影
 
-当前流程会先消费 ApprovalRecord，再读取并校验 Checkpoint、`AgentRunState` 和待执行 Tool Call。后续恢复校验失败时，审批已经无法再次提交。文件型 consume 也缺少跨进程 CAS。
-
-等待审批 Run 的取消可绕过 Session 锁，而审批恢复会获取 Session 锁；二者之间没有事务型竞争协调。
+工具审批决议、拒绝结果、审批/工具事件、Run 与 Checkpoint 通过同一账本投影意图提交；拒绝不会请求取消，拒绝结果可以继续当前工具批次。取消先在运行 gate 内受理时优先于审批恢复。文件存储仍是补偿式多文件投影，不是跨进程事务或数据库 ACID。
 
 #### R6. 取消主要依赖安全点标记
 
 `LLMProxyAdapter.cancel()` 没有底层请求句柄，`ToolExecutorAdapter.cancel()` 不能终止正在执行的 Handler。长模型请求和有副作用 Tool 不一定立即停止。
 
-#### R7. Tool 错误语义被压缩
+#### R7. Tool 结果反馈已保留细分原因，运行错误仍有统一类别
 
-Tool 的 `INVALID_ARGUMENTS`、`POLICY_DENIED`、`TIMEOUT` 和网络错误进入 Runtime 后统一映射为 `TOOL_FAILURE`，限制重试判断、模型反馈、统计和用户展示。
+工具结果消息保留工具错误码/类型、执行证据、副作用确定性和错误说明，并以稳定 JSON 反馈模型；运行级 `RunError` 仍使用 Runtime 错误类别。明确普通工具失败按调用级结果回灌，批次其他工具可继续；持久化及恢复契约错误仍停止运行。
 
 #### R8. 预算与统计事实边界不清
 
@@ -1861,15 +1861,25 @@ Tool 的 `INVALID_ARGUMENTS`、`POLICY_DENIED`、`TIMEOUT` 和网络错误进入
 |---|---|---|---|
 | E1 | R1 | 在单执行中心下提取 LLMDrive、ToolDrive、ContextPreparation、Recovery 和 SuccessCommit 等内部服务 | Runtime Application；需防止服务互相触发形成新状态机 |
 | E2 | R2、R3 | 明确状态机定位：要么让 AgentAction 成为唯一执行计划并补齐终态/超时/委派，要么删除未使用动作和字段，仅保留合法阶段校验 | Runtime Domain、Engine、Checkpoint；涉及较大控制流调整 |
-| E3 | R3、R8 | 统一运行限制与统计：明确 max_iterations、deadline、Token 消耗和最终统计的单一更新入口 | Execution、Facts、Engine、测试；需要存储兼容 |
+| E3 | R3、R8 | 模型轮数上限已执行；deadline、Token 消耗和其他运行统计仍待统一 | timeout 控制、Execution/Facts 统计及恢复口径仍需后续工作 |
 | E4 | R4 | 为数据库 Adapter 增加 session lease、fencing token 和条件更新 | Repository、Coordinator、Bootstrap；本地文件模式仍可保留单进程语义 |
-| E5 | R5 | 将审批“验证恢复条件 + 消费记录 + 更新 Run”纳入事务；文件模式至少增加进程锁和失败补偿 | Approval、Checkpoint、Run Repository、Coordinator |
+| E5 | R5 | 审批拒绝结果与运行投影已通过账本意图补偿提交；跨进程 CAS/数据库事务仍待设计 | Approval、Checkpoint、Run Repository、Coordinator |
 | E6 | R6 | LLM、Tool 和 Delegation 注册可取消 Operation Handle；有副作用 Tool 增加持久化调用账本和幂等键 | LLM、Tool、Runtime、外部 Provider；无法替代外部系统幂等 |
-| E7 | R7 | Runtime Tool DTO 保留 tool_error_code、tool_error_type 和 retryable | Tool、Runtime Adapter、状态机和输出展示 |
+| E7 | R7 | 工具错误码/类型已保留在账本事件与模型反馈中；RunError 仍保留统一运行错误类别 | Tool、Runtime Adapter、状态机和输出展示 |
 | E8 | R9 | 将 OutputDeliveryError 与 LLMUnavailableError 分离，或采用非阻断输出队列；输出失败不影响最终 response 聚合 | Channel、LLM Adapter、Runtime |
 | E9 | R10 | 持久化 parent/child/task/session binding，重启后按 child Run 终态恢复父 Run | Orchestration、Runtime Repository、Session |
 | E10 | R11 | 引入 SQLite/PostgreSQL 索引型 Adapter；清理未使用事件、旧版本命名和重复压缩契约 | Runtime、Bootstrap、迁移工具；需要明确格式迁移 |
 | E11 | R12 | 仅在明确隐私策略下增加有限 reasoning 元数据或摘要事件，而非默认保存全文 | LLM、Runtime Events、配置；需权衡隐私和存储 |
+
+### 8.5 工具纠错与总轮数预算：当前实现补充
+
+本节更新 2026-07 的扫描结论，描述 `feat/toolCorrection@d5d7dfd` 中已接入的行为。
+
+- **普通失败回灌：**工具结果消息带 `status`、`tool_error_code`、`tool_error_type`、`message`、`execution_evidence`、`effect_certainty` 和限制原因。已判定的普通工具失败不会结束 Run；批次完成后模型能读取结果并调整调用。持久化故障、状态冲突和冻结恢复契约变化仍按控制故障处理。
+- **模型总轮数：**`max_loop_steps` 默认 `10`；`0` 关闭总轮数上限，正整数表示最多允许的模型逻辑轮数。最后允许轮返回的工具批次会先完成，之后在下一次模型调用前原子记录 `ITERATION_LIMIT_REACHED` 与 `RUN_FAILED`，删除 Checkpoint 并以 `iteration_limit` 返回未完成；不会额外调用模型。
+- **任务内强制限制：**账本为每次 Run 保存审批拒绝和未知结果，恢复时从账本重建限制。审批拒绝后，同一规范化调用以及匹配的已冻结 FILE_READ/FILE_WRITE 操作键会被阻止；重复策略默认在同工具、同规范化参数组合连续 3 次执行失败后阻止下一次匹配调用。成功清零该组合计数；预检、审批等待/拒绝、GUARD、恢复与取消不累计执行失败。策略可替换，但不能覆盖审批拒绝或未知工具封禁。
+- **未知结果：**副作用不是 `NONE` 且执行证据未知时，调用结果保存为 `UNCERTAIN`，只封禁本 Run 内的同名工具，其余工具仍可执行；副作用声明为 `NONE` 时以 `FAILED`、`UNKNOWN` 证据回灌，不封禁工具。跨重启限制由账本延续，不跨 Run 共享。
+- **明确未实现：**运行时不查询外部系统确认未知副作用，不解除工具封禁；#52 留给后续外部核验和解封能力。当前这组变更有静态编译/构建证据，没有动态或端到端验证结果。
 
 ## 9. 源码索引
 

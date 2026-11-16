@@ -126,8 +126,8 @@ class ToolOutcomeSnapshot:
         if self.message_kind not in {RunMessageKind.TOOL_RESULT, RunMessageKind.DELEGATION_RESULT}:
             raise ValueError("工具结果消息类别必须是 TOOL_RESULT 或 DELEGATION_RESULT")
 
-    def to_dict(self) -> JSONMap:
-        return {
+    def to_dict(self, *, schema_version: int = 2) -> JSONMap:
+        data = {
             "status": self.status.value,
             "output": self.output,
             "error": None if self.error is None else self.error.to_dict(),
@@ -138,9 +138,11 @@ class ToolOutcomeSnapshot:
             "child_outcome": None if self.child_outcome is None else self.child_outcome.value,
             "tool_error_code": self.tool_error_code,
             "tool_error_type": self.tool_error_type,
-            "origin": self.origin.value,
-            "execution_evidence": None if self.execution_evidence is None else self.execution_evidence.value,
         }
+        if schema_version >= 2:
+            data["origin"] = self.origin.value
+            data["execution_evidence"] = None if self.execution_evidence is None else self.execution_evidence.value
+        return data
 
     @classmethod
     def from_dict(cls, data: JSONMap) -> ToolOutcomeSnapshot:
@@ -282,8 +284,8 @@ class ToolCallRecord:
             self.state is ToolCallState.UNCERTAIN and self.result is not None
         )
 
-    def to_dict(self) -> JSONMap:
-        return {
+    def to_dict(self, *, schema_version: int = 2) -> JSONMap:
+        data = {
             "run_id": self.run_id,
             "call": self.call.to_dict(),
             "source_message_id": self.source_message_id,
@@ -311,11 +313,13 @@ class ToolCallRecord:
             "approval_id": self.approval_id,
             "approval_decision": self.approval_decision,
             "child_run_id": self.child_run_id,
-            "result": None if self.result is None else self.result.to_dict(),
+            "result": None if self.result is None else self.result.to_dict(schema_version=schema_version),
             "uncertainty_reason": self.uncertainty_reason,
-            "approval_operation_keys": list(self.approval_operation_keys),
             "updated_at": self.updated_at,
         }
+        if schema_version >= 2:
+            data["approval_operation_keys"] = list(self.approval_operation_keys)
+        return data
 
     @classmethod
     def from_dict(cls, data: JSONMap) -> ToolCallRecord:
@@ -468,7 +472,7 @@ class ToolCallLedger:
             "session_id": self.session_id,
             "run_id": self.run_id,
             "revision": self.revision,
-            "calls": [call.to_dict() for call in self.calls],
+            "calls": [call.to_dict(schema_version=self.schema_version) for call in self.calls],
             "pending_projection": None if self.pending_projection is None else self.pending_projection.to_dict(),
         }
 
