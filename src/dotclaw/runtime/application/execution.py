@@ -114,8 +114,6 @@ class RunExecution:
     """最近一次业务 LLM 调用前的真实输入预算结论，仅保存不含正文的审计字段。"""
     tool_batch_id: str | None = None
     """当前账本工具批次的原始助手消息标识。"""
-    legacy_tool_recovery: bool = False
-    """仅恢复没有账本版本引用的旧检查点时启用旧读取与执行兼容。"""
     run_events: tuple[RunEvent, ...] = ()
     """Context Provider 用于精确排除旧审批假结果的只读运行事件。"""
 

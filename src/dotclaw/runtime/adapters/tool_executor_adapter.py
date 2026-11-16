@@ -40,6 +40,7 @@ class ToolExecutorAdapter(ToolPort):
                 status=ToolResultStatus.APPROVAL_REQUIRED,
                 approval_id=_approval_id(invocation.run_id, invocation.call.call_id),
                 execution_evidence=ToolExecutionEvidence.NOT_STARTED,
+                approval_operation_keys=legacy_result.approval_operation_keys,
             )
         if legacy_result.is_error:
             return ToolResult(
@@ -50,10 +51,12 @@ class ToolExecutorAdapter(ToolPort):
                 execution_evidence=legacy_result.execution_evidence,
                 tool_error_code=legacy_result.error_code,
                 tool_error_type=legacy_result.error_type,
+                approval_operation_keys=legacy_result.approval_operation_keys,
             )
         return ToolResult(invocation.call.call_id, ToolResultStatus.COMPLETED, legacy_result.output,
             execution_evidence=legacy_result.execution_evidence,
-            tool_error_code=legacy_result.error_code, tool_error_type=legacy_result.error_type)
+            tool_error_code=legacy_result.error_code, tool_error_type=legacy_result.error_type,
+            approval_operation_keys=legacy_result.approval_operation_keys)
 
     async def preflight(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolResult:
         """用真实参数和安全策略检查审批需求，不启动处理函数。"""
@@ -63,11 +66,14 @@ class ToolExecutorAdapter(ToolPort):
         if result.approval_required:
             return ToolResult(invocation.call.call_id, ToolResultStatus.APPROVAL_REQUIRED,
                 approval_id=_approval_id(invocation.run_id, invocation.call.call_id),
-                execution_evidence=ToolExecutionEvidence.NOT_STARTED)
+                execution_evidence=ToolExecutionEvidence.NOT_STARTED,
+                approval_operation_keys=result.approval_operation_keys)
         return ToolResult(invocation.call.call_id,
             ToolResultStatus.FAILED if result.is_error else ToolResultStatus.COMPLETED,
             output=result.output, execution_evidence=ToolExecutionEvidence.NOT_STARTED,
-            tool_error_code=result.error_code, tool_error_type=result.error_type)
+            error=RunError(RunErrorCode.TOOL_FAILURE, result.output) if result.is_error else None,
+            tool_error_code=result.error_code, tool_error_type=result.error_type,
+            approval_operation_keys=result.approval_operation_keys)
 
     def _context(self, invocation: ToolInvocation, execution: RunExecutionView) -> ToolExecutionContext:
         """把账本身份与稳定幂等键注入底层处理上下文。"""

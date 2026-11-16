@@ -29,7 +29,6 @@ from ..domain.events import (
     RunEvent,
     RunEventType,
     RunStarted,
-    ToolApprovalRequired,
     ToolAuditStatus,
     ToolBatchCompleted,
     ToolBatchFailed,
@@ -113,6 +112,7 @@ from ..domain.tool_recovery import (
     ToolCallState,
     ToolEffectCertainty,
     ToolOutcomeSnapshot,
+    ToolOutcomeOrigin,
     ToolOutcomeStatus,
     ToolRecoveryAction,
 )
@@ -573,6 +573,8 @@ class RuntimeEngine:
                         ToolOutcomeStatus.COMPLETED, child_output, None,
                         f"delegation-{parent_run_id}-{record.call.call_id}", utc_now_iso(), ToolEffectCertainty.KNOWN,
                         message_kind=RunMessageKind.DELEGATION_RESULT, child_outcome=child_result.outcome,
+                        origin=ToolOutcomeOrigin.EXECUTION,
+                        execution_evidence=ToolExecutionEvidence.RETURNED,
                     )
                     await _await_control(self._tool_recovery.commit_outcome(latest, record.call.call_id, outcome, current_checkpoint))
             return await self.resume_run(parent_run_id, output_port)
@@ -943,7 +945,6 @@ class RuntimeEngine:
             active_context_version=version,
             staged_history_compressions=run.staged_history_compressions,
             replay_active_context=checkpoint.replay_context is not False,
-            legacy_tool_recovery=(resume_action is AgentAction.EXECUTE_TOOLS and checkpoint.tool_ledger_revision is None),
             tool_batch_id=checkpoint.pending.get("tool_batch_id") if isinstance(checkpoint.pending.get("tool_batch_id"), str) else None,
         )
         async with self._cancellation_service.gate(run.run_id):
@@ -1280,7 +1281,7 @@ class RuntimeEngine:
             if run is not None and run.parent_run_id and self._delegation_port is not None:
                 await self._delegation_port.result(run.run_id)
 
-    async def _drive(self, execution: RunExecution, run: AgentRun, initial_messages: tuple[RunMessage, ...], pending_calls: tuple[ToolCall, ...], event_sequence: int = 0, output_port: LLMOutputPort | None = None, resume_approved_call_id: str | None = None) -> RunResult:
+    async def _drive(self, execution: RunExecution, run: AgentRun, initial_messages: tuple[RunMessage, ...], pending_calls: tuple[ToolCall, ...], event_sequence: int = 0, output_port: LLMOutputPort | None = None) -> RunResult:
         """驱动局部状态机，并在每个事实边界按顺序持久化。
 
         主循环消费 ``StateTransition.action``（存于 ``execution.action``）决定下一项动作：
@@ -1312,7 +1313,7 @@ class RuntimeEngine:
             action: AgentAction = execution.action
             if action is AgentAction.EXECUTE_TOOLS:
                 run, sequence, event_number, pending_calls, terminal = await self._execute_tools_action(
-                    execution, run, messages, sequence, event_number, pending_calls, resume_approved_call_id,
+                    execution, run, messages, sequence, event_number, pending_calls,
                 )
                 if terminal is not None:
                     return terminal
@@ -1353,146 +1354,49 @@ class RuntimeEngine:
         sequence: int,
         event_number: int,
         pending_calls: tuple[ToolCall, ...],
-        resume_approved_call_id: str | None,
     ) -> tuple[AgentRun, int, int, tuple[ToolCall, ...], RunResult | None]:
-        """执行 ``EXECUTING_TOOLS`` 动作：逐个工具调用，回灌 ToolBatchCompleted / ToolApprovalRequired。
-
-        返回 (run, sequence, event_number, pending_calls, terminal)：``terminal`` 非 None 表示已
-        收口（审批挂起或失败），主循环直接返回；否则主循环以空 pending_calls 继续下一轮。
-        """
-        tool_calls: tuple[ToolCall, ...] = pending_calls
-        pending_calls = ()
+        """通过调用账本规划并执行当前普通工具批次。"""
+        tool_calls = pending_calls
         if not tool_calls:
-            return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "缺少待执行工具调用")
-        # 旧检查点继续走兼容动作；新格式批次由 ordinal 账本统一处理普通调用与委派。
-        for tool_index, tool_call in (enumerate(tool_calls) if execution.legacy_tool_recovery else ()):
-            delegation_request: DelegationRequest | None = _delegation_request(
-                execution.run_id,
-                run.root_run_id or run.run_id,
-                run.agent_id,
-                run.session_id,
-                tool_call,
+            return run, sequence, event_number, (), await self._fail(
+                execution, run, tuple(messages), event_number, "缺少待执行工具调用",
             )
-            if delegation_request is not None:
-                event_number = await self._tool_started_event(run, event_number, messages, tool_call)
-                # 经状态机发送 DelegationRequested：产出 HANDOFF_TARGET 动作（状态保持 Running(EXECUTING_TOOLS)），
-                # 由 _drive 的 action dispatcher 消费该动作并提交子运行，确保 delegation 走设计确定的 action 契约。
-                request_transition = await self._apply_transition(execution, run, DelegationRequested(), event_number)
-                if request_transition is None:
-                    return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 DelegationRequested 迁移")
-                execution.update_state(request_transition.state, request_transition.action)
-                event_number = await self._event(
-                    run,
-                    event_number,
-                    RunEventType.DELEGATION_REQUESTED,
-                    (messages[-1].message_id,) if messages else (),
-                    "模型请求派发子运行",
-                    {"tool_call_id": tool_call.call_id, "target_agent_id": delegation_request.target_agent_id},
-                )
-                execution.pending_delegation = PendingDelegation(
-                    request=delegation_request,
-                    tool_call=tool_call,
-                    batch_id=_source_response_message_id(messages, tool_call.call_id),
-                )
-                # 不直接提交：返回空 terminal 让主循环按 HANDOFF_TARGET 分支调度 _handoff_target_action。
-                return run, sequence, event_number, pending_calls, None
-        if not execution.legacy_tool_recovery:
-            source_id = _source_response_message_id(messages, tool_calls[0].call_id)
-            source_message = next((item for item in messages if item.message_id == source_id), None)
-            if source_message is None:
-                return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "工具批次原始助手消息不存在", RunErrorCode.PERSISTENCE_FAILURE)
-            contracts: dict[str, ToolRecoveryContract] = {}
-            for call in tool_calls:
-                contracts[call.call_id] = await self._tool_port.describe_recovery(call, execution.view())
-            async with self._cancellation_service.gate(run.run_id):
-                checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
-                if checkpoint is None:
-                    raise ValueError("规划工具批次时检查点不存在")
-                await self._tool_recovery.recover_projection(run.session_id, run.run_id)
-                tool_run = replace(run, state=execution.state)
-                await self._tool_recovery.plan_batch(tool_run, source_message, contracts, checkpoint)
-                checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
-                if checkpoint is None:
-                    raise ValueError("工具批次投影后检查点不存在")
-                latest = await self._run_repository.load_run(run.session_id, run.run_id)
-                if latest is None:
-                    raise ValueError("工具批次投影后运行不存在")
-                plan = await self._tool_recovery.reconcile(latest, checkpoint, contracts)
-                execution.tool_batch_id = source_message.message_id
-            terminal = await self._resume_tool_batch(execution, plan, contracts)
-            refreshed = await self._run_repository.load_run(run.session_id, run.run_id)
-            persisted_messages = await self._run_repository.load_messages(run.session_id, run.run_id)
-            persisted_events = await self._run_repository.load_events(run.session_id, run.run_id)
-            if refreshed is None:
-                raise ValueError("账本工具批次结束后运行不存在")
-            messages[:] = persisted_messages
-            execution.replace_run_messages(persisted_messages)
-            execution.replay_active_context = False
-            return refreshed, len(persisted_messages), len(persisted_events), (), terminal
-        # 恢复边界：所有 tool_started 事件已落盘、进入工具外部调用前，先持久化 Running(EXECUTING_TOOLS)
-        # 状态与 EXECUTE_TOOLS 检查点（含待执行工具调用）。此时 event_sequence 恰好等于最后落盘的
-        # tool_started 事件序号，使崩溃恢复时 RUN_RESUMED 以连续序号接上，并以 EXECUTE_TOOLS 节点重放
-        # 工具轮而非退化回重调 LLM。
-        run = await self._persist_running_transition(
-            execution, run, execution.state, AgentAction.EXECUTE_TOOLS, event_number, sequence, tool_calls,
-        )
-        # 阶段二：逐个执行工具，回灌 ToolBatchCompleted / ToolApprovalRequired。
-        completed_message_ids: list[str] = []
-        for tool_index, tool_call in enumerate(tool_calls):
-            if execution.cancellation.cancelled:
-                return run, sequence, event_number, pending_calls, await self._finish_cancelled(run, execution.cancellation.reason)
-            event_number = await self._tool_started_event(run, event_number, messages, tool_call)
-            run = await self._persist_running_transition(execution, run, execution.state, AgentAction.EXECUTE_TOOLS, event_number, sequence, tool_calls[tool_index:])
-            try:
-                approved: bool = (
-                    resume_approved_call_id is not None
-                    and tool_call.call_id == resume_approved_call_id
-                )
-                tool_result: ToolResult = await self._cancellation_service.run_operation(
-                    execution.run_id, RunOperationKind.TOOL,
-                    lambda: self._tool_port.execute(ToolInvocation(execution.run_id, tool_call, approved=approved), execution.view()),
-                    call_id=tool_call.call_id,
-                )
-            except RunOperationCancelled:
-                return run, sequence, event_number, pending_calls, await self._finish_cancelled(run, execution.cancellation.reason)
-            except RunOperationCleanupError as error:
-                await self.refresh_cancellation_progress(run.run_id)
-                return run, sequence, event_number, pending_calls, RunResult(run.run_id, run.state, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, str(error)))
-            except Exception as error:
-                event_number = await self._tool_completed_event(run, event_number, tool_call, None, ToolAuditStatus.FAILED, _safe_error_summary(error))
-                return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, f"工具调用失败：{error}", RunErrorCode.TOOL_FAILURE)
-            if tool_result.status is ToolResultStatus.APPROVAL_REQUIRED:
-                return run, sequence, event_number, pending_calls, await self._suspend_action(
-                    execution, run, messages, sequence, event_number, tool_call, tool_calls, tool_index, tool_result,
-                    _source_response_message_id(messages, tool_call.call_id),
-                )
-            sequence += 1
-            run = _with_tool_statistic(run)
-            tool_message: RunMessage = RunMessage(
-                f"tool-{execution.run_id}-{sequence}",
-                sequence,
-                RunMessageKind.TOOL_RESULT,
-                MessageRole.TOOL,
-                tool_result.output,
-                tool_call_id=tool_result.call_id,
+        source_id = _source_response_message_id(messages, tool_calls[0].call_id)
+        source_message = next((item for item in messages if item.message_id == source_id), None)
+        if source_message is None:
+            return run, sequence, event_number, (), await self._fail(
+                execution, run, tuple(messages), event_number,
+                "工具批次原始助手消息不存在", RunErrorCode.PERSISTENCE_FAILURE,
             )
-            messages.append(tool_message)
-            await self._save_messages(run, execution, messages)
-            event_number = await self._tool_completed_event(run, event_number, tool_call, tool_message.message_id, _tool_audit_status(tool_result.status), _tool_error_summary(tool_result))
-            if execution.cancellation.cancelled:
-                return run, sequence, event_number, pending_calls, await self._finish_cancelled(run, execution.cancellation.reason)
-            if tool_result.status is ToolResultStatus.FAILED:
-                error = tool_result.error.message if tool_result.error is not None else tool_result.output or "工具执行失败"
-                return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, error, RunErrorCode.TOOL_FAILURE)
-            completed_message_ids.append(tool_message.message_id)
-        batch_transition = await self._apply_transition(execution, run, ToolBatchCompleted(tuple(completed_message_ids)), event_number)
-        if batch_transition is None:
-            return run, sequence, event_number, pending_calls, await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 ToolBatchCompleted 迁移")
-        execution.update_state(batch_transition.state, batch_transition.action)
-        # 恢复边界：工具批次完成后、进入下一轮 LLM 外部调用前，先持久化新 state 与 INVOKE_LLM 检查点。
-        run = await self._persist_running_transition(execution, run, batch_transition.state, batch_transition.action, event_number, sequence)
-        return run, sequence, event_number, pending_calls, None
-
+        contracts = {
+            call.call_id: await self._tool_port.describe_recovery(call, execution.view())
+            for call in tool_calls
+        }
+        async with self._cancellation_service.gate(run.run_id):
+            checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+            if checkpoint is None:
+                raise ValueError("规划工具批次时检查点不存在")
+            await self._tool_recovery.recover_projection(run.session_id, run.run_id)
+            tool_run = replace(run, state=execution.state)
+            await self._tool_recovery.plan_batch(tool_run, source_message, contracts, checkpoint)
+            checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+            if checkpoint is None:
+                raise ValueError("工具批次投影后检查点不存在")
+            latest = await self._run_repository.load_run(run.session_id, run.run_id)
+            if latest is None:
+                raise ValueError("工具批次投影后运行不存在")
+            plan = await self._tool_recovery.reconcile(latest, checkpoint, contracts)
+            execution.tool_batch_id = source_message.message_id
+        terminal = await self._resume_tool_batch(execution, plan, contracts)
+        refreshed = await self._run_repository.load_run(run.session_id, run.run_id)
+        persisted_messages = await self._run_repository.load_messages(run.session_id, run.run_id)
+        persisted_events = await self._run_repository.load_events(run.session_id, run.run_id)
+        if refreshed is None:
+            raise ValueError("账本工具批次结束后运行不存在")
+        messages[:] = persisted_messages
+        execution.replace_run_messages(persisted_messages)
+        execution.replay_active_context = False
+        return refreshed, len(persisted_messages), len(persisted_events), (), terminal
     async def _resume_tool_batch(
         self,
         execution: RunExecution,
@@ -1554,6 +1458,8 @@ class RuntimeEngine:
                     ToolEffectCertainty.KNOWN,
                     message_kind=RunMessageKind.DELEGATION_RESULT,
                     child_outcome=child_result.outcome,
+                    origin=ToolOutcomeOrigin.EXECUTION,
+                    execution_evidence=ToolExecutionEvidence.RETURNED,
                 )
                 async with self._cancellation_service.gate(run.run_id):
                     latest = await self._run_repository.load_run(run.session_id, run.run_id)
@@ -1580,9 +1486,6 @@ class RuntimeEngine:
                     if run is None or checkpoint is None:
                         raise ValueError("委派结果提交后父运行或检查点不存在")
                 continue
-            if decision.action is ToolRecoveryAction.REUSE and record.state is ToolCallState.FAILED:
-                error = record.result.error if record.result is not None else RunError(RunErrorCode.TOOL_FAILURE, "工具调用失败")
-                return await self._after_tool_failure(execution, run, error, checkpoint)
             if decision.action is ToolRecoveryAction.REUSE:
                 continue
             if decision.action is ToolRecoveryAction.RETRY:
@@ -1645,8 +1548,6 @@ class RuntimeEngine:
             step = await self._execute_one_tool(execution, run, record, checkpoint)
             if step.kind is not ToolStepKind.COMPLETED:
                 return step.run_result
-            if step.outcome.status is ToolOutcomeStatus.FAILED:
-                return await self._after_tool_failure(execution, run, step.outcome.error, checkpoint)
             run, _, checkpoint, _ = await self._reload_tool_execution(execution, run.run_id)
         batch_id = checkpoint.pending.get("tool_batch_id")
         if not isinstance(batch_id, str):
@@ -1667,7 +1568,6 @@ class RuntimeEngine:
         checkpoint: RunCheckpoint,
     ) -> ToolStepResult:
         """执行一项普通调用，区分完成、审批挂起、阻断和取消收尾。"""
-        preflight_failure: ToolResult | None = None
         if record.state is ToolCallState.PENDING:
             preflight_result = await self._tool_port.preflight(
                 ToolInvocation(run.run_id, record.call, attempt=record.attempt + 1,
@@ -1679,10 +1579,41 @@ class RuntimeEngine:
                     await self._tool_recovery.wait_approval(run, record.call.call_id, approval_id, checkpoint)
                 latest, _, _, _ = await self._reload_tool_execution(execution, run.run_id)
                 return ToolStepResult(ToolStepKind.SUSPENDED, run_result=RunResult(run.run_id, latest.state, approval_id=approval_id))
-            if preflight_result.status is ToolResultStatus.FAILED and preflight_result.execution_evidence in {
-                ToolExecutionEvidence.NOT_STARTED, ToolExecutionEvidence.RETURNED,
-            }:
-                preflight_failure = preflight_result
+            if preflight_result.status is ToolResultStatus.FAILED:
+                if preflight_result.execution_evidence is not ToolExecutionEvidence.NOT_STARTED:
+                    raise ValueError("工具预检失败必须明确 NOT_STARTED 执行证据")
+                error = preflight_result.error or RunError(
+                    RunErrorCode.TOOL_FAILURE, preflight_result.output or "工具预检失败",
+                )
+                outcome = ToolOutcomeSnapshot(
+                    ToolOutcomeStatus.FAILED,
+                    preflight_result.output,
+                    error,
+                    f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, run.run_id + ':' + record.call.call_id).hex}",
+                    utc_now_iso(),
+                    ToolEffectCertainty.KNOWN,
+                    tool_error_code=preflight_result.tool_error_code,
+                    tool_error_type=preflight_result.tool_error_type,
+                    origin=ToolOutcomeOrigin.PREFLIGHT,
+                    execution_evidence=ToolExecutionEvidence.NOT_STARTED,
+                )
+                async with self._cancellation_service.gate(run.run_id):
+                    cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
+                    if cancellation is not None:
+                        return ToolStepResult(ToolStepKind.CANCEL_PENDING, run_result=RunResult(
+                            run.run_id, run.state,
+                            error=RunError(RunErrorCode.CANCELLED, cancellation.request.reason),
+                            control_status="cancelling",
+                        ))
+                    latest = await self._run_repository.load_run(run.session_id, run.run_id)
+                    current_checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                    if latest is None or current_checkpoint is None:
+                        raise ValueError("提交预检结果前运行或检查点不存在")
+                    await self._tool_recovery.commit_not_started(
+                        latest, record.call.call_id, outcome, current_checkpoint,
+                    )
+                await self._reload_tool_execution(execution, run.run_id)
+                return ToolStepResult(ToolStepKind.COMPLETED, outcome=outcome)
         async with self._cancellation_service.gate(run.run_id):
             cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
             if cancellation is not None:
@@ -1699,18 +1630,6 @@ class RuntimeEngine:
             started = await self._run_repository.load_tool_ledger(run.session_id, run.run_id)
             record = next(item for item in started.calls if item.call.call_id == record.call.call_id)
             run, _, checkpoint, _ = await self._reload_tool_execution(execution, run.run_id)
-        if preflight_failure is not None:
-            error = preflight_failure.error or RunError(
-                RunErrorCode.TOOL_FAILURE, preflight_failure.output or "工具预检失败",
-            )
-            snapshot = ToolOutcomeSnapshot(
-                ToolOutcomeStatus.FAILED, preflight_failure.output, error,
-                f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, run.run_id + ':' + record.call.call_id).hex}",
-                utc_now_iso(), ToolEffectCertainty.KNOWN, tool_error_code=preflight_failure.tool_error_code,
-                tool_error_type=preflight_failure.tool_error_type,
-            )
-            await _await_control(self._commit_observed_tool_result(run, record.call.call_id, snapshot, checkpoint))
-            return ToolStepResult(ToolStepKind.COMPLETED, outcome=snapshot)
         try:
             result = await self._cancellation_service.run_operation(
                 run.run_id, RunOperationKind.TOOL,
@@ -1726,12 +1645,6 @@ class RuntimeEngine:
         except RunOperationCleanupError as error:
             return ToolStepResult(ToolStepKind.CANCEL_PENDING,
                 run_result=RunResult(run.run_id, run.state, error=RunError(RunErrorCode.PERSISTENCE_FAILURE, str(error)), control_status="cancelling"))
-        except Exception as error:
-            result = ToolResult(
-                record.call.call_id, ToolResultStatus.FAILED,
-                error=RunError(RunErrorCode.TOOL_FAILURE, str(error)),
-                execution_evidence=ToolExecutionEvidence.UNKNOWN,
-            )
         if result.status is ToolResultStatus.APPROVAL_REQUIRED:
             approval_id = result.approval_id or uuid.uuid5(uuid.NAMESPACE_URL, f"dotclaw:approval:{run.run_id}:{record.call.call_id}").hex
             async with self._cancellation_service.gate(run.run_id):
@@ -1786,6 +1699,8 @@ class RuntimeEngine:
             f"tool-result-{uuid.uuid5(uuid.NAMESPACE_URL, run.run_id + ':' + record.call.call_id).hex}",
             utc_now_iso(), ToolEffectCertainty.KNOWN, tool_error_code=result.tool_error_code,
             tool_error_type=result.tool_error_type,
+            origin=(ToolOutcomeOrigin.PREFLIGHT if result.execution_evidence is ToolExecutionEvidence.NOT_STARTED else ToolOutcomeOrigin.EXECUTION),
+            execution_evidence=result.execution_evidence,
         )
         await _await_control(self._commit_observed_tool_result(run, record.call.call_id, snapshot, checkpoint))
         return ToolStepResult(ToolStepKind.COMPLETED, outcome=snapshot)
@@ -1819,79 +1734,6 @@ class RuntimeEngine:
         execution.replace_run_messages(messages)
         self._run_change_notifier.notify(run_id)
         return run, messages, checkpoint, len(events) + 1
-
-    async def _after_tool_failure(self, execution: RunExecution, run: AgentRun, error: RunError | None, checkpoint: RunCheckpoint) -> RunResult:
-        """工具失败事实已提交后，按当前停止策略收口运行；后续阶段再改为错误回灌。"""
-        failure = error or RunError(RunErrorCode.TOOL_FAILURE, "工具执行失败")
-        async with self._cancellation_service.gate(run.run_id):
-            await self._tool_recovery.commit_run_failure(run, failure, checkpoint)
-        failed = await self._run_repository.load_run(run.session_id, run.run_id)
-        if failed is None:
-            raise ValueError("工具失败收口后运行不存在")
-        execution.update_state(failed.state, AgentAction.FINALIZE)
-        self._run_change_notifier.notify(failed.run_id)
-        return RunResult(run.run_id, failed.state, error=failure)
-
-    async def _suspend_action(
-        self,
-        execution: RunExecution,
-        run: AgentRun,
-        messages: list[RunMessage],
-        sequence: int,
-        event_number: int,
-        tool_call: ToolCall,
-        tool_calls: tuple[ToolCall, ...],
-        tool_index: int,
-        tool_result: ToolResult,
-        source_message_id: str,
-    ) -> RunResult:
-        """执行审批挂起动作：经 ToolApprovalRequired 迁移到 AgentRunState(mode=Suspended(APPROVAL)) 并持久化检查点。"""
-        await self._tool_recovery.recover_projection(run.session_id, run.run_id)
-        record = await self._approval_service.create(run.run_id, run.session_id, tool_result.approval_id)
-        suspend_transition = await self._apply_transition(execution, run, ToolApprovalRequired(record.approval_id), event_number)
-        if suspend_transition is None:
-            return await self._fail(execution, run, tuple(messages), event_number, "状态机拒绝 ToolApprovalRequired 迁移")
-        execution.update_state(suspend_transition.state, suspend_transition.action)
-        remaining_calls: tuple[ToolCall, ...] = tool_calls[tool_index:]
-        checkpoint = RunCheckpoint(
-            checkpoint_id=f"checkpoint-{run.run_id}",
-            run_id=run.run_id,
-            session_id=run.session_id,
-            checkpoint_sequence=1,
-            event_sequence=event_number + 1,
-            message_sequence=sequence,
-            action=suspend_transition.action,
-            pending={
-                "approval_id": record.approval_id,
-                "tool_calls": [call.to_dict() for call in remaining_calls],
-            },
-            budget=execution.budget.to_dict(),
-            active_context_version=(
-                execution.active_context_version.version
-                if execution.active_context_version is not None else None
-            ),
-        )
-        await self._checkpoint_repository.save(checkpoint)
-        waiting_run: AgentRun = replace(
-            run,
-            state=suspend_transition.state,
-            latest_checkpoint_id=checkpoint.checkpoint_id,
-        )
-        await self._run_repository.save_run(waiting_run)
-        self._run_change_notifier.notify(waiting_run.run_id)
-        event_number = await self._event(
-            run,
-            event_number,
-            RunEventType.WAITING_APPROVAL,
-            (source_message_id,),
-            "等待工具审批",
-            {
-                "approval_id": record.approval_id,
-                "call_id": tool_call.call_id,
-                "tool_event_semantics": 2,
-            },
-        )
-        return RunResult(run.run_id, suspend_transition.state, approval_id=record.approval_id)
 
     async def _invoke_llm_action(
         self,
@@ -2821,22 +2663,6 @@ def _safe_error_summary(error: Exception) -> str:
     return f"{type(error).__name__}: {str(error)[:200]}"
 
 
-def _tool_error_summary(result: ToolResult) -> str:
-    """提取工具失败结果的安全错误摘要，不复制完整工具正文。"""
-    if result.error is not None:
-        return result.error.message[:200]
-    return result.output[:200] if result.status is ToolResultStatus.FAILED else ""
-
-
-def _tool_audit_status(status: ToolResultStatus) -> ToolAuditStatus:
-    """将 ToolPort 结果类别映射为不混淆 Run 取消语义的审计终态。"""
-    if status is ToolResultStatus.COMPLETED:
-        return ToolAuditStatus.COMPLETED
-    if status is ToolResultStatus.APPROVAL_REQUIRED:
-        return ToolAuditStatus.APPROVAL_REQUIRED
-    return ToolAuditStatus.FAILED
-
-
 def _scan_legacy_tool_activity(events: tuple[RunEvent, ...]) -> ToolActivityScan:
     """统一解释旧事件与语义2事件中的执行、审批等待和终态。"""
     active: dict[str, RunEvent] = {}
@@ -2896,18 +2722,6 @@ def _with_llm_statistics(run: AgentRun, response: RunMessage) -> AgentRun:
         tool_call_count=statistics.tool_call_count,
         tokens_in=statistics.tokens_in + input_tokens,
         tokens_out=statistics.tokens_out + output_tokens,
-    ))
-
-
-def _with_tool_statistic(run: AgentRun) -> AgentRun:
-    """累加工具调用次数，保持其他运行统计不变。"""
-    statistics = run.statistics
-    return replace(run, statistics=RunStatistics(
-        duration_ms=statistics.duration_ms,
-        llm_call_count=statistics.llm_call_count,
-        tool_call_count=statistics.tool_call_count + 1,
-        tokens_in=statistics.tokens_in,
-        tokens_out=statistics.tokens_out,
     ))
 
 
