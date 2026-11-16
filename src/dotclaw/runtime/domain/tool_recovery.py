@@ -58,6 +58,18 @@ class ToolOutcomeStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    UNCERTAIN = "uncertain"
+
+
+class ToolOutcomeOrigin(StrEnum):
+    """工具结果形成阶段。"""
+
+    PREFLIGHT = "preflight"
+    EXECUTION = "execution"
+    APPROVAL = "approval"
+    GUARD = "guard"
+    RECOVERY = "recovery"
+    LEGACY = "legacy"
 
 
 class ToolEffectCertainty(StrEnum):
@@ -92,17 +104,23 @@ class ToolOutcomeSnapshot:
     child_outcome: RunOutcome | None = None
     tool_error_code: str | None = None
     tool_error_type: str | None = None
+    origin: ToolOutcomeOrigin = ToolOutcomeOrigin.LEGACY
+    execution_evidence: ToolExecutionEvidence | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.output, str) or not self.observed_at:
             raise ValueError("工具结果正文和观测时间必须存在")
         _validate_utc(self.observed_at, "observed_at")
-        if self.status in {ToolOutcomeStatus.COMPLETED, ToolOutcomeStatus.FAILED} and not self.message_id:
-            raise ValueError("成功或失败工具结果必须引用稳定消息")
-        if self.status is ToolOutcomeStatus.FAILED and self.error is None:
-            raise ValueError("失败工具结果必须包含运行错误")
+        if self.status in {ToolOutcomeStatus.COMPLETED, ToolOutcomeStatus.FAILED, ToolOutcomeStatus.UNCERTAIN} and not self.message_id:
+            raise ValueError("成功、失败或未知工具结果必须引用稳定消息")
+        if self.status in {ToolOutcomeStatus.FAILED, ToolOutcomeStatus.UNCERTAIN} and self.error is None:
+            raise ValueError("失败或未知工具结果必须包含运行错误")
         if self.status is ToolOutcomeStatus.COMPLETED and self.error is not None:
             raise ValueError("成功工具结果不能包含失败错误")
+        if self.status is ToolOutcomeStatus.UNCERTAIN and (self.effect_certainty is not ToolEffectCertainty.UNKNOWN or self.execution_evidence is not ToolExecutionEvidence.UNKNOWN or self.origin not in {ToolOutcomeOrigin.EXECUTION, ToolOutcomeOrigin.RECOVERY}):
+            raise ValueError("UNCERTAIN 必须是执行或恢复阶段的未知证据结果")
+        if self.status is ToolOutcomeStatus.FAILED and self.execution_evidence is ToolExecutionEvidence.NOT_STARTED and self.origin not in {ToolOutcomeOrigin.PREFLIGHT, ToolOutcomeOrigin.APPROVAL, ToolOutcomeOrigin.GUARD}:
+            raise ValueError("未启动失败的来源必须是预检、审批或准入限制")
         if self.message_kind is RunMessageKind.TOOL_RESULT and self.child_outcome is not None:
             raise ValueError("普通工具结果不能包含子运行结局")
         if self.message_kind not in {RunMessageKind.TOOL_RESULT, RunMessageKind.DELEGATION_RESULT}:
@@ -120,11 +138,13 @@ class ToolOutcomeSnapshot:
             "child_outcome": None if self.child_outcome is None else self.child_outcome.value,
             "tool_error_code": self.tool_error_code,
             "tool_error_type": self.tool_error_type,
+            "origin": self.origin.value,
+            "execution_evidence": None if self.execution_evidence is None else self.execution_evidence.value,
         }
 
     @classmethod
     def from_dict(cls, data: JSONMap) -> ToolOutcomeSnapshot:
-        _reject_unknown(data, {"status", "output", "error", "message_id", "observed_at", "effect_certainty", "message_kind", "child_outcome", "tool_error_code", "tool_error_type"}, "ToolOutcomeSnapshot")
+        _reject_unknown(data, {"status", "output", "error", "message_id", "observed_at", "effect_certainty", "message_kind", "child_outcome", "tool_error_code", "tool_error_type", "origin", "execution_evidence"}, "ToolOutcomeSnapshot")
         error = _optional_error(data.get("error"))
         return cls(
             status=ToolOutcomeStatus(_required_string(data, "status")),
@@ -137,6 +157,8 @@ class ToolOutcomeSnapshot:
             child_outcome=_optional_enum(data.get("child_outcome"), RunOutcome, "child_outcome"),
             tool_error_code=_optional_string(data.get("tool_error_code"), "tool_error_code"),
             tool_error_type=_optional_string(data.get("tool_error_type"), "tool_error_type"),
+            origin=ToolOutcomeOrigin(_optional_string(data.get("origin"), "origin") or ToolOutcomeOrigin.LEGACY.value),
+            execution_evidence=_optional_enum(data.get("execution_evidence"), ToolExecutionEvidence, "execution_evidence"),
         )
 
 
@@ -173,6 +195,7 @@ class ToolCallRecord:
     child_run_id: str | None = None
     result: ToolOutcomeSnapshot | None = None
     uncertainty_reason: str | None = None
+    approval_operation_keys: tuple[str, ...] = ()
     updated_at: str = field(default_factory=utc_now_iso)
 
     def __post_init__(self) -> None:
@@ -206,7 +229,7 @@ class ToolCallRecord:
             raise ValueError("WAITING_CHILD 仅允许关联稳定子运行的委派调用")
         if self.state is ToolCallState.WAITING_APPROVAL and not self.approval_id:
             raise ValueError("WAITING_APPROVAL 必须关联 approval_id")
-        if self.state in {ToolCallState.PENDING, ToolCallState.STARTED, ToolCallState.WAITING_APPROVAL, ToolCallState.WAITING_CHILD, ToolCallState.UNCERTAIN} and self.result is not None:
+        if self.state in {ToolCallState.PENDING, ToolCallState.STARTED, ToolCallState.WAITING_APPROVAL, ToolCallState.WAITING_CHILD} and self.result is not None:
             raise ValueError("非结果终态不能包含工具结果快照")
         if self.state is ToolCallState.SUCCEEDED and (self.result is None or self.result.status is not ToolOutcomeStatus.COMPLETED):
             raise ValueError("SUCCEEDED 必须包含 completed 结果快照")
@@ -214,6 +237,10 @@ class ToolCallRecord:
             raise ValueError("FAILED 必须包含 failed 结果快照")
         if self.state is ToolCallState.CANCELLED and (self.result is None or self.result.status is not ToolOutcomeStatus.CANCELLED):
             raise ValueError("CANCELLED 必须包含 cancelled 结果快照")
+        if self.state is ToolCallState.UNCERTAIN and self.result is not None and self.result.status is not ToolOutcomeStatus.UNCERTAIN:
+            raise ValueError("UNCERTAIN 记录只能包含 uncertain 结果快照")
+        if not isinstance(self.approval_operation_keys, tuple) or any(not isinstance(key, str) or not key for key in self.approval_operation_keys):
+            raise ValueError("approval_operation_keys 必须是非空字符串组成的 tuple")
         if self.result is not None:
             expected_message_kind = (
                 RunMessageKind.DELEGATION_RESULT
@@ -234,9 +261,9 @@ class ToolCallRecord:
     def validate_transition(self, target: ToolCallState) -> None:
         """只校验状态图边；STARTED 重试的 attempt/retry_count 增量由提交入口校验。"""
         allowed = {
-            ToolCallState.PENDING: {ToolCallState.STARTED, ToolCallState.WAITING_APPROVAL, ToolCallState.WAITING_CHILD, ToolCallState.CANCELLED},
+            ToolCallState.PENDING: {ToolCallState.STARTED, ToolCallState.WAITING_APPROVAL, ToolCallState.WAITING_CHILD, ToolCallState.FAILED, ToolCallState.CANCELLED},
             ToolCallState.STARTED: {ToolCallState.STARTED, ToolCallState.SUCCEEDED, ToolCallState.FAILED, ToolCallState.WAITING_APPROVAL, ToolCallState.WAITING_CHILD, ToolCallState.UNCERTAIN, ToolCallState.CANCELLED},
-            ToolCallState.WAITING_APPROVAL: {ToolCallState.STARTED, ToolCallState.CANCELLED},
+            ToolCallState.WAITING_APPROVAL: {ToolCallState.STARTED, ToolCallState.FAILED, ToolCallState.CANCELLED},
             ToolCallState.WAITING_CHILD: {ToolCallState.SUCCEEDED, ToolCallState.CANCELLED},
             ToolCallState.SUCCEEDED: {ToolCallState.SUCCEEDED},
             ToolCallState.FAILED: {ToolCallState.FAILED},
@@ -247,6 +274,13 @@ class ToolCallRecord:
             raise ValueError(f"不允许工具调用状态迁移：{self.state.value} -> {target.value}")
         if target is ToolCallState.WAITING_CHILD and self.kind is not ToolCallKind.DELEGATION:
             raise ValueError("WAITING_CHILD 仅允许委派调用")
+
+    @property
+    def is_settled(self) -> bool:
+        """判断调用是否已形成可消费的单次结果。"""
+        return self.state in {ToolCallState.SUCCEEDED, ToolCallState.FAILED, ToolCallState.CANCELLED} or (
+            self.state is ToolCallState.UNCERTAIN and self.result is not None
+        )
 
     def to_dict(self) -> JSONMap:
         return {
@@ -279,12 +313,13 @@ class ToolCallRecord:
             "child_run_id": self.child_run_id,
             "result": None if self.result is None else self.result.to_dict(),
             "uncertainty_reason": self.uncertainty_reason,
+            "approval_operation_keys": list(self.approval_operation_keys),
             "updated_at": self.updated_at,
         }
 
     @classmethod
     def from_dict(cls, data: JSONMap) -> ToolCallRecord:
-        fields = {"run_id", "call", "source_message_id", "ordinal", "kind", "state", "attempt", "replay_policy", "side_effect", "replay_contract_version", "idempotency_key", "key_valid_until", "retry_count", "recovery_max_retries", "recovery_initial_delay_s", "recovery_backoff_multiplier", "recovery_max_delay_s", "recovery_retry_not_before", "last_execution_evidence", "last_error", "last_tool_error_code", "last_tool_error_type", "attempt_started_at", "approval_id", "approval_decision", "child_run_id", "result", "uncertainty_reason", "updated_at", "execution_scope"}
+        fields = {"run_id", "call", "source_message_id", "ordinal", "kind", "state", "attempt", "replay_policy", "side_effect", "replay_contract_version", "idempotency_key", "key_valid_until", "retry_count", "recovery_max_retries", "recovery_initial_delay_s", "recovery_backoff_multiplier", "recovery_max_delay_s", "recovery_retry_not_before", "last_execution_evidence", "last_error", "last_tool_error_code", "last_tool_error_type", "attempt_started_at", "approval_id", "approval_decision", "child_run_id", "result", "uncertainty_reason", "updated_at", "execution_scope", "approval_operation_keys"}
         _reject_unknown(data, fields, "ToolCallRecord")
         call_data = require_json_map(data.get("call"))
         call = ToolCall(
@@ -292,6 +327,9 @@ class ToolCallRecord:
             _required_string(call_data, "name"),
             _required_map(call_data.get("arguments"), "call.arguments"),
         )
+        raw_approval_keys = data.get("approval_operation_keys", [])
+        if not isinstance(raw_approval_keys, list) or any(not isinstance(item, str) or not item for item in raw_approval_keys):
+            raise ValueError("approval_operation_keys 必须是非空字符串数组")
         return cls(
             run_id=_required_string(data, "run_id"),
             call=call,
@@ -322,6 +360,7 @@ class ToolCallRecord:
             child_run_id=_optional_string(data.get("child_run_id"), "child_run_id"),
             result=None if data.get("result") is None else ToolOutcomeSnapshot.from_dict(require_json_map(data["result"])),
             uncertainty_reason=_optional_string(data.get("uncertainty_reason"), "uncertainty_reason"),
+            approval_operation_keys=tuple(raw_approval_keys),
             updated_at=_required_string(data, "updated_at"),
         )
 
@@ -395,10 +434,10 @@ class ToolCallLedger:
     revision: int
     calls: tuple[ToolCallRecord, ...]
     pending_projection: ToolProjectionIntent | None = None
-    schema_version: int = 1
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or isinstance(self.schema_version, bool):
+        if not isinstance(self.schema_version, int) or isinstance(self.schema_version, bool) or self.schema_version not in {1, 2}:
             raise ValueError(f"不支持的工具账本版本：{self.schema_version!r}")
         if not self.session_id or not self.run_id:
             raise ValueError("工具账本 session_id 和 run_id 必须非空")
@@ -437,7 +476,7 @@ class ToolCallLedger:
     def from_dict(cls, data: JSONMap) -> ToolCallLedger:
         _reject_unknown(data, {"schema_version", "session_id", "run_id", "revision", "calls", "pending_projection"}, "ToolCallLedger")
         version = _required_integer(data, "schema_version", minimum=1)
-        if version != 1:
+        if version not in {1, 2}:
             raise ValueError(f"不支持的工具账本版本：{version}")
         raw_calls = _required_list(data, "calls")
         raw_intent = data.get("pending_projection")

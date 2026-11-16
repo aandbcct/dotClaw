@@ -51,13 +51,16 @@ class AgentPolicyResolver(RunPolicyPort):
         compaction_model, compaction_tokenizer = resolve_compaction_settings(
             model_name, self._router_config
         )
+        system_prompt = identity.resolve_system_prompt() or self._config.agent.system_prompt
+        system_prompt = f"{system_prompt}\n\n{_TOOL_CORRECTION_RULES}"
         return AgentPolicySnapshot(
             agent_id=identity.agent_id,
             identity_version=identity_version,
             model_id=model_name,
             max_iterations=identity.max_loop_steps,
             policy_data={
-                "system_prompt": identity.resolve_system_prompt() or self._config.agent.system_prompt,
+                "system_prompt": system_prompt,
+                "tool_correction": {"version": 1, "repeat_failure_limit": identity.tool_repeat_failure_limit},
                 "tools": [tool.to_dict() for tool in tools],
                 "project_root": str(self._project_root),
                 "max_context_tokens": self._config.agent.max_context_tokens,
@@ -109,6 +112,9 @@ def _identity_version(identity: AgentIdentity) -> str:
     """根据身份约束生成稳定版本，供 scoped cache 隔离。"""
     source = repr(identity).encode("utf-8")
     return hashlib.sha256(source).hexdigest()[:16]
+
+
+_TOOL_CORRECTION_RULES = "工具失败不等于任务失败。请读取错误码、执行证据和限制后调整方案；不得重复申请或绕过审批拒绝；UNKNOWN 不代表未生效；是否能执行由系统决定。"
 
 
 def resolve_compaction_settings(

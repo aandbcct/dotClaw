@@ -21,6 +21,7 @@ from .events import (
     DelegationCompleted,
     DelegationRequested,
     DelegationSubmitted,
+    IterationLimitReached,
     LLMCallFailed,
     LLMResponseProduced,
     RunStarted,
@@ -249,6 +250,15 @@ def transition(state: AgentRunState, event: AgentRunEvent) -> StateTransition:
         return _finalize_if_active(state, RunOutcome.FAILED, "timeout_reached")
     if isinstance(event, AbandonRequested):
         return _finalize_if_active(state, RunOutcome.ABANDONED, "abandon_requested")
+    if isinstance(event, IterationLimitReached):
+        if not isinstance(state.mode, Running) or state.mode.stage is not RunStage.CALLING_LLM or event.limit <= 0 or event.iteration <= event.limit or event.iteration != state.iteration:
+            raise InvalidTransition(
+                "模型轮数预算事件与当前状态不匹配",
+                current_mode=_mode_name(state.mode),
+                event_type=type(event).__name__,
+                reason="iteration_limit_mismatch",
+            )
+        return StateTransition(_end(state, RunOutcome.FAILED), AgentAction.FINALIZE)
 
     match state.mode:
         case Created():
@@ -410,7 +420,16 @@ def _on_suspended(state: AgentRunState, event: AgentRunEvent) -> StateTransition
                     event_type=type(event).__name__,
                     reason="approval_id_mismatch",
                 )
-            return StateTransition(_end(state, RunOutcome.CANCELLED), AgentAction.FINALIZE)
+            return StateTransition(
+                AgentRunState(
+                    mode=Running(RunStage.EXECUTING_TOOLS),
+                    iteration=state.iteration,
+                    retry_count=state.retry_count,
+                    truncate_count=state.truncate_count,
+                    loop_fingerprint=state.loop_fingerprint,
+                ),
+                AgentAction.EXECUTE_TOOLS,
+            )
         raise InvalidTransition(
             "APPROVAL 挂起仅接受审批结果事件",
             current_mode=_mode_name(state.mode),

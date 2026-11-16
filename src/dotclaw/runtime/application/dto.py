@@ -284,6 +284,7 @@ class ToolResult:
     execution_evidence: ToolExecutionEvidence | None = None
     tool_error_code: str | None = None
     tool_error_type: str | None = None
+    approval_operation_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
