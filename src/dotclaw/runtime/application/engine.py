@@ -1325,6 +1325,10 @@ class RuntimeEngine:
                     return terminal
                 continue
             if action is AgentAction.INVOKE_LLM:
+                if execution.budget.max_iterations and execution.state.iteration > execution.budget.max_iterations:
+                    return await self._finish_iteration_limit(
+                        execution, run, tuple(messages), event_number,
+                    )
                 run, sequence, event_number, pending_calls, terminal = await self._invoke_llm_action(
                     execution, run, messages, sequence, event_number, output_port,
                 )
@@ -1351,6 +1355,33 @@ class RuntimeEngine:
             # 落入此处说明状态机返回了未预期的动作。
             return await self._fail(execution, run, tuple(messages), event_number, f"状态机返回未预期的动作：{action.value}")
         return await self._fail(execution, run, tuple(messages), event_number, "状态机意外结束")
+
+    async def _finish_iteration_limit(
+        self,
+        execution: RunExecution,
+        run: AgentRun,
+        messages: tuple[RunMessage, ...],
+        event_number: int,
+    ) -> RunResult:
+        """不再调用模型，原子保存预算终态并优先处理已受理取消。"""
+        cancellation = None
+        async with self._cancellation_service.gate(run.run_id):
+            cancellation = await self._run_repository.load_cancellation(run.session_id, run.run_id)
+            if cancellation is None:
+                latest = await self._run_repository.load_run(run.session_id, run.run_id)
+                checkpoint = await self._checkpoint_repository.load(run.session_id, run.run_id)
+                if latest is None or checkpoint is None:
+                    raise ValueError("预算终止前运行或检查点不存在")
+                await self._tool_recovery.commit_iteration_limit(
+                    latest, checkpoint, execution.budget.max_iterations, execution.state.iteration,
+                )
+                final = await self._run_repository.load_run(run.session_id, run.run_id)
+                if final is None:
+                    raise ValueError("预算终态提交后运行不存在")
+                execution.update_state(final.state, AgentAction.FINALIZE)
+                self._run_change_notifier.notify(run.run_id)
+                return RunResult(run.run_id, final.state, error=final.error)
+        return await self.complete_cancellation(run.run_id)
 
     async def _execute_tools_action(
         self,

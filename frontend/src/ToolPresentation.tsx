@@ -31,6 +31,9 @@ export function ToolApprovalSummary({ tool }: { tool?: ToolExecution }) {
 /** 使用后端状态和已有结果分类展示，文本不会被当作 HTML 执行。 */
 export function ToolResultView({ tool }: { tool: ToolExecution }) {
   if (!tool.result) return null;
+  if (tool.status !== "completed") {
+    return <TextPreview text={tool.result} label={tool.status === "uncertain" ? "结果待确认" : "工具错误"} />;
+  }
   const path = argument(tool, "path");
   if (tool.name === "builtin.web.search") {
     const sources = parseToolSearchSources(tool);

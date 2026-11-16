@@ -14,6 +14,7 @@ from ..domain.events import (
     ApprovalRejected,
     DelegationCompleted,
     DelegationSubmitted,
+    IterationLimitReached,
     RunEvent,
     RunEventType,
     ToolApprovalRequired,
@@ -966,6 +967,42 @@ class ToolRecoveryService:
         target_run = self._failed_run_target(base_run, error)
         event = await self._event(base_run, RunEventType.RUN_FAILED, {"error_code": error.code.value}, error.message)
         return await self._commit_fact(ledger, base_run, target_run, base_checkpoint, None, events=(event,))
+
+    async def commit_iteration_limit(self, run: AgentRun, checkpoint: RunCheckpoint, limit: int, iteration: int) -> ToolCallLedger:
+        """原子提交模型轮数预算终止、运行错误事件并删除检查点。"""
+        self._assert_run(run, checkpoint)
+        if limit <= 0 or iteration <= limit:
+            raise ValueError("模型轮数预算终止参数无效")
+        ledger = await self._ledger(run.session_id, run.run_id) or ToolCallLedger(run.session_id, run.run_id, 1, ())
+        if ledger.pending_projection is not None:
+            await self._apply_projection(ledger)
+            ledger = await self._ledger(run.session_id, run.run_id) or ledger
+        base_run, base_checkpoint = await self._persistent_base(run)
+        if isinstance(base_run.state.mode, Ended):
+            if base_run.state.mode.outcome is RunOutcome.FAILED and base_run.error is not None and base_run.error.code is RunErrorCode.ITERATION_LIMIT:
+                return ledger
+            raise ValueError("已结束运行不能覆盖为模型轮数预算失败")
+        if (base_run.state.iteration != iteration or not isinstance(base_run.state.mode, Running)
+                or base_run.state.mode.stage is not RunStage.CALLING_LLM or base_checkpoint is None):
+            raise ValueError("模型轮数预算提交与运行阶段或检查点不匹配")
+        if base_checkpoint != checkpoint:
+            raise ValueError("模型轮数预算提交检查点已变化")
+        recent_failure = next((item for item in reversed(ledger.calls)
+            if item.result is not None and item.result.status in {ToolOutcomeStatus.FAILED, ToolOutcomeStatus.UNCERTAIN}), None)
+        message = f"任务未完成：已达到模型轮数上限 {limit}。"
+        if recent_failure is not None:
+            code = recent_failure.result.tool_error_code or (recent_failure.result.error.code.value if recent_failure.result.error else "unknown")
+            message += f" 最近工具 {recent_failure.call.name} 的结果为 {code}。"
+        error = RunError(RunErrorCode.ITERATION_LIMIT, message)
+        target_state = transition(base_run.state, IterationLimitReached(limit, iteration)).state
+        target_run = replace(base_run, state=target_state, ended_at=utc_now_iso(), error=error)
+        budget_event = await self._event(base_run, RunEventType.ITERATION_LIMIT_REACHED,
+            {"limit": limit, "iteration": iteration, "error_code": error.code.value},
+            "模型轮数已达上限，任务未完成")
+        failed_event = replace(await self._event(base_run, RunEventType.RUN_FAILED,
+            {"error_code": error.code.value}, error.message), sequence=budget_event.sequence + 1)
+        return await self._commit_fact(ledger, base_run, target_run, base_checkpoint, None,
+            events=(budget_event, failed_event))
 
     async def record_interruption(self, run: AgentRun, call_id: str, evidence: ToolExecutionEvidence | None, error: RunError, checkpoint: RunCheckpoint) -> ToolCallLedger:
         ledger = await self._required_ledger(run, checkpoint)
