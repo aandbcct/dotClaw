@@ -18,6 +18,9 @@ memory:
   workspace: /app/data
 session:
   directory: /app/data/sessions
+personal_tasks:
+  database_path: /app/data/personal-assistant.sqlite3
+  timezone: Asia/Shanghai
 debug:
   level: INFO
   log_file: /app/data/dotclaw.log

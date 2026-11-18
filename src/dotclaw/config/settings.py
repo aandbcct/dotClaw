@@ -349,6 +349,12 @@ class SessionConfig:
 
 
 @dataclass
+class PersonalTaskConfig:
+    database_path: str = "./data/personal-assistant.sqlite3"
+    timezone: str = "Asia/Shanghai"
+
+
+@dataclass
 class EvalConfig:
     """评测 Dataset 存储配置（PR5：TraceToEvalCaseDraft 与目录 Dataset）。"""
 
@@ -387,6 +393,7 @@ class Config:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    personal_tasks: PersonalTaskConfig = field(default_factory=PersonalTaskConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
@@ -803,6 +810,14 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
     session = SessionConfig(
         directory=raw.get("session", {}).get("directory", "./data/sessions"),
     )
+    personal_raw = raw.get("personal_tasks", {})
+    if not isinstance(personal_raw, dict):
+        raise ValueError("personal_tasks 必须是映射")
+    database_path = personal_raw.get("database_path", "./data/personal-assistant.sqlite3")
+    timezone = personal_raw.get("timezone", "Asia/Shanghai")
+    if not isinstance(database_path, str) or not database_path.strip() or not isinstance(timezone, str) or not timezone.strip():
+        raise ValueError("personal_tasks.database_path 和 timezone 必须是非空字符串")
+    personal_tasks = PersonalTaskConfig(database_path, timezone)
     eval_raw = raw.get("eval", {})
     eval_cfg = EvalConfig(
         dataset_directory=eval_raw.get("dataset_directory", "./data/datasets"),
@@ -832,6 +847,7 @@ def _raw_to_config(raw: dict[str, Any]) -> Config:
         skills=skills,
         memory=memory,
         session=session,
+        personal_tasks=personal_tasks,
         eval=eval_cfg,
         scheduler=scheduler,
         debug=debug,
