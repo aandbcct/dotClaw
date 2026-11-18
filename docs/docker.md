@@ -63,7 +63,7 @@ docker compose -f compose.dev.yml up -d --force-recreate
 | `/app/config.yaml`、`/app/model_router_config.yaml` | 宿主配置文件，只读挂载 |
 | `/app/.dotclaw/agentConfig` | 仓库 Agent 配置，只读挂载 |
 | `/app/skills` | 本地 `skills` 目录，只读挂载 |
-| `/app/data` | 开发版为本地 `./data`，部署版为命名卷；保存会话、运行事实、记忆和界面设置 |
+| `/app/data` | 开发版为本地 `./data`，部署版为命名卷；保存会话、运行事实、记忆、个人事务数据库和界面设置 |
 | `/workspace` | 开发版为本地 `./workspace`，部署版为命名卷；默认工具读写范围 |
 
 开发项目默认名为 `dotclaw-dev`，部署项目默认名为 `dotclaw`。部署版继续使用项目隔离的命名卷；开发版会直接读写原有宿主 `data`，避免同时运行另一个使用相同目录的本地后端。
