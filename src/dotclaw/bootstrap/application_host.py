@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,8 @@ from ..eval.reexecution import ReexecutionRunner
 from ..orchestration.registry import AgentRegistry
 from ..session.session import SessionManager
 from ..trace.service import TraceService
+from ..personal_tasks.service import PersonalTaskService
+from ..personal_tasks.sqlite_repository import SqlitePersonalTaskRepository
 
 if TYPE_CHECKING:
     from dotclaw.channel.base import Channel
@@ -71,6 +74,7 @@ class ApplicationHost:
         self._session_interaction: SessionInteractionService | None = None
         self._eval_draft_service: EvalCaseDraftService | None = None
         self._trace_service: TraceService | None = None
+        self._personal_task_service: PersonalTaskService | None = None
         self._http_client: "HttpClient | None" = None
 
     # ── 构建 ──
@@ -186,6 +190,14 @@ class ApplicationHost:
         self._eval_draft_service = EvalCaseDraftService(dataset_root)
         self._trace_service = TraceService(self._runtime_services.run_repository)
 
+        task_path = Path(config.personal_tasks.database_path)
+        if not task_path.is_absolute():
+            task_path = root / task_path
+        task_timezone = ZoneInfo(config.personal_tasks.timezone)
+        task_repository = SqlitePersonalTaskRepository(task_path)
+        await task_repository.initialize()
+        self._personal_task_service = PersonalTaskService(task_repository, timezone=task_timezone)
+
         logger.info("ApplicationHost 就绪：%d 个 Identity 已注册", len(self._agent_registry.list_all()))
 
     def _resolve_default_agent_id(self):
@@ -286,6 +298,12 @@ class ApplicationHost:
         if self._trace_service is None:
             raise RuntimeError("ApplicationHost 尚未初始化")
         return self._trace_service
+
+    @property
+    def personal_task_service(self) -> PersonalTaskService:
+        if self._personal_task_service is None:
+            raise RuntimeError("ApplicationHost 尚未初始化")
+        return self._personal_task_service
 
     @property
     def playback_runner(self) -> PlaybackRunner:

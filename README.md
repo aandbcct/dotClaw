@@ -404,6 +404,7 @@ resume_delegation(child_run_id)
 | Trace 与 Eval | 按需入口已装配 | 动态 Trace、人工确认 Dataset、9 类确定性评分、Playback Gate、失败归因与显式 OTLP 导出 |
 | Journal | 未接入主链 | 代码和配置存在，不作为 Runtime 恢复事实源 |
 | Scheduler | 未接入主链 | `ReminderManager` 存在，但 Host 当前不创建和管理 |
+| 个人事务 | 已接入 Web 工作区 | 独立 SQLite 持久化，确定性管理，不自动提醒或调用模型 |
 
 ---
 
@@ -531,7 +532,7 @@ npm install
 npm run dev
 ```
 
-访问 `http://127.0.0.1:5173/`。首次发送才创建会话，支持切换已配置模型、搜索历史、逐轮执行详情、Markdown 导出和本机置顶。设置中模型/运行参数只读，已有工具/技能开关与 MCP 重连可用。刷新运行中的页面只恢复状态及最终结果，不重放逐字增量。
+访问 `http://127.0.0.1:5173/`。事务入口提供独立事务管理；数据保存在 `data/personal-assistant.sqlite3`，默认时区为 Asia/Shanghai。事务操作不依赖会话或模型，也不产生提醒。首次发送才创建会话，支持切换已配置模型、搜索历史、逐轮执行详情、Markdown 导出和本机置顶。设置中模型/运行参数只读，已有工具/技能开关与 MCP 重连可用。刷新运行中的页面只恢复状态及最终结果，不重放逐字增量。
 
 实施范围、测试、前后截图及限制见[前端补齐与视觉改造开发说明](docs/Development/gui/前端与ChatGPT差距及补齐建议.md#9-实施结果与验收记录2026-10-23)。当前入口面向本地使用。
 
@@ -685,6 +686,7 @@ mcp.<server>.<tool>
 
 ```text
 data/
+├── personal-assistant.sqlite3
 ├── sessions/
 │   ├── approvals/
 │   └── {session_id}/

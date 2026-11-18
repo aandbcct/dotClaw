@@ -108,7 +108,9 @@ def _fake_config(session_dir: str) -> types.SimpleNamespace:
     memory = None
     llm = types.SimpleNamespace()
     debug = types.SimpleNamespace(level="INFO", log_file="logs/test.log")
-    return types.SimpleNamespace(session=session, skills=skills, tools=tools, memory=memory, llm=llm, debug=debug)
+    personal_tasks = types.SimpleNamespace(database_path="./data/personal-assistant.sqlite3", timezone="Asia/Shanghai")
+    return types.SimpleNamespace(session=session, skills=skills, tools=tools, memory=memory, llm=llm, debug=debug,
+                                 eval=types.SimpleNamespace(dataset_directory="./data/datasets"), personal_tasks=personal_tasks)
 
 
 def _patch_registry(identities: list[AgentIdentity]):
