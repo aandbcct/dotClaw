@@ -1,6 +1,7 @@
 """个人事务 HTTP 请求与响应模型。"""
 
 from datetime import date, datetime, UTC
+import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
@@ -16,7 +17,7 @@ class DateDeadlinePayload(BaseModel):
     @field_validator("value", mode="before")
     @classmethod
     def parse_date(cls, value):
-        if not isinstance(value, str) or len(value) != 10:
+        if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None:
             raise ValueError("日期必须为 YYYY-MM-DD")
         return date.fromisoformat(value)
 
@@ -29,7 +30,7 @@ class DateTimeDeadlinePayload(BaseModel):
     @field_validator("value", mode="before")
     @classmethod
     def parse_datetime(cls, value):
-        if not isinstance(value, str):
+        if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", value) is None:
             raise ValueError("截止时刻必须为 RFC3339 字符串")
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None:

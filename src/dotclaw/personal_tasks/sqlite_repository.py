@@ -14,10 +14,16 @@ class SqlitePersonalTaskRepository:
         self._db_path = db_path
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._db_path, timeout=5.0, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA synchronous=FULL")
-        return connection
+        connection = None
+        try:
+            connection = sqlite3.connect(self._db_path, timeout=5.0, isolation_level=None)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA synchronous=FULL")
+            return connection
+        except sqlite3.Error as error:
+            if connection is not None:
+                connection.close()
+            raise PersonalTaskStorageError("打开事务数据库失败") from error
 
     @staticmethod
     def _encode(task: PersonalTask) -> tuple:
@@ -35,11 +41,11 @@ class SqlitePersonalTaskRepository:
     def _row_to_task(row: sqlite3.Row) -> PersonalTask:
         kind, value = row["deadline_kind"], row["deadline_value"]
         deadline = None if kind is None else TaskDeadline(kind, date.fromisoformat(value) if kind == "date" else datetime.fromisoformat(value.replace("Z", "+00:00")))
-        def parse(value: str) -> datetime:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
         return PersonalTask(row["id"], row["title"], row["description"], PersonalTaskStatus(row["status"]),
-                            deadline, parse(row["created_at"]), parse(row["updated_at"]),
-                            parse(row["completed_at"]) if row["completed_at"] else None, row["version"])
+                            deadline, datetime.fromisoformat(row["created_at"].replace("Z", "+00:00")).astimezone(UTC),
+                            datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00")).astimezone(UTC),
+                            datetime.fromisoformat(row["completed_at"].replace("Z", "+00:00")).astimezone(UTC) if row["completed_at"] else None,
+                            row["version"])
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize_sync)
