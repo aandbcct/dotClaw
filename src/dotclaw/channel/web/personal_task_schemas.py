@@ -59,7 +59,7 @@ class UpdatePersonalTaskRequest(BaseModel):
 
 class ChangePersonalTaskStatusRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    status: PersonalTaskStatus
+    status: PersonalTaskStatus = Field(strict=False)
     expected_version: Annotated[int, Field(ge=1, strict=True)]
 
 
@@ -90,7 +90,7 @@ def deadline_to_domain(value: TaskDeadlinePayload | None) -> TaskDeadline | None
 
 def to_task_response(view: PersonalTaskView) -> PersonalTaskResponse:
     task = view.task
-    deadline = _deadline_adapter.validate_python({"kind": task.deadline.kind, "value": task.deadline.value}) if task.deadline else None
+    deadline = _deadline_adapter.validate_python({"kind": task.deadline.kind, "value": task.deadline.value.isoformat()}) if task.deadline else None
     return PersonalTaskResponse(id=task.id, title=task.title, description=task.description, status=task.status,
         deadline=deadline, created_at=task.created_at, updated_at=task.updated_at,
         completed_at=task.completed_at, version=task.version, is_overdue=view.is_overdue)

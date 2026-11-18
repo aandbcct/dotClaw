@@ -33,8 +33,7 @@ describe("个人事务视图", () => {
     let finishPost: ((response: Response) => void) | undefined;
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "POST") return new Promise<Response>((resolve) => { finishPost = resolve; });
-      if (init?.method === "GET") return Promise.resolve(payload(list([])));
-      return Promise.resolve(payload({ ...current, version: 1 }, 201));
+      return Promise.resolve(payload(list([])));
     });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
@@ -45,5 +44,6 @@ describe("个人事务视图", () => {
     await waitFor(() => expect((title as HTMLInputElement).disabled).toBe(true));
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
     finishPost?.(payload({ ...current, title: "新事务" }, 201));
+    await waitFor(() => expect(screen.queryByLabelText("标题")).toBeNull());
   });
 });

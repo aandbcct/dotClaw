@@ -68,7 +68,7 @@ def deadline_sort_at(deadline: TaskDeadline, zone: ZoneInfo) -> datetime:
     if deadline.kind == "datetime":
         return deadline.value  # type: ignore[return-value]
     next_day = deadline.value + timedelta(days=1)
-    return datetime.combine(next_day, time.min, tzinfo=zone, fold=0).astimezone(UTC)
+    return datetime.combine(next_day, time.min, tzinfo=zone).astimezone(UTC)
 
 
 def is_overdue(task: PersonalTask, now: datetime, zone: ZoneInfo) -> bool:
