@@ -293,7 +293,8 @@ a { color:var(--accent); text-underline-offset:3px; }
 .abandon-confirm { border-top:1px solid var(--line); padding-top:8px; }
 .abandon-confirm p { font-size:13px; }
 .abandon-confirm button:last-child { color:var(--danger); }
-.personal-tasks { width: min(900px, 100%); margin: 0 auto; padding: 24px; overflow: auto; }
+/* 事务页占满工作区三行，避免落入聊天布局的顶部固定高度行。 */
+.personal-tasks { grid-row: 1 / -1; min-height: 0; width: min(900px, 100%); margin: 0 auto; padding: 24px; overflow: auto; }
 .personal-tasks > header, .personal-tasks > nav, .personal-tasks li, .task-editor footer { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .personal-tasks > header h1 { margin-right: auto; }
 .personal-tasks ul { list-style: none; padding: 0; }
