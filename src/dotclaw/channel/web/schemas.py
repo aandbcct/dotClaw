@@ -53,6 +53,10 @@ class WebErrorCode(StrEnum):
     INTERNAL_ERROR = "internal_error"
     COMMITTING_SUCCESS = "committing_success"
     INVALID_CURSOR = "invalid_cursor"
+    PERSONAL_TASK_NOT_FOUND = "personal_task_not_found"
+    PERSONAL_TASK_VERSION_CONFLICT = "personal_task_version_conflict"
+    PERSONAL_TASK_INVALID_TRANSITION = "personal_task_invalid_transition"
+    PERSONAL_TASK_STORAGE_FAILED = "personal_task_storage_failed"
 
 
 class CreateSessionRequest(BaseModel):

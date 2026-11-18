@@ -28,6 +28,8 @@ from ...runtime.domain.events import RunEvent, RunEventType
 from ...runtime.domain.facts import AgentRun, JSONMap, MessageRole, RunError, RunErrorCode, RunMessage, RunMessageKind
 from ...runtime.domain.state import RunOutcome, Suspended
 from ...session.session import Conversation, Session
+from ...personal_tasks.repository import PersonalTaskNotFound, PersonalTaskStorageError, PersonalTaskVersionConflict
+from ...personal_tasks.service import InvalidPersonalTaskInput, InvalidPersonalTaskTransition
 from .schemas import (
     CancelSessionRequest,
     CancellationActivityResponse,
@@ -59,6 +61,7 @@ from .schemas import (
     SearchSessionsResponse,
 )
 from .sse import SSEOutputAdapter, encode_sse_event
+from .personal_task_routes import router as personal_task_router
 
 logger = logging.getLogger("dotclaw.channel.web")
 
@@ -106,6 +109,32 @@ def create_app(
             WebErrorCode.INVALID_REQUEST,
             "请求参数无效",
         )
+
+    @app.exception_handler(PersonalTaskNotFound)
+    async def personal_task_not_found_handler(request: Request, error: PersonalTaskNotFound) -> JSONResponse:
+        del request, error
+        return _error_response(404, WebErrorCode.PERSONAL_TASK_NOT_FOUND, "事务不存在")
+
+    @app.exception_handler(PersonalTaskVersionConflict)
+    async def personal_task_conflict_handler(request: Request, error: PersonalTaskVersionConflict) -> JSONResponse:
+        del request, error
+        return _error_response(409, WebErrorCode.PERSONAL_TASK_VERSION_CONFLICT, "事务已被修改，请刷新后重试")
+
+    @app.exception_handler(InvalidPersonalTaskTransition)
+    async def personal_task_transition_handler(request: Request, error: InvalidPersonalTaskTransition) -> JSONResponse:
+        del request, error
+        return _error_response(409, WebErrorCode.PERSONAL_TASK_INVALID_TRANSITION, "当前状态不允许此操作")
+
+    @app.exception_handler(InvalidPersonalTaskInput)
+    async def personal_task_input_handler(request: Request, error: InvalidPersonalTaskInput) -> JSONResponse:
+        del request
+        return _error_response(422, WebErrorCode.INVALID_REQUEST, str(error))
+
+    @app.exception_handler(PersonalTaskStorageError)
+    async def personal_task_storage_handler(request: Request, error: PersonalTaskStorageError) -> JSONResponse:
+        del request
+        logger.error("个人事务存储失败", exc_info=error)
+        return _error_response(500, WebErrorCode.PERSONAL_TASK_STORAGE_FAILED, "事务暂时无法保存或读取")
 
     @app.get("/api/v1/sessions", response_model=list[SessionSummaryResponse])
     async def list_sessions(request: Request) -> list[SessionSummaryResponse]:
@@ -467,6 +496,7 @@ def create_app(
             "status": receipt.outcome.value if ended and receipt.outcome else "cancelling"}, status_code=200 if ended else 202)
 
     static_directory = frontend_dir or _frontend_dist_directory()
+    app.include_router(personal_task_router)
     if (static_directory / "index.html").is_file():
         # API 路由必须先注册；根挂载只负责构建后的前端文件。
         app.mount(
