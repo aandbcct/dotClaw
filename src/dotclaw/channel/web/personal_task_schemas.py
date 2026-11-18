@@ -4,9 +4,9 @@ from datetime import date, datetime, UTC
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ...personal_tasks.models import PersonalTask, PersonalTaskFilter, PersonalTaskStatus, PersonalTaskView, TaskDeadline
+from ...personal_tasks.models import PersonalTaskStatus, PersonalTaskView, TaskDeadline
 
 
 class DateDeadlinePayload(BaseModel):
@@ -32,14 +32,10 @@ class DateTimeDeadlinePayload(BaseModel):
     def parse_datetime(cls, value):
         if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", value) is None:
             raise ValueError("截止时刻必须为 RFC3339 字符串")
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            raise ValueError("截止时刻必须包含时区")
-        return parsed.astimezone(UTC)
+        return datetime.fromisoformat(value).astimezone(UTC)
 
 
 TaskDeadlinePayload = Annotated[DateDeadlinePayload | DateTimeDeadlinePayload, Field(discriminator="kind")]
-_deadline_adapter = TypeAdapter(TaskDeadlinePayload)
 
 
 class CreatePersonalTaskRequest(BaseModel):
@@ -90,11 +86,13 @@ def deadline_to_domain(value: TaskDeadlinePayload | None) -> TaskDeadline | None
 
 def to_task_response(view: PersonalTaskView) -> PersonalTaskResponse:
     task = view.task
-    deadline = _deadline_adapter.validate_python({"kind": task.deadline.kind, "value": task.deadline.value.isoformat()}) if task.deadline else None
+    deadline = None
+    if task.deadline is not None:
+        # 领域层已校验截止值，响应直接序列化，避免再次走请求解析。
+        if task.deadline.kind == "date":
+            deadline = DateDeadlinePayload.model_construct(kind="date", value=task.deadline.value)
+        else:
+            deadline = DateTimeDeadlinePayload.model_construct(kind="datetime", value=task.deadline.value)
     return PersonalTaskResponse(id=task.id, title=task.title, description=task.description, status=task.status,
         deadline=deadline, created_at=task.created_at, updated_at=task.updated_at,
         completed_at=task.completed_at, version=task.version, is_overdue=view.is_overdue)
-
-
-def to_task_list_response(result) -> PersonalTaskListResponse:
-    return PersonalTaskListResponse(items=[to_task_response(item) for item in result.items], timezone=result.timezone, as_of=result.as_of)

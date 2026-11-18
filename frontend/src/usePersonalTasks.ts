@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, changePersonalTaskStatus, createPersonalTask, deletePersonalTask, getPersonalTask, listPersonalTasks, updatePersonalTask } from "./api";
+import { ApiError, changePersonalTaskStatus, createPersonalTask, deletePersonalTask, listPersonalTasks, updatePersonalTask } from "./api";
 import type { PersonalTask, PersonalTaskFilter, PersonalTaskInput, PersonalTaskStatus } from "./types";
 
 export function usePersonalTasks() {
@@ -18,7 +18,7 @@ export function usePersonalTasks() {
   useEffect(() => {
     void reload();
     const onFocus = () => { if (!mutation.current && !loadingRef.current) void reload(); };
-    const timer = window.setInterval(() => { if (!mutation.current && !loadingRef.current) void reload(); }, 60_000);
+    const timer = window.setInterval(onFocus, 60_000);
     window.addEventListener("focus", onFocus);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", onFocus); controller.current?.abort(); };
   }, [filter, reload]);
@@ -26,10 +26,8 @@ export function usePersonalTasks() {
     if (mutation.current) throw new Error("请等待当前操作完成"); mutation.current = true; setPending(true); setError(""); ++sequence.current;
     try { const result = await action(); if (!await reload()) setError("操作已保存，列表刷新失败"); return result; }
     catch (reason) {
-      const message = reason instanceof ApiError ? reason.message : "未能确认保存结果，请刷新核对后再操作";
-      setError(message);
-      if (!(reason instanceof ApiError)) throw new Error(message, { cause: reason });
-      throw reason;
+      if (reason instanceof ApiError) throw reason;
+      throw new Error("未能确认保存结果，请刷新核对后再操作", { cause: reason });
     }
     finally { mutation.current = false; setPending(false); }
   }, [reload]);
@@ -37,6 +35,5 @@ export function usePersonalTasks() {
     create: (input: PersonalTaskInput) => run(() => createPersonalTask(input)),
     update: (id: string, input: PersonalTaskInput, version: number) => run(() => updatePersonalTask(id, input, version)),
     changeStatus: (task: PersonalTask, status: PersonalTaskStatus) => run(() => changePersonalTaskStatus(task.id, status, task.version)),
-    remove: (task: PersonalTask) => run(() => deletePersonalTask(task.id, task.version)),
-    get: (id: string) => getPersonalTask(id) };
+    remove: (task: PersonalTask) => run(() => deletePersonalTask(task.id, task.version)) };
 }

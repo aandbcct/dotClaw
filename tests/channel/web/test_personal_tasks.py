@@ -57,10 +57,15 @@ async def test_real_task_http_lifecycle_and_persistence(tmp_path, deadline):
             created = await client.post("/api/v1/personal-tasks", json={"title": "测试事务", "deadline": deadline})
             assert created.status_code == 201, created.text
             task = created.json()
+            expected_deadline = deadline
+            if deadline is not None and deadline["kind"] == "datetime":
+                expected_deadline = {"kind": "datetime", "value": "2026-11-20T07:00:00Z"}
+            assert task["deadline"] == expected_deadline
             url = f"/api/v1/personal-tasks/{task['id']}"
             listed = await client.get("/api/v1/personal-tasks")
             assert listed.status_code == 200, listed.text
             assert listed.json()["items"][0]["id"] == task["id"]
+            assert listed.json()["items"][0]["deadline"] == expected_deadline
             edited = await client.put(url, json={"title": "已编辑", "description": "说明", "deadline": deadline, "expected_version": 1})
             assert edited.status_code == 200, edited.text
             conflict = await client.put(url, json={"title": "旧版本", "description": "", "deadline": None, "expected_version": 1})

@@ -2,11 +2,11 @@
 
 from fastapi import APIRouter, Query, Request, Response, status
 
-from ...personal_tasks.models import PersonalTaskFilter, PersonalTaskStatus
+from ...personal_tasks.models import PersonalTaskFilter
 from ...personal_tasks.service import PersonalTaskService
 from .personal_task_schemas import (ChangePersonalTaskStatusRequest, CreatePersonalTaskRequest,
     PersonalTaskListResponse, PersonalTaskResponse, UpdatePersonalTaskRequest, deadline_to_domain,
-    to_task_list_response, to_task_response)
+    to_task_response)
 
 router = APIRouter(prefix="/api/v1/personal-tasks", tags=["personal-tasks"])
 
@@ -17,7 +17,10 @@ def _service(request: Request) -> PersonalTaskService:
 
 @router.get("", response_model=PersonalTaskListResponse)
 async def list_personal_tasks(request: Request, filter: PersonalTaskFilter = PersonalTaskFilter.ACTIVE):
-    return to_task_list_response(await _service(request).list(filter))
+    result = await _service(request).list(filter)
+    return PersonalTaskListResponse(
+        items=[to_task_response(item) for item in result.items], timezone=result.timezone, as_of=result.as_of,
+    )
 
 
 @router.post("", response_model=PersonalTaskResponse, status_code=status.HTTP_201_CREATED)

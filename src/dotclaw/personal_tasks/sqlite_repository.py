@@ -56,10 +56,12 @@ class SqlitePersonalTaskRepository:
         try:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            tables = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
-            if version == 0 and tables:
-                raise PersonalTaskStorageError("版本 0 数据库已有用户表")
             if version == 0:
+                existing_table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' LIMIT 1"
+                ).fetchone()
+                if existing_table is not None:
+                    raise PersonalTaskStorageError("版本 0 数据库已有用户表")
                 connection.execute("""CREATE TABLE personal_tasks (
                     id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL,
                     status TEXT NOT NULL CHECK(status IN ('pending','in_progress','completed','cancelled')),
@@ -74,14 +76,11 @@ class SqlitePersonalTaskRepository:
             else:
                 raise PersonalTaskStorageError(f"不支持的数据库版本：{version}")
             connection.execute("COMMIT")
-        except Exception as error:
+        except sqlite3.Error as error:
             connection.rollback()
-            if isinstance(error, (PersonalTaskStorageError, sqlite3.Error)):
-                if isinstance(error, sqlite3.Error):
-                    raise PersonalTaskStorageError("初始化事务数据库失败") from error
-                raise
-            raise
+            raise PersonalTaskStorageError("初始化事务数据库失败") from error
         finally:
+            # 关闭连接会撤销仍未提交的事务，包括版本检查拒绝的初始化。
             connection.close()
 
     async def create(self, task: PersonalTask) -> PersonalTask:
