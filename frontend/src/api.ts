@@ -8,9 +8,17 @@ import type {
   SearchResults,
   WorkspaceOptions,
   CancelReceipt,
+  PersonalTask, PersonalTaskFilter, PersonalTaskInput, PersonalTaskList, PersonalTaskStatus,
 } from "./types";
 
 const API_ROOT = "/api/v1";
+
+export function listPersonalTasks(filter: PersonalTaskFilter, signal?: AbortSignal): Promise<PersonalTaskList> { return requestJson(`${API_ROOT}/personal-tasks?${new URLSearchParams({ filter })}`, { signal }); }
+export function getPersonalTask(id: string): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}`); }
+export function createPersonalTask(input: PersonalTaskInput): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
+export function updatePersonalTask(id: string, input: PersonalTaskInput, expectedVersion: number): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, expected_version: expectedVersion }) }); }
+export function changePersonalTaskStatus(id: string, status: PersonalTaskStatus, expectedVersion: number): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, expected_version: expectedVersion }) }); }
+export async function deletePersonalTask(id: string, expectedVersion: number): Promise<void> { const response = await fetch(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}?${new URLSearchParams({ expected_version: String(expectedVersion) })}`, { method: "DELETE" }); if (!response.ok) throw await responseError(response); }
 
 export class ApiError extends Error {
   readonly code: string;

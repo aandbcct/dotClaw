@@ -293,3 +293,13 @@ a { color:var(--accent); text-underline-offset:3px; }
 .abandon-confirm { border-top:1px solid var(--line); padding-top:8px; }
 .abandon-confirm p { font-size:13px; }
 .abandon-confirm button:last-child { color:var(--danger); }
+.personal-tasks { width: min(900px, 100%); margin: 0 auto; padding: 24px; overflow: auto; }
+.personal-tasks > header, .personal-tasks > nav, .personal-tasks li, .task-editor footer { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.personal-tasks > header h1 { margin-right: auto; }
+.personal-tasks ul { list-style: none; padding: 0; }
+.personal-tasks li { padding: 16px 0; border-bottom: 1px solid var(--border, #ddd); }
+.personal-tasks li p { flex-basis: 100%; white-space: pre-wrap; }
+.task-editor { display: grid; gap: 14px; min-width: min(420px, 75vw); }
+.task-editor label { display: grid; gap: 6px; }
+.task-editor input, .task-editor textarea, .task-editor select { padding: 9px; }
+.task-editor textarea { min-height: 90px; }

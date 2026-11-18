@@ -1,5 +1,12 @@
 export type MessageRole = "user" | "assistant";
 
+export type PersonalTaskStatus = "pending" | "in_progress" | "completed" | "cancelled";
+export type PersonalTaskFilter = "active" | "all" | "completed" | "cancelled";
+export type TaskDeadline = { kind: "date"; value: string } | { kind: "datetime"; value: string };
+export interface PersonalTask { id: string; title: string; description: string; status: PersonalTaskStatus; deadline: TaskDeadline | null; created_at: string; updated_at: string; completed_at: string | null; version: number; is_overdue: boolean; }
+export interface PersonalTaskList { items: PersonalTask[]; timezone: string; as_of: string; }
+export interface PersonalTaskInput { title: string; description: string; deadline: TaskDeadline | null; }
+
 export interface SessionSummary {
   id: string;
   title: string;

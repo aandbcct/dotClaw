@@ -8,6 +8,7 @@ import { SearchDialog } from "./SearchDialog";
 import { SearchSources } from "./SearchSources";
 import { SessionList, SessionMenu } from "./SessionList";
 import { SettingsPanel } from "./SettingsPanel";
+import { PersonalTasks } from "./PersonalTasks";
 import { exportMarkdown, readPreference, writePreference } from "./preferences";
 import { useConversationScroll } from "./useConversationScroll";
 import { useDraft } from "./useDraft";
@@ -21,6 +22,7 @@ export function App() {
   const [theme, setTheme] = useState(() => { try { return localStorage.getItem("dotclaw.theme") === "dark" ? "dark" : "light"; } catch { return "light"; } });
   const [collapsed, setCollapsed] = useState(() => readPreference("dotclaw.sidebar.v1", window.innerWidth < 1024));
   const [mobileNav, setMobileNav] = useState(false);
+  const [activeWorkspace, setActiveWorkspace] = useState<"chat" | "tasks">("chat");
   const [pinned, setPinned] = useState<string[]>(() => { const value = readPreference<unknown>("dotclaw.pins.v1", []); return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; });
   const [options, setOptions] = useState<WorkspaceOptions | null>(null);
   const [nextChoice, setNextChoice] = useState<{ agent_id: string; model: string } | null>(null);
@@ -72,10 +74,12 @@ export function App() {
     setOptions(value); return value;
   }
   function startNew(): void {
+    setActiveWorkspace("chat");
     workspace.startNew(); setMobileNav(false); setNewError(""); setModelError("");
     inputRef.current?.focus();
   }
   async function open(session: SessionSummary): Promise<void> {
+    setActiveWorkspace("chat");
     setMobileNav(false); setModelOpen(false); setModelError(""); setNewError("");
     await workspace.open(session);
   }
@@ -184,6 +188,7 @@ export function App() {
     <div className="brand-row"><strong className="brand-name">dotClaw</strong><button type="button" aria-label="折叠侧栏" onClick={() => { setCollapsed(!collapsed); setMobileNav(false); }}>◧</button></div>
     <button className="nav-action" type="button" aria-label="新对话" onClick={startNew}><span aria-hidden="true">＋</span><span>新对话</span></button>
     <button className="nav-action" type="button" aria-label="搜索对话" onClick={() => { setSearchOpen(true); setMobileNav(false); }}><span aria-hidden="true">⌕</span><span>搜索对话</span></button>
+    <button className="nav-action" type="button" aria-label="事务" onClick={() => { setActiveWorkspace("tasks"); setMobileNav(false); }}><span aria-hidden="true">✓</span><span>事务</span></button>
     <SessionList sessions={workspace.sessions} selectedId={selectedId || undefined} pinned={pinned} activeIds={Object.entries(workspace.views).filter(([, value]) => ["running", "stopping", "suspended", "recoverable"].includes(value.phase)).map(([id]) => id)} onSelect={(session) => void open(session)} onMenu={(session) => { setActionError(""); setMenu(session); }} />
     <button className="nav-action settings-entry" type="button" aria-label="设置" onClick={() => void loadSettings()}><span aria-hidden="true">⚙</span><span>设置</span></button>
   </>;
@@ -191,6 +196,7 @@ export function App() {
     <aside className="sidebar" aria-label="工作区导航">{navigation}</aside>
     {mobileNav && <Dialog title="会话导航" className="mobile-navigation" onClose={() => setMobileNav(false)}>{navigation}</Dialog>}
     <main className={`workspace ${!selected && !view.messages.length ? "workspace--new" : ""}`}>
+      {activeWorkspace === "tasks" ? <PersonalTasks onOpenNavigation={() => setMobileNav(true)} /> : <>
       <header className="workspace-header">
         <button className="menu-button" type="button" aria-label="打开会话列表" onClick={() => setMobileNav(true)}>☰</button>
         <div className="model-context">
@@ -234,6 +240,7 @@ export function App() {
         <div className="composer-hint"><span>Enter 发送 · Shift + Enter 换行</span>{!selected && <button type="button" onClick={() => void requestAdvanced()}>智能体与模型</button>}{storageFailed && <span role="alert">草稿保存失败</span>}</div>
       </div>
       {awayFromBottom && <button className="back-to-bottom" type="button" onClick={scrollToBottom}>{hasNewContent ? "有新内容 · 回到底部" : "回到底部"} ↓</button>}
+      </>}
     </main>
     {advanced && options && <CreateSessionDialog options={options} onCancel={() => setAdvanced(false)} onCreate={(agent_id, model) => { setNextChoice({ agent_id, model }); setAdvanced(false); }} />}
     {modelOpen && options && <Dialog title="选择模型" className="model-dialog" onClose={() => setModelOpen(false)}>
