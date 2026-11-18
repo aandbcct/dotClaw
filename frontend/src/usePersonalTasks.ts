@@ -11,8 +11,8 @@ export function usePersonalTasks() {
   const filterRef = useRef(filter); filterRef.current = filter;
   const reload = useCallback(async () => {
     const current = ++sequence.current; controller.current?.abort(); const abort = new AbortController(); controller.current = abort; setLoading(true);
-    try { const result = await listPersonalTasks(filterRef.current, abort.signal); if (current === sequence.current) { setItems(result.items); setTimezone(result.timezone); setError(""); } return current === sequence.current; }
-    catch (reason) { if ((reason as Error).name !== "AbortError" && current === sequence.current) setError("事务列表读取失败，请重试"); return false; }
+    try { const result = await listPersonalTasks(filterRef.current, abort.signal); if (current === sequence.current) { setItems(result.items); setTimezone(result.timezone); setError(""); } return true; }
+    catch (reason) { if ((reason as Error).name === "AbortError" || current !== sequence.current) return true; setError("事务列表读取失败，请重试"); return false; }
     finally { if (current === sequence.current) setLoading(false); }
   }, []);
   useEffect(() => {
