@@ -1,5 +1,5 @@
 """Scheduler 模块"""
 
-from .reminder import ReminderManager
+from .reminder_scheduler import ReminderScheduler
 
-__all__ = ["ReminderManager"]
+__all__ = ["ReminderScheduler"]
