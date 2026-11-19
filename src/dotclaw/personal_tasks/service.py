@@ -72,7 +72,7 @@ class PersonalTaskService:
         now = self._clock().astimezone(UTC)
         updated = PersonalTask(current.id, title, description, current.status, deadline,
                                current.created_at, now, current.completed_at, current.version + 1)
-        return self._view(await self._repository.replace(updated, expected_version=expected_version), now)
+        return self._view(await self._repository.replace(updated, expected_version=expected_version, now=now, timezone=self._timezone), now)
 
     async def change_status(self, task_id: str, *, status: PersonalTaskStatus, expected_version: int) -> PersonalTaskView:
         current = await self._repository.get(task_id)
@@ -92,7 +92,7 @@ class PersonalTaskService:
         updated = PersonalTask(current.id, current.title, current.description, status, current.deadline,
                                current.created_at, now, now if status == PersonalTaskStatus.COMPLETED else None,
                                current.version + 1)
-        return self._view(await self._repository.replace(updated, expected_version=expected_version), now)
+        return self._view(await self._repository.replace(updated, expected_version=expected_version, now=now, timezone=self._timezone), now)
 
     async def delete(self, task_id: str, *, expected_version: int) -> None:
         await self._repository.delete(task_id, expected_version=expected_version)
