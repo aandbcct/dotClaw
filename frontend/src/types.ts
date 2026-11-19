@@ -6,6 +6,14 @@ export type TaskDeadline = { kind: "date"; value: string } | { kind: "datetime";
 export interface PersonalTask { id: string; title: string; description: string; status: PersonalTaskStatus; deadline: TaskDeadline | null; created_at: string; updated_at: string; completed_at: string | null; version: number; is_overdue: boolean; }
 export interface PersonalTaskList { items: PersonalTask[]; timezone: string; as_of: string; }
 export interface PersonalTaskInput { title: string; description: string; deadline: TaskDeadline | null; }
+export type ReminderRule = { kind: "at"; at: string } | { kind: "before_deadline"; offset_minutes: number } | { kind: "before_date"; days_before: number; local_time: string } | { kind: "daily"; local_time: string } | { kind: "weekly"; weekdays: number[]; local_time: string } | { kind: "monthly"; day: number; local_time: string } | { kind: "yearly"; month: number; day: number; local_time: string };
+export interface Reminder { id: string; task_id: string; rule: ReminderRule; timezone: string; status: string; reason: string | null; next_fire_at: string | null; version: number; created_at: string; updated_at: string; }
+export interface ReminderList { items: Reminder[]; timezone: string; scheduler_enabled: boolean; last_scan_at: string | null; scan_lag_seconds: number | null; }
+export interface NotificationMember { task_id: string; title_snapshot: string; missed: boolean; overdue: boolean; current_status: string | null; current_is_overdue: boolean | null; }
+export interface NotificationDelivery { notification_id: number; channel: string; claim_id: string; status: string; attempted_at: string; reported_at: string | null; error: string | null; }
+export interface NotificationItem { id: number; kind: "reminder" | "recovery_summary"; occurrence_id: string | null; created_at: string; read_at: string | null; title: string; body: string; members: NotificationMember[]; deliveries: NotificationDelivery[]; }
+export interface NotificationList { items: NotificationItem[]; next_before_id: number | null; unread_count: number; watermark: number; }
+export interface NotificationChanges { items: NotificationItem[]; next_after_id: number; has_more: boolean; unread_count: number; watermark: number; }
 
 export interface SessionSummary {
   id: string;

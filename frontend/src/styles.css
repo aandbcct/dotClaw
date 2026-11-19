@@ -304,3 +304,15 @@ a { color:var(--accent); text-underline-offset:3px; }
 .task-editor label { display: grid; gap: 6px; }
 .task-editor input, .task-editor textarea, .task-editor select { padding: 9px; }
 .task-editor textarea { min-height: 90px; }
+/* 提醒与通知沿用事务页的布局和颜色变量。 */
+.reminder-editor,.notification-center { display:grid; gap:14px; min-width:min(520px,78vw); }
+.reminder-editor label { display:grid; gap:6px; }
+.reminder-editor input,.reminder-editor select { min-height:40px; padding:8px; }
+.reminder-editor fieldset { display:flex; flex-wrap:wrap; gap:8px; }
+.reminder-editor fieldset label { display:flex; align-items:center; gap:4px; }
+.reminder-editor footer,.notification-center header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.notification-center header h1 { margin-right:auto; }
+.notification-center > ul > li > button { display:grid; width:100%; text-align:left; gap:6px; padding:12px; }
+.notification-detail { border:1px solid var(--line); border-radius:10px; padding:16px; }
+.notification-detail li { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:8px 0; }
+.notification-preferences { position:fixed; z-index:5; bottom:8px; right:8px; display:flex; gap:8px; align-items:center; padding:8px; background:var(--surface); border:1px solid var(--line); border-radius:8px; }

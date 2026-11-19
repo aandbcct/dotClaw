@@ -9,6 +9,7 @@ import type {
   WorkspaceOptions,
   CancelReceipt,
   PersonalTask, PersonalTaskFilter, PersonalTaskInput, PersonalTaskList, PersonalTaskStatus,
+  Reminder, ReminderRule, ReminderList, NotificationItem, NotificationList, NotificationChanges, NotificationDelivery,
 } from "./types";
 
 const API_ROOT = "/api/v1";
@@ -19,6 +20,17 @@ export function createPersonalTask(input: PersonalTaskInput): Promise<PersonalTa
 export function updatePersonalTask(id: string, input: PersonalTaskInput, expectedVersion: number): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, expected_version: expectedVersion }) }); }
 export function changePersonalTaskStatus(id: string, status: PersonalTaskStatus, expectedVersion: number): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, expected_version: expectedVersion }) }); }
 export async function deletePersonalTask(id: string, expectedVersion: number): Promise<void> { const response = await fetch(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}?${new URLSearchParams({ expected_version: String(expectedVersion) })}`, { method: "DELETE" }); if (!response.ok) throw await responseError(response); }
+
+export function listTaskReminders(taskId: string, signal?: AbortSignal): Promise<ReminderList> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(taskId)}/reminders`, { signal }); }
+export function createTaskReminder(taskId: string, rule: ReminderRule, taskVersion: number): Promise<Reminder> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(taskId)}/reminders`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rule, expected_task_version: taskVersion }) }); }
+export function updateTaskReminder(taskId: string, id: string, rule: ReminderRule, version: number, taskVersion: number): Promise<Reminder> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(taskId)}/reminders/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rule, expected_version: version, expected_task_version: taskVersion }) }); }
+export function changeTaskReminderStatus(taskId: string, id: string, action: "pause" | "resume" | "cancel", version: number, taskVersion: number): Promise<Reminder> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(taskId)}/reminders/${encodeURIComponent(id)}/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, expected_version: version, expected_task_version: taskVersion }) }); }
+export function listNotifications(options: { unread_only?: boolean; before_id?: number; limit?: number } = {}, signal?: AbortSignal): Promise<NotificationList> { return requestJson(`${API_ROOT}/notifications?${new URLSearchParams(Object.entries(options).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]))}`, { signal }); }
+export function getNotificationChanges(afterId: number, signal?: AbortSignal): Promise<NotificationChanges> { return requestJson(`${API_ROOT}/notifications/changes?${new URLSearchParams({ after_id: String(afterId) })}`, { signal }); }
+export function getNotification(id: number): Promise<NotificationItem> { return requestJson(`${API_ROOT}/notifications/${id}`); }
+export function markNotificationRead(id: number): Promise<NotificationItem> { return requestJson(`${API_ROOT}/notifications/${id}/read`, { method: "POST" }); }
+export function claimNotificationDelivery(id: number): Promise<NotificationDelivery | null> { return requestJson(`${API_ROOT}/notifications/${id}/deliveries/claim`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel: "browser" }) }); }
+export function reportNotificationDelivery(id: number, claimId: string, status: "accepted" | "failed", error: string | null): Promise<NotificationDelivery> { return requestJson(`${API_ROOT}/notifications/${id}/deliveries/report`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ claim_id: claimId, status, error }) }); }
 
 export class ApiError extends Error {
   readonly code: string;
