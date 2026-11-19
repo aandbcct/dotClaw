@@ -24,8 +24,9 @@ export function useNotifications(delivery: NotificationDeliveryPort, onNavigate:
       if (delivery.permission() !== "granted") return;
       const claim = await claimNotificationDelivery(item.id);
       if (!claim) return;
-      try { await delivery.deliver(item, () => navigating.current(item)); await reportNotificationDelivery(item.id, claim.claim_id, "accepted", null); }
-      catch (error) { await reportNotificationDelivery(item.id, claim.claim_id, "failed", error instanceof Error ? error.message : "浏览器通知失败"); }
+      try { await delivery.deliver(item, () => navigating.current(item)); }
+      catch (error) { await reportNotificationDelivery(item.id, claim.claim_id, "failed", error instanceof Error ? error.message : "浏览器通知失败"); return; }
+      await reportNotificationDelivery(item.id, claim.claim_id, "accepted", null);
     }
     async function poll() {
       if (disposed || busy.current) return;

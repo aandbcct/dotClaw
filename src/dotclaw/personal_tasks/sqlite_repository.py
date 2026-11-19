@@ -79,7 +79,12 @@ class SqlitePersonalTaskRepository:
             task = self._row_to_task(task_row)
             members.append(NotificationMember(member["task_id"], member["title_snapshot"], bool(member["missed"]), bool(member["overdue"]), task.status.value, is_overdue(task, now, self._timezone)))
         deliveries = tuple(NotificationDelivery(d["notification_id"], d["channel"], d["claim_id"], d["status"], self._date(d["attempted_at"]), self._date(d["reported_at"]), d["error"]) for d in connection.execute("SELECT * FROM notification_deliveries WHERE notification_id=?", (row["id"],)).fetchall())
-        return Notification(row["id"], row["kind"], row["occurrence_id"], self._date(row["created_at"]), self._date(row["read_at"]), row["title"], row["body"], tuple(members), deliveries)
+        body = row["body"]
+        if row["kind"] == "recovery_summary":
+            missed_count = sum(member.missed for member in members)
+            overdue_count = sum(member.overdue for member in members)
+            body = f"离线期间有 {missed_count} 件事务错过提醒，目前有 {overdue_count} 件事务已逾期"
+        return Notification(row["id"], row["kind"], row["occurrence_id"], self._date(row["created_at"]), self._date(row["read_at"]), row["title"], body, tuple(members), deliveries)
 
     @staticmethod
     def _encode(task: PersonalTask) -> tuple:
@@ -405,9 +410,13 @@ class SqlitePersonalTaskRepository:
                         task = self._row_to_task(task_row)
                         if is_overdue(task, now, timezone):
                             current_overdue.append(task)
-                    cursor = connection.execute("INSERT INTO notifications(kind,created_at,title,body) VALUES('recovery_summary',?,?,?)", (self._stamp(now), "离线期间提醒汇总", f"离线期间有 {len(missed_tasks)} 件事务错过提醒，目前有 {len(current_overdue)} 件事务已逾期"))
+                    for task in current_overdue:
+                        missed_tasks.setdefault(task.id, (task.title, False))
+                    missed_count = sum(missed for _, missed in missed_tasks.values())
+                    cursor = connection.execute("INSERT INTO notifications(kind,created_at,title,body) VALUES('recovery_summary',?,?,?)", (self._stamp(now), "离线期间提醒汇总", f"离线期间有 {missed_count} 件事务错过提醒，目前有 {len(current_overdue)} 件事务已逾期"))
+                    overdue_ids = {task.id for task in current_overdue}
                     for task_id, (title, missed) in missed_tasks.items():
-                        connection.execute("INSERT INTO notification_members VALUES(?,?,?,?,?)", (cursor.lastrowid, task_id, title, int(missed), int(any(t.id == task_id for t in current_overdue))))
+                        connection.execute("INSERT INTO notification_members VALUES(?,?,?,?,?)", (cursor.lastrowid, task_id, title, int(missed), int(task_id in overdue_ids)))
             connection.execute("INSERT INTO reminder_scan_state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET last_scan_at=excluded.last_scan_at,timezone=excluded.timezone", (self._stamp(now), str(timezone)))
             connection.execute("COMMIT")
         except (sqlite3.Error, ValueError, TypeError) as error:
