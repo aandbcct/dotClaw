@@ -208,7 +208,7 @@ export function App() {
     <aside className="sidebar" aria-label="工作区导航">{navigation}</aside>
     {mobileNav && <Dialog title="会话导航" className="mobile-navigation" onClose={() => setMobileNav(false)}>{navigation}</Dialog>}
     <main className={`workspace ${!selected && !view.messages.length ? "workspace--new" : ""}`}>
-      {activeWorkspace === "tasks" ? <PersonalTasks onOpenNavigation={() => setMobileNav(true)} focusTaskId={focusTaskId} focusNotificationId={focusNotificationId} onFocusHandled={() => { setFocusTaskId(null); setFocusNotificationId(null); }} /> : activeWorkspace === "notifications" ? <NotificationCenter onRefresh={notifications.refresh} onOpenTask={(id) => { setFocusTaskId(id); setActiveWorkspace("tasks"); }} onOpenSummary={(id) => { setFocusNotificationId(id); setActiveWorkspace("tasks"); }} /> : <>
+      {activeWorkspace === "tasks" ? <PersonalTasks onOpenNavigation={() => setMobileNav(true)} focusTaskId={focusTaskId} focusNotificationId={focusNotificationId} onFocusHandled={() => { setFocusTaskId(null); setFocusNotificationId(null); }} /> : activeWorkspace === "notifications" ? <NotificationCenter onOpenNavigation={() => setMobileNav(true)} systemNotifications={<aside className="notification-preferences"><span>{notifications.connectionError || `系统通知权限：${notifications.permission}`}</span>{notifications.permission !== "granted" && <button onClick={() => void notifications.enableSystemNotifications()}>启用系统通知</button>}</aside>} onRefresh={notifications.refresh} onOpenTask={(id) => { setFocusTaskId(id); setActiveWorkspace("tasks"); }} onOpenSummary={(id) => { setFocusNotificationId(id); setActiveWorkspace("tasks"); }} /> : <>
       <header className="workspace-header">
         <button className="menu-button" type="button" aria-label="打开会话列表" onClick={() => setMobileNav(true)}>☰</button>
         <div className="model-context">
@@ -268,7 +268,7 @@ export function App() {
       <footer className="dialog-actions"><button data-initial-focus autoFocus type="button" className="secondary-button" disabled={actionBusy} onClick={() => setDeleting(null)}>取消</button>{actionError && <button type="button" onClick={() => { void open(deleting); setDeleting(null); }}>打开会话处理运行</button>}<button type="button" className="danger-button" disabled={actionBusy} onClick={() => void confirmDelete()}>确认删除</button></footer>
     </Dialog>}
     {settingsOpen && <SettingsPanel settings={settings} loading={settingsLoading} busyKey={settingsBusy} error={settingsError} onRetry={() => void loadSettings()} onClose={() => setSettingsOpen(false)} onToggleTool={(name, enabled) => void settingAction(name, () => toggleTool(name, enabled))} onToggleSkill={(name, enabled) => void settingAction(name, () => toggleSkill(name, enabled))} onReconnectMcp={() => void settingAction("mcp", reconnectMcp)} />}
-    {activeWorkspace === "notifications" && <aside className="notification-preferences"><span>{notifications.connectionError || `系统通知权限：${notifications.permission}`}</span>{notifications.permission !== "granted" && <button onClick={() => void notifications.enableSystemNotifications()}>启用系统通知</button>}</aside>}
+
 
   </div>;
 }
