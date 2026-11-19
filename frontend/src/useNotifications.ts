@@ -18,6 +18,7 @@ export function useNotifications(delivery: NotificationDeliveryPort, onNavigate:
     let disposed = false;
     let timer = 0;
     let previousPoll = Date.now();
+    let wasDisconnected = false;
     const controller = new AbortController();
     async function deliverNew(item: NotificationItem) {
       if (delivery.permission() !== "granted") return;
@@ -31,6 +32,7 @@ export function useNotifications(delivery: NotificationDeliveryPort, onNavigate:
       busy.current = true;
       try {
         const now = Date.now();
+        if (started.current && wasDisconnected) { const page = await listNotifications({ limit: 1 }, controller.signal); cursor.current = page.watermark; setUnreadCount(page.unread_count); wasDisconnected = false; previousPoll = now; setConnectionError(""); return; }
         if (started.current && now - previousPoll > 30000) { const page = await listNotifications({ limit: 1 }, controller.signal); cursor.current = page.watermark; setUnreadCount(page.unread_count); previousPoll = now; setConnectionError(""); return; }
         if (!started.current) { const page = await listNotifications({ limit: 1 }, controller.signal); cursor.current = page.watermark; setUnreadCount(page.unread_count); started.current = true; previousPoll = now; return; }
         let more = true;
@@ -42,7 +44,7 @@ export function useNotifications(delivery: NotificationDeliveryPort, onNavigate:
           cursor.current = page.next_after_id; setUnreadCount(page.unread_count); more = page.has_more;
         }
         previousPoll = now; setConnectionError("");
-      } catch (error) { if (!disposed && !controller.signal.aborted) setConnectionError(error instanceof Error ? error.message : "通知连接中断"); }
+      } catch (error) { if (!disposed && !controller.signal.aborted) { wasDisconnected = true; setConnectionError(error instanceof Error ? error.message : "通知连接中断"); } }
       finally { busy.current = false; }
     }
     void poll(); timer = window.setInterval(() => void poll(), 5000);

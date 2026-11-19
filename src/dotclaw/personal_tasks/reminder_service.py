@@ -39,6 +39,8 @@ class ReminderService:
             raise InvalidReminderInput(str(error)) from error
         if candidate is None:
             raise InvalidReminderInput("提醒时间必须晚于当前时间")
+        if rule["kind"] == "at":
+            rule = {**rule, "at": datetime.fromisoformat(rule["at"].replace("Z", "+00:00")).astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")}
         reminder = Reminder(str(uuid4()), task_id, rule, str(self._timezone), ReminderStatus.ACTIVE, None,
                             candidate, 1, now, now)
         return await self._repository.create_reminder(reminder, expected_task_version=expected_task_version)
@@ -64,6 +66,8 @@ class ReminderService:
             raise InvalidReminderInput(str(error)) from error
         if candidate is None:
             raise InvalidReminderInput("提醒时间必须晚于当前时间")
+        if rule["kind"] == "at":
+            rule = {**rule, "at": datetime.fromisoformat(rule["at"].replace("Z", "+00:00")).astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")}
         updated = Reminder(current.id, task_id, rule, str(self._timezone), ReminderStatus.ACTIVE, None,
                            candidate, current.version + 1, current.created_at, now)
         return await self._repository.replace_reminder(updated, expected_version=expected_version, expected_task_version=expected_task_version)
@@ -81,12 +85,13 @@ class ReminderService:
             result = Reminder(current.id, task_id, current.rule, current.timezone, ReminderStatus.PAUSED, None, None, current.version + 1, current.created_at, now)
         elif action == "resume" and current.status == ReminderStatus.PAUSED and task.status in (PersonalTaskStatus.PENDING, PersonalTaskStatus.IN_PROGRESS):
             try:
-                candidate = next_fire_at(current.rule, task, self._timezone, now)
+                rule_zone = ZoneInfo(current.timezone)
+                candidate = next_fire_at(current.rule, task, rule_zone, now)
             except (ValueError, KeyError, TypeError) as error:
                 raise InvalidReminderInput(str(error)) from error
             if candidate is None:
                 raise InvalidReminderInput("提醒规则没有未来时刻")
-            result = Reminder(current.id, task_id, current.rule, str(self._timezone), ReminderStatus.ACTIVE, None, candidate, current.version + 1, current.created_at, now)
+            result = Reminder(current.id, task_id, current.rule, current.timezone, ReminderStatus.ACTIVE, None, candidate, current.version + 1, current.created_at, now)
         elif action == "cancel" and current.status in (ReminderStatus.ACTIVE, ReminderStatus.PAUSED):
             result = Reminder(current.id, task_id, current.rule, current.timezone, ReminderStatus.CANCELLED, None, None, current.version + 1, current.created_at, now)
         else:

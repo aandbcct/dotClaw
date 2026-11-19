@@ -1,6 +1,6 @@
 # PA-02 提醒与通知总体设计及实施计划
 
-设计基线为 2026-11-19 的 `feat/assistant`、提交 `98a6b99` 和本次已确认讨论。覆盖 #61、#62、#63，默认一个 PR、六个按依赖排列的 commit。本次交付仅为设计文档，以下实现与验证均为待执行。详细契约唯一来源为 [spec.md](spec.md)。
+设计基线为 2026-11-19 的 `feat/assistant`、提交 `98a6b99` 和本次已确认讨论。覆盖 #61、#62、#63，按依赖完成六阶段 commit。实现已交付；按用户要求未运行 pytest、Vitest、应用或浏览器动态验证。已完成 Python 源码编译静态检查、前端 TypeScript/Vite 构建与文档/差异检查。详细契约唯一来源为 [spec.md](spec.md)。
 
 ## 1. 目标与范围
 
@@ -93,6 +93,13 @@ Commit 为 `feat(gui): add reminder management and notification center`。
 Commit 为 `test(assistant): verify reminder lifecycle and document delivery`。
 
 ## 5. 完成门槛
+
+### 本次实际交付记录（2026-11-19）
+
+- 六阶段 commit：`7ab38d5`、`1038a7d`、`ba6a506`、`dbb212d`、`2272046`，以及本阶段文档交付提交。
+- 静态验证：`.venv\Scripts\python.exe -m compileall -q src/dotclaw/personal_tasks src/dotclaw/scheduler src/dotclaw/bootstrap src/dotclaw/channel/web`；`frontend` 下 `npm run build`；`git diff --check`。
+- 动态验证依用户明确要求未执行；SQLite 迁移、扫描恢复、HTTP、浏览器通知和 Docker 流程不能据此宣称运行验收通过。
+- 当前运行限制：同一 SQLite 数据目录只能由一个应用进程管理。浏览器通知需要页面打开并获授权；认领后浏览器副作用未知时不自动重弹。
 
 Windows 测试先执行 `.venv\Scripts\python.exe -c "import sys; print(sys.executable)"`，随后使用该解释器运行 pytest。目标测试为 `tests/personal_tasks`、`tests/channel/web`、宿主生命周期相关测试；新增测试均放已收集目录。前端在 frontend 运行 `npm test`、`npm run build`。Docker 内使用 `/opt/venv/bin/python`，沿用现有 compose 工作流，不删除数据卷。
 

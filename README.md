@@ -89,7 +89,7 @@ flowchart TB
 5. 所有状态变化来自 `transition()`，RuntimeEngine 只执行返回的 `AgentAction`；
 6. Runtime 只通过 Port 调用能力模块；
 7. MCP 是 Tool 来源，不在 Runtime 中建立独立调用分支；
-8. Journal 和 Scheduler 的代码与配置目前存在，但尚未进入 ApplicationHost 主链。
+8. Scheduler 持久化扫描个人提醒；Journal 仍未接入 ApplicationHost 主链。
 9. Trace / Eval 是后置控制面：它们只读取既有运行事实或执行隔离 Run，不参与普通请求的执行和恢复。
 
 ---
@@ -403,8 +403,9 @@ resume_delegation(child_run_id)
 | 多 Agent 委派 | 已接入主链 | 异步 child Run、`Suspended(DELEGATION)` 与结果回灌；Task 和等待映射当前主要在内存 |
 | Trace 与 Eval | 按需入口已装配 | 动态 Trace、人工确认 Dataset、9 类确定性评分、Playback Gate、失败归因与显式 OTLP 导出 |
 | Journal | 未接入主链 | 代码和配置存在，不作为 Runtime 恢复事实源 |
-| Scheduler | 未接入主链 | `ReminderManager` 存在，但 Host 当前不创建和管理 |
-| 个人事务 | 已接入 Web 工作区 | 独立 SQLite 持久化，确定性管理，不自动提醒或调用模型 |
+| Scheduler | 已接入 Web 宿主 | APScheduler 每秒扫描 SQLite 提醒；启动与长间隔恢复生成汇总 |
+| 个人事务与提醒 | 已接入 Web 工作区 | 独立 SQLite 持久化；事务操作不依赖会话或模型 |
+| 通知 | 已接入 Web 工作区 | 站内历史、已读和浏览器系统通知；网页关闭时只保存站内通知 |
 
 ---
 
@@ -532,7 +533,7 @@ npm install
 npm run dev
 ```
 
-访问 `http://127.0.0.1:5173/`。事务入口提供独立事务管理；数据保存在 `data/personal-assistant.sqlite3`，默认时区为 Asia/Shanghai。事务操作不依赖会话或模型，也不产生提醒。首次发送才创建会话，支持切换已配置模型、搜索历史、逐轮执行详情、Markdown 导出和本机置顶。设置中模型/运行参数只读，已有工具/技能开关与 MCP 重连可用。刷新运行中的页面只恢复状态及最终结果，不重放逐字增量。
+访问 `http://127.0.0.1:5173/`。事务入口提供独立事务管理和一次性/周期提醒；数据保存在 `data/personal-assistant.sqlite3`，默认时区为 Asia/Shanghai。提醒由宿主扫描，即使网页关闭也会写入站内通知；浏览器系统通知要求网页保持打开且用户授权。首次发送才创建会话，支持切换已配置模型、搜索历史、逐轮执行详情、Markdown 导出和本机置顶。设置中模型/运行参数只读，已有工具/技能开关与 MCP 重连可用。刷新运行中的页面只恢复状态及最终结果，不重放逐字增量。
 
 实施范围、测试、前后截图及限制见[前端补齐与视觉改造开发说明](docs/Development/gui/前端与ChatGPT差距及补齐建议.md#9-实施结果与验收记录2026-10-23)。当前入口面向本地使用。
 
@@ -743,7 +744,7 @@ dotClaw/
 │   ├── memory/          # 记忆存储、检索与蒸馏
 │   ├── orchestration/   # Task、Broker 与 Delegation
 │   ├── runtime/         # Domain、Application、Ports 与 Adapters
-│   ├── scheduler/       # ReminderManager，当前未装配
+│   ├── scheduler/       # APScheduler 提醒扫描生命周期
 │   ├── session/         # Session 与 Conversation
 │   ├── skills/          # Skill 扫描与 Registry
 │   ├── tools/           # Tool 定义、Registry、安全与执行
@@ -798,7 +799,7 @@ dotClaw 当前明确定位为本地、单进程 Agent Harness：
 - LLM 和 Tool 的取消当前主要是 best effort；
 - Delegation 的 child Run 可以异步执行并挂起父 Run，但 Task、结果缓存和等待映射主要保存在内存，进程重启后不能继续原等待关系；
 - Config、Agent Identity 和 Tool Registry 不支持运行时热重载；
-- Journal 和 Scheduler 尚未进入 ApplicationHost 主链；
+- Journal 尚未进入 ApplicationHost 主链；Scheduler 扫描依赖单应用进程管理同一 SQLite 数据目录；
 - MCP resources 和 prompts 尚未进入 Agent 能力主链。
 - Eval 不提供 LLM Judge、真实副作用回放或运行期间进度 UI；Re-execution 不进入 CI Gate，Tool、审批和委派仍必须由 Fixture 覆盖。
 

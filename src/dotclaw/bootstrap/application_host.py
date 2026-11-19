@@ -200,7 +200,7 @@ class ApplicationHost:
         if not task_path.is_absolute():
             task_path = root / task_path
         task_timezone = ZoneInfo(config.personal_tasks.timezone)
-        task_repository = SqlitePersonalTaskRepository(task_path)
+        task_repository = SqlitePersonalTaskRepository(task_path, task_timezone)
         await task_repository.initialize()
         self._personal_task_service = PersonalTaskService(task_repository, timezone=task_timezone)
         self._reminder_service = ReminderService(task_repository, timezone=task_timezone)

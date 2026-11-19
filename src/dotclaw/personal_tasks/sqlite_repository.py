@@ -1,10 +1,12 @@
 """个人事务 SQLite 持久化适配器。"""
 
 import asyncio
+import calendar
 import sqlite3
 from datetime import UTC, date, datetime
 from pathlib import Path
 import json
+import re
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -18,8 +20,9 @@ from .models import is_overdue, PersonalTaskStatus
 
 
 class SqlitePersonalTaskRepository:
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, timezone: ZoneInfo = ZoneInfo("UTC")):
         self._db_path = db_path
+        self._timezone = timezone
 
     def _connect(self) -> sqlite3.Connection:
         connection = None
@@ -44,13 +47,39 @@ class SqlitePersonalTaskRepository:
 
     @classmethod
     def _row_to_reminder(cls, row: sqlite3.Row) -> Reminder:
-        return Reminder(row["id"], row["task_id"], json.loads(row["rule_json"]), row["timezone"], ReminderStatus(row["status"]), row["reason"], cls._date(row["next_fire_at"]), row["version"], cls._date(row["created_at"]), cls._date(row["updated_at"]))
+        rule = json.loads(row["rule_json"])
+        fields = {"at": {"kind", "at"}, "before_deadline": {"kind", "offset_minutes"}, "before_date": {"kind", "days_before", "local_time"}, "daily": {"kind", "local_time"}, "weekly": {"kind", "weekdays", "local_time"}, "monthly": {"kind", "day", "local_time"}, "yearly": {"kind", "month", "day", "local_time"}}
+        if not isinstance(rule, dict) or rule.get("kind") not in fields or set(rule) != fields[rule["kind"]]:
+            raise ValueError("数据库中的提醒规则结构无效")
+        if "local_time" in rule and (not isinstance(rule["local_time"], str) or re.fullmatch(r"\d{2}:[0-5]\d", rule["local_time"]) is None or int(rule["local_time"][:2]) > 23):
+            raise ValueError("数据库中的提醒当地时刻无效")
+        if rule["kind"] == "at" and (not isinstance(rule["at"], str) or datetime.fromisoformat(rule["at"].replace("Z", "+00:00")).tzinfo is None):
+            raise ValueError("数据库中的提醒时刻无效")
+        if rule["kind"] in ("before_deadline", "before_date") and (type(rule["offset_minutes"] if rule["kind"] == "before_deadline" else rule["days_before"]) is not int or (rule["offset_minutes"] if rule["kind"] == "before_deadline" else rule["days_before"]) < 0):
+            raise ValueError("数据库中的相对提醒偏移无效")
+        if rule["kind"] in ("monthly", "yearly"):
+            if type(rule["day"]) is not int or not 1 <= rule["day"] <= 31:
+                raise ValueError("数据库中的提醒日期无效")
+            if rule["kind"] == "yearly" and (type(rule["month"]) is not int or not 1 <= rule["month"] <= 12 or rule["day"] > calendar.monthrange(2000, rule["month"])[1]):
+                raise ValueError("数据库中的年提醒日期无效")
+        if rule["kind"] == "weekly" and (not isinstance(rule["weekdays"], list) or not rule["weekdays"] or any(type(day) is not int or not 0 <= day <= 6 for day in rule["weekdays"]) or rule["weekdays"] != sorted(set(rule["weekdays"]))):
+            raise ValueError("数据库中的星期规则无效")
+        status = ReminderStatus(row["status"])
+        next_fire = cls._date(row["next_fire_at"])
+        if (status == ReminderStatus.ACTIVE) != (next_fire is not None) or row["version"] < 1 or (status in (ReminderStatus.FIRED, ReminderStatus.MISSED) and rule["kind"] not in ("at", "before_deadline", "before_date")):
+            raise ValueError("数据库中的提醒状态不一致")
+        ZoneInfo(row["timezone"])
+        return Reminder(row["id"], row["task_id"], rule, row["timezone"], status, row["reason"], next_fire, row["version"], cls._date(row["created_at"]), cls._date(row["updated_at"]))
 
-    @classmethod
-    def _row_to_notification(cls, connection: sqlite3.Connection, row: sqlite3.Row) -> Notification:
-        members = tuple(NotificationMember(m["task_id"], m["title_snapshot"], bool(m["missed"]), bool(m["overdue"]), connection.execute("SELECT status FROM personal_tasks WHERE id=?", (m["task_id"],)).fetchone()[0], None) for m in connection.execute("SELECT * FROM notification_members WHERE notification_id=? ORDER BY task_id", (row["id"],)).fetchall())
-        deliveries = tuple(NotificationDelivery(d["notification_id"], d["channel"], d["claim_id"], d["status"], cls._date(d["attempted_at"]), cls._date(d["reported_at"]), d["error"]) for d in connection.execute("SELECT * FROM notification_deliveries WHERE notification_id=?", (row["id"],)).fetchall())
-        return Notification(row["id"], row["kind"], row["occurrence_id"], cls._date(row["created_at"]), cls._date(row["read_at"]), row["title"], row["body"], members, deliveries)
+    def _row_to_notification(self, connection: sqlite3.Connection, row: sqlite3.Row) -> Notification:
+        members = []
+        now = datetime.now(UTC)
+        for member in connection.execute("SELECT * FROM notification_members WHERE notification_id=? ORDER BY task_id", (row["id"],)).fetchall():
+            task_row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (member["task_id"],)).fetchone()
+            task = self._row_to_task(task_row)
+            members.append(NotificationMember(member["task_id"], member["title_snapshot"], bool(member["missed"]), bool(member["overdue"]), task.status.value, is_overdue(task, now, self._timezone)))
+        deliveries = tuple(NotificationDelivery(d["notification_id"], d["channel"], d["claim_id"], d["status"], self._date(d["attempted_at"]), self._date(d["reported_at"]), d["error"]) for d in connection.execute("SELECT * FROM notification_deliveries WHERE notification_id=?", (row["id"],)).fetchall())
+        return Notification(row["id"], row["kind"], row["occurrence_id"], self._date(row["created_at"]), self._date(row["read_at"]), row["title"], row["body"], tuple(members), deliveries)
 
     @staticmethod
     def _encode(task: PersonalTask) -> tuple:
@@ -114,7 +143,15 @@ class SqlitePersonalTaskRepository:
                         connection.execute(statement)
                 connection.execute("PRAGMA user_version=2")
             elif version == 2:
-                connection.execute("SELECT id,task_id,rule_json,timezone,status,reason,next_fire_at,version,created_at,updated_at FROM task_reminders LIMIT 0")
+                for query in (
+                    "SELECT id,task_id,rule_json,timezone,status,reason,next_fire_at,version,created_at,updated_at FROM task_reminders LIMIT 0",
+                    "SELECT id,reminder_id,task_id,reminder_version,scheduled_at,processed_at,outcome,missed_until FROM reminder_occurrences LIMIT 0",
+                    "SELECT id,kind,occurrence_id,created_at,read_at,title,body FROM notifications LIMIT 0",
+                    "SELECT notification_id,task_id,title_snapshot,missed,overdue FROM notification_members LIMIT 0",
+                    "SELECT notification_id,channel,claim_id,status,attempted_at,reported_at,error FROM notification_deliveries LIMIT 0",
+                    "SELECT id,last_scan_at,timezone FROM reminder_scan_state LIMIT 0",
+                ):
+                    connection.execute(query)
             else:
                 raise PersonalTaskStorageError(f"不支持的数据库版本：{version}")
             connection.execute("COMMIT")
@@ -186,7 +223,9 @@ class SqlitePersonalTaskRepository:
             if cursor.rowcount == 0:
                 exists = connection.execute("SELECT 1 FROM personal_tasks WHERE id=?", (task.id,)).fetchone()
                 raise PersonalTaskVersionConflict(task.id) if exists else PersonalTaskNotFound(task.id)
-            if old_task and old_task.deadline != task.deadline:
+            if task.status not in (PersonalTaskStatus.PENDING, PersonalTaskStatus.IN_PROGRESS):
+                connection.execute("UPDATE task_reminders SET status='cancelled',reason='task_ended',next_fire_at=NULL,version=version+1,updated_at=? WHERE task_id=? AND status IN ('active','paused')", (self._stamp(now), task.id))
+            elif old_task and old_task.deadline != task.deadline:
                 reminders = connection.execute("SELECT * FROM task_reminders WHERE task_id=? AND status IN ('active','paused')", (task.id,)).fetchall()
                 for row in reminders:
                     reminder = self._row_to_reminder(row)
@@ -197,8 +236,6 @@ class SqlitePersonalTaskRepository:
                     elif reminder.status == ReminderStatus.ACTIVE:
                         adjusted = reschedule_relative(reminder, task, now)
                         connection.execute("UPDATE task_reminders SET status=?,reason=?,next_fire_at=?,version=?,updated_at=? WHERE id=?", (adjusted.status.value, adjusted.reason, self._stamp(adjusted.next_fire_at), adjusted.version, self._stamp(now), reminder.id))
-            if task.status not in (PersonalTaskStatus.PENDING, PersonalTaskStatus.IN_PROGRESS):
-                connection.execute("UPDATE task_reminders SET status='cancelled',reason='task_ended',next_fire_at=NULL,version=version+1,updated_at=? WHERE task_id=? AND status IN ('active','paused')", (self._stamp(now), task.id))
             connection.execute("COMMIT")
             return task
         except (PersonalTaskNotFound, PersonalTaskVersionConflict):
@@ -259,6 +296,10 @@ class SqlitePersonalTaskRepository:
             if row is None:
                 raise ReminderNotFound(reminder_id)
             return self._row_to_reminder(row)
+        except ReminderNotFound:
+            raise
+        except (sqlite3.Error, ValueError, TypeError, KeyError) as error:
+            raise PersonalTaskStorageError("读取提醒失败") from error
         finally:
             connection.close()
 
@@ -331,7 +372,7 @@ class SqlitePersonalTaskRepository:
                 connection.execute("COMMIT")
                 return
             recovering = startup or previous is None or (now - previous).total_seconds() > 30
-            due = connection.execute("SELECT r.*,t.title,t.status,t.deadline_kind,t.deadline_value FROM task_reminders r JOIN personal_tasks t ON t.id=r.task_id WHERE r.status='active' AND r.next_fire_at<=? ORDER BY r.next_fire_at,r.id", (self._stamp(now),)).fetchall()
+            due = connection.execute("SELECT r.*,t.title,t.status,t.deadline_kind,t.deadline_value FROM task_reminders r JOIN personal_tasks t ON t.id=r.task_id WHERE r.status='active' AND t.status IN ('pending','in_progress') AND r.next_fire_at<=? ORDER BY r.next_fire_at,r.id", (self._stamp(now),)).fetchall()
             missed_tasks: dict[str, tuple[str, bool]] = {}
             for row in due:
                 reminder = self._row_to_reminder(row)
@@ -347,7 +388,8 @@ class SqlitePersonalTaskRepository:
                 if recovering:
                     missed_tasks[task.id] = (task.title, True)
                 else:
-                    cursor = connection.execute("INSERT INTO notifications(kind,occurrence_id,created_at,title,body) VALUES('reminder',?,?,?,?)", (occurrence_id, self._stamp(now), task.title, f"提醒时间：{scheduled.isoformat()}"))
+                    deadline_text = f"；事务截止：{task.deadline.value}" if task.deadline else ""
+                    cursor = connection.execute("INSERT INTO notifications(kind,occurrence_id,created_at,title,body) VALUES('reminder',?,?,?,?)", (occurrence_id, self._stamp(now), task.title, f"提醒时间：{scheduled.isoformat()}{deadline_text}"))
                     connection.execute("INSERT INTO notification_members VALUES(?,?,?,?,?)", (cursor.lastrowid, task.id, task.title, 0, 0))
             if recovering:
                 if previous:
@@ -411,9 +453,14 @@ class SqlitePersonalTaskRepository:
     def _get_notification_sync(self, notification_id: int) -> Notification:
         connection = self._connect()
         try:
+            connection.execute("BEGIN")
             row = connection.execute("SELECT * FROM notifications WHERE id=?", (notification_id,)).fetchone()
-            if row is None: raise NotificationNotFound(notification_id)
-            return self._row_to_notification(connection, row)
+            if row is None:
+                connection.rollback()
+                raise NotificationNotFound(notification_id)
+            result = self._row_to_notification(connection, row)
+            connection.execute("COMMIT")
+            return result
         finally: connection.close()
 
     async def notification_changes(self, *, after_id: int, limit: int) -> NotificationChanges:
@@ -482,6 +529,9 @@ class SqlitePersonalTaskRepository:
                 if not connection.execute("SELECT 1 FROM notifications WHERE id=?", (notification_id,)).fetchone(): raise NotificationNotFound(notification_id)
                 raise NotificationDeliveryConflict(claim_id)
             if row["status"] != "attempted" and (row["status"] != status or row["error"] != error): raise NotificationDeliveryConflict(claim_id)
+            if row["status"] != "attempted":
+                connection.execute("COMMIT")
+                return NotificationDelivery(notification_id, row["channel"], claim_id, row["status"], self._date(row["attempted_at"]), self._date(row["reported_at"]), row["error"])
             connection.execute("UPDATE notification_deliveries SET status=?,reported_at=?,error=? WHERE notification_id=? AND claim_id=?", (status, self._stamp(now), error, notification_id, claim_id))
             updated = connection.execute("SELECT * FROM notification_deliveries WHERE notification_id=? AND claim_id=?", (notification_id, claim_id)).fetchone()
             connection.execute("COMMIT")

@@ -82,7 +82,7 @@ flowchart TB
 | Orchestration | `orchestration/` | Task 编排事实、消息 Broker 和子 Agent 委派 | 独立文档 |
 | Config | `config/settings.py`、`common/utils.py` | 全局配置模型、路由配置、环境变量和兼容迁移 | 独立文档 |
 | Journal | `journal/` | 可选 trace、report 和 snapshot 观测 | 独立短文档 |
-| Scheduler | `scheduler/reminder.py` | 当前仅提供进程内一次性提醒 | 独立极短文档，或在 Wiki 首页标记实验性 |
+| Scheduler | `scheduler/reminder_scheduler.py`、`personal_tasks/` | SQLite 持久提醒的恢复与周期扫描 | 见个人事务提醒计划与详细设计 |
 
 ---
 
@@ -514,16 +514,15 @@ Scheduler 当前只有一个进程内一次性提醒管理器，尚未形成完�
 
 | 组件 | 核心代码 | 核心对象 | 职责 |
 |---|---|---|---|
-| Reminder 管理 | `scheduler/reminder.py` | `ReminderManager` | 创建、保存和取消 `asyncio.Task` |
-| 延迟触发 | 内部 `_remind` 协程 | `asyncio.sleep` | 延迟后向 Channel 发送提醒 |
-| Channel 通知 | `Channel.send` | Channel 依赖 | 将提醒文本发送到当前通道 |
+| 提醒扫描 | `scheduler/reminder_scheduler.py` | `ReminderScheduler` | 按秒驱动 SQLite 持久提醒扫描 |
+| 触发与恢复 | `personal_tasks/sqlite_repository.py` | `process_due` | 原子写触发、通知和扫描水位 |
+| 浏览器投递 | `channel/web/notification_routes.py` | 通知认领 API | 网页端认领并调用浏览器通知 API |
 
 ### 当前边界
 
-- 未看到 ApplicationHost 对 ReminderManager 的装配。
-- 任务状态只在内存中，进程重启后丢失。
-- 不支持持久化、重复计划、条件触发或与 AgentRun 集成。
-- Wiki 应明确标记为“当前轻量能力/实验性模块”，避免与 Runtime 调度或多 Agent Orchestration 混淆。
+- ReminderScheduler 由 ApplicationHost 装配，调度状态和触发结果保存在 SQLite。
+- 个人提醒支持一次性与日/周/月/年规则，不进入 AgentRun 或 Orchestration。
+- 浏览器系统通知要求页面打开且授权；认领结果未知时不自动重弹。
 
 ---
 
@@ -621,11 +620,11 @@ Journal 代码保留完整观测模型，但 Runtime v4 的主执行和恢复事
 
 **建议：** 在正式 Journal 文档重写前，先搜索 Runtime v4 对 Journal 的真实调用点，区分现行观测、旧实现遗留和未接入能力。
 
-### 5.5 Scheduler 尚不是第一类运行模块
+### 5.5 Scheduler 只负责个人提醒扫描
 
-ReminderManager 未进入 ApplicationHost 的装配主链。
+ReminderScheduler 已进入 ApplicationHost；提醒业务事实和恢复状态由个人事务 SQLite 仓储管理，不进入 Runtime 或 Orchestration。
 
-**建议：** 保留模块记录，但在 Wiki 首页标记为“轻量/实验性”，不与 Runtime 的运行协调或 Orchestration 的 Task 调度并列宣传。
+**边界：** 单应用进程管理一个 SQLite 数据目录；Scheduler 不负责 AgentRun 或 Orchestration Task。
 
 ### 5.6 README 的源码结构存在遗漏
 

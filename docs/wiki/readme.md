@@ -244,7 +244,7 @@ flowchart LR
 |---|---|---|---|---|
 | Config | 加载全局配置、模型路由配置、环境变量和兼容迁移 | `Config`、`RouterConfig`、`get_config` | 主链已装配 | [Config](./Config%20模块总体说明.md) |
 | Journal | Trace、Report 和 Snapshot 观测代码 | `Journal`、`AgentEvent` | 代码存在、未进入 Runtime 主链 | 边界审计后决定是否建立 Observability Wiki |
-| Scheduler | 进程内一次性提醒代码 | `ReminderManager` | 代码存在、当前未装配 | 暂不建立独立 Wiki |
+| Scheduler | 个人事务持久化提醒扫描 | `ReminderScheduler` | 已由 ApplicationHost 管理 | [个人事务提醒设计与实现](../Development/personal-assistant/pa2-RemindersNotifications/plan.md) |
 
 ---
 
@@ -393,7 +393,7 @@ flowchart TB
 | 新增确定性评测或修改 Fixture | [Eval](./Eval%20模块总体说明.md) | `eval/models.py`、`fixtures.py`、`scorers/` | Playback STRICT、隔离边界与 Trace 证据 |
 | 修改回归 Dataset 或 CI Gate | [Eval](./Eval%20模块总体说明.md) | `draft_service.py`、`playback.py`、`gate.py` | Draft 审核、仅 Playback 可入 Gate、三态报告 |
 | 排查观测输出 | [Runtime](./Runtime%20模块总体说明.md) + [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块总体说明.md) | `runtime` RunEvent、`journal/` | Journal 当前未进入 Runtime 主链 |
-| 评估提醒能力 | [Bootstrap 与应用入口](./Bootstrap%20与应用入口模块总体说明.md) + [Config](./Config%20模块总体说明.md) | `scheduler/reminder.py` | 当前 Host 未装配、无持久化和关闭管理 |
+| 评估提醒能力 | [个人事务提醒设计与实现](../Development/personal-assistant/pa2-RemindersNotifications/plan.md) | `scheduler/reminder_scheduler.py`、`personal_tasks/` | Host 管理持久提醒扫描；浏览器投递由 Web 前端完成 |
 
 ---
 
@@ -491,7 +491,7 @@ Runtime：Run / Event / Message 权威事实
 - Tool 的安全链路提供参数校验、资源解释和 allow/ask/deny 决策，但不是 OS 级强沙箱。
 - MCP 只将 tools 接入 Tool Registry；resources 和 prompts 当前不作为模型工具暴露。
 - Journal 代码和配置存在，但当前没有进入 ApplicationHost 或 Runtime 主链；Runtime 的恢复依据是 Run Repository 和 Checkpoint。
-- Scheduler 代码和配置存在，但 ApplicationHost 当前不创建 ReminderManager，也不管理其 Task 生命周期。
+- Scheduler 由 ApplicationHost 管理，负责个人提醒恢复与周期扫描，不参与 Runtime 或 Orchestration 调度。
 - MCP 主链接入存在，但当前默认 `mcp_servers=[]`，不会连接 Server 或注册 MCP Tool。
 - Skills 主链接入存在，但当前默认跳过 `_example`，Registry 为空。
 - Memory 主链接入存在；DeepDream 当前只由手动入口触发，不是普通 Run 自动阶段。

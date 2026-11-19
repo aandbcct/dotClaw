@@ -1,6 +1,7 @@
 """提醒 API 的严格请求与响应模型。"""
 
 import re
+import calendar
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -34,10 +35,24 @@ class BeforeDateRulePayload(_Rule):
     days_before: Annotated[int, Field(ge=0)]
     local_time: str
 
+    @field_validator("local_time")
+    @classmethod
+    def valid_time(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{2}:\d{2}", value) or int(value[:2]) > 23 or int(value[3:]) > 59:
+            raise ValueError("local_time 必须为 HH:mm")
+        return value
+
 
 class DailyRulePayload(_Rule):
     kind: Literal["daily"]
     local_time: str
+
+    @field_validator("local_time")
+    @classmethod
+    def valid_time(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{2}:\d{2}", value) or int(value[:2]) > 23 or int(value[3:]) > 59:
+            raise ValueError("local_time 必须为 HH:mm")
+        return value
 
 
 class WeeklyRulePayload(_Rule):
@@ -45,11 +60,32 @@ class WeeklyRulePayload(_Rule):
     weekdays: list[Annotated[int, Field(ge=0, le=6)]]
     local_time: str
 
+    @field_validator("weekdays")
+    @classmethod
+    def valid_weekdays(cls, value: list[int]) -> list[int]:
+        if not value or value != sorted(set(value)):
+            raise ValueError("weekdays 必须是非空去重升序列表")
+        return value
+
+    @field_validator("local_time")
+    @classmethod
+    def valid_time(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{2}:\d{2}", value) or int(value[:2]) > 23 or int(value[3:]) > 59:
+            raise ValueError("local_time 必须为 HH:mm")
+        return value
+
 
 class MonthlyRulePayload(_Rule):
     kind: Literal["monthly"]
     day: Annotated[int, Field(ge=1, le=31)]
     local_time: str
+
+    @field_validator("local_time")
+    @classmethod
+    def valid_time(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{2}:\d{2}", value) or int(value[:2]) > 23 or int(value[3:]) > 59:
+            raise ValueError("local_time 必须为 HH:mm")
+        return value
 
 
 class YearlyRulePayload(_Rule):
@@ -57,6 +93,21 @@ class YearlyRulePayload(_Rule):
     month: Annotated[int, Field(ge=1, le=12)]
     day: Annotated[int, Field(ge=1, le=31)]
     local_time: str
+
+    @field_validator("day")
+    @classmethod
+    def valid_day(cls, value: int, info) -> int:
+        month = info.data.get("month")
+        if month and value > calendar.monthrange(2000, month)[1]:
+            raise ValueError("yearly 月日无效")
+        return value
+
+    @field_validator("local_time")
+    @classmethod
+    def valid_time(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{2}:\d{2}", value) or int(value[:2]) > 23 or int(value[3:]) > 59:
+            raise ValueError("local_time 必须为 HH:mm")
+        return value
 
 
 ReminderRulePayload = Annotated[AtRulePayload | BeforeDeadlineRulePayload | BeforeDateRulePayload | DailyRulePayload | WeeklyRulePayload | MonthlyRulePayload | YearlyRulePayload, Field(discriminator="kind")]
