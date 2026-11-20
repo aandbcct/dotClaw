@@ -35,6 +35,18 @@ describe("通知中心", () => {
     expect(formatNotificationBody("reminder", "自定义提醒正文")).toBe("自定义提醒正文");
   });
 
+  it("支持无截止和RFC3339截止时间的固定提醒正文", () => {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const noDeadline = formatNotificationBody("reminder", "提醒时间：2026-11-20T01:01:00+00:00");
+    expect(noDeadline).toContain("浏览器当地时间");
+    expect(noDeadline).toContain(timezone);
+    expect(noDeadline).not.toContain("事务截止");
+    const datetimeDeadline = formatNotificationBody("reminder", "提醒时间：2026-11-20T01:01:00+00:00；事务截止：2026-11-20T08:30:00+08:00");
+    expect(datetimeDeadline).toContain("事务截止：");
+    expect(datetimeDeadline).toContain(timezone);
+    expect(datetimeDeadline).not.toContain("2026-11-20T08:30:00+08:00");
+  });
+
   it("展示通知详情和成员状态，并分别导航到事务与摘要", async () => {
     let readAt: string | null = null;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -11,13 +11,22 @@ function timeLabel(value: string) {
 
 export function formatNotificationBody(kind: NotificationItem["kind"], body: string) {
   if (kind !== "reminder") return body;
-  const match = /^提醒时间：([^；]+)；事务截止：(\d{4}-\d{2}-\d{2})$/.exec(body);
+  const match = /^提醒时间：([^；]+)(?:；事务截止：([^；]+))?$/.exec(body);
   if (!match) return body;
   const reminderDate = new Date(match[1]);
   if (!Number.isFinite(reminderDate.getTime())) return body;
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const localTime = reminderDate.toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" });
-  return `提醒时间：${localTime}（浏览器当地时间，${zone}）；事务截止：${match[2]}`;
+  let formatted = `提醒时间：${localTime}（浏览器当地时间，${zone}）`;
+  if (match[2]) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(match[2])) formatted += `；事务截止：${match[2]}`;
+    else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(match[2])) {
+      const deadline = new Date(match[2]);
+      if (!Number.isFinite(deadline.getTime())) return body;
+      formatted += `；事务截止：${deadline.toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" })}（浏览器当地时间，${zone}）`;
+    } else return body;
+  }
+  return formatted;
 }
 
 function taskStatus(status: string | null) {
