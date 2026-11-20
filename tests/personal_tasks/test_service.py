@@ -22,7 +22,7 @@ class MemoryRepository:
     async def list(self, statuses):
         return tuple(task for task in self.items.values() if statuses is None or task.status in statuses)
 
-    async def replace(self, task, *, expected_version):
+    async def replace(self, task, *, expected_version, now=None, timezone=None):
         current = self.items.get(task.id)
         if current is None:
             raise PersonalTaskNotFound(task.id)
