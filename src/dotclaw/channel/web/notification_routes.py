@@ -2,13 +2,28 @@
 
 from fastapi import APIRouter, Path, Query, Request
 
-from .notification_schemas import ClaimDeliveryRequest, NotificationChangesResponse, NotificationListResponse, NotificationResponse, ReportDeliveryRequest
+from .notification_schemas import (ClaimDeliveryRequest, NotificationChangesResponse, NotificationDeliveryResponse,
+    NotificationListResponse, NotificationMemberResponse, NotificationResponse, ReportDeliveryRequest)
 
 router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
 
 
 def _response(notification) -> NotificationResponse:
-    return NotificationResponse(id=notification.id, kind=notification.kind, occurrence_id=notification.occurrence_id, created_at=notification.created_at, read_at=notification.read_at, title=notification.title, body=notification.body, members=notification.members, deliveries=notification.deliveries)
+    return NotificationResponse(
+        id=notification.id, kind=notification.kind, occurrence_id=notification.occurrence_id,
+        created_at=notification.created_at, read_at=notification.read_at, title=notification.title,
+        body=notification.body,
+        members=[NotificationMemberResponse(
+            task_id=member.task_id, title_snapshot=member.title_snapshot, missed=member.missed,
+            overdue=member.overdue, current_status=member.current_status,
+            current_is_overdue=member.current_is_overdue,
+        ) for member in notification.members],
+        deliveries=[NotificationDeliveryResponse(
+            notification_id=delivery.notification_id, channel=delivery.channel,
+            claim_id=delivery.claim_id, status=delivery.status, attempted_at=delivery.attempted_at,
+            reported_at=delivery.reported_at, error=delivery.error,
+        ) for delivery in notification.deliveries],
+    )
 
 
 @router.get("", response_model=NotificationListResponse)
