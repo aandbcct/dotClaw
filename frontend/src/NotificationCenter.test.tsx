@@ -47,6 +47,14 @@ describe("通知中心", () => {
     expect(datetimeDeadline).not.toContain("2026-11-20T08:30:00+08:00");
   });
 
+  it("在列表中也显示格式化后的提醒时间", async () => {
+    const reminder = { ...notification, kind: "reminder" as const, body: "提醒时间：2026-11-20T01:01:00+00:00；事务截止：2026-11-20" };
+    vi.stubGlobal("fetch", vi.fn(async () => json(page([reminder]))));
+    render(<NotificationCenter {...props} />);
+    expect(await screen.findByText(formatNotificationBody("reminder", reminder.body))).toBeTruthy();
+    expect(screen.queryByText(reminder.body)).toBeNull();
+  });
+
   it("展示通知详情和成员状态，并分别导航到事务与摘要", async () => {
     let readAt: string | null = null;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

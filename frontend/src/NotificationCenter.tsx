@@ -168,7 +168,7 @@ export function NotificationCenter({ onOpenTask, onOpenSummary, onRefresh, onOpe
             <button type="button" aria-current={selected?.id === item.id ? "true" : undefined} onClick={() => void open(item)} disabled={actionPending === item.id}>
               <span className="notification-workspace__item-heading"><strong>{item.title}</strong><span>{item.read_at ? "已读" : "未读"}</span></span>
               <time dateTime={item.created_at}>{timeLabel(item.created_at)}</time>
-              <span className="notification-workspace__summary">{item.body}</span>
+              <span className="notification-workspace__summary">{formatNotificationBody(item.kind, item.body)}</span>
               {actionPending === item.id && <small role="status">正在打开…</small>}
             </button>
           </li>)}
