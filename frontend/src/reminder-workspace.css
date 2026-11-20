@@ -1,0 +1,250 @@
+.personal-tasks > header {
+  min-height: 52px;
+  border-bottom: 1px solid var(--line);
+}
+
+.personal-tasks > header > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.personal-tasks > nav {
+  gap: 4px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.personal-tasks > nav button[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.personal-tasks .task-list > .task-row {
+  display: block;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+  scroll-margin: 24px;
+}
+
+.task-row:focus {
+  background: var(--accent-soft);
+  animation: reminder-focus 900ms ease-out;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.task-row-heading,
+.task-row-actions,
+.task-focus-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.task-row-heading > strong {
+  margin-right: auto;
+  font-size: 16px;
+}
+
+.task-row-heading > span:not(.task-status) {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-row-actions {
+  margin-top: 8px;
+}
+
+.personal-tasks .task-row-actions button,
+.personal-tasks > header button,
+.personal-tasks > nav button,
+.reminder-workspace button {
+  min-height: 44px;
+  padding: 8px 12px;
+}
+
+.task-status,
+.reminder-status {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-status--in_progress,
+.reminder-status--active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.task-row p {
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.task-focus-heading h2 {
+  margin-right: auto;
+  font-size: 16px;
+}
+
+.personal-tasks .task-editor.reminder-form {
+  min-width: min(520px, 78vw);
+}
+
+.reminder-date-fields,
+.reminder-offset-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.reminder-offset-fields {
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 0.7fr);
+}
+
+.reminder-workspace {
+  min-width: min(520px, 78vw);
+}
+
+.reminder-workspace .reminder-editor {
+  min-width: 0;
+}
+
+.reminder-context {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.reminder-context strong {
+  color: var(--text);
+}
+
+.reminder-list {
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.personal-tasks .reminder-list > li,
+.reminder-workspace .reminder-list > li {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.reminder-item-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reminder-item-main strong {
+  flex: 1;
+  min-width: 180px;
+}
+
+.reminder-list time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.reminder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.reminder-primary {
+  min-height: 44px;
+  padding: 8px 14px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.reminder-primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(0.94);
+}
+
+.reminder-note,
+.reminder-empty {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.reminder-success {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.reminder-error {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--danger-surface);
+  color: var(--danger);
+}
+
+.reminder-conflict {
+  padding: 12px;
+  border-left: 2px solid var(--accent);
+  background: var(--surface);
+}
+
+.reminder-workspace .reminder-form label {
+  margin-bottom: 4px;
+}
+
+.reminder-workspace .reminder-form fieldset {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.reminder-workspace .reminder-form fieldset input {
+  min-height: 24px;
+  accent-color: var(--accent);
+}
+
+.reminder-workspace .reminder-form footer {
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+@keyframes reminder-focus {
+  from { background: var(--accent-soft); }
+  to { background: transparent; }
+}
+
+@media (max-width: 620px) {
+  .reminder-workspace,
+  .personal-tasks .task-editor.reminder-form {
+    min-width: min(100%, 78vw);
+  }
+
+  .reminder-date-fields,
+  .reminder-offset-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-row:focus { animation: none; }
+}

@@ -20,7 +20,7 @@ describe("个人事务视图", () => {
     const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
     await user.click(await screen.findByRole("button", { name: "编辑" }));
     const title = screen.getByLabelText("标题"); await user.clear(title); await user.type(title, "我的草稿");
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "保存事务" }));
     await user.click(await screen.findByRole("button", { name: "重新读取" }));
     expect(await screen.findByText(/确认后会替换当前草稿/)).toBeTruthy();
     expect((title as HTMLInputElement).value).toBe("我的草稿");
@@ -39,8 +39,8 @@ describe("个人事务视图", () => {
     const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
     await user.click(await screen.findByRole("button", { name: "新建" }));
     const title = screen.getByLabelText("标题"); await user.type(title, "新事务");
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存事务" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存事务" }));
     await waitFor(() => expect((title as HTMLInputElement).disabled).toBe(true));
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
     finishPost?.(payload({ ...current, title: "新事务" }, 201));

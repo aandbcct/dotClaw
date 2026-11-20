@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TaskReminders } from "./TaskReminders";
@@ -38,21 +38,24 @@ describe("事务提醒管理", () => {
     render(<TaskReminders task={task} onClose={() => undefined} />);
 
     await user.click(await screen.findByRole("button", { name: "修改" }));
-    const input = screen.getByLabelText(/RFC3339 时刻/);
-    await user.clear(input);
-    await user.type(input, "2026-12-02T10:30:00+08:00");
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    const dateInput = screen.getByLabelText("触发日期");
+    const timeInput = screen.getByLabelText("触发时刻");
+    fireEvent.change(dateInput, { target: { value: "2026-12-02" } });
+    fireEvent.change(timeInput, { target: { value: "10:30" } });
+    await user.click(screen.getByRole("button", { name: "保存提醒" }));
 
     await waitFor(() => expect(screen.getAllByRole("alert").some((node) => node.textContent?.includes("提醒已被修改"))).toBe(true));
-    expect((input as HTMLInputElement).value).toBe("2026-12-02T10:30:00+08:00");
+    expect((dateInput as HTMLInputElement).value).toBe("2026-12-02");
+    expect((timeInput as HTMLInputElement).value).toBe("10:30");
     await user.click(screen.getByRole("button", { name: "重新读取当前提醒" }));
     expect(await screen.findByText(/当前版本为 2/)).toBeTruthy();
-    expect((input as HTMLInputElement).value).toBe("2026-12-02T10:30:00+08:00");
-    await user.click(screen.getByRole("button", { name: "确认替换当前版本" }));
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect((dateInput as HTMLInputElement).value).toBe("2026-12-02");
+    expect((timeInput as HTMLInputElement).value).toBe("10:30");
+    await user.click(screen.getByRole("button", { name: "确认使用当前版本" }));
+    await user.click(screen.getByRole("button", { name: "保存提醒" }));
 
     await waitFor(() => expect(updateCount).toBe(2));
     expect(putBodies.map((body) => body.expected_version)).toEqual([1, 2]);
-    expect(putBodies[1]).toMatchObject({ expected_task_version: 1, rule: { kind: "at", at: "2026-12-02T10:30:00+08:00" } });
+    expect(putBodies[1]).toMatchObject({ expected_task_version: 1, rule: { kind: "at", at: "2026-12-02T02:30:00.000Z" } });
   });
 });
