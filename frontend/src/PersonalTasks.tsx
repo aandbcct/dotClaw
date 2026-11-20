@@ -36,7 +36,7 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
           return Boolean(old && item.version > old.version && Date.parse(item.updated_at) === Date.parse(savedTask.updated_at) && ((item.status === "paused" && item.reason === "deadline_moved_past") || (item.status === "cancelled" && item.reason === "deadline_removed_or_changed_kind")));
         }));
       } catch (reason) { setDeadlineChangeError(reason instanceof Error ? `事务已保存，但读取关联提醒变化失败：${reason.message}` : "事务已保存，但读取关联提醒变化失败"); }
-    } else { const created = await tasks.create(input, initialReminder ? [initialReminder] : []); setReminding(created); setEditing(undefined); setTaskSuccess("事务已创建"); }
+    } else { await tasks.create(input, initialReminder ? [initialReminder] : []); setEditing(undefined); setTaskSuccess(initialReminder ? "事务及提醒已创建" : "事务已创建"); }
   }
   function changeTaskStatus(task: PersonalTask, status: PersonalTaskStatus) {
     setActionError("");
@@ -44,7 +44,7 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
     const success = status === "completed" ? "事务已完成" : status === "pending" ? "事务已重新打开" : status === "in_progress" ? "事务已开始" : "事务已取消";
     void tasks.changeStatus(task, status).then(() => setTaskSuccess(success)).catch((error) => setActionError(error instanceof Error ? error.message : "状态更新失败"));
   }
-  return <section className="personal-tasks"><header><button className="menu-button" onClick={onOpenNavigation}>☰</button><h1>事务</h1><span>应用时区：{tasks.timezone}</span><button onClick={() => void tasks.reload()}>刷新</button><button onClick={() => setEditing(null)}>新建</button></header>
+  return <section className="personal-tasks"><header><button className="menu-button" onClick={onOpenNavigation}>☰</button><h1>事务</h1><span>应用时区：{tasks.timezone}</span><button onClick={() => void tasks.reload(true)}>刷新</button><button onClick={() => setEditing(null)}>新建</button></header>
     <nav aria-label="事务筛选">{(["active", "all", "completed", "cancelled"] as PersonalTaskFilter[]).map((value) => <button key={value} aria-pressed={tasks.filter === value} onClick={() => tasks.setFilter(value)}>{({ active: "未完成", all: "全部", completed: "已完成", cancelled: "已取消" })[value]}</button>)}</nav>
     {tasks.error && <p role="alert">{tasks.error}</p>}
     {missingTask && <p role="status">事务已删除 <button onClick={() => setMissingTask(false)}>清除定位</button></p>}

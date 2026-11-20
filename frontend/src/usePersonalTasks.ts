@@ -15,13 +15,8 @@ export function usePersonalTasks() {
   const reminderSequences = useRef(new Map<string, number>());
   const reminderRequests = useRef(new Set<string>());
   const filterRef = useRef(filter); filterRef.current = filter;
-  const reload = useCallback(async () => {
-    const current = ++sequence.current; controller.current?.abort(); const abort = new AbortController(); controller.current = abort; setLoading(true);
-    try { const result = await listPersonalTasks(filterRef.current, abort.signal); if (current === sequence.current) { setItems(result.items); setTimezone(result.timezone); setError(""); } return true; }
-    catch (reason) { if ((reason as Error).name === "AbortError" || current !== sequence.current) return true; setError("事务列表读取失败，请重试"); return false; }
-    finally { if (current === sequence.current) setLoading(false); }
-  }, []);
   const refreshReminderSummary = useCallback(async (taskId: string) => {
+    reminderRequests.current.add(taskId);
     const current = (reminderSequences.current.get(taskId) || 0) + 1;
     reminderSequences.current.set(taskId, current);
     reminderControllers.current.get(taskId)?.abort();
@@ -47,20 +42,32 @@ export function usePersonalTasks() {
       if (reminderSequences.current.get(taskId) === current) reminderControllers.current.delete(taskId);
     }
   }, []);
+  const reload = useCallback(async (refreshSummaries = false) => {
+    const current = ++sequence.current; controller.current?.abort(); const abort = new AbortController(); controller.current = abort; setLoading(true);
+    try {
+      const result = await listPersonalTasks(filterRef.current, abort.signal);
+      if (current === sequence.current) {
+        setItems(result.items); setTimezone(result.timezone); setError("");
+        if (refreshSummaries) result.items.forEach((task) => { void refreshReminderSummary(task.id); });
+      }
+      return true;
+    } catch (reason) { if ((reason as Error).name === "AbortError" || current !== sequence.current) return true; setError("事务列表读取失败，请重试"); return false; }
+    finally { if (current === sequence.current) setLoading(false); }
+  }, [refreshReminderSummary]);
   useEffect(() => {
     for (const task of items) {
       if (reminderRequests.current.has(task.id)) continue;
-      reminderRequests.current.add(task.id);
       void refreshReminderSummary(task.id);
     }
   }, [items, refreshReminderSummary]);
   useEffect(() => {
     void reload();
-    const onFocus = () => { if (!mutation.current && !loadingRef.current) void reload(); };
+    const onFocus = () => { if (!mutation.current && !loadingRef.current) void reload(true); };
     const timer = window.setInterval(onFocus, 60_000);
     window.addEventListener("focus", onFocus);
-    return () => { window.clearInterval(timer); window.removeEventListener("focus", onFocus); controller.current?.abort(); reminderControllers.current.forEach((request) => request.abort()); };
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", onFocus); controller.current?.abort(); };
   }, [filter, reload]);
+  useEffect(() => () => { reminderControllers.current.forEach((request) => request.abort()); }, []);
   const run = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
     if (mutation.current) throw new Error("请等待当前操作完成"); mutation.current = true; setPending(true); setError(""); ++sequence.current;
     try { const result = await action(); if (!await reload()) setError("操作已保存，列表刷新失败"); return result; }

@@ -14,11 +14,14 @@ const reminderPage = (items: unknown[]) => ({ items, timezone: "Asia/Shanghai", 
 describe("个人事务视图", () => {
   it("新建时将事务和初始提醒放进同一个创建请求", async () => {
     const created = { ...current, id: "new-task", title: "含提醒事务" };
+    const today = dateTimeInputValue(new Date().toISOString(), "Asia/Shanghai").date;
+    const trigger = dateTimeToRfc3339(addDaysToDateInput(today, 1), "09:00", "Asia/Shanghai");
+    const initialReminder = { id: "r1", task_id: "new-task", rule: { kind: "at", at: trigger }, timezone: "Asia/Shanghai", status: "active", reason: null, next_fire_at: trigger, version: 1, created_at: current.created_at, updated_at: current.updated_at };
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input); requests.push({ url, init });
       if (url === "/api/v1/personal-tasks" && init?.method === "POST") return payload(created, 201);
-      if (url.endsWith("/new-task/reminders")) return payload({ items: [], timezone: "Asia/Shanghai", scheduler_enabled: true, last_scan_at: null, scan_lag_seconds: 0 });
+      if (url.endsWith("/new-task/reminders")) return payload(reminderPage([initialReminder]));
       if (url.endsWith("/new-task")) return payload(created);
       if (url.includes("/personal-tasks?")) return payload(list([created]));
       throw new Error("未预期请求：" + (init?.method || "GET") + " " + url);
@@ -30,9 +33,10 @@ describe("个人事务视图", () => {
     await user.click(screen.getByRole("button", { name: "明天 09:00" }));
     await user.click(screen.getByRole("button", { name: "保存事务" }));
 
-    await waitFor(() => expect(requests.some(({ init }) => init?.method === "POST")).toBe(true));
+    await screen.findByText("事务及提醒已创建");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await screen.findByText(/下次提醒：/);
     const create = requests.find(({ init }) => init?.method === "POST");
-    const today = dateTimeInputValue(new Date().toISOString(), "Asia/Shanghai").date;
     expect(JSON.parse(String(create?.init?.body))).toMatchObject({
       title: "含提醒事务",
       reminders: [{ kind: "at", at: dateTimeToRfc3339(addDaysToDateInput(today, 1), "09:00", "Asia/Shanghai") }],
@@ -67,17 +71,18 @@ describe("个人事务视图", () => {
     });
   });
 
-  it("每个事务摘要只读取一次，读取失败可重试", async () => {
+  it("读取失败可重试，显式刷新更新摘要且每轮只读一次", async () => {
     let summaryReads = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/t1/reminders")) {
         summaryReads += 1;
         if (summaryReads === 1) return payload({ error: { message: "网络不可用" } }, 503);
-        return payload(reminderPage([
+        if (summaryReads === 2) return payload(reminderPage([
           { ...current, id: "r1", rule: { kind: "at", at: "2026-12-01T09:00:00Z" }, task_id: "t1", timezone: "Asia/Shanghai", status: "active", reason: null, next_fire_at: "2026-12-01T09:00:00Z", version: 1, created_at: current.created_at, updated_at: current.updated_at },
           { ...current, id: "r2", rule: { kind: "at", at: "2026-12-02T09:00:00Z" }, task_id: "t1", timezone: "Asia/Shanghai", status: "active", reason: null, next_fire_at: "2026-12-02T09:00:00Z", version: 1, created_at: current.created_at, updated_at: current.updated_at },
         ]));
+        return payload(reminderPage([{ ...current, id: "r3", rule: { kind: "at", at: "2026-12-03T09:00:00Z" }, task_id: "t1", timezone: "Asia/Shanghai", status: "active", reason: null, next_fire_at: "2026-12-03T09:00:00Z", version: 1, created_at: current.created_at, updated_at: current.updated_at }]));
       }
       return payload(list([current]));
     });
@@ -87,8 +92,8 @@ describe("个人事务视图", () => {
     await user.click(screen.getByRole("button", { name: "重试" }));
     expect(await screen.findByText(/另有 1 条/)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "刷新" }));
-    await waitFor(() => expect(screen.getByText(/另有 1 条/)).toBeTruthy());
-    expect(summaryReads).toBe(2);
+    await screen.findByText(/12月3日/);
+    expect(summaryReads).toBe(3);
   });
 
   it("摘要旧请求晚到时不会覆盖较新的读取", async () => {
@@ -117,6 +122,24 @@ describe("个人事务视图", () => {
     await act(async () => { await oldRequest; });
     expect(result.current.reminderSummaries.t1.items).toEqual([]);
     unmount();
+  });
+
+  it("切换筛选不会留下永久加载的提醒摘要", async () => {
+    let finishSummary: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/t1/reminders")) return new Promise<Response>((resolve, reject) => {
+        finishSummary = resolve;
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
+      });
+      return Promise.resolve(payload(list([current])));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
+    await screen.findByText("正在读取提醒摘要…");
+    await user.click(screen.getByRole("button", { name: "全部" }));
+    finishSummary?.(payload(reminderPage([])));
+    expect(await screen.findByText("无待触发提醒")).toBeTruthy();
   });
 
   it("冲突后先读取，再由用户确认替换草稿与版本", async () => {
@@ -156,5 +179,7 @@ describe("个人事务视图", () => {
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
     finishPost?.(payload({ ...current, title: "新事务" }, 201));
     await waitFor(() => expect(screen.queryByLabelText("标题")).toBeNull());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByText("事务已创建")).toBeTruthy();
   });
 });

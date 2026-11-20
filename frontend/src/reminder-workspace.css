@@ -98,12 +98,18 @@
   list-style-position: inside;
 }
 
+.task-more {
+  position: relative;
+}
+
 .task-more[open] > div {
   position: absolute;
   z-index: 2;
-  right: 0;
+  top: calc(100% + 4px);
+  left: 0;
   display: grid;
   min-width: 160px;
+  max-width: calc(100vw - 32px);
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -337,6 +343,13 @@
   .reminder-date-fields,
   .reminder-offset-fields {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 960px) {
+  .task-more[open] > div {
+    right: 0;
+    left: auto;
   }
 }
 
