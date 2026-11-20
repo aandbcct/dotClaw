@@ -7,13 +7,21 @@ export function useNotifications(delivery: NotificationDeliveryPort, onNavigate:
   const [unreadCount, setUnreadCount] = useState(0);
   const [connectionError, setConnectionError] = useState("");
   const [permission, setPermission] = useState(delivery.permission());
+  const [permissionPending, setPermissionPending] = useState(false);
+  const [permissionError, setPermissionError] = useState("");
+  const [revision, setRevision] = useState(0);
   const cursor = useRef(0);
   const started = useRef(false);
   const navigating = useRef(onNavigate);
   const busy = useRef(false);
   navigating.current = onNavigate;
   const refresh = useCallback(async () => { const page = await listNotifications({ limit: 1 }); setUnreadCount(page.unread_count); return page; }, []);
-  const enableSystemNotifications = useCallback(async () => { const value = await delivery.requestPermission(); setPermission(value); if (value === "granted") { const page = await refresh(); cursor.current = page.watermark; started.current = true; } }, [delivery, refresh]);
+  const enableSystemNotifications = useCallback(async () => {
+    setPermissionPending(true); setPermissionError("");
+    try { const value = await delivery.requestPermission(); setPermission(value); if (value === "granted") { const page = await refresh(); cursor.current = page.watermark; started.current = true; } }
+    catch (error) { setPermissionError(error instanceof Error ? error.message : "无法启用系统通知"); }
+    finally { setPermissionPending(false); }
+  }, [delivery, refresh]);
   useEffect(() => {
     let disposed = false;
     let timer = 0;
@@ -33,13 +41,14 @@ export function useNotifications(delivery: NotificationDeliveryPort, onNavigate:
       busy.current = true;
       try {
         const now = Date.now();
-        if (started.current && wasDisconnected) { const page = await listNotifications({ limit: 1 }, controller.signal); cursor.current = page.watermark; setUnreadCount(page.unread_count); wasDisconnected = false; previousPoll = now; setConnectionError(""); return; }
-        if (started.current && now - previousPoll > 30000) { const page = await listNotifications({ limit: 1 }, controller.signal); cursor.current = page.watermark; setUnreadCount(page.unread_count); previousPoll = now; setConnectionError(""); return; }
+        if (started.current && wasDisconnected) { const page = await listNotifications({ limit: 1 }, controller.signal); if (page.watermark !== cursor.current) setRevision((value) => value + 1); cursor.current = page.watermark; setUnreadCount(page.unread_count); wasDisconnected = false; previousPoll = now; setConnectionError(""); return; }
+        if (started.current && now - previousPoll > 30000) { const page = await listNotifications({ limit: 1 }, controller.signal); if (page.watermark !== cursor.current) setRevision((value) => value + 1); cursor.current = page.watermark; setUnreadCount(page.unread_count); previousPoll = now; setConnectionError(""); return; }
         if (!started.current) { const page = await listNotifications({ limit: 1 }, controller.signal); cursor.current = page.watermark; setUnreadCount(page.unread_count); started.current = true; previousPoll = now; return; }
         let more = true;
         while (more && !disposed) {
           const page = await getNotificationChanges(cursor.current, controller.signal);
           if (page.items.length) {
+            setRevision((value) => value + 1);
             for (const item of page.items) { if (item.id > cursor.current) await deliverNew(item); }
           }
           cursor.current = page.next_after_id; setUnreadCount(page.unread_count); more = page.has_more;
@@ -51,5 +60,5 @@ export function useNotifications(delivery: NotificationDeliveryPort, onNavigate:
     void poll(); timer = window.setInterval(() => void poll(), 5000);
     return () => { disposed = true; controller.abort(); window.clearInterval(timer); };
   }, [delivery]);
-  return { unreadCount, connectionError, permission, enableSystemNotifications, refresh };
+  return { unreadCount, connectionError, permission, permissionPending, permissionError, revision, enableSystemNotifications, refresh };
 }

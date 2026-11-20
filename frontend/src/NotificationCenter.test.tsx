@@ -20,7 +20,8 @@ const notification = {
   deliveries: [{ notification_id: 12, channel: "browser", claim_id: "claim-12", status: "attempted", attempted_at: "2026-11-20T01:00:01Z", reported_at: null, error: null }],
 };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-const page = (items: unknown[]) => ({ items, next_before_id: null, unread_count: 1, watermark: 12 });
+const page = (items: unknown[], next_before_id: number | null = null) => ({ items, next_before_id, unread_count: 1, watermark: 12 });
+const props = { onOpenNavigation: () => undefined, onOpenTask: (_id: string) => undefined, onOpenSummary: (_id: number) => undefined, onRefresh: async () => undefined, revision: 0, unreadCount: 1, connectionError: "", permission: "default" as const, permissionPending: false, permissionError: "", onEnableSystemNotifications: () => undefined };
 
 describe("通知中心", () => {
   it("展示通知详情和成员状态，并分别导航到事务与摘要", async () => {
@@ -40,10 +41,10 @@ describe("通知中心", () => {
     const onOpenSummary = vi.fn();
     const onRefresh = vi.fn(async () => undefined);
     const user = userEvent.setup();
-    render(<NotificationCenter onOpenNavigation={() => undefined} systemNotifications={null} onOpenTask={onOpenTask} onOpenSummary={onOpenSummary} onRefresh={onRefresh} />);
+    render(<NotificationCenter {...props} onOpenTask={onOpenTask} onOpenSummary={onOpenSummary} onRefresh={onRefresh} />);
 
     await user.click(await screen.findByRole("button", { name: /离线期间提醒汇总/ }));
-    expect(document.querySelector(".notification-detail")?.textContent).toContain("当前状态：in_progress");
+    expect(document.querySelector(".notification-workspace__detail")?.textContent).toContain("当前状态：进行中");
     expect(screen.getByText("结果未确认")).toBeTruthy();
     expect(onRefresh).toHaveBeenCalledOnce();
     await user.click(screen.getByRole("button", { name: "准备评审" }));
@@ -55,7 +56,61 @@ describe("通知中心", () => {
 
   it("读取列表失败时保留通知区并显示错误", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ error: { code: "personal_task_storage_failed", message: "通知暂时无法读取", retryable: true } }, 500)));
-    render(<NotificationCenter onOpenNavigation={() => undefined} systemNotifications={null} onOpenTask={() => undefined} onOpenSummary={() => undefined} onRefresh={async () => undefined} />);
+    render(<NotificationCenter {...props} />);
     expect((await screen.findByRole("alert")).textContent).toContain("通知暂时无法读取");
+  });
+
+  it("自动刷新首屏时保留已加载的历史页", async () => {
+    let newest = [notification];
+    const older = { ...notification, id: 11, kind: "reminder", title: "较早通知", read_at: "2026-11-19T01:00:00Z" };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("before_id=11")) return json(page([older], null));
+      return json(page(newest, 11));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { rerender } = render(<NotificationCenter {...props} />);
+    await screen.findByRole("button", { name: /离线期间提醒汇总/ });
+    await user.click(screen.getByRole("button", { name: "加载更早通知" }));
+    expect(await screen.findByRole("button", { name: /较早通知/ })).toBeTruthy();
+    newest = [{ ...notification, id: 13, title: "刚到的新通知" }, notification];
+    rerender(<NotificationCenter {...props} revision={1} unreadCount={2} />);
+    expect(await screen.findByRole("button", { name: /刚到的新通知/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /较早通知/ })).toBeTruthy();
+    expect(screen.getByText("2 条未读通知")).toBeTruthy();
+  });
+
+  it("快速切换详情时忽略较早请求的迟到响应", async () => {
+    let resolveFirst!: (response: Response) => void;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/v1/notifications?") ) return Promise.resolve(json(page([notification, { ...notification, id: 13, title: "第二条通知" }])));
+      if (url === "/api/v1/notifications/12") return new Promise<Response>((resolve) => { resolveFirst = resolve; });
+      if (url === "/api/v1/notifications/13") return Promise.resolve(json({ ...notification, id: 13, title: "第二条通知", read_at: "2026-11-20T01:05:00Z" }));
+      if (url.endsWith("/read")) return Promise.resolve(json(notification));
+      throw new Error(`未预期的请求：${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<NotificationCenter {...props} />);
+    await user.click(await screen.findByRole("button", { name: /离线期间提醒汇总/ }));
+    await user.click(screen.getByRole("button", { name: /第二条通知/ }));
+    expect(await screen.findByRole("heading", { name: "第二条通知" })).toBeTruthy();
+    resolveFirst(json(notification));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByRole("heading", { name: "第二条通知" })).toBeTruthy();
+  });
+
+  it("权限状态使用易懂中文，且请求期间禁用按钮", async () => {
+    let resolvePermission!: () => void;
+    const onEnableSystemNotifications = vi.fn(() => new Promise<void>((resolve) => { resolvePermission = resolve; }));
+    const user = userEvent.setup();
+    const { rerender } = render(<NotificationCenter {...props} onEnableSystemNotifications={onEnableSystemNotifications} />);
+    await user.click(screen.getByRole("button", { name: "启用系统通知" }));
+    rerender(<NotificationCenter {...props} permissionPending onEnableSystemNotifications={onEnableSystemNotifications} />);
+    expect(screen.getByRole("button", { name: "正在请求权限…" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByText("default")).toBeNull();
+    resolvePermission();
   });
 });
