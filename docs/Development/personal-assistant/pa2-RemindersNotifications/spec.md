@@ -341,3 +341,15 @@ deliver 直接创建浏览器 Notification（浏览器系统通知对象），ti
 10. Docker 运行中网页后台收到系统通知；关闭网页后站内仍生成，重开只见历史未读；服务停机后恢复看到汇总。浏览器计时节流和 OS 免打扰不按准秒送达验收，后端正常扫描到期至入库以 2 秒内为无负载测试目标。
 
 设计依据包括仓库 README、docs/docker.md、当前个人事务/宿主/Web/前端实现，以及 [APScheduler 3.x 官方指南](https://apscheduler.readthedocs.io/en/3.x/userguide.html)、[浏览器通知文档](https://developer.mozilla.org/en-US/docs/Web/API/Notifications_API/Using_the_Notifications_API)。后两者在本次讨论中已核对。所有实现与测试结果须在开发阶段记录，不将设计契约作为运行证据。
+
+## 10. 2026-11-20 日常使用优化补充
+
+本节记录用户随后确认的使用流程调整，相关条目以本节为准。
+
+- CreatePersonalTaskRequest（创建事务请求）增加可选 `reminders: list[ReminderRulePayload]`，缺省空列表。原客户端继续适用，201 仍返回 PersonalTaskResponse（事务响应）。PersonalTaskService（事务业务服务）的 create 增加 `reminders: tuple[ReminderRule, ...] = ()`，先验证全部规则及未来时刻，再调用 `PersonalTaskRepository.create_with_reminders(task, reminders)`（事务与初始提醒的原子创建）。SQLite 在同一个 BEGIN IMMEDIATE 中插入事务和全部初始提醒，任何失败整次回滚。无初始提醒继续使用既有 create。
+- 新建表单允许附一条指定时刻或截止前一天提醒，保存后回列表，明确提示事务或事务及提醒已创建。后续多条/周期提醒仍由提醒管理入口设置。
+- 事务列表读取并显示最早活动提醒时刻及额外活动提醒数量。摘要读取失败显示重试，刷新、聚焦和既有定时刷新重验证当前列表摘要，迟到请求不得覆盖新结果。保留“完成”和“提醒”为主操作，其余放更多菜单，删除保留确认步骤。
+- 创建表单与提醒编辑器提供“今天15:00”“明天09:00”“截止前1天”。前两者按应用时区计算，今天15:00已过则禁用；截止快捷保存相对规则，时刻截止为 before_deadline 偏移1440分钟，日期截止为 before_date 提前一天当地09:00，用户可继续编辑。
+- 通知详情优先展示事项、可读时间和查看事务/摘要主操作，多成员及投递状态放折叠区。列表与详情的已知普通提醒正文统一格式化时间，保留原始持久文本，明确浏览器当地时区；未知正文保持原文。
+
+针对上述调整新增原子创建回滚、创建后回列表、摘要重验证、快捷规则及通知主操作测试。相关后端测试104项、前端测试121项通过；实际 Docker 页面完成新建并附明天09:00提醒、返回列表显示摘要、更多菜单及通知主操作核对。验收临时事项已通过 API 清理。
