@@ -153,6 +153,8 @@ it("终态历史尚未回填时保留下一条草稿，不静默吞掉提交", a
   let finishHistory: (response: Response) => void = () => undefined;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    if (url.startsWith("/api/v1/notifications?")) return json({ items: [], next_before_id: null, unread_count: 0, watermark: 0 });
+    if (url.startsWith("/api/v1/notifications/changes?")) return json({ items: [], next_after_id: 0, has_more: false, unread_count: 0, watermark: 0 });
     if (url.endsWith("/sessions")) return json([a]);
     if (url.includes("/activity")) return json(null);
     if (url.endsWith("/messages")) {
