@@ -183,6 +183,29 @@ class SqlitePersonalTaskRepository:
         finally:
             connection.close()
 
+    async def create_with_reminders(self, task: PersonalTask, reminders: tuple[Reminder, ...]) -> PersonalTask:
+        return await asyncio.to_thread(self._create_with_reminders_sync, task, reminders)
+
+    def _create_with_reminders_sync(self, task: PersonalTask, reminders: tuple[Reminder, ...]) -> PersonalTask:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("INSERT INTO personal_tasks VALUES (?,?,?,?,?,?,?,?,?,?)", self._encode(task))
+            for reminder in reminders:
+                connection.execute(
+                    "INSERT INTO task_reminders VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (reminder.id, reminder.task_id, json.dumps(reminder.rule, ensure_ascii=False), reminder.timezone,
+                     reminder.status.value, reminder.reason, self._stamp(reminder.next_fire_at), reminder.version,
+                     self._stamp(reminder.created_at), self._stamp(reminder.updated_at)),
+                )
+            connection.execute("COMMIT")
+            return task
+        except sqlite3.Error as error:
+            connection.rollback()
+            raise PersonalTaskStorageError("创建事务及初始提醒失败") from error
+        finally:
+            connection.close()
+
     async def get(self, task_id: str) -> PersonalTask | None:
         return await asyncio.to_thread(self._get_sync, task_id)
 

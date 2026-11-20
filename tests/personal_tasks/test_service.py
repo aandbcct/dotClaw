@@ -11,9 +11,15 @@ from dotclaw.personal_tasks.service import InvalidPersonalTaskTransition, Person
 class MemoryRepository:
     def __init__(self):
         self.items = {}
+        self.reminders = {}
 
     async def create(self, task):
         self.items[task.id] = task
+        return task
+
+    async def create_with_reminders(self, task, reminders):
+        self.items[task.id] = task
+        self.reminders[task.id] = reminders
         return task
 
     async def get(self, task_id):
@@ -79,3 +85,22 @@ async def test_datetime_overdue_is_strictly_after_deadline():
     after = PersonalTaskService(repository, timezone=ZoneInfo("Asia/Shanghai"), clock=lambda: deadline.replace(microsecond=1))
     task_after = await after.get(task_at_boundary.task.id)
     assert task_after.is_overdue
+
+
+@pytest.mark.asyncio
+async def test_create_initial_reminders_validates_all_before_persisting():
+    from dotclaw.personal_tasks.repository import InvalidReminderInput
+
+    now = datetime(2030, 1, 1, 12, tzinfo=UTC)
+    repository = MemoryRepository()
+    service = PersonalTaskService(repository, timezone=ZoneInfo("UTC"), clock=lambda: now)
+    future = now.replace(minute=1).isoformat().replace("+00:00", "Z")
+    with pytest.raises(InvalidReminderInput):
+        await service.create(title="事务", reminders=(
+            {"kind": "at", "at": future},
+            {"kind": "before_deadline", "offset_minutes": 60},
+        ))
+    assert repository.items == {}
+
+    created = await service.create(title="事务", reminders=({"kind": "at", "at": future},))
+    assert len(repository.reminders[created.task.id]) == 1

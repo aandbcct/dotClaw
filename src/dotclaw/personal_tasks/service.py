@@ -7,7 +7,9 @@ from zoneinfo import ZoneInfo
 
 from .models import (PersonalTask, PersonalTaskFilter, PersonalTaskList, PersonalTaskStatus,
                      PersonalTaskView, TaskDeadline, deadline_sort_at, is_overdue)
-from .repository import PersonalTaskNotFound, PersonalTaskRepository, PersonalTaskVersionConflict
+from .reminder_models import Reminder, ReminderRule, ReminderStatus
+from .reminder_rules import next_fire_at, validate_rule
+from .repository import InvalidReminderInput, PersonalTaskNotFound, PersonalTaskRepository, PersonalTaskVersionConflict
 
 
 class InvalidPersonalTaskInput(ValueError):
@@ -30,14 +32,32 @@ class PersonalTaskService:
     def _view(self, task: PersonalTask, now: datetime) -> PersonalTaskView:
         return PersonalTaskView(task, is_overdue(task, now, self._timezone))
 
-    async def create(self, *, title: str, description: str = "", deadline: TaskDeadline | None = None) -> PersonalTaskView:
+    async def create(self, *, title: str, description: str = "", deadline: TaskDeadline | None = None,
+                     reminders: tuple[ReminderRule, ...] = ()) -> PersonalTaskView:
         title = title.strip()
         if not title:
             raise InvalidPersonalTaskInput("标题不能为空")
         now = self._clock().astimezone(UTC)
         task = PersonalTask(str(uuid4()), title, description, PersonalTaskStatus.PENDING,
                             deadline, now, now, None, 1)
-        return self._view(await self._repository.create(task), now)
+        if not reminders:
+            created = await self._repository.create(task)
+        else:
+            initial: list[Reminder] = []
+            for rule in reminders:
+                try:
+                    validate_rule(rule, task, self._timezone)
+                    candidate = next_fire_at(rule, task, self._timezone, now)
+                except (ValueError, KeyError, TypeError) as error:
+                    raise InvalidReminderInput(str(error)) from error
+                if candidate is None:
+                    raise InvalidReminderInput("提醒时间必须晚于当前时间")
+                if rule["kind"] == "at":
+                    rule = {**rule, "at": datetime.fromisoformat(rule["at"].replace("Z", "+00:00")).astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")}
+                initial.append(Reminder(str(uuid4()), task.id, rule, str(self._timezone), ReminderStatus.ACTIVE,
+                                        None, candidate, 1, now, now))
+            created = await self._repository.create_with_reminders(task, tuple(initial))
+        return self._view(created, now)
 
     async def get(self, task_id: str) -> PersonalTaskView:
         task = await self._repository.get(task_id)

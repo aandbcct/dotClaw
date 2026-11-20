@@ -9,6 +9,7 @@ from dotclaw.channel.web.app import create_app
 from dotclaw.personal_tasks.models import PersonalTask, PersonalTaskStatus, PersonalTaskView
 from dotclaw.personal_tasks.repository import PersonalTaskVersionConflict
 from dotclaw.personal_tasks.service import PersonalTaskService
+from dotclaw.personal_tasks.reminder_service import ReminderService
 from dotclaw.personal_tasks.sqlite_repository import SqlitePersonalTaskRepository
 from zoneinfo import ZoneInfo
 
@@ -85,3 +86,41 @@ async def test_real_task_http_lifecycle_and_persistence(tmp_path, deadline):
             deleted = await client.delete(url, params={"expected_version": version})
             assert deleted.status_code == 204
             assert (await client.get(url)).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_create_task_with_initial_reminder_is_atomic_and_keeps_task_response(tmp_path):
+    now = datetime(2030, 1, 1, 12, tzinfo=UTC)
+    repository = SqlitePersonalTaskRepository(tmp_path / "task-reminder-create.sqlite3")
+    await repository.initialize()
+    zone = ZoneInfo("UTC")
+    host = SimpleNamespace(personal_task_service=PersonalTaskService(repository, timezone=zone, clock=lambda: now),
+        reminder_service=ReminderService(repository, timezone=zone, clock=lambda: now),
+        scheduler_enabled=True, _config=SimpleNamespace(personal_tasks=SimpleNamespace(timezone="UTC")),
+        project_root=None, shutdown=AsyncMock())
+
+    async def host_factory():
+        return host
+
+    app = create_app(host_factory=host_factory)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            invalid = await client.post("/api/v1/personal-tasks", json={
+                "title": "原子验证",
+                "reminders": [
+                    {"kind": "at", "at": "2030-01-01T12:01:00Z"},
+                    {"kind": "before_deadline", "offset_minutes": 60},
+                ],
+            })
+            assert invalid.status_code == 422
+            assert (await client.get("/api/v1/personal-tasks?filter=all")).json()["items"] == []
+
+            created = await client.post("/api/v1/personal-tasks", json={
+                "title": "含初始提醒",
+                "reminders": [{"kind": "at", "at": "2030-01-01T12:01:00Z"}],
+            })
+            assert created.status_code == 201, created.text
+            assert "reminders" not in created.json()
+            reminders = await client.get(f"/api/v1/personal-tasks/{created.json()['id']}/reminders")
+            assert reminders.status_code == 200
+            assert len(reminders.json()["items"]) == 1

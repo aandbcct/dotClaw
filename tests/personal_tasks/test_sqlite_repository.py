@@ -7,6 +7,7 @@ import pytest
 from dotclaw.personal_tasks.models import PersonalTask, PersonalTaskStatus
 from dotclaw.personal_tasks.repository import PersonalTaskStorageError, PersonalTaskVersionConflict
 from dotclaw.personal_tasks.sqlite_repository import SqlitePersonalTaskRepository
+from dotclaw.personal_tasks.reminder_models import Reminder, ReminderStatus
 
 
 def task(version=1):
@@ -51,3 +52,18 @@ def test_connect_maps_pragma_failure_and_closes_connection(tmp_path, monkeypatch
         repository._connect()
     assert isinstance(captured.value.__cause__, sqlite3.OperationalError)
     assert connection.closed
+
+
+@pytest.mark.asyncio
+async def test_create_task_and_reminders_roll_back_as_one_transaction(tmp_path):
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    repository = SqlitePersonalTaskRepository(tmp_path / "atomic-create.sqlite3")
+    await repository.initialize()
+    new_task = PersonalTask("task-1", "事务", "", PersonalTaskStatus.PENDING, None, now, now, None, 1)
+    reminder = Reminder("reminder-1", new_task.id, {"kind": "daily", "local_time": "09:00"}, "UTC",
+                        ReminderStatus.ACTIVE, None, now.replace(hour=9), 1, now, now)
+
+    with pytest.raises(PersonalTaskStorageError):
+        await repository.create_with_reminders(new_task, (reminder, reminder))
+
+    assert await repository.get(new_task.id) is None

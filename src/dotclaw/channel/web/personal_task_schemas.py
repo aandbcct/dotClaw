@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ...personal_tasks.models import PersonalTaskStatus, PersonalTaskView, TaskDeadline
+from .reminder_schemas import ReminderRulePayload
 
 
 class DateDeadlinePayload(BaseModel):
@@ -43,6 +44,7 @@ class CreatePersonalTaskRequest(BaseModel):
     title: str
     description: str = ""
     deadline: TaskDeadlinePayload | None = None
+    reminders: list[ReminderRulePayload] = Field(default_factory=list)
 
 
 class UpdatePersonalTaskRequest(BaseModel):

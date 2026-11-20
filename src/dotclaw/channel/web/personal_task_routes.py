@@ -25,7 +25,9 @@ async def list_personal_tasks(request: Request, filter: PersonalTaskFilter = Per
 
 @router.post("", response_model=PersonalTaskResponse, status_code=status.HTTP_201_CREATED)
 async def create_personal_task(request: Request, body: CreatePersonalTaskRequest):
-    return to_task_response(await _service(request).create(title=body.title, description=body.description, deadline=deadline_to_domain(body.deadline)))
+    reminders = tuple(rule.model_dump() for rule in body.reminders)
+    return to_task_response(await _service(request).create(title=body.title, description=body.description,
+        deadline=deadline_to_domain(body.deadline), reminders=reminders))
 
 
 @router.get("/{task_id}", response_model=PersonalTaskResponse)
