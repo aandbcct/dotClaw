@@ -41,7 +41,7 @@ export function ReminderEditor({ task, reminder, timezone, pending, onSave, onRe
     {["before_date","daily","weekly","monthly","yearly"].includes(kind) && <label>当地时间（{timezone}）<input required type="time" value={localTime} onChange={(event) => setLocalTime(event.target.value)} /></label>}
     {kind === "monthly" && <p className="muted">该月没有所选日期时跳过，不会提前到月末。</p>}
     {error && <p role="alert">{error}</p>}
-    {error && baseReminder && onReload && <div><button type="button" disabled={pending} onClick={() => { void onReload().then((latest) => { if (!latest) throw new Error("提醒已不存在，无法重新读取"); setConflictReminder(latest); setError(""); }).catch((reason) => setError(reason instanceof Error ? reason.message : "重新读取失败")); }}>重新读取当前提醒</button>{conflictReminder && <><p>当前版本为 {conflictReminder.version}。确认后保留本次草稿，并按此版本再次提交。</p><button type="button" disabled={pending} onClick={() => { setBaseReminder(conflictReminder); setConflictReminder(null); setError(""); }}>确认替换当前版本</button></>}</div>}
+    {baseReminder && onReload && <div>{error && !conflictReminder && <button type="button" disabled={pending} onClick={() => { void onReload().then((latest) => { if (!latest) throw new Error("提醒已不存在，无法重新读取"); setConflictReminder(latest); setError(""); }).catch((reason) => setError(reason instanceof Error ? reason.message : "重新读取失败")); }}>重新读取当前提醒</button>}{conflictReminder && <><p>当前版本为 {conflictReminder.version}。确认后保留本次草稿，并按此版本再次提交。</p><button type="button" disabled={pending} onClick={() => { setBaseReminder(conflictReminder); setConflictReminder(null); setError(""); }}>确认替换当前版本</button></>}</div>}
     <footer><button type="button" disabled={pending} onClick={onClose}>取消</button><button type="submit" disabled={pending}>保存</button></footer>
   </form>;
 }
