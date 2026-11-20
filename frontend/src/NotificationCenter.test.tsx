@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NotificationCenter } from "./NotificationCenter";
+import { formatNotificationBody, NotificationCenter } from "./NotificationCenter";
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -24,6 +24,17 @@ const page = (items: unknown[], next_before_id: number | null = null) => ({ item
 const props = { onOpenNavigation: () => undefined, onOpenTask: (_id: string) => undefined, onOpenSummary: (_id: number) => undefined, onRefresh: async () => undefined, revision: 0, unreadCount: 1, connectionError: "", permission: "default" as const, permissionPending: false, permissionError: "", onEnableSystemNotifications: () => undefined };
 
 describe("通知中心", () => {
+  it("把普通提醒的时间格式化为浏览器当地时间，保留纯日期截止日和未知正文", () => {
+    const readable = formatNotificationBody("reminder", "提醒时间：2026-11-20T01:01:00+00:00；事务截止：2026-11-20");
+    expect(readable).toContain("浏览器当地时间");
+    expect(readable).toContain(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    expect(readable).toContain("事务截止：2026-11-20");
+    expect(readable).not.toContain("2026-11-20T01:01:00+00:00");
+    const summary = "离线期间有 1 件事务错过提醒";
+    expect(formatNotificationBody("recovery_summary", summary)).toBe(summary);
+    expect(formatNotificationBody("reminder", "自定义提醒正文")).toBe("自定义提醒正文");
+  });
+
   it("展示通知详情和成员状态，并分别导航到事务与摘要", async () => {
     let readAt: string | null = null;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

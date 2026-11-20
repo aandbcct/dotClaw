@@ -9,6 +9,17 @@ function timeLabel(value: string) {
   return new Date(value).toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" });
 }
 
+export function formatNotificationBody(kind: NotificationItem["kind"], body: string) {
+  if (kind !== "reminder") return body;
+  const match = /^提醒时间：([^；]+)；事务截止：(\d{4}-\d{2}-\d{2})$/.exec(body);
+  if (!match) return body;
+  const reminderDate = new Date(match[1]);
+  if (!Number.isFinite(reminderDate.getTime())) return body;
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const localTime = reminderDate.toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" });
+  return `提醒时间：${localTime}（浏览器当地时间，${zone}）；事务截止：${match[2]}`;
+}
+
 function taskStatus(status: string | null) {
   if (status === "pending") return "待办";
   if (status === "in_progress") return "进行中";
@@ -158,7 +169,7 @@ export function NotificationCenter({ onOpenTask, onOpenSummary, onRefresh, onOpe
       <article className="notification-workspace__detail" aria-label="通知详情">
         {selected ? <>
           <button className="notification-workspace__back" type="button" onClick={closeDetail}>返回通知列表</button>
-          <h2>{selected.title}</h2><time dateTime={selected.created_at}>{timeLabel(selected.created_at)}</time><p className="notification-workspace__body-copy">{selected.body}</p>
+          <h2>{selected.title}</h2><time dateTime={selected.created_at}>{timeLabel(selected.created_at)}</time><p className="notification-workspace__body-copy">{formatNotificationBody(selected.kind, selected.body)}</p>
           {actionPending === selected.id && <p role="status">正在读取详情…</p>}
           {selected.members.length > 0 && <section><h3>相关事务</h3><ul>{selected.members.map((member) => <li key={member.task_id}><button type="button" onClick={() => onOpenTask(member.task_id)}>{member.title_snapshot}</button><span>{member.missed ? "错过提醒" : "提醒"}{member.overdue ? " · 当时逾期" : ""} · 当前状态：{taskStatus(member.current_status)}</span></li>)}</ul></section>}
           {selected.kind === "recovery_summary" && <button type="button" onClick={() => onOpenSummary(selected.id)}>查看摘要事务</button>}
