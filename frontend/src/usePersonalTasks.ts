@@ -32,7 +32,15 @@ export function usePersonalTasks() {
         setReminderSummaries((previous) => ({ ...previous, [taskId]: { items: result.items, loading: false, error: "" } }));
       }
     } catch (reason) {
-      if (reminderSequences.current.get(taskId) === current && (reason as Error).name !== "AbortError") {
+      if (reminderSequences.current.get(taskId) === current) {
+        reminderRequests.current.delete(taskId);
+        if ((reason as Error).name === "AbortError") {
+          setReminderSummaries((previous) => ({
+            ...previous,
+            [taskId]: { items: previous[taskId]?.items || [], loading: false, error: "" },
+          }));
+          return;
+        }
         setReminderSummaries((previous) => ({
           ...previous,
           [taskId]: { items: previous[taskId]?.items || [], loading: false, error: reason instanceof Error ? reason.message : "提醒摘要读取失败" },
@@ -67,7 +75,12 @@ export function usePersonalTasks() {
     window.addEventListener("focus", onFocus);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", onFocus); controller.current?.abort(); };
   }, [filter, reload]);
-  useEffect(() => () => { reminderControllers.current.forEach((request) => request.abort()); }, []);
+  useEffect(() => () => {
+    reminderControllers.current.forEach((request, taskId) => {
+      reminderSequences.current.set(taskId, (reminderSequences.current.get(taskId) || 0) + 1);
+      request.abort();
+    });
+  }, []);
   const run = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
     if (mutation.current) throw new Error("请等待当前操作完成"); mutation.current = true; setPending(true); setError(""); ++sequence.current;
     try { const result = await action(); if (!await reload()) setError("操作已保存，列表刷新失败"); return result; }
@@ -81,5 +94,5 @@ export function usePersonalTasks() {
     create: (input: PersonalTaskInput, reminders?: ReminderRule[]) => run(() => createPersonalTask(input, reminders)),
     update: async (id: string, input: PersonalTaskInput, version: number) => { const saved = await run(() => updatePersonalTask(id, input, version)); await refreshReminderSummary(id); return saved; },
     changeStatus: async (task: PersonalTask, status: PersonalTaskStatus) => { const saved = await run(() => changePersonalTaskStatus(task.id, status, task.version)); await refreshReminderSummary(task.id); return saved; },
-    remove: async (task: PersonalTask) => { const result = await run(() => deletePersonalTask(task.id, task.version)); reminderSequences.current.set(task.id, (reminderSequences.current.get(task.id) || 0) + 1); reminderControllers.current.get(task.id)?.abort(); reminderControllers.current.delete(task.id); setReminderSummaries((previous) => { const next = { ...previous }; delete next[task.id]; return next; }); return result; } };
+    remove: async (task: PersonalTask) => { const result = await run(() => deletePersonalTask(task.id, task.version)); reminderSequences.current.set(task.id, (reminderSequences.current.get(task.id) || 0) + 1); reminderControllers.current.get(task.id)?.abort(); reminderControllers.current.delete(task.id); reminderRequests.current.delete(task.id); setReminderSummaries((previous) => { const next = { ...previous }; delete next[task.id]; return next; }); return result; } };
 }

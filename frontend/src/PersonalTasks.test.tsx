@@ -96,6 +96,51 @@ describe("个人事务视图", () => {
     expect(summaryReads).toBe(3);
   });
 
+  it("窗口重新聚焦时刷新可见摘要，每个事务只读取一次", async () => {
+    let listReads = 0;
+    let summaryReads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/t1/reminders")) {
+        summaryReads += 1;
+        return payload(reminderPage([]));
+      }
+      if (url.includes("/personal-tasks?")) {
+        listReads += 1;
+        return payload(list([current]));
+      }
+      throw new Error("未预期请求：" + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<PersonalTasks onOpenNavigation={() => undefined} />);
+    await screen.findByText("无待触发提醒");
+
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    await waitFor(() => expect(listReads).toBe(2));
+    await waitFor(() => expect(summaryReads).toBe(2));
+    expect(summaryReads).toBe(2);
+  });
+
+  it("中止的摘要请求会结束加载并允许筛选刷新后重新读取", async () => {
+    let summaryReads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/t1/reminders")) {
+        summaryReads += 1;
+        if (summaryReads === 1) throw new DOMException("读取已中止", "AbortError");
+        return payload(reminderPage([]));
+      }
+      return payload(list([current]));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<PersonalTasks onOpenNavigation={() => undefined} />);
+    await waitFor(() => expect(screen.queryByText("正在读取提醒摘要…")).toBeNull());
+    await user.click(screen.getByRole("button", { name: "全部" }));
+    expect(await screen.findByText("无待触发提醒")).toBeTruthy();
+    expect(summaryReads).toBe(2);
+  });
+
   it("摘要旧请求晚到时不会覆盖较新的读取", async () => {
     let finishOld: ((response: Response) => void) | undefined;
     let reads = 0;
