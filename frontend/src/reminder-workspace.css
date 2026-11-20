@@ -94,7 +94,8 @@
 }
 
 .personal-tasks .task-editor.reminder-form {
-  min-width: min(520px, 78vw);
+  width: 100%;
+  min-width: 0;
 }
 
 .reminder-date-fields,
@@ -109,10 +110,13 @@
 }
 
 .reminder-workspace {
-  min-width: min(520px, 78vw);
+  width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .reminder-workspace .reminder-editor {
+  width: 100%;
   min-width: 0;
 }
 
@@ -234,9 +238,8 @@
 }
 
 @media (max-width: 620px) {
-  .reminder-workspace,
   .personal-tasks .task-editor.reminder-form {
-    min-width: min(100%, 78vw);
+    min-width: 0;
   }
 
   .reminder-date-fields,

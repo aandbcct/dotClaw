@@ -9,7 +9,7 @@ export function reminderRuleSummary(rule: ReminderRule, timezone: string): strin
     const value = unit === "天" ? rule.offset_minutes / 1440 : unit === "小时" ? rule.offset_minutes / 60 : rule.offset_minutes;
     return `截止前${value}${unit}`;
   }
-  if (rule.kind === "before_date") return `截止日期前${rule.days_before}天 ${rule.local_time}`;
+  if (rule.kind === "before_date") return rule.days_before === 0 ? `截止当天 ${rule.local_time}` : `截止日期前${rule.days_before}天 ${rule.local_time}`;
   if (rule.kind === "daily") return `每天 ${rule.local_time}`;
   if (rule.kind === "weekly") return `每${rule.weekdays.map((day) => weekdays[day]).join("、")} ${rule.local_time}`;
   if (rule.kind === "monthly") return `每月${rule.day}日 ${rule.local_time}${rule.day > 28 ? "（当月无此日期时跳过）" : ""}`;
@@ -17,7 +17,7 @@ export function reminderRuleSummary(rule: ReminderRule, timezone: string): strin
 }
 
 export function reminderStatusLabel(status: string): string {
-  return ({ active: "进行中", paused: "已暂停", cancelled: "已取消", completed: "已完成" } as Record<string, string>)[status] || status;
+  return ({ active: "进行中", paused: "已暂停", cancelled: "已取消", fired: "已触发", missed: "已错过", completed: "已完成" } as Record<string, string>)[status] || status;
 }
 
 export function reminderReasonLabel(reason: string | null): string | null {
