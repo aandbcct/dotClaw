@@ -40,11 +40,9 @@ export function ReminderEditor({ task, reminder, timezone, pending, onSave, onRe
 
   function chooseDeadlineShortcut() {
     if (!task.deadline) return;
-    if (task.deadline.kind === "date") chooseAt(addCalendarDays(task.deadline.value, -1), "09:00");
-    else {
-      const deadline = dateTimeInputValue(task.deadline.value, timezone);
-      chooseAt(addCalendarDays(deadline.date, -1), deadline.time);
-    }
+    setAmount(1);
+    if (task.deadline.kind === "date") { setKind("before_date"); setLocalTime("09:00"); }
+    else { setKind("before_deadline"); setUnit("days"); }
   }
 
   async function submit(event: React.FormEvent) {
@@ -78,7 +76,7 @@ export function ReminderEditor({ task, reminder, timezone, pending, onSave, onRe
         <span>快捷时间 · {timezone}</span>
         <button type="button" disabled={pending || todayAtThreeHasPassed} onClick={() => chooseAt(today.date, "15:00")}>今天 15:00</button>
         <button type="button" disabled={pending} onClick={() => chooseAt(addCalendarDays(today.date, 1), "09:00")}>明天 09:00</button>
-        {task.deadline && <button type="button" disabled={pending} onClick={chooseDeadlineShortcut}>{task.deadline.kind === "date" ? "截止前1天（09:00）" : "截止前1天（同当地时刻）"}</button>}
+        {task.deadline && <button type="button" disabled={pending} onClick={chooseDeadlineShortcut}>{task.deadline.kind === "date" ? "截止前1天（每天09:00）" : "截止前1天（提前24小时）"}</button>}
       </div>
       <label>触发日期和时刻 · {timezone}<span className="reminder-date-fields"><input aria-label="触发日期" disabled={pending} required type="date" value={atDate} onChange={(event) => setAtDate(event.target.value)} /><input aria-label="触发时刻" disabled={pending} required type="time" value={atTime} onChange={(event) => setAtTime(event.target.value)} /></span></label>
     </>}

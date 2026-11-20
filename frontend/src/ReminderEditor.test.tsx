@@ -31,26 +31,27 @@ describe("提醒时间快捷项", () => {
     expect((screen.getByLabelText("触发日期") as HTMLInputElement).value).toBe("2027-01-01");
   });
 
-  it("日期截止前1天跨月默认09点，之后仍可编辑并按应用时区保存", async () => {
+  it("日期截止快捷项保存为随截止日变化的规则且时间仍可编辑", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn(async () => undefined);
     render(<ReminderEditor {...common} task={makeTask({ kind: "date", value: "2026-03-01" })} onSave={onSave} />);
-    await user.click(screen.getByRole("button", { name: "截止前1天（09:00）" }));
-    expect((screen.getByLabelText("触发日期") as HTMLInputElement).value).toBe("2026-02-28");
-    expect((screen.getByLabelText("触发时刻") as HTMLInputElement).value).toBe("09:00");
-    fireEvent.change(screen.getByLabelText("触发时刻"), { target: { value: "10:30" } });
+    await user.click(screen.getByRole("button", { name: "截止前1天（每天09:00）" }));
+    expect((screen.getByLabelText("提前天数") as HTMLInputElement).value).toBe("1");
+    const localTime = screen.getByLabelText(/当地时间 · Asia\/Shanghai/) as HTMLInputElement;
+    expect(localTime.value).toBe("09:00");
+    fireEvent.change(localTime, { target: { value: "10:30" } });
     await user.click(screen.getByRole("button", { name: "保存提醒" }));
-    expect(onSave).toHaveBeenCalledWith({ kind: "at", at: "2026-02-28T02:30:00.000Z" }, undefined);
+    expect(onSave).toHaveBeenCalledWith({ kind: "before_date", days_before: 1, local_time: "10:30" }, undefined);
   });
 
-  it("datetime截止前1天沿用当地时刻并跨月换算", async () => {
+  it("日期时间截止快捷项保存为24小时前的相对规则", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn(async () => undefined);
     render(<ReminderEditor {...common} task={makeTask({ kind: "datetime", value: "2026-04-01T00:30:00Z" })} onSave={onSave} />);
-    await user.click(screen.getByRole("button", { name: "截止前1天（同当地时刻）" }));
-    expect((screen.getByLabelText("触发日期") as HTMLInputElement).value).toBe("2026-03-31");
-    expect((screen.getByLabelText("触发时刻") as HTMLInputElement).value).toBe("08:30");
+    await user.click(screen.getByRole("button", { name: "截止前1天（提前24小时）" }));
+    expect((screen.getByLabelText("提前数量") as HTMLInputElement).value).toBe("1");
+    expect((screen.getByLabelText("提前单位") as HTMLSelectElement).value).toBe("days");
     await user.click(screen.getByRole("button", { name: "保存提醒" }));
-    expect(onSave).toHaveBeenCalledWith({ kind: "at", at: "2026-03-31T00:30:00.000Z" }, undefined);
+    expect(onSave).toHaveBeenCalledWith({ kind: "before_deadline", offset_minutes: 1440 }, undefined);
   });
 });
