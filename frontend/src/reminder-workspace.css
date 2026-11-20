@@ -54,7 +54,67 @@
 }
 
 .task-row-actions {
+  position: relative;
   margin-top: 8px;
+}
+
+.task-reminder-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 28px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-reminder-summary [role="alert"] {
+  color: var(--danger);
+}
+
+.task-reminder-summary button {
+  min-height: 44px;
+  padding: 8px 10px;
+}
+
+.task-primary-action {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.task-primary-action:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(0.94);
+}
+
+.task-more summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.task-more[open] > div {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  display: grid;
+  min-width: 160px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+}
+
+.task-more[open] button {
+  min-height: 44px;
+  padding: 8px 12px;
+  text-align: left;
 }
 
 .personal-tasks .task-row-actions button,
@@ -96,6 +156,38 @@
 .personal-tasks .task-editor.reminder-form {
   width: 100%;
   min-width: 0;
+}
+
+.personal-tasks .task-editor .initial-reminder {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.personal-tasks .task-editor .initial-reminder > label {
+  display: grid;
+}
+
+.reminder-quick-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.reminder-quick-actions > span {
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.reminder-quick-actions button {
+  min-height: 44px;
+  padding: 8px 10px;
 }
 
 .reminder-date-fields,

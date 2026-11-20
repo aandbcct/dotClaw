@@ -23,6 +23,13 @@ export function dateTimeInputValue(value: string, timezone: string): { date: str
   return { date: `${String(parts[0]).padStart(4, "0")}-${String(parts[1]).padStart(2, "0")}-${String(parts[2]).padStart(2, "0")}`, time: `${String(parts[3]).padStart(2, "0")}:${String(parts[4]).padStart(2, "0")}` };
 }
 
+export function addDaysToDateInput(date: string, days: number): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) throw new Error("请选择有效的日期");
+  const shifted = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + days));
+  return `${String(shifted.getUTCFullYear()).padStart(4, "0")}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
+}
+
 export function dateTimeToRfc3339(date: string, time: string, timezone: string): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
   const clock = /^(\d{2}):(\d{2})$/.exec(time);
