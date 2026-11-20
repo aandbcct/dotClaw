@@ -1,10 +1,17 @@
 import { useState } from "react";
 import { ApiError } from "./api";
 import { dateTimeInputValue, dateTimeToRfc3339 } from "./reminderTime";
+import "./reminder-editor-workspace.css";
 import type { PersonalTask, Reminder, ReminderRule } from "./types";
 
 type OffsetUnit = "minutes" | "hours" | "days";
 const unitMinutes: Record<OffsetUnit, number> = { minutes: 1, hours: 60, days: 1440 };
+
+function addCalendarDays(date: string, amount: number) {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + amount);
+  return value.toISOString().slice(0, 10);
+}
 
 export function ReminderEditor({ task, reminder, timezone, pending, onSave, onReload, onClose }: { task: PersonalTask; reminder: Reminder | null; timezone: string; pending: boolean; onSave: (rule: ReminderRule, baseReminder?: Reminder) => Promise<void>; onReload?: () => Promise<Reminder | null>; onClose: () => void }) {
   const initial = reminder?.rule || { kind: "at", at: "" } as ReminderRule;
@@ -22,6 +29,23 @@ export function ReminderEditor({ task, reminder, timezone, pending, onSave, onRe
   const [error, setError] = useState("");
   const [baseReminder, setBaseReminder] = useState(reminder);
   const [conflictReminder, setConflictReminder] = useState<Reminder | null>(null);
+  const today = dateTimeInputValue(new Date().toISOString(), timezone);
+  const todayAtThreeHasPassed = today.time >= "15:00";
+
+  function chooseAt(date: string, time: string) {
+    setKind("at");
+    setAtDate(date);
+    setAtTime(time);
+  }
+
+  function chooseDeadlineShortcut() {
+    if (!task.deadline) return;
+    if (task.deadline.kind === "date") chooseAt(addCalendarDays(task.deadline.value, -1), "09:00");
+    else {
+      const deadline = dateTimeInputValue(task.deadline.value, timezone);
+      chooseAt(addCalendarDays(deadline.date, -1), deadline.time);
+    }
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -48,8 +72,16 @@ export function ReminderEditor({ task, reminder, timezone, pending, onSave, onRe
   }
 
   return <form onSubmit={(event) => void submit(event)} className="reminder-editor reminder-form">
-    <label>提醒规则<select disabled={pending} value={kind} onChange={(event) => setKind(event.target.value as ReminderRule["kind"])}><option value="at">指定时刻</option><option value="before_deadline" disabled={task.deadline?.kind !== "datetime"}>截止前</option><option value="before_date" disabled={task.deadline?.kind !== "date"}>日期截止前</option><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="yearly">每年</option></select></label>
-    {kind === "at" && <label>触发日期和时刻 · {timezone}<span className="reminder-date-fields"><input aria-label="触发日期" disabled={pending} required type="date" value={atDate} onChange={(event) => setAtDate(event.target.value)} /><input aria-label="触发时刻" disabled={pending} required type="time" value={atTime} onChange={(event) => setAtTime(event.target.value)} /></span></label>}
+    <label>提醒规则<select disabled={pending} value={kind} onChange={(event) => { const nextKind = event.target.value as ReminderRule["kind"]; setKind(nextKind); if (nextKind === "at" && !atDate) { setAtDate(today.date); setAtTime("09:00"); } }}><option value="at">指定时刻</option><option value="before_deadline" disabled={task.deadline?.kind !== "datetime"}>截止前</option><option value="before_date" disabled={task.deadline?.kind !== "date"}>日期截止前</option><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="yearly">每年</option></select></label>
+    {kind === "at" && <>
+      <div className="reminder-editor__shortcuts" aria-label="常用时间">
+        <span>快捷时间 · {timezone}</span>
+        <button type="button" disabled={pending || todayAtThreeHasPassed} onClick={() => chooseAt(today.date, "15:00")}>今天 15:00</button>
+        <button type="button" disabled={pending} onClick={() => chooseAt(addCalendarDays(today.date, 1), "09:00")}>明天 09:00</button>
+        {task.deadline && <button type="button" disabled={pending} onClick={chooseDeadlineShortcut}>{task.deadline.kind === "date" ? "截止前1天（09:00）" : "截止前1天（同当地时刻）"}</button>}
+      </div>
+      <label>触发日期和时刻 · {timezone}<span className="reminder-date-fields"><input aria-label="触发日期" disabled={pending} required type="date" value={atDate} onChange={(event) => setAtDate(event.target.value)} /><input aria-label="触发时刻" disabled={pending} required type="time" value={atTime} onChange={(event) => setAtTime(event.target.value)} /></span></label>
+    </>}
     {kind === "before_deadline" && <label>提前时长<span className="reminder-offset-fields"><input aria-label="提前数量" disabled={pending} required type="number" min="0" step="any" value={amount} onChange={(event) => setAmount(Number(event.target.value))} /><select aria-label="提前单位" disabled={pending} value={unit} onChange={(event) => setUnit(event.target.value as OffsetUnit)}><option value="minutes">分钟</option><option value="hours">小时</option><option value="days">天</option></select></span></label>}
     {kind === "before_date" && <label>提前天数<input disabled={pending} required type="number" min="0" step="1" value={amount} onChange={(event) => setAmount(Number(event.target.value))} /></label>}
     {kind === "weekly" && <fieldset disabled={pending}><legend>重复星期</legend>{[0, 1, 2, 3, 4, 5, 6].map((value) => <label key={value}><input type="checkbox" checked={weekdays.includes(value)} onChange={(event) => setWeekdays(event.target.checked ? [...weekdays, value] : weekdays.filter((item) => item !== value))} />{["一", "二", "三", "四", "五", "六", "日"][value]}</label>)}</fieldset>}

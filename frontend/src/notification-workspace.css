@@ -39,6 +39,12 @@
 .notification-workspace__detail li button { justify-self: start; min-height: 40px; padding: 0 4px; border: 0; background: transparent; color: var(--accent); text-align: left; }
 .notification-workspace__detail li span { color: var(--muted); font-size: 13px; }
 .notification-workspace__detail > button:not(.notification-workspace__back) { min-height: 44px; margin-top: 20px; padding: 0 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--accent); }
+.notification-workspace__detail > .notification-workspace__primary-action { min-height: 48px; margin: 20px 0 4px; padding: 0 16px; border-color: var(--accent); background: var(--accent); color: var(--surface); font-weight: 600; }
+.notification-workspace__read-status { color: var(--muted); font-size: 13px; }
+.notification-workspace__related p { color: var(--muted); font-size: 13px; }
+.notification-workspace__detail > details { margin-top: 20px; border-top: 1px solid var(--line); }
+.notification-workspace__detail > details > summary { min-height: 44px; padding: 12px 2px; color: var(--accent); cursor: pointer; }
+.notification-workspace__detail > details[open] > summary { border-bottom: 1px solid var(--line); }
 .notification-workspace__back { display: none; }
 .notification-workspace__placeholder, .notification-workspace__empty { padding: 20px 0; color: var(--muted); }
 .notification-workspace__error { display: flex; align-items: center; gap: 12px; color: #b42318; }

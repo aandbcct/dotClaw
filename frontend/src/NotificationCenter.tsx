@@ -180,9 +180,12 @@ export function NotificationCenter({ onOpenTask, onOpenSummary, onRefresh, onOpe
           <button className="notification-workspace__back" type="button" onClick={closeDetail}>返回通知列表</button>
           <h2>{selected.title}</h2><time dateTime={selected.created_at}>{timeLabel(selected.created_at)}</time><p className="notification-workspace__body-copy">{formatNotificationBody(selected.kind, selected.body)}</p>
           {actionPending === selected.id && <p role="status">正在读取详情…</p>}
-          {selected.members.length > 0 && <section><h3>相关事务</h3><ul>{selected.members.map((member) => <li key={member.task_id}><button type="button" onClick={() => onOpenTask(member.task_id)}>{member.title_snapshot}</button><span>{member.missed ? "错过提醒" : "提醒"}{member.overdue ? " · 当时逾期" : ""} · 当前状态：{taskStatus(member.current_status)}</span></li>)}</ul></section>}
-          {selected.kind === "recovery_summary" && <button type="button" onClick={() => onOpenSummary(selected.id)}>查看摘要事务</button>}
-          {selected.deliveries.length > 0 && <section><h3>系统通知记录</h3><ul>{selected.deliveries.map((entry) => <li key={entry.claim_id}>{entry.status === "accepted" ? "已交给浏览器" : entry.status === "failed" ? `投递失败：${entry.error}` : "结果未确认"}</li>)}</ul></section>}
+          {selected.read_at && <p className="notification-workspace__read-status" role="status">已标记为已读</p>}
+          {selected.kind === "recovery_summary" && <button className="notification-workspace__primary-action" type="button" onClick={() => onOpenSummary(selected.id)}>查看摘要事务</button>}
+          {selected.kind === "reminder" && selected.members.length === 1 && <button className="notification-workspace__primary-action" type="button" onClick={() => onOpenTask(selected.members[0].task_id)}>查看事务：{selected.members[0].title_snapshot}</button>}
+          {selected.members.length === 1 && <section className="notification-workspace__related"><h3>提醒事项</h3><p>{selected.members[0].missed ? "错过提醒" : "提醒"}{selected.members[0].overdue ? " · 当时逾期" : ""} · 当前状态：{taskStatus(selected.members[0].current_status)}</p></section>}
+          {selected.members.length > 1 && <details className="notification-workspace__more-members"><summary>查看相关事务（{selected.members.length}）</summary><ul>{selected.members.map((member) => <li key={member.task_id}><button type="button" onClick={() => onOpenTask(member.task_id)}>{member.title_snapshot}</button><span>{member.missed ? "错过提醒" : "提醒"}{member.overdue ? " · 当时逾期" : ""} · 当前状态：{taskStatus(member.current_status)}</span></li>)}</ul></details>}
+          {selected.deliveries.length > 0 && <details className="notification-workspace__deliveries"><summary>投递状态（{selected.deliveries.length}）</summary><ul>{selected.deliveries.map((entry) => <li key={entry.claim_id}>{entry.status === "accepted" ? "已交给浏览器" : entry.status === "failed" ? `投递失败：${entry.error}` : "结果未确认"}</li>)}</ul></details>}
         </> : <p className="notification-workspace__placeholder">选择一条通知查看详情</p>}
       </article>
     </div>

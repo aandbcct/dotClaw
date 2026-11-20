@@ -76,13 +76,41 @@ describe("通知中心", () => {
 
     await user.click(await screen.findByRole("button", { name: /离线期间提醒汇总/ }));
     expect(document.querySelector(".notification-workspace__detail")?.textContent).toContain("当前状态：进行中");
-    expect(screen.getByText("结果未确认")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看摘要事务" })).toBeTruthy();
+    const memberDetails = document.querySelector(".notification-workspace__more-members") as HTMLDetailsElement;
+    const deliveryDetails = document.querySelector(".notification-workspace__deliveries") as HTMLDetailsElement;
+    expect(memberDetails.open).toBe(false);
+    expect(deliveryDetails.open).toBe(false);
     expect(onRefresh).toHaveBeenCalledOnce();
+    await user.click(screen.getByText("查看相关事务（2）"));
+    await user.click(screen.getByText("投递状态（1）"));
+    expect(screen.getByText("结果未确认")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "准备评审" }));
     await user.click(screen.getByRole("button", { name: "查看摘要事务" }));
     expect(onOpenTask).toHaveBeenCalledWith("task-1");
     expect(onOpenSummary).toHaveBeenCalledWith(12);
     expect(fetchMock.mock.calls.some(([url, init]) => String(url) === "/api/v1/notifications/12/read" && init?.method === "POST")).toBe(true);
+  });
+
+  it("单成员提醒突出查看事务主操作并反馈已读", async () => {
+    const reminder = { ...notification, kind: "reminder" as const, body: "提醒时间：2026-11-20T01:00:00Z", members: [notification.members[0]] };
+    let readAt: string | null = null;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/v1/notifications?")) return json(page([{ ...reminder, read_at: readAt }]));
+      if (url === "/api/v1/notifications/12") return json({ ...reminder, read_at: readAt });
+      if (url === "/api/v1/notifications/12/read") { readAt = "2026-11-20T01:05:00Z"; return json({ ...reminder, read_at: readAt }); }
+      throw new Error(`未预期的请求：${url}`);
+    }));
+    const user = userEvent.setup();
+    const onOpenTask = vi.fn();
+    render(<NotificationCenter {...props} onOpenTask={onOpenTask} />);
+    await user.click(await screen.findByRole("button", { name: /离线期间提醒汇总/ }));
+    await user.click(screen.getByRole("button", { name: "查看事务：准备评审" }));
+    expect(onOpenTask).toHaveBeenCalledWith("task-1");
+    expect(await screen.findByRole("status")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看事务：准备评审" })).toBeTruthy();
+    expect(document.querySelector(".notification-workspace__more-members")).toBeNull();
   });
 
   it("读取列表失败时保留通知区并显示错误", async () => {

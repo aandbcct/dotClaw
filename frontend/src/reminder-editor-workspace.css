@@ -1,0 +1,4 @@
+.reminder-editor.reminder-form .reminder-editor__shortcuts { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.reminder-editor.reminder-form .reminder-editor__shortcuts > span { flex-basis: 100%; color: var(--muted); font-size: 13px; }
+.reminder-editor.reminder-form .reminder-editor__shortcuts > button { min-height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--accent); }
+.reminder-editor.reminder-form .reminder-editor__shortcuts > button:disabled { color: var(--muted); cursor: not-allowed; opacity: .6; }
