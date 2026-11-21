@@ -134,3 +134,14 @@ async def test_query_uses_literal_keyword_local_dates_and_stable_pagination():
     assert len(page.items) == 1
     assert page.offset == 1 and page.limit == 1
     assert page.items[0].task.id == today.task.id
+
+
+@pytest.mark.asyncio
+async def test_legacy_list_keeps_all_items_without_query_limit():
+    service = PersonalTaskService(MemoryRepository(), timezone=ZoneInfo("UTC"),
+        clock=lambda: datetime(2026, 11, 18, tzinfo=UTC))
+    for index in range(105):
+        await service.create(title=f"事务 {index}")
+    result = await service.list(PersonalTaskFilter.ALL)
+    assert len(result.items) == 105
+    assert result.total == 105

@@ -88,9 +88,8 @@ class PersonalTaskService:
             t.deadline is None, deadline_sort_at(t.deadline, self._timezone) if t.deadline else t.created_at,
             t.created_at, t.id)))
         now = self._clock().astimezone(UTC)
-        page = tasks[:100]
-        return PersonalTaskList(tuple(self._view(task, now) for task in page), str(self._timezone), now,
-                                len(tasks), 0, 100)
+        return PersonalTaskList(tuple(self._view(task, now) for task in tasks), str(self._timezone), now,
+                                len(tasks), 0, len(tasks))
 
     async def query(self, query: PersonalTaskQuery) -> PersonalTaskList:
         if not isinstance(query, PersonalTaskQuery):
