@@ -395,10 +395,10 @@ PUT事务与POST状态响应增加 `reminder_changes`，返回已提交的版本
 ### 11.5 文件与方法对应
 
 - `personal_tasks/models.py`：新增 PersonalTaskQuery、ReminderSummary（提醒摘要）、ReminderChange；PersonalTaskList（事务列表结果）增加total/offset/limit和与items同序的reminder_summaries。既有字段顺序保持。
-- `personal_tasks/repository.py`：协议增加 `query(query) -> tuple[tuple[PersonalTask,...], dict[str,ReminderSummary]]`、`get_detail(task_id) -> tuple[PersonalTask|None, tuple[Reminder,...]]`、`replace_with_effects(task, *, expected_version, now=None, timezone=None) -> tuple[PersonalTask,tuple[ReminderChange,...]]`。原replace仍返回事务，不改成元组。
-- `personal_tasks/sqlite_repository.py`：对应async方法用既有to_thread模式调用同步实现；query/get_detail用显式读取事务固定快照，replace_with_effects复用既有写事务，在COMMIT成功后返回事务及变化，replace丢弃变化保持兼容。
+- `personal_tasks/repository.py`：协议增加 `read_task_snapshot() -> tuple[tuple[PersonalTask,...], dict[str,ReminderSummary]]`、`get_detail(task_id) -> tuple[PersonalTask|None, tuple[Reminder,...]]`、`replace_with_effects(task, *, expected_version, now=None, timezone=None) -> tuple[PersonalTask,tuple[ReminderChange,...]]`。原replace仍返回事务，不改成元组。快照为每个事务提供摘要，无活动提醒为0/null；服务直接读取该结果，不重复兜底。
+- `personal_tasks/sqlite_repository.py`：对应async方法用既有to_thread模式调用同步实现；read_task_snapshot/get_detail用显式读取事务固定快照，replace_with_effects复用既有写事务，在COMMIT成功后返回事务及变化，replace丢弃变化保持兼容。快照方法不接收查询条件，条件筛选统一在服务query中执行。
 - `personal_tasks/service.py`：query校验、筛选排序分页并组合列表；get_detail将仓储不存在映射领域异常；update/change_status调用replace_with_effects并填入view。旧list保留完整列表语义，HTTP有界列表统一走query。
-- `personal_tasks/reminder_rules.py`：validate_rule统一七种规则的字段、类型、范围及时间格式；`reminder_service.py`在写入口验证版本和动作后复用它，未来入口无需引用Web模型。
+- `personal_tasks/reminder_rules.py`：validate_rule统一七种规则的字段、类型、范围及时间格式；normalize_rule将已验证的at规则转为UTC微秒Z格式，其他规则保持原值，供事务带提醒创建及提醒create/update三个调用方复用；`reminder_service.py`在写入口验证版本和动作后复用规则函数，未来入口无需引用Web模型。
 - `channel/web/personal_task_schemas.py`：增加提醒摘要、联动变化、列表项和详情响应；`personal_task_routes.py`把查询参数组装为领域查询，详情调用get_detail，变更序列化view.reminder_changes；沿用现有app异常映射。
 - `frontend/src/api.ts/types.ts`：列表请求接收组合查询，响应带total/offset/limit及每项reminder_summary；详情类型增加reminders；修改及状态响应含reminder_changes。
 - `frontend/src/usePersonalTasks.ts`：reload(preserveLoaded)从首页刷新并按需恢复已加载范围，loadMore按服务分页追加、按ID去重；条件变化重置页并取消旧请求，序号阻止迟到结果覆盖。保留聚焦和60秒刷新，以列表摘要代替逐事务提醒读取。
@@ -412,3 +412,9 @@ PUT事务与POST状态响应增加 `reminder_changes`，返回已提交的版本
 最终 `a78be1a` 同步清除定位错误提示，相关12项组件测试通过，避免清除定位后残留不可重试的错误区域。
 
 主代理通过实际Docker的5173代理完成：创建带日期截止和相对提醒的临时事务→关键词/日期范围/limit组合查询返回摘要→详情读取提醒→改期返回rescheduled→完成返回cancelled→按精确临时标记核对后删除。容器healthy。此次未完成新的浏览器人工验收：浏览器控制工具报告Chrome不可用；不把HTTP验收或组件测试表述为浏览器人工验证。系统通知弹窗不属于本轮变更验收。
+
+### 11.6 后续清理记录
+
+`c24cdc7` 将未消费查询参数的仓储query更名为无参read_task_snapshot，明确筛选/排序/分页属于服务职责；SQLite快照仍提供每个事务的摘要，服务移除重复默认值。normalize_rule替代三处相同的UTC转换。`990bef7` 删除事务hook未被使用的filters/showAll返回入口，以及提醒详情加载中从未执行abort的局部控制器和signal参数。未新增取消机制，未改变提醒详情请求时机。
+
+保留旧service.list/repository.list/replace兼容入口、scheduler公开导出和enabled配置、HTTP与服务各自边界校验、提醒端点的调度状态元数据。不能将这些有职责或已有契约的接口认作废弃代码。此次清理后端定向24项、前端相关13项测试及构建通过，未重跑全量测试或浏览器手测。
