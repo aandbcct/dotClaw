@@ -533,7 +533,9 @@ npm install
 npm run dev
 ```
 
-访问 `http://127.0.0.1:5173/`。事务入口提供独立事务管理和一次性/周期提醒；数据保存在 `data/personal-assistant.sqlite3`，默认时区为 Asia/Shanghai。提醒由宿主扫描，即使网页关闭也会写入站内通知；浏览器系统通知要求网页保持打开且用户授权。首次发送才创建会话，支持切换已配置模型、搜索历史、逐轮执行详情、Markdown 导出和本机置顶。设置中模型/运行参数只读，已有工具/技能开关与 MCP 重连可用。刷新运行中的页面只恢复状态及最终结果，不重放逐字增量。
+访问 `http://127.0.0.1:5173/`。事务入口提供独立事务管理和一次性/周期提醒；数据保存在 `data/personal-assistant.sqlite3`，默认时区为 Asia/Shanghai。提醒由宿主扫描，即使网页关闭也会写入站内通知；浏览器系统通知要求网页保持打开且用户授权。事务支持关键词、截止日期范围和逾期筛选，列表附带提醒摘要并可加载更多；修改截止或结束事务后显示关联提醒的实际变化。首次发送才创建会话，支持切换已配置模型、搜索历史、逐轮执行详情、Markdown 导出和本机置顶。设置中模型/运行参数只读，已有工具/技能开关与 MCP 重连可用。刷新运行中的页面只恢复状态及最终结果，不重放逐字增量。
+
+事务 HTTP 列表 `GET /api/v1/personal-tasks` 默认返回最多50条，使用 `offset`、`limit`（1—100）及返回的 `total` 分页；旧客户端不能再假定一次返回全部事务。支持 `filter`、`keyword`、`deadline_from`、`deadline_until`、`overdue_only`；截止日期范围按应用时区，起始包含、结束不包含。详情包含完整提醒，事务修改/状态响应中的 `reminder_changes` 为同次提交实际产生的联动结果。非网页调用复用事务及提醒服务，详细契约见 [PA2 spec](docs/Development/personal-assistant/pa2-RemindersNotifications/spec.md)。
 
 实施范围、测试、前后截图及限制见[前端补齐与视觉改造开发说明](docs/Development/gui/前端与ChatGPT差距及补齐建议.md#9-实施结果与验收记录2026-10-23)。当前入口面向本地使用。
 

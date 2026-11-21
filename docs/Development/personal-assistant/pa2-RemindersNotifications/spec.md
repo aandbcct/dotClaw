@@ -353,3 +353,62 @@ deliver 直接创建浏览器 Notification（浏览器系统通知对象），ti
 - 通知详情优先展示事项、可读时间和查看事务/摘要主操作，多成员及投递状态放折叠区。列表与详情的已知普通提醒正文统一格式化时间，保留原始持久文本，明确浏览器当地时区；未知正文保持原文。
 
 针对上述调整新增原子创建回滚、创建后回列表、摘要重验证、快捷规则及通知主操作测试。相关后端测试104项、前端测试121项通过；实际 Docker 页面完成新建并附明天09:00提醒、返回列表显示摘要、更多菜单及通知主操作核对。验收临时事项已通过 API 清理。
+
+## 11. 2026-11-21 面向后续入口的基础契约
+
+本节覆盖此前“逐事务加载摘要”的设计；不引入自然语言或模型调用。目录保留既有 personal_tasks、channel/web、frontend/src 分层，修改对应模型、服务、仓储、Web请求响应、事务hook和页面及其测试，不新增基础设施依赖。内部实现方法的最终清单随实现收敛补记。
+
+### 11.1 查询与聚合读取
+
+`models.py` 增加 PersonalTaskQuery（事务查询条件）：filter默认active、keyword默认空、deadline_from/date可空、deadline_until/date可空、overdue_only默认false、offset默认0、limit默认50。limit范围1..100，offset非负且为整数，日期范围非空时必须from<until。keyword去除两端空格后匹配标题和说明，不区分大小写，`%`、`_`是字面字符。
+
+日期范围为应用时区日历日，from包含、until不包含。日期截止按日期比较，时刻截止按该日期的当地零点转换UTC比较；无截止不匹配日期范围。overdue_only复用现有逾期定义，已结束事务永不逾期。先条件筛选、沿用现有deadline_sort_at/created_at/id排序、再分页，返回total、offset、limit及既有timezone/as_of。
+
+PersonalTaskService（事务业务服务）增加 `query(query: PersonalTaskQuery)`。旧 `list(filter)` 保留兼容，HTTP列表改用query；查询输入在服务边界验证，不能依靠Web请求模型才能保证合法。仓储聚合查询在同一SQLite读取事务内获取事务与提醒，形成一致快照；当前单用户规模允许在快照内排序分页，禁止调用方加载全部事务自行筛选。
+
+列表项增加 `reminder_summary: {active_count:int, next_fire_at:datetime|null}`，统计active提醒且取最早next_fire_at，无active时0/null，不混入paused或历史。服务增加 `get_detail(task_id)`，读取同一快照内的事务及完整提醒；GET单项增加reminders字段，旧get保持现有语义。聚合查询与详情不存在时沿用既有异常，不将存储失败当作空结果。
+
+HTTP `GET /api/v1/personal-tasks` 接受filter/keyword/deadline_from/deadline_until/overdue_only/offset/limit。日期使用YYYY-MM-DD。原items/timezone/as_of字段保留，默认列表变为最多50条，客户端必须处理total和加载更多；这属于本次明确的列表兼容调整，其他CRUD端点和版本校验保持。
+
+### 11.2 联动结果与写入顺序
+
+`models.py` 增加 ReminderChange（提醒变化结果）：reminder_id、action（rescheduled/paused/cancelled）、reason（可空）、next_fire_at（可空）、version。PersonalTaskView（事务展示结果）末尾增加默认空元组reminder_changes，不破坏旧位置参数。
+
+修改截止和事务状态时，SQLite持有写锁后校验父事务版本，读取相关提醒，写事务及既有提醒联动，收集本次实际改变的提醒结果，提交成功后一起返回。不可提交后重新读取提醒再猜测变化，也不可比较两个跨事务快照生成反馈。无变化返回空集合；已触发/错过等历史提醒不报告为新取消。过往规则仍生效：相对规则随截止移动、无未来时刻暂停、移除或改变截止类型取消，完成/取消事务结束活动及暂停提醒，重新打开不恢复。
+
+PUT事务与POST状态响应增加 `reminder_changes`，返回已提交的版本和最终状态；其他响应允许空集合。原仓储replace调用方保留兼容入口；新增返回联动结果的方法或返回模型必须同步协议、SQLite实现和测试替身，禁止破坏既有调用。
+
+### 11.3 共用边界与前端调用
+
+服务接收外部入口提供的领域参数，统一检查查询、标题、规则结构/类型/范围及必要版本参数；HTTP仅负责字符串/JSON到领域参数转换与错误码映射。非法输入产生明确领域输入异常，找不到/冲突/无效状态/存储失败保持不同异常。直接服务调用不得接受HTTP会拒绝的非法提醒规则；复用既有规则校验函数，不再复制一套规则。信任通过边界校验的内部对象，不堆叠防御分支。
+
+前端 `types.ts/api.ts` 定义查询、分页元数据、摘要、详情和联动结果；`usePersonalTasks.ts`统一持有条件/分页/在途序号。切换条件从offset0重新读取，加载更多追加同条件页，失败保留已有页并可重试；换条件或刷新后旧请求不得覆盖。列表直接使用服务端摘要，删除为每个可见事务分别读取提醒的摘要请求。显式刷新、定时刷新和聚焦刷新重新验证当前查询，不能混合旧分页与新排序。提醒管理仍使用原独立提醒接口。
+
+`PersonalTasks.tsx`提供关键词、截止日期范围和逾期筛选以及加载更多；使用界面日期的结束日时转换为次日until，标签说明包含该日。事务编辑/结束成功显示实际联动数量和动作，空集合不虚构反馈；冲突保留既有确认逻辑。未来非网页入口直接调用相同服务，禁止绕过服务写SQLite。
+
+### 11.4 验收与禁止行为
+
+使用独立临时数据库验证：直接服务调用创建带提醒事务→条件查询→同快照详情→修改截止返回实际提醒变化→结束后无未来提醒→重启读取保持结果。覆盖时区日期边界、无截止/结束状态、关键词通配符字面匹配、相同排序值分页、非法范围/limit/版本、真实写入失败无半结果，以及HTTP相同错误映射。前端验证查询切换、加载更多、迟到响应、空结果/读取失败和无N+1请求；运行相关后端测试、前端测试与构建，结果另记，不以设计断言替代证据。
+
+不提供批量模糊修改或按标题直接变更事务；不预设模型解析结果、消歧或确认策略；不以自动重试创建来掩盖网络不确定结果。分页跨多次请求不承诺全局快照，数据变化后以刷新重建结果。
+
+### 11.5 文件与方法对应
+
+- `personal_tasks/models.py`：新增 PersonalTaskQuery、ReminderSummary（提醒摘要）、ReminderChange；PersonalTaskList（事务列表结果）增加total/offset/limit和与items同序的reminder_summaries。既有字段顺序保持。
+- `personal_tasks/repository.py`：协议增加 `query(query) -> tuple[tuple[PersonalTask,...], dict[str,ReminderSummary]]`、`get_detail(task_id) -> tuple[PersonalTask|None, tuple[Reminder,...]]`、`replace_with_effects(task, *, expected_version, now=None, timezone=None) -> tuple[PersonalTask,tuple[ReminderChange,...]]`。原replace仍返回事务，不改成元组。
+- `personal_tasks/sqlite_repository.py`：对应async方法用既有to_thread模式调用同步实现；query/get_detail用显式读取事务固定快照，replace_with_effects复用既有写事务，在COMMIT成功后返回事务及变化，replace丢弃变化保持兼容。
+- `personal_tasks/service.py`：query校验、筛选排序分页并组合列表；get_detail将仓储不存在映射领域异常；update/change_status调用replace_with_effects并填入view。旧list保留完整列表语义，HTTP有界列表统一走query。
+- `personal_tasks/reminder_rules.py`：validate_rule统一七种规则的字段、类型、范围及时间格式；`reminder_service.py`在写入口验证版本和动作后复用它，未来入口无需引用Web模型。
+- `channel/web/personal_task_schemas.py`：增加提醒摘要、联动变化、列表项和详情响应；`personal_task_routes.py`把查询参数组装为领域查询，详情调用get_detail，变更序列化view.reminder_changes；沿用现有app异常映射。
+- `frontend/src/api.ts/types.ts`：列表请求接收组合查询，响应带total/offset/limit及每项reminder_summary；详情类型增加reminders；修改及状态响应含reminder_changes。
+- `frontend/src/usePersonalTasks.ts`：reload(preserveLoaded)从首页刷新并按需恢复已加载范围，loadMore按服务分页追加、按ID去重；条件变化重置页并取消旧请求，序号阻止迟到结果覆盖。保留聚焦和60秒刷新，以列表摘要代替逐事务提醒读取。
+- `frontend/src/PersonalTasks.tsx`：提供状态/关键词/日期/逾期组合筛选、加载更多与准确联动反馈。通知定位单独按ID调用getPersonalTask，摘要先读取通知成员再定向读取成员详情；不改变当前查询，不依赖首50条。404显示已删除，其他失败显示可重试错误；新定位或卸载忽略旧结果。
+- `frontend/src/useTaskReminders.ts`：详情返回的事务和reminders来自同一快照，提醒端点仍用于读取调度启用和扫描延迟元数据。新增/修改/状态操作后复用现有刷新，TaskReminders完成变更时通知事务列表刷新摘要。
+
+### 11.6 实际验收记录
+
+后端提交 `1d7b2e6`，旧list完整语义修复 `3b2d39d`，前端提交 `5fc65ed`。开发使用项目解释器核对后运行 `tests/personal_tasks tests/channel/web`：109项通过；前端15文件124项通过，TypeScript/Vite构建通过。独立审查发现并闭环旧list截断和通知定位跨分页问题；最终定位测试覆盖首屏外事务、真实404及临时错误重试。随后 `8028f44` 清理未读状态并修正首次定位加载提示，相关11项组件测试和构建再次通过。构建仍有既有大于500kB的chunk提示，测试存在既有Markdown/HTML嵌套警告。
+
+最终 `a78be1a` 同步清除定位错误提示，相关12项组件测试通过，避免清除定位后残留不可重试的错误区域。
+
+主代理通过实际Docker的5173代理完成：创建带日期截止和相对提醒的临时事务→关键词/日期范围/limit组合查询返回摘要→详情读取提醒→改期返回rescheduled→完成返回cancelled→按精确临时标记核对后删除。容器healthy。此次未完成新的浏览器人工验收：浏览器控制工具报告Chrome不可用；不把HTTP验收或组件测试表述为浏览器人工验证。系统通知弹窗不属于本轮变更验收。

@@ -104,3 +104,15 @@ Commit 为 `test(assistant): verify reminder lifecycle and document delivery`。
 Windows 测试先执行 `.venv\Scripts\python.exe -c "import sys; print(sys.executable)"`，随后使用该解释器运行 pytest。目标测试为 `tests/personal_tasks`、`tests/channel/web`、宿主生命周期相关测试；新增测试均放已收集目录。前端在 frontend 运行 `npm test`、`npm run build`。Docker 内使用 `/opt/venv/bin/python`，沿用现有 compose 工作流，不删除数据卷。
 
 最终必须验证从界面设置提醒到站内生成、浏览器展示、点击回到事务的完整流程，重启汇总和结束后停发，以及 v1 数据兼容。浏览器接受通知请求只代表 accepted，不代表用户已看见；系统关闭通知/免打扰造成的展示差异须在验证记录中如实描述。纯文档阶段以文档覆盖与一致性核对验收，不声称实现测试通过。
+
+## 6. 2026-11-21 基础能力收口
+
+目标是让下一阶段的自然语言事务入口复用确定性业务服务。现有服务已独立于会话，但缺少有界条件查询、统一提醒读取和准确的联动结果；部分边界校验依赖 HTTP。详细契约集中在 spec §11，本节不重复字段规则。
+
+沿用本 PR，依赖已完成的提醒持久化和页面功能，分三个提交阶段：
+
+1. 后端：修改 personal_tasks 下 models/repository/sqlite_repository/service/reminder_rules/reminder_service 以及必要的 Web schemas/routes；增加查询、快照聚合读取、事务提交内产生的提醒变化结果，统一直接服务调用的输入校验。同步相关仓储替身与 tests/personal_tasks、tests/channel/web。验收查询边界、原子联动结果、直接调用错误与 HTTP 映射一致及既有行为兼容。
+2. 前端：修改 types/api/usePersonalTasks/PersonalTasks 及必要样式和测试；共用查询条件，支持加载更多，以列表自带摘要替代逐事务请求，明确展示事务修改造成的提醒变化。验收条件切换重置分页、迟到响应不覆盖新条件、分页错误可重试和现有提醒管理兼容。
+3. 验收与文档：独立检查关键差异、针对性动态测试及前端构建；实际 Docker 验证非空查询、详情和联动响应，更新 README 和本设计中的实际结果。任何测试临时数据只清理本次创建的记录。
+
+不纳入自然语言解析、消歧确认、助理工具注册、工具重试防重复、事务实例/打卡以及新的通知渠道。事务创建的原子性不等于请求幂等，后者留给下一阶段结合运行时契约决定。
