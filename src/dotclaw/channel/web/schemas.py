@@ -57,6 +57,11 @@ class WebErrorCode(StrEnum):
     PERSONAL_TASK_VERSION_CONFLICT = "personal_task_version_conflict"
     PERSONAL_TASK_INVALID_TRANSITION = "personal_task_invalid_transition"
     PERSONAL_TASK_STORAGE_FAILED = "personal_task_storage_failed"
+    REMINDER_NOT_FOUND = "reminder_not_found"
+    REMINDER_VERSION_CONFLICT = "reminder_version_conflict"
+    REMINDER_INVALID_TRANSITION = "reminder_invalid_transition"
+    NOTIFICATION_NOT_FOUND = "notification_not_found"
+    NOTIFICATION_DELIVERY_CONFLICT = "notification_delivery_conflict"
 
 
 class CreateSessionRequest(BaseModel):

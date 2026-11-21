@@ -422,7 +422,7 @@ flowchart TB
 | Skills | `./skills` | Scanner 使用；默认 skip `_` |
 | Memory | long_term_file | 当前该字段未控制实际 Manager 路径 |
 | Session | `./data/sessions` | Session 与 Runtime 存储根 |
-| Scheduler | true | 当前 Host 未构造 Scheduler |
+| Scheduler | true | ApplicationHost 管理个人提醒扫描 |
 | Debug | INFO + log_file | level 后置生效；log_file 当前硬编码路径碰巧一致 |
 | Journal | trace/snapshot 开关 | 当前 Runtime 主链未注入 JournalConfig |
 
@@ -1474,7 +1474,7 @@ context_slot_ids:
 | `tools.mcp_servers` | 结构校验 | MCP Provider | **有效** |
 | `skills.directory/enabled/skip_prefix` | 是 | Skill Builder | **有效** |
 | `session.directory` | 是 | SessionManager/Runtime Repo | **有效** |
-| `scheduler.enabled` | 是 | Host 未构造 Scheduler | **未消费** |
+| `scheduler.enabled` | 是 | ApplicationHost 提醒调度器 | **有效** |
 | `debug.level` | 是 | CLI 在 Host 就绪后设置 | **部分有效** |
 | `debug.log_file` | 是 | main.py 使用硬编码路径 | **未消费** |
 | `journal.trace_dir/snapshot_dir` | 是 | Runtime 未注入 JournalConfig | **未消费于主链** |

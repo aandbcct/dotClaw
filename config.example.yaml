@@ -81,6 +81,7 @@ personal_tasks:
   timezone: Asia/Shanghai
 
 scheduler:
+  # 启用持久化个人提醒扫描；关闭时仍可管理提醒，但不会触发。
   enabled: true
 
 debug:

@@ -36,6 +36,9 @@ from ..session.session import SessionManager
 from ..trace.service import TraceService
 from ..personal_tasks.service import PersonalTaskService
 from ..personal_tasks.sqlite_repository import SqlitePersonalTaskRepository
+from ..personal_tasks.reminder_service import ReminderService
+from ..personal_tasks.notification_service import NotificationService
+from ..scheduler.reminder_scheduler import ReminderScheduler
 
 if TYPE_CHECKING:
     from dotclaw.channel.base import Channel
@@ -75,6 +78,9 @@ class ApplicationHost:
         self._eval_draft_service: EvalCaseDraftService | None = None
         self._trace_service: TraceService | None = None
         self._personal_task_service: PersonalTaskService | None = None
+        self._reminder_service: ReminderService | None = None
+        self._notification_service: NotificationService | None = None
+        self._reminder_scheduler: ReminderScheduler | None = None
         self._http_client: "HttpClient | None" = None
 
     # ── 构建 ──
@@ -194,9 +200,14 @@ class ApplicationHost:
         if not task_path.is_absolute():
             task_path = root / task_path
         task_timezone = ZoneInfo(config.personal_tasks.timezone)
-        task_repository = SqlitePersonalTaskRepository(task_path)
+        task_repository = SqlitePersonalTaskRepository(task_path, task_timezone)
         await task_repository.initialize()
         self._personal_task_service = PersonalTaskService(task_repository, timezone=task_timezone)
+        self._reminder_service = ReminderService(task_repository, timezone=task_timezone)
+        self._notification_service = NotificationService(task_repository)
+        self._reminder_scheduler = ReminderScheduler(self._reminder_service)
+        if config.scheduler.enabled:
+            await self._reminder_scheduler.start()
 
         logger.info("ApplicationHost 就绪：%d 个 Identity 已注册", len(self._agent_registry.list_all()))
 
@@ -306,6 +317,22 @@ class ApplicationHost:
         return self._personal_task_service
 
     @property
+    def reminder_service(self) -> ReminderService:
+        if self._reminder_service is None:
+            raise RuntimeError("ApplicationHost 尚未初始化")
+        return self._reminder_service
+
+    @property
+    def notification_service(self) -> NotificationService:
+        if self._notification_service is None:
+            raise RuntimeError("ApplicationHost 尚未初始化")
+        return self._notification_service
+
+    @property
+    def scheduler_enabled(self) -> bool:
+        return self._config.scheduler.enabled
+
+    @property
     def playback_runner(self) -> PlaybackRunner:
         """返回 Playback 批量执行器（PR6）；无状态，按需构建。"""
         return PlaybackRunner()
@@ -324,6 +351,9 @@ class ApplicationHost:
         → 释放其他可关闭资源。幂等：可重复调用，亦可在半初始化失败后回收部分资源。
         Agent 不参与资源关闭。
         """
+        if self._reminder_scheduler is not None:
+            await self._reminder_scheduler.stop()
+            self._reminder_scheduler = None
         # 运行控制先于共享能力关闭；未知资源保持未终态，不因宿主关闭伪造停止成功。
         if self._runtime_services is not None:
             try:

@@ -304,3 +304,38 @@ a { color:var(--accent); text-underline-offset:3px; }
 .task-editor label { display: grid; gap: 6px; }
 .task-editor input, .task-editor textarea, .task-editor select { padding: 9px; }
 .task-editor textarea { min-height: 90px; }
+/* 提醒与通知沿用事务页的布局和颜色变量。 */
+.reminder-editor { display:grid; gap:14px; min-width:min(520px,78vw); }
+.reminder-editor label { display:grid; gap:6px; }
+.reminder-editor input,.reminder-editor select { min-height:40px; padding:8px; }
+.reminder-editor fieldset { display:flex; flex-wrap:wrap; gap:8px; }
+.reminder-editor fieldset label { display:flex; align-items:center; gap:4px; }
+.reminder-editor footer,.notification-center header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+/* 通知页面占满工作区，列表与详情随页面滚动。 */
+.notification-center { grid-row:1 / -1; width:min(960px,100%); min-width:0; min-height:0; margin:0 auto; padding:24px; overflow-y:auto; overflow-x:hidden; }
+.notification-center > header { margin-bottom:20px; }
+.notification-center h1 { margin:0 auto 0 0; font-size:24px; }
+.notification-center > header button:not(.menu-button),.notification-detail > button { padding:8px 12px; border:1px solid var(--line); }
+.notification-center button[aria-pressed="true"] { background:var(--accent-soft); color:var(--accent); }
+.notification-center ul { list-style:none; padding:0; margin:0; }
+.notification-list { display:grid; gap:8px; margin:20px 0 !important; }
+.notification-list > li { min-width:0; }
+.notification-list > li > button { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px 16px; width:100%; padding:16px; border:1px solid var(--line); text-align:left; background:var(--raised); }
+.notification-list strong { overflow-wrap:anywhere; }
+.notification-list span { color:var(--muted); font-size:12px; }
+.notification-list small { grid-column:1 / -1; color:var(--muted); line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
+.notification-unread > button { border-left:3px solid var(--accent) !important; }
+.notification-unread span { color:var(--accent); }
+.notification-detail { margin-top:20px; border:1px solid var(--line); border-radius:10px; padding:20px; }
+.notification-detail h2 { margin:0 0 12px; font-size:18px; }
+.notification-detail p { white-space:pre-wrap; line-height:1.6; }
+.notification-detail li { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:10px 0; border-top:1px solid var(--line); }
+.notification-detail li span { color:var(--muted); font-size:13px; }
+.notification-detail li button { padding:6px 8px; color:var(--accent); }
+.notification-preferences { display:flex; gap:12px; justify-content:space-between; align-items:center; flex-wrap:wrap; padding:12px 16px; background:var(--surface); border:1px solid var(--line); border-radius:8px; font-size:13px; color:var(--muted); }
+.notification-preferences button { padding:8px 12px; color:var(--accent); }
+@media (max-width:640px) {
+  .notification-center { padding:16px 12px; }
+  .notification-center h1 { font-size:20px; }
+  .notification-list > li > button,.notification-detail { padding:14px; }
+}

@@ -2560,7 +2560,7 @@ src/dotclaw/
 | 文件 | Memory 视角 |
 |---|---|
 | `main.py` | `/dream` 手动入口；普通提交后没有 Flush |
-| `scheduler/reminder.py` | 仅支持一次性 Reminder，不消费 dream_schedule |
+| `scheduler/reminder_scheduler.py` | 仅扫描个人事务提醒，不消费 dream_schedule |
 
 ### 9.7 配置文件
 

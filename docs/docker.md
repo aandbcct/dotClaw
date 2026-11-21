@@ -113,3 +113,5 @@ docker compose -f compose.yml start
 打开 <http://localhost:8765>。部署版把代码与 `frontend/dist` 构建进镜像，不挂载源码、不自动重载；代码更新后重新执行 `up --build -d`。单独构建时 `docker build -t dotclaw:deployment .` 默认也是部署目标。
 
 两版默认仅绑定宿主机 `127.0.0.1`。端口冲突时，在 `.env` 设置 `DOTCLAW_DEV_PORT=15173` 或 `DOTCLAW_PORT=18765` 后重新执行 `up -d`。可用 `docker compose -f compose.dev.yml ps` 查看健康状态。该入口仍按本地单用户使用设计。
+
+个人事务提醒由后端 APScheduler 扫描，并与事务、触发记录和站内通知保存在同一 SQLite 数据库。网页关闭时仍会生成站内通知；浏览器系统通知只有在页面打开且用户授予权限后才可投递。`scheduler.enabled: false` 会停止扫描，但仍允许管理提醒和查看通知。一个数据目录只能由一个应用进程管理。

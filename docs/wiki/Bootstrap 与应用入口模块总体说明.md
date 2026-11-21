@@ -1355,18 +1355,18 @@ Host 启动不改写遗留 Run 的领域状态，并执行取消补偿 `recover_
 
 ### 4.10 当前未纳入 Host 的模块
 
-#### 4.10.1 `ReminderManager`
+#### 4.10.1 `ReminderScheduler`
 
-**职责与用途：**`ReminderManager` 是 Scheduler 模块当前的一次性提醒实现。它持有异步 Task 和可选 Channel，但 ApplicationHost 没有创建、暴露、关闭或恢复该对象。
+**职责与用途：**`ReminderScheduler` 由 ApplicationHost 持有，启动时先恢复扫描，再每秒驱动 SQLite 中的持久提醒；关闭时停止扫描并等待当前写事务结束。
 
-虽然 `Config.scheduler.enabled` 已存在，当前启动链没有消费该字段。因此：
+`Config.scheduler.enabled` 控制提醒扫描：
 
 ```text
-scheduler.enabled
-≠ Scheduler 已启动
+scheduler.enabled=false
+→ 允许管理提醒，但不会扫描触发
 ```
 
-提醒任务只存在于进程内，进程退出后不会恢复；未来接入 Host 时必须补充 Task 取消和 Channel 生命周期。
+业务触发状态保存在个人事务 SQLite 库；APScheduler 仅负责唤醒扫描。浏览器通知由 Web 客户端认领与投递。
 
 #### 4.10.2 `Journal`
 
@@ -1913,7 +1913,7 @@ response：
 | 修改流式输出 | `ChannelLLMOutputAdapter` | LLMOutputPort、render | 每个提交单独实例 |
 | 修改最终渲染 | `_render_result`、`format_run_result` | RunResult | 已流式 response 不重复 |
 | 修改关闭顺序 | `ApplicationHost.shutdown` | 所有资源构建器 | 依赖逆序、单项失败不阻塞 |
-| 接入 Scheduler | `ApplicationHost.initialize` + `scheduler/reminder.py` | Channel、shutdown、Config | Task 必须可取消并定义恢复语义 |
+| 接入 Scheduler | `ApplicationHost.initialize` + `scheduler/reminder_scheduler.py` | SQLite 扫描服务、shutdown、Config | 启动恢复后扫描，不保存进程内业务提醒 |
 | 接入 Journal | Host/RuntimeFactory 的观测 Adapter | Runtime Events、Config、shutdown | Journal 不得成为恢复事实源 |
 | 排查启动失败 | Host 日志 → 构建阶段 → shutdown 日志 | Config、Identity、外部服务 | 区分 CRITICAL 与 DEGRADE |
 | 排查首个 Run 缺工具 | MCP 首次发现 → Tool Registry → Policy Snapshot | Host、Tool、Runtime | 不在 Runtime 装配后补注册 |
@@ -2257,7 +2257,7 @@ LLMProxy 构建只创建 Router、Limiter 和 Breaker，不验证：
 
 因此关键组件“构建成功”与“首个业务请求可成功”仍有距离。该选择避免启动时产生外部调用，但需要明确能力边界。
 
-#### B21. Scheduler 与 Journal 配置尚未进入组合根
+#### B21. Journal 配置尚未进入组合根
 
 Config 已定义：
 
@@ -2266,11 +2266,10 @@ SchedulerConfig.enabled
 JournalConfig
 ```
 
-仓库也存在 `ReminderManager` 和 Journal 模块，但 Host 没有创建或注入它们。配置表面能力与实际启动能力不一致，容易让用户误判：
+Journal 模块仍未接入 Host。Scheduler 已由 Host 管理。需要区分：
 
-- `scheduler.enabled=true` 时提醒服务已运行；
 - `journal.trace=true` 时 Runtime 已写 Journal；
-- Host shutdown 已管理提醒 Task 或 Journal 资源。
+- Host shutdown 已管理 Journal 资源。
 
 #### B22. RouterConfig 加载遗漏 Circuit Breaker 配置
 
@@ -2443,7 +2442,7 @@ src/dotclaw/
 
 | 文件 | Bootstrap 视角 |
 |---|---|
-| `scheduler/reminder.py` | 当前未被 Host 装配的一次性提醒实现 |
+| `scheduler/reminder_scheduler.py` | Host 管理的 SQLite 持久提醒扫描器 |
 | `journal/__init__.py` | 当前未被 Host 装配的观测模块公共入口 |
 
 ### 9.6 包入口

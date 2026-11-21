@@ -28,7 +28,9 @@ from ...runtime.domain.events import RunEvent, RunEventType
 from ...runtime.domain.facts import AgentRun, JSONMap, MessageRole, RunError, RunErrorCode, RunMessage, RunMessageKind
 from ...runtime.domain.state import RunOutcome, Suspended
 from ...session.session import Conversation, Session
-from ...personal_tasks.repository import PersonalTaskNotFound, PersonalTaskStorageError, PersonalTaskVersionConflict
+from ...personal_tasks.repository import (PersonalTaskNotFound, PersonalTaskStorageError, PersonalTaskVersionConflict,
+    ReminderNotFound, ReminderVersionConflict, InvalidReminderInput, InvalidReminderTransition,
+    NotificationNotFound, NotificationDeliveryConflict)
 from ...personal_tasks.service import InvalidPersonalTaskInput, InvalidPersonalTaskTransition
 from .schemas import (
     CancelSessionRequest,
@@ -62,6 +64,8 @@ from .schemas import (
 )
 from .sse import SSEOutputAdapter, encode_sse_event
 from .personal_task_routes import router as personal_task_router
+from .reminder_routes import router as reminder_router
+from .notification_routes import router as notification_router
 
 logger = logging.getLogger("dotclaw.channel.web")
 
@@ -135,6 +139,36 @@ def create_app(
         del request
         logger.error("个人事务存储失败", exc_info=error)
         return _error_response(500, WebErrorCode.PERSONAL_TASK_STORAGE_FAILED, "事务暂时无法保存或读取")
+
+    @app.exception_handler(ReminderNotFound)
+    async def reminder_not_found_handler(request: Request, error: ReminderNotFound) -> JSONResponse:
+        del request, error
+        return _error_response(404, WebErrorCode.REMINDER_NOT_FOUND, "提醒不存在")
+
+    @app.exception_handler(ReminderVersionConflict)
+    async def reminder_conflict_handler(request: Request, error: ReminderVersionConflict) -> JSONResponse:
+        del request, error
+        return _error_response(409, WebErrorCode.REMINDER_VERSION_CONFLICT, "提醒已被修改，请刷新后重试")
+
+    @app.exception_handler(InvalidReminderTransition)
+    async def reminder_transition_handler(request: Request, error: InvalidReminderTransition) -> JSONResponse:
+        del request
+        return _error_response(409, WebErrorCode.REMINDER_INVALID_TRANSITION, str(error))
+
+    @app.exception_handler(InvalidReminderInput)
+    async def reminder_input_handler(request: Request, error: InvalidReminderInput) -> JSONResponse:
+        del request
+        return _error_response(422, WebErrorCode.INVALID_REQUEST, str(error))
+
+    @app.exception_handler(NotificationNotFound)
+    async def notification_not_found_handler(request: Request, error: NotificationNotFound) -> JSONResponse:
+        del request, error
+        return _error_response(404, WebErrorCode.NOTIFICATION_NOT_FOUND, "通知不存在")
+
+    @app.exception_handler(NotificationDeliveryConflict)
+    async def notification_delivery_conflict_handler(request: Request, error: NotificationDeliveryConflict) -> JSONResponse:
+        del request, error
+        return _error_response(409, WebErrorCode.NOTIFICATION_DELIVERY_CONFLICT, "通知投递状态冲突")
 
     @app.get("/api/v1/sessions", response_model=list[SessionSummaryResponse])
     async def list_sessions(request: Request) -> list[SessionSummaryResponse]:
@@ -497,6 +531,8 @@ def create_app(
 
     static_directory = frontend_dir or _frontend_dist_directory()
     app.include_router(personal_task_router)
+    app.include_router(reminder_router)
+    app.include_router(notification_router)
     if (static_directory / "index.html").is_file():
         # API 路由必须先注册；根挂载只负责构建后的前端文件。
         app.mount(

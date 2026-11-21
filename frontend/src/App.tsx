@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { ApiError, createSession, deleteSession, getRuntimeSettings, getSession, getWorkspaceOptions, reconnectMcp, resolveApproval, resumeDelegation, resumeRun, switchSessionModel, toggleSkill, toggleTool, updateSession } from "./api";
 import { CreateSessionDialog } from "./CreateSessionDialog";
 import { Dialog } from "./Dialog";
@@ -9,6 +9,9 @@ import { SearchSources } from "./SearchSources";
 import { SessionList, SessionMenu } from "./SessionList";
 import { SettingsPanel } from "./SettingsPanel";
 import { PersonalTasks } from "./PersonalTasks";
+import { NotificationCenter } from "./NotificationCenter";
+import { BrowserNotificationDelivery } from "./notificationDelivery";
+import { useNotifications } from "./useNotifications";
 import { exportMarkdown, readPreference, writePreference } from "./preferences";
 import { useConversationScroll } from "./useConversationScroll";
 import { useDraft } from "./useDraft";
@@ -22,7 +25,15 @@ export function App() {
   const [theme, setTheme] = useState(() => { try { return localStorage.getItem("dotclaw.theme") === "dark" ? "dark" : "light"; } catch { return "light"; } });
   const [collapsed, setCollapsed] = useState(() => readPreference("dotclaw.sidebar.v1", window.innerWidth < 1024));
   const [mobileNav, setMobileNav] = useState(false);
-  const [activeWorkspace, setActiveWorkspace] = useState<"chat" | "tasks">("chat");
+  const [activeWorkspace, setActiveWorkspace] = useState<"chat" | "tasks" | "notifications">("chat");
+  const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
+  const [focusNotificationId, setFocusNotificationId] = useState<number | null>(null);
+  const delivery = useMemo(() => new BrowserNotificationDelivery(), []);
+  const notifications = useNotifications(delivery, (item) => {
+    setActiveWorkspace("tasks");
+    if (item.kind === "reminder" && item.members[0]) setFocusTaskId(item.members[0].task_id);
+    if (item.kind === "recovery_summary") setFocusNotificationId(item.id);
+  });
   const [pinned, setPinned] = useState<string[]>(() => { const value = readPreference<unknown>("dotclaw.pins.v1", []); return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; });
   const [options, setOptions] = useState<WorkspaceOptions | null>(null);
   const [nextChoice, setNextChoice] = useState<{ agent_id: string; model: string } | null>(null);
@@ -189,6 +200,7 @@ export function App() {
     <button className="nav-action" type="button" aria-label="新对话" onClick={startNew}><span aria-hidden="true">＋</span><span>新对话</span></button>
     <button className="nav-action" type="button" aria-label="搜索对话" onClick={() => { setSearchOpen(true); setMobileNav(false); }}><span aria-hidden="true">⌕</span><span>搜索对话</span></button>
     <button className="nav-action" type="button" aria-label="事务" onClick={() => { setActiveWorkspace("tasks"); setMobileNav(false); }}><span aria-hidden="true">✓</span><span>事务</span></button>
+    <button className="nav-action" type="button" aria-label={`通知${notifications.unreadCount ? `，${notifications.unreadCount} 条未读` : ""}`} onClick={() => { setActiveWorkspace("notifications"); setMobileNav(false); }}><span aria-hidden="true">♢</span><span>通知 {notifications.unreadCount > 0 ? `(${notifications.unreadCount})` : ""}</span></button>
     <SessionList sessions={workspace.sessions} selectedId={selectedId || undefined} pinned={pinned} activeIds={Object.entries(workspace.views).filter(([, value]) => ["running", "stopping", "suspended", "recoverable"].includes(value.phase)).map(([id]) => id)} onSelect={(session) => void open(session)} onMenu={(session) => { setActionError(""); setMenu(session); }} />
     <button className="nav-action settings-entry" type="button" aria-label="设置" onClick={() => void loadSettings()}><span aria-hidden="true">⚙</span><span>设置</span></button>
   </>;
@@ -196,7 +208,7 @@ export function App() {
     <aside className="sidebar" aria-label="工作区导航">{navigation}</aside>
     {mobileNav && <Dialog title="会话导航" className="mobile-navigation" onClose={() => setMobileNav(false)}>{navigation}</Dialog>}
     <main className={`workspace ${!selected && !view.messages.length ? "workspace--new" : ""}`}>
-      {activeWorkspace === "tasks" ? <PersonalTasks onOpenNavigation={() => setMobileNav(true)} /> : <>
+      {activeWorkspace === "tasks" ? <PersonalTasks onOpenNavigation={() => setMobileNav(true)} focusTaskId={focusTaskId} focusNotificationId={focusNotificationId} onFocusHandled={() => { setFocusTaskId(null); setFocusNotificationId(null); }} /> : activeWorkspace === "notifications" ? <NotificationCenter onOpenNavigation={() => setMobileNav(true)} revision={notifications.revision} unreadCount={notifications.unreadCount} connectionError={notifications.connectionError} permission={notifications.permission} permissionPending={notifications.permissionPending} permissionError={notifications.permissionError} onEnableSystemNotifications={() => void notifications.enableSystemNotifications()} onRefresh={notifications.refresh} onOpenTask={(id) => { setFocusTaskId(id); setActiveWorkspace("tasks"); }} onOpenSummary={(id) => { setFocusNotificationId(id); setActiveWorkspace("tasks"); }} /> : <>
       <header className="workspace-header">
         <button className="menu-button" type="button" aria-label="打开会话列表" onClick={() => setMobileNav(true)}>☰</button>
         <div className="model-context">
@@ -256,6 +268,7 @@ export function App() {
       <footer className="dialog-actions"><button data-initial-focus autoFocus type="button" className="secondary-button" disabled={actionBusy} onClick={() => setDeleting(null)}>取消</button>{actionError && <button type="button" onClick={() => { void open(deleting); setDeleting(null); }}>打开会话处理运行</button>}<button type="button" className="danger-button" disabled={actionBusy} onClick={() => void confirmDelete()}>确认删除</button></footer>
     </Dialog>}
     {settingsOpen && <SettingsPanel settings={settings} loading={settingsLoading} busyKey={settingsBusy} error={settingsError} onRetry={() => void loadSettings()} onClose={() => setSettingsOpen(false)} onToggleTool={(name, enabled) => void settingAction(name, () => toggleTool(name, enabled))} onToggleSkill={(name, enabled) => void settingAction(name, () => toggleSkill(name, enabled))} onReconnectMcp={() => void settingAction("mcp", reconnectMcp)} />}
+
 
   </div>;
 }

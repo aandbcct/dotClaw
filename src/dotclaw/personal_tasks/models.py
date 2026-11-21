@@ -31,7 +31,7 @@ class TaskDeadline:
             if not isinstance(self.value, date) or isinstance(self.value, datetime):
                 raise ValueError("日期截止值必须是 date")
         elif self.kind == "datetime":
-            if not isinstance(self.value, datetime) or self.value.tzinfo is None:
+            if not isinstance(self.value, datetime) or self.value.tzinfo is None or self.value.utcoffset() is None:
                 raise ValueError("时刻截止值必须带时区")
             object.__setattr__(self, "value", self.value.astimezone(UTC))
         else:
@@ -55,6 +55,33 @@ class PersonalTask:
 class PersonalTaskView:
     task: PersonalTask
     is_overdue: bool
+    reminder_changes: tuple["ReminderChange", ...] = ()
+
+
+@dataclass(frozen=True)
+class ReminderChange:
+    reminder_id: str
+    action: Literal["rescheduled", "paused", "cancelled"]
+    reason: str | None
+    next_fire_at: datetime | None
+    version: int
+
+
+@dataclass(frozen=True)
+class PersonalTaskQuery:
+    filter: PersonalTaskFilter = PersonalTaskFilter.ACTIVE
+    keyword: str = ""
+    deadline_from: date | None = None
+    deadline_until: date | None = None
+    overdue_only: bool = False
+    offset: int = 0
+    limit: int = 50
+
+
+@dataclass(frozen=True)
+class ReminderSummary:
+    active_count: int
+    next_fire_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -62,6 +89,10 @@ class PersonalTaskList:
     items: tuple[PersonalTaskView, ...]
     timezone: str
     as_of: datetime
+    total: int = 0
+    offset: int = 0
+    limit: int = 50
+    reminder_summaries: tuple[ReminderSummary, ...] = ()
 
 
 def deadline_sort_at(deadline: TaskDeadline, zone: ZoneInfo) -> datetime:
