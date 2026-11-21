@@ -6,9 +6,9 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .models import (PersonalTask, PersonalTaskFilter, PersonalTaskList, PersonalTaskQuery, PersonalTaskStatus,
-                     PersonalTaskView, ReminderSummary, TaskDeadline, deadline_sort_at, is_overdue)
+                     PersonalTaskView, TaskDeadline, deadline_sort_at, is_overdue)
 from .reminder_models import Reminder, ReminderRule, ReminderStatus
-from .reminder_rules import next_fire_at, validate_rule
+from .reminder_rules import next_fire_at, normalize_rule, validate_rule
 from .repository import InvalidReminderInput, PersonalTaskNotFound, PersonalTaskRepository, PersonalTaskVersionConflict
 
 
@@ -56,8 +56,7 @@ class PersonalTaskService:
                     raise InvalidReminderInput(str(error)) from error
                 if candidate is None:
                     raise InvalidReminderInput("提醒时间必须晚于当前时间")
-                if rule["kind"] == "at":
-                    rule = {**rule, "at": datetime.fromisoformat(rule["at"].replace("Z", "+00:00")).astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")}
+                rule = normalize_rule(rule)
                 initial.append(Reminder(str(uuid4()), task.id, rule, str(self._timezone), ReminderStatus.ACTIVE,
                                         None, candidate, 1, now, now))
             created = await self._repository.create_with_reminders(task, tuple(initial))
@@ -104,7 +103,7 @@ class PersonalTaskService:
             raise InvalidPersonalTaskInput("deadline_from 必须早于 deadline_until")
         if type(query.overdue_only) is not bool or type(query.offset) is not int or query.offset < 0 or type(query.limit) is not int or not 1 <= query.limit <= 100:
             raise InvalidPersonalTaskInput("分页或逾期筛选条件无效")
-        tasks, reminder_summaries = await self._repository.query(query)
+        tasks, reminder_summaries = await self._repository.read_task_snapshot()
         now = self._clock().astimezone(UTC)
         tasks = tuple(sorted(tasks, key=lambda t: (t.deadline is None,
             deadline_sort_at(t.deadline, self._timezone) if t.deadline else t.created_at,
@@ -133,7 +132,7 @@ class PersonalTaskService:
             filtered.append(task)
         total = len(filtered)
         page = tuple(filtered[query.offset:query.offset + query.limit])
-        summaries = tuple(reminder_summaries.get(task.id, ReminderSummary(0, None)) for task in page)
+        summaries = tuple(reminder_summaries[task.id] for task in page)
         return PersonalTaskList(tuple(self._view(task, now) for task in page), str(self._timezone), now,
                                 total, query.offset, query.limit, summaries)
 

@@ -77,6 +77,13 @@ def validate_rule(rule: ReminderRule, task: PersonalTask, zone: ZoneInfo) -> Non
             raise ValueError("yearly 月日无效")
 
 
+def normalize_rule(rule: ReminderRule) -> ReminderRule:
+    if rule["kind"] != "at":
+        return rule
+    value = datetime.fromisoformat(rule["at"].replace("Z", "+00:00"))
+    return {**rule, "at": value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")}
+
+
 def _validate_local_time(value: object) -> None:
     if not isinstance(value, str) or re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) is None:
         raise ValueError("当地时刻必须为 HH:MM")

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from .models import PersonalTaskStatus
 from .reminder_models import Reminder, ReminderRule, ReminderStatus
-from .reminder_rules import next_fire_at, validate_rule
+from .reminder_rules import next_fire_at, normalize_rule, validate_rule
 from .repository import InvalidReminderInput, InvalidReminderTransition, PersonalTaskNotFound, PersonalTaskRepository, ReminderNotFound
 
 
@@ -41,8 +41,7 @@ class ReminderService:
             raise InvalidReminderInput(str(error)) from error
         if candidate is None:
             raise InvalidReminderInput("提醒时间必须晚于当前时间")
-        if rule["kind"] == "at":
-            rule = {**rule, "at": datetime.fromisoformat(rule["at"].replace("Z", "+00:00")).astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")}
+        rule = normalize_rule(rule)
         reminder = Reminder(str(uuid4()), task_id, rule, str(self._timezone), ReminderStatus.ACTIVE, None,
                             candidate, 1, now, now)
         return await self._repository.create_reminder(reminder, expected_task_version=expected_task_version)
@@ -70,8 +69,7 @@ class ReminderService:
             raise InvalidReminderInput(str(error)) from error
         if candidate is None:
             raise InvalidReminderInput("提醒时间必须晚于当前时间")
-        if rule["kind"] == "at":
-            rule = {**rule, "at": datetime.fromisoformat(rule["at"].replace("Z", "+00:00")).astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")}
+        rule = normalize_rule(rule)
         updated = Reminder(current.id, task_id, rule, str(self._timezone), ReminderStatus.ACTIVE, None,
                            candidate, current.version + 1, current.created_at, now)
         return await self._repository.replace_reminder(updated, expected_version=expected_version, expected_task_version=expected_task_version)

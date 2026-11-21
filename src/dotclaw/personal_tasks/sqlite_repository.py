@@ -10,7 +10,7 @@ import re
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from .models import PersonalTask, PersonalTaskQuery, PersonalTaskStatus, ReminderChange, ReminderSummary, TaskDeadline
+from .models import PersonalTask, PersonalTaskStatus, ReminderChange, ReminderSummary, TaskDeadline
 from .repository import PersonalTaskNotFound, PersonalTaskStorageError, PersonalTaskVersionConflict
 from .reminder_models import Reminder, ReminderRule, ReminderStatus
 from .notification_models import Notification, NotificationMember, NotificationDelivery, NotificationPage, NotificationChanges
@@ -257,10 +257,10 @@ class SqlitePersonalTaskRepository:
         finally:
             connection.close()
 
-    async def query(self, query: PersonalTaskQuery) -> tuple[tuple[PersonalTask, ...], dict[str, ReminderSummary]]:
-        return await asyncio.to_thread(self._query_sync, query)
+    async def read_task_snapshot(self) -> tuple[tuple[PersonalTask, ...], dict[str, ReminderSummary]]:
+        return await asyncio.to_thread(self._read_task_snapshot_sync)
 
-    def _query_sync(self, query: PersonalTaskQuery) -> tuple[tuple[PersonalTask, ...], dict[str, ReminderSummary]]:
+    def _read_task_snapshot_sync(self) -> tuple[tuple[PersonalTask, ...], dict[str, ReminderSummary]]:
         connection = self._connect()
         try:
             connection.execute("BEGIN")

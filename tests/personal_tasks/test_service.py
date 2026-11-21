@@ -6,6 +6,7 @@ import pytest
 from dotclaw.personal_tasks.models import PersonalTask, PersonalTaskFilter, PersonalTaskStatus, TaskDeadline
 from dotclaw.personal_tasks.repository import PersonalTaskNotFound, PersonalTaskVersionConflict
 from dotclaw.personal_tasks.service import InvalidPersonalTaskTransition, PersonalTaskService
+from dotclaw.personal_tasks.reminder_rules import normalize_rule
 
 
 class MemoryRepository:
@@ -28,7 +29,7 @@ class MemoryRepository:
     async def list(self, statuses):
         return tuple(task for task in self.items.values() if statuses is None or task.status in statuses)
 
-    async def query(self, query):
+    async def read_task_snapshot(self):
         from dotclaw.personal_tasks.models import ReminderSummary
 
         return tuple(self.items.values()), {task.id: ReminderSummary(0, None) for task in self.items.values()}
@@ -52,6 +53,14 @@ class MemoryRepository:
         if current.version != expected_version:
             raise PersonalTaskVersionConflict(task_id)
         del self.items[task_id]
+
+
+def test_normalize_rule_converts_at_to_utc_and_preserves_other_rules():
+    at_rule = {"kind": "at", "at": "2030-01-02T09:00:00+08:00"}
+    daily_rule = {"kind": "daily", "local_time": "09:00"}
+
+    assert normalize_rule(at_rule) == {"kind": "at", "at": "2030-01-02T01:00:00.000000Z"}
+    assert normalize_rule(daily_rule) is daily_rule
 
 
 @pytest.mark.asyncio
@@ -112,6 +121,7 @@ async def test_create_initial_reminders_validates_all_before_persisting():
 
     created = await service.create(title="事务", reminders=({"kind": "at", "at": future},))
     assert len(repository.reminders[created.task.id]) == 1
+    assert repository.reminders[created.task.id][0].rule["at"] == "2030-01-01T12:01:00.000000Z"
 
 
 @pytest.mark.asyncio

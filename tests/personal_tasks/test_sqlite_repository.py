@@ -72,7 +72,7 @@ async def test_create_task_and_reminders_roll_back_as_one_transaction(tmp_path):
 
 @pytest.mark.asyncio
 async def test_query_snapshot_summaries_and_detail(tmp_path):
-    from dotclaw.personal_tasks.models import PersonalTaskQuery, TaskDeadline
+    from dotclaw.personal_tasks.models import TaskDeadline
 
     now = datetime(2030, 1, 1, tzinfo=UTC)
     repository = SqlitePersonalTaskRepository(tmp_path / "query.sqlite3")
@@ -87,7 +87,7 @@ async def test_query_snapshot_summaries_and_detail(tmp_path):
         ReminderStatus.ACTIVE, None, now.replace(hour=9), 1, now, now)
     await repository.create_reminder(reminder, expected_task_version=1)
 
-    tasks, summaries = await repository.query(PersonalTaskQuery())
+    tasks, summaries = await repository.read_task_snapshot()
     detail_task, reminders = await repository.get_detail(first.id)
     assert {item.id for item in tasks} == {first.id, second.id}
     assert summaries[first.id].active_count == 1
