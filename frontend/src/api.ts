@@ -8,14 +8,17 @@ import type {
   SearchResults,
   WorkspaceOptions,
   CancelReceipt,
-  PersonalTask, PersonalTaskFilter, PersonalTaskInput, PersonalTaskList, PersonalTaskStatus,
+  PersonalTask, PersonalTaskDetail, PersonalTaskInput, PersonalTaskList, PersonalTaskQuery, PersonalTaskStatus,
   Reminder, ReminderRule, ReminderList, NotificationItem, NotificationList, NotificationChanges, NotificationDelivery,
 } from "./types";
 
 const API_ROOT = "/api/v1";
 
-export function listPersonalTasks(filter: PersonalTaskFilter, signal?: AbortSignal): Promise<PersonalTaskList> { return requestJson(`${API_ROOT}/personal-tasks?${new URLSearchParams({ filter })}`, { signal }); }
-export function getPersonalTask(id: string): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}`); }
+export function listPersonalTasks(query: PersonalTaskQuery, signal?: AbortSignal): Promise<PersonalTaskList> {
+  const params = Object.fromEntries(Object.entries(query).filter(([, value]) => value !== null).map(([key, value]) => [key, String(value)]));
+  return requestJson(`${API_ROOT}/personal-tasks?${new URLSearchParams(params)}`, { signal });
+}
+export function getPersonalTask(id: string): Promise<PersonalTaskDetail> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}`); }
 export function createPersonalTask(input: PersonalTaskInput, reminders: ReminderRule[] = []): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(reminders.length ? { ...input, reminders } : input) }); }
 export function updatePersonalTask(id: string, input: PersonalTaskInput, expectedVersion: number): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, expected_version: expectedVersion }) }); }
 export function changePersonalTaskStatus(id: string, status: PersonalTaskStatus, expectedVersion: number): Promise<PersonalTask> { return requestJson(`${API_ROOT}/personal-tasks/${encodeURIComponent(id)}/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, expected_version: expectedVersion }) }); }

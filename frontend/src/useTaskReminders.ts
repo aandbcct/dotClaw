@@ -17,8 +17,8 @@ export function useTaskReminders(taskId: string) {
     const controller = new AbortController();
     try {
       const [current, reminders] = await Promise.all([getPersonalTask(taskId), listTaskReminders(taskId, controller.signal)]);
-      setTask(current); setItems(reminders.items); setTimezone(reminders.timezone); setSchedulerEnabled(reminders.scheduler_enabled); setScanLag(reminders.scan_lag_seconds); setError("");
-      return reminders.items;
+      setTask(current); setItems(current.reminders); setTimezone(reminders.timezone); setSchedulerEnabled(reminders.scheduler_enabled); setScanLag(reminders.scan_lag_seconds); setError("");
+      return current.reminders;
     } catch (reason) { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "读取提醒失败"); if (throwOnError) throw reason; return null; }
     finally { setLoading(false); }
   }, [taskId]);
@@ -38,6 +38,6 @@ export function useTaskReminders(taskId: string) {
   return { task, items, timezone, schedulerEnabled, scanLag, loading, pending, error, success, reload,
     create: (rule: ReminderRule) => mutate(() => createTaskReminder(taskId, rule, task!.version), "提醒已新增", true),
     update: (item: Reminder, rule: ReminderRule) => mutate(() => updateTaskReminder(taskId, item.id, rule, item.version, task!.version), "提醒已保存", true),
-    changeStatus: (item: Reminder, action: "pause" | "resume" | "cancel") => mutate(() => changeTaskReminderStatus(taskId, item.id, action, item.version, task!.version), action === "pause" ? "提醒已暂停" : action === "resume" ? "提醒已恢复" : "提醒已取消"),
+    changeStatus: (item: Reminder, action: "pause" | "resume" | "cancel") => mutate(() => changeTaskReminderStatus(taskId, item.id, action, item.version, task!.version), action === "pause" ? "提醒已暂停" : action === "resume" ? "提醒已恢复" : "提醒已取消", true),
   };
 }

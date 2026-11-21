@@ -1,14 +1,13 @@
-import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PersonalTasks } from "./PersonalTasks";
-import { usePersonalTasks } from "./usePersonalTasks";
 import { addDaysToDateInput, dateTimeInputValue, dateTimeToRfc3339 } from "./reminderTime";
 
 afterEach(() => { vi.unstubAllGlobals(); });
 const current = { id: "t1", title: "原题", description: "", status: "pending", deadline: null, created_at: "2026-11-18T00:00:00Z", updated_at: "2026-11-18T00:00:00Z", completed_at: null, version: 1, is_overdue: false };
 const payload = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-const list = (items: unknown[]) => ({ items, timezone: "Asia/Shanghai", as_of: "2026-11-18T00:00:00Z" });
+const list = (items: unknown[], extra: Record<string, unknown> = {}) => ({ items: items.map((item) => ({ ...(item as Record<string, unknown>), reminder_summary: (item as { reminder_summary?: unknown }).reminder_summary || { active_count: 0, next_fire_at: null } })), timezone: "Asia/Shanghai", as_of: "2026-11-18T00:00:00Z", total: items.length, offset: 0, limit: 50, has_more: false, ...extra });
 const reminderPage = (items: unknown[]) => ({ items, timezone: "Asia/Shanghai", scheduler_enabled: true, last_scan_at: null, scan_lag_seconds: 0 });
 
 describe("个人事务视图", () => {
@@ -23,7 +22,7 @@ describe("个人事务视图", () => {
       if (url === "/api/v1/personal-tasks" && init?.method === "POST") return payload(created, 201);
       if (url.endsWith("/new-task/reminders")) return payload(reminderPage([initialReminder]));
       if (url.endsWith("/new-task")) return payload(created);
-      if (url.includes("/personal-tasks?")) return payload(list([created]));
+      if (url.includes("/personal-tasks?")) return payload(list([{ ...created, reminder_summary: { active_count: 1, next_fire_at: trigger } }]));
       throw new Error("未预期请求：" + (init?.method || "GET") + " " + url);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -71,120 +70,136 @@ describe("个人事务视图", () => {
     });
   });
 
-  it("读取失败可重试，显式刷新更新摘要且每轮只读一次", async () => {
-    let summaryReads = 0;
+  it("关键词和日期筛选随查询发送，摘要直接来自列表项且聚焦刷新当前范围", async () => {
+    let listReads = 0;
+    const withSummary = { ...current, reminder_summary: { active_count: 2, next_fire_at: "2026-12-01T09:00:00Z" } };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/t1/reminders")) {
-        summaryReads += 1;
-        if (summaryReads === 1) return payload({ error: { message: "网络不可用" } }, 503);
-        if (summaryReads === 2) return payload(reminderPage([
-          { ...current, id: "r1", rule: { kind: "at", at: "2026-12-01T09:00:00Z" }, task_id: "t1", timezone: "Asia/Shanghai", status: "active", reason: null, next_fire_at: "2026-12-01T09:00:00Z", version: 1, created_at: current.created_at, updated_at: current.updated_at },
-          { ...current, id: "r2", rule: { kind: "at", at: "2026-12-02T09:00:00Z" }, task_id: "t1", timezone: "Asia/Shanghai", status: "active", reason: null, next_fire_at: "2026-12-02T09:00:00Z", version: 1, created_at: current.created_at, updated_at: current.updated_at },
-        ]));
-        return payload(reminderPage([{ ...current, id: "r3", rule: { kind: "at", at: "2026-12-03T09:00:00Z" }, task_id: "t1", timezone: "Asia/Shanghai", status: "active", reason: null, next_fire_at: "2026-12-03T09:00:00Z", version: 1, created_at: current.created_at, updated_at: current.updated_at }]));
-      }
-      return payload(list([current]));
+      if (url.includes("/personal-tasks?")) { listReads += 1; return payload(list([withSummary])); }
+      throw new Error("未预期请求：" + url);
     });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
-    await screen.findByText(/提醒摘要读取失败/);
-    await user.click(screen.getByRole("button", { name: "重试" }));
-    expect(await screen.findByText(/另有 1 条/)).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "刷新" }));
-    await screen.findByText(/12月3日/);
-    expect(summaryReads).toBe(3);
+    expect(await screen.findByText(/下次提醒：/)).toBeTruthy();
+    await user.type(screen.getByLabelText("事务关键词"), "%_");
+    await user.clear(screen.getByLabelText("截止日期从")); await user.type(screen.getByLabelText("截止日期从"), "2026-11-20");
+    await user.click(screen.getByRole("button", { name: "搜索" }));
+    await waitFor(() => expect(listReads).toBe(3));
+    const searchUrl = new URL(String(fetchMock.mock.calls.at(-1)?.[0]), "http://localhost");
+    expect(searchUrl.searchParams.get("keyword")).toBe("%_");
+    expect(searchUrl.searchParams.get("deadline_from")).toBe("2026-11-20");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/reminders"))).toBe(false);
+    await user.click(screen.getByLabelText("仅逾期"));
+    await waitFor(() => {
+      const query = new URL(String(fetchMock.mock.calls.at(-1)?.[0]), "http://localhost").searchParams;
+      expect(query.get("overdue_only")).toBe("true"); expect(query.get("keyword")).toBe("%_");
+    });
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    await waitFor(() => expect(listReads).toBe(5));
   });
 
-  it("窗口重新聚焦时刷新可见摘要，每个事务只读取一次", async () => {
-    let listReads = 0;
-    let summaryReads = 0;
+  it("加载更多追加无重复事务，搜索后重置分页并传入全部筛选", async () => {
+    const second = { ...current, id: "t2", title: "第二页" };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.searchParams.get("keyword") === "第二页") return payload(list([second]));
+      if (url.searchParams.get("offset") === "50") return payload(list([current, second], { offset: 50, total: 51, has_more: false }));
+      return payload(list([current, ...Array.from({ length: 49 }, (_, index) => ({ ...current, id: `more-${index}`, title: `更多 ${index}` }))], { total: 51, has_more: true }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
+    await screen.findByText("原题");
+    await user.click(screen.getByRole("button", { name: "加载更多" }));
+    await screen.findByText("第二页");
+    expect(screen.getAllByText("原题")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(screen.getAllByText("第二页")).toHaveLength(1));
+    expect(screen.getAllByText("原题")).toHaveLength(1);
+    await user.type(screen.getByLabelText("事务关键词"), "第二页");
+    await user.click(screen.getByRole("button", { name: "搜索" }));
+    expect(await screen.findByText("第二页")).toBeTruthy();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => new URL(String(input), "http://localhost").searchParams.get("offset") === "0" && new URL(String(input), "http://localhost").searchParams.get("keyword") === "第二页")).toBe(true));
+  });
+
+  it("旧列表响应晚到时不会覆盖新的筛选结果", async () => {
+    let finishOld: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.searchParams.get("filter") === "active" && !finishOld) return new Promise<Response>((resolve) => { finishOld = resolve; });
+      return Promise.resolve(payload(list([{ ...current, title: "最新结果" }])));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
+    await user.click(screen.getByRole("button", { name: "全部" }));
+    expect(await screen.findByText("最新结果")).toBeTruthy();
+    finishOld?.(payload(list([{ ...current, title: "旧结果" }])));
+    await waitFor(() => expect(screen.queryByText("旧结果")).toBeNull());
+  });
+
+  it("列表失败可重试，任务操作展示服务返回的提醒变化数量", async () => {
+    let reads = 0;
+    const changes = [
+      { reminder_id: "r1", action: "rescheduled", reason: null, next_fire_at: "2026-12-01T09:00:00Z", version: 2 },
+      { reminder_id: "r2", action: "paused", reason: "deadline_moved_past", next_fire_at: null, version: 2 },
+      { reminder_id: "r3", action: "cancelled", reason: "task_ended", next_fire_at: null, version: 2 },
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/t1/reminders")) {
-        summaryReads += 1;
-        return payload(reminderPage([]));
-      }
+      if (init?.method === "POST") return payload({ ...current, status: "completed", reminder_changes: changes });
       if (url.includes("/personal-tasks?")) {
-        listReads += 1;
+        reads += 1;
+        if (reads === 1) return payload({ error: { message: "网络不可用" } }, 503);
         return payload(list([current]));
       }
       throw new Error("未预期请求：" + url);
     });
     vi.stubGlobal("fetch", fetchMock);
-    render(<PersonalTasks onOpenNavigation={() => undefined} />);
-    await screen.findByText("无待触发提醒");
-
-    await act(async () => { window.dispatchEvent(new Event("focus")); });
-    await waitFor(() => expect(listReads).toBe(2));
-    await waitFor(() => expect(summaryReads).toBe(2));
-    expect(summaryReads).toBe(2);
+    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
+    await screen.findByRole("alert");
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await screen.findByText("原题");
+    await user.click(screen.getByRole("button", { name: "完成" }));
+    expect(await screen.findByText("事务已完成 · 改期 1 条、暂停 1 条、取消 1 条")).toBeTruthy();
   });
 
-  it("中止的摘要请求会结束加载并允许筛选刷新后重新读取", async () => {
-    let summaryReads = 0;
+  it("摘要目标超过首屏时定向读取事务，并明确标记真实 404", async () => {
+    const target = { ...current, id: "task-51", title: "首屏外事务" };
+    const firstPage = [current, ...Array.from({ length: 49 }, (_, index) => ({ ...current, id: `task-${index + 1}`, title: `事务 ${index + 1}` }))];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/t1/reminders")) {
-        summaryReads += 1;
-        if (summaryReads === 1) throw new DOMException("读取已中止", "AbortError");
-        return payload(reminderPage([]));
-      }
-      return payload(list([current]));
+      if (url.endsWith("/notifications/7")) return payload({ id: 7, members: [{ task_id: target.id }, { task_id: "deleted-task" }] });
+      if (url.endsWith(`/personal-tasks/${target.id}`)) return payload(target);
+      if (url.endsWith("/personal-tasks/deleted-task")) return payload({ error: { code: "personal_task_not_found", message: "事务不存在" } }, 404);
+      if (url.includes("/personal-tasks?")) return payload(list(firstPage, { total: 51, has_more: true }));
+      throw new Error("未预期请求：" + url);
     });
     vi.stubGlobal("fetch", fetchMock);
-    const user = userEvent.setup();
-    render(<PersonalTasks onOpenNavigation={() => undefined} />);
-    await waitFor(() => expect(screen.queryByText("正在读取提醒摘要…")).toBeNull());
-    await user.click(screen.getByRole("button", { name: "全部" }));
-    expect(await screen.findByText("无待触发提醒")).toBeTruthy();
-    expect(summaryReads).toBe(2);
+    render(<PersonalTasks onOpenNavigation={() => undefined} focusNotificationId={7} />);
+    expect(await screen.findByText("首屏外事务")).toBeTruthy();
+    expect(await screen.findByText("关联事务已删除（deleted-task）")).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => new URL(String(url), "http://localhost").searchParams.get("offset") === "50")).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(`/personal-tasks/${target.id}`))).toBe(true);
   });
 
-  it("摘要旧请求晚到时不会覆盖较新的读取", async () => {
-    let finishOld: ((response: Response) => void) | undefined;
-    let reads = 0;
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+  it("关联事务非 404 读取失败可重试，且不会误报删除", async () => {
+    let taskReads = 0;
+    const target = { ...current, id: "task-51", title: "稍后可读事务" };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/t1/reminders")) {
-        reads += 1;
-        if (reads === 1) return new Promise<Response>((resolve) => { finishOld = resolve; });
-        return Promise.resolve(payload(reminderPage([])));
+      if (url.endsWith("/notifications/8")) return payload({ id: 8, members: [{ task_id: target.id }] });
+      if (url.endsWith(`/personal-tasks/${target.id}`)) {
+        taskReads += 1;
+        return taskReads === 1 ? payload({ error: { code: "temporary_error", message: "暂时不可用" } }, 503) : payload(target);
       }
-      return Promise.resolve(payload(list([])));
+      if (url.includes("/personal-tasks?")) return payload(list([current]));
+      throw new Error("未预期请求：" + url);
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { result, unmount } = renderHook(() => usePersonalTasks());
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    let oldRequest: Promise<void> | undefined;
-    await act(async () => {
-      oldRequest = result.current.refreshReminderSummary("t1");
-      await result.current.refreshReminderSummary("t1");
-    });
-    finishOld?.(payload(reminderPage([{
-      ...current, id: "old", task_id: "t1", rule: { kind: "at", at: "2030-01-01T12:01:00Z" }, timezone: "UTC", status: "active", reason: null, next_fire_at: "2030-01-01T12:01:00Z", version: 1,
-    }])));
-    await act(async () => { await oldRequest; });
-    expect(result.current.reminderSummaries.t1.items).toEqual([]);
-    unmount();
-  });
-
-  it("切换筛选不会留下永久加载的提醒摘要", async () => {
-    let finishSummary: ((response: Response) => void) | undefined;
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith("/t1/reminders")) return new Promise<Response>((resolve, reject) => {
-        finishSummary = resolve;
-        init?.signal?.addEventListener("abort", () => reject(new DOMException("已取消", "AbortError")), { once: true });
-      });
-      return Promise.resolve(payload(list([current])));
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
-    await screen.findByText("正在读取提醒摘要…");
-    await user.click(screen.getByRole("button", { name: "全部" }));
-    finishSummary?.(payload(reminderPage([])));
-    expect(await screen.findByText("无待触发提醒")).toBeTruthy();
+    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} focusNotificationId={8} />);
+    expect(await screen.findByText("部分关联事务读取失败，请重试。")).toBeTruthy();
+    expect(screen.queryByText(/关联事务已删除/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    expect(await screen.findByText("稍后可读事务")).toBeTruthy();
   });
 
   it("冲突后先读取，再由用户确认替换草稿与版本", async () => {

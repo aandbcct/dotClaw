@@ -18,7 +18,7 @@ describe("事务提醒管理", () => {
     const putBodies: Record<string, unknown>[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/v1/personal-tasks/task-1" && !init?.method) return json(task);
+      if (url === "/api/v1/personal-tasks/task-1" && !init?.method) return json({ ...task, reminders: [latest] });
       if (url === "/api/v1/personal-tasks/task-1/reminders" && !init?.method) return json(reminderPage([latest]));
       if (url === "/api/v1/personal-tasks/task-1/reminders/reminder-1" && init?.method === "PUT") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -35,7 +35,7 @@ describe("事务提醒管理", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    render(<TaskReminders task={task} onClose={() => undefined} />);
+    render(<TaskReminders task={task} onClose={() => undefined} onChanged={() => undefined} />);
 
     await user.click(await screen.findByRole("button", { name: "修改" }));
     const dateInput = screen.getByLabelText("触发日期");
