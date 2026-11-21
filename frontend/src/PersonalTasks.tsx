@@ -23,7 +23,6 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
   const [focusRetry, setFocusRetry] = useState(0);
   const [focusTarget, setFocusTarget] = useState<{ taskId?: string; notificationId?: number } | null>(null);
   const [keywordDraft, setKeywordDraft] = useState("");
-  const [reminderChanges, setReminderChanges] = useState<ReminderChange[]>([]);
   const [taskSuccess, setTaskSuccess] = useState("");
   const visibleTasks = tasks.items;
   useEffect(() => { setKeywordDraft(tasks.keyword); }, [tasks.keyword]);
@@ -61,11 +60,10 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
     return () => { active = false; };
   }, [focusTarget, focusRetry]);
   async function save(input: PersonalTaskInput, version?: number, initialReminder?: ReminderRule) {
-    setReminderChanges([]); setTaskSuccess("");
+    setTaskSuccess("");
     if (editing && version) {
       const savedTask = await tasks.update(editing.id, input, version);
       setEditing(undefined);
-      setReminderChanges(savedTask.reminder_changes || []);
       const effects = reminderEffectText(savedTask.reminder_changes || []);
       setTaskSuccess(effects ? `事务已保存 · ${effects}` : "事务已保存");
     } else { await tasks.create(input, initialReminder ? [initialReminder] : []); setEditing(undefined); setTaskSuccess(initialReminder ? "事务及提醒已创建" : "事务已创建"); }
@@ -75,7 +73,7 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
     setTaskSuccess("");
     const success = status === "completed" ? "事务已完成" : status === "pending" ? "事务已重新打开" : status === "in_progress" ? "事务已开始" : "事务已取消";
     void tasks.changeStatus(task, status).then((saved) => {
-      const changes = saved.reminder_changes || []; setReminderChanges(changes);
+      const changes = saved.reminder_changes || [];
       const effects = reminderEffectText(changes); setTaskSuccess(effects ? `${success} · ${effects}` : success);
     }).catch((error) => setActionError(error instanceof Error ? error.message : "状态更新失败"));
   }
@@ -91,13 +89,13 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
     {tasks.error && <p role="alert">{tasks.error} <button disabled={tasks.pending} onClick={() => void tasks.reload(true)}>重试</button></p>}
     {!deleting && actionError && <p role="alert">{actionError}</p>}
     {taskSuccess && <p role="status" className="reminder-success">{taskSuccess}</p>}
-    {focusResult && <section className="task-focus-results" aria-label={focusResult.kind === "summary" ? "摘要关联事务" : "定位事务"}>
-      <header><h2>{focusResult.kind === "summary" ? "摘要关联事务" : "定位事务"}</h2><button onClick={() => { setFocusResult(null); setFocusTarget(null); }}>清除定位</button></header>
+    {(focusResult || focusLoading || focusError) && <section className="task-focus-results" aria-label={(focusResult?.kind || (focusTarget?.notificationId ? "summary" : "task")) === "summary" ? "摘要关联事务" : "定位事务"}>
+      <header><h2>{(focusResult?.kind || (focusTarget?.notificationId ? "summary" : "task")) === "summary" ? "摘要关联事务" : "定位事务"}</h2><button onClick={() => { setFocusResult(null); setFocusTarget(null); setFocusLoading(false); }}>清除定位</button></header>
       {focusLoading && <p>正在读取关联事务…</p>}
       {focusError && <p role="alert">{focusError} <button onClick={() => setFocusRetry((value) => value + 1)}>重试</button></p>}
-      {focusResult.items.map((task) => <p key={task.id}><strong>{task.title}</strong> · {labels[task.status]}{task.is_overdue ? " · 逾期" : ""}</p>)}
-      {focusResult.missingIds.map((id) => <p key={id} role="status">关联事务已删除（{id}）</p>)}
-      {!focusLoading && !focusError && !focusResult.items.length && !focusResult.missingIds.length && <p>没有可显示的关联事务</p>}
+      {focusResult?.items.map((task) => <p key={task.id}><strong>{task.title}</strong> · {labels[task.status]}{task.is_overdue ? " · 逾期" : ""}</p>)}
+      {focusResult?.missingIds.map((id) => <p key={id} role="status">关联事务已删除（{id}）</p>)}
+      {!focusLoading && !focusError && focusResult && !focusResult.items.length && !focusResult.missingIds.length && <p>没有可显示的关联事务</p>}
     </section>}
     {tasks.loading ? <p>正在读取事务…</p> : !visibleTasks.length ? <p>暂无事务</p> : <ul className="task-list">{visibleTasks.map((task) => {
       const summary = task.reminder_summary;

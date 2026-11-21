@@ -202,6 +202,23 @@ describe("个人事务视图", () => {
     expect(await screen.findByText("稍后可读事务")).toBeTruthy();
   });
 
+  it("关联事务首次读取时立即显示加载状态", async () => {
+    let finishTask: ((response: Response) => void) | undefined;
+    const target = { ...current, id: "task-90", title: "稍后返回" };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/notifications/9")) return Promise.resolve(payload({ id: 9, members: [{ task_id: target.id }] }));
+      if (url.endsWith(`/personal-tasks/${target.id}`)) return new Promise<Response>((resolve) => { finishTask = resolve; });
+      if (url.includes("/personal-tasks?")) return Promise.resolve(payload(list([current])));
+      throw new Error("未预期请求：" + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<PersonalTasks onOpenNavigation={() => undefined} focusNotificationId={9} />);
+    expect(await screen.findByText("正在读取关联事务…")).toBeTruthy();
+    finishTask?.(payload(target));
+    expect(await screen.findByText("稍后返回")).toBeTruthy();
+  });
+
   it("冲突后先读取，再由用户确认替换草稿与版本", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
