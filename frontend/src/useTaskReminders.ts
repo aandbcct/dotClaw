@@ -14,12 +14,11 @@ export function useTaskReminders(taskId: string) {
   const [success, setSuccess] = useState("");
   const lock = useRef(false);
   const reload = useCallback(async (throwOnError = false): Promise<Reminder[] | null> => {
-    const controller = new AbortController();
     try {
-      const [current, reminders] = await Promise.all([getPersonalTask(taskId), listTaskReminders(taskId, controller.signal)]);
+      const [current, reminders] = await Promise.all([getPersonalTask(taskId), listTaskReminders(taskId)]);
       setTask(current); setItems(current.reminders); setTimezone(reminders.timezone); setSchedulerEnabled(reminders.scheduler_enabled); setScanLag(reminders.scan_lag_seconds); setError("");
       return current.reminders;
-    } catch (reason) { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "读取提醒失败"); if (throwOnError) throw reason; return null; }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "读取提醒失败"); if (throwOnError) throw reason; return null; }
     finally { setLoading(false); }
   }, [taskId]);
   useEffect(() => { void reload(); }, [reload]);

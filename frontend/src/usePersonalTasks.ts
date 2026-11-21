@@ -110,7 +110,7 @@ export function usePersonalTasks() {
     } finally { mutation.current = false; setPending(false); }
   }, [reload]);
 
-  return { items, timezone, filters, filter: filters.filter, keyword: filters.keyword,
+  return { items, timezone, filter: filters.filter, keyword: filters.keyword,
     deadlineFrom: filters.deadline_from, deadlineUntil: filters.deadline_until, overdueOnly: filters.overdue_only,
     total, hasMore, loading, loadingMore, pending, error,
     setFilter: (filter: PersonalTaskFilter) => setFilters({ filter }),
@@ -118,7 +118,6 @@ export function usePersonalTasks() {
     setDeadlineFrom: (deadline_from: string | null) => setFilters({ deadline_from }),
     setDeadlineUntil: (deadline_until: string | null) => setFilters({ deadline_until }),
     setOverdueOnly: (overdue_only: boolean) => setFilters({ overdue_only }),
-    showAll: () => setFilters({ filter: "all", keyword: "", deadline_from: null, deadline_until: null, overdue_only: false }),
     reload, loadMore,
     create: (input: PersonalTaskInput, reminders?: ReminderRule[]) => run(() => createPersonalTask(input, reminders)),
     update: (id: string, input: PersonalTaskInput, version: number) => run(() => updatePersonalTask(id, input, version)),
