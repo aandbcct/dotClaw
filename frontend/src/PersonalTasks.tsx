@@ -90,7 +90,7 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
     {!deleting && actionError && <p role="alert">{actionError}</p>}
     {taskSuccess && <p role="status" className="reminder-success">{taskSuccess}</p>}
     {(focusResult || focusLoading || focusError) && <section className="task-focus-results" aria-label={(focusResult?.kind || (focusTarget?.notificationId ? "summary" : "task")) === "summary" ? "摘要关联事务" : "定位事务"}>
-      <header><h2>{(focusResult?.kind || (focusTarget?.notificationId ? "summary" : "task")) === "summary" ? "摘要关联事务" : "定位事务"}</h2><button onClick={() => { setFocusResult(null); setFocusTarget(null); setFocusLoading(false); }}>清除定位</button></header>
+      <header><h2>{(focusResult?.kind || (focusTarget?.notificationId ? "summary" : "task")) === "summary" ? "摘要关联事务" : "定位事务"}</h2><button onClick={() => { setFocusResult(null); setFocusError(""); setFocusTarget(null); setFocusLoading(false); }}>清除定位</button></header>
       {focusLoading && <p>正在读取关联事务…</p>}
       {focusError && <p role="alert">{focusError} <button onClick={() => setFocusRetry((value) => value + 1)}>重试</button></p>}
       {focusResult?.items.map((task) => <p key={task.id}><strong>{task.title}</strong> · {labels[task.status]}{task.is_overdue ? " · 逾期" : ""}</p>)}

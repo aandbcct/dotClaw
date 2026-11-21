@@ -219,6 +219,23 @@ describe("个人事务视图", () => {
     expect(await screen.findByText("稍后返回")).toBeTruthy();
   });
 
+  it("清除关联定位会一并清除读取错误", async () => {
+    const targetId = "task-error";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/notifications/10")) return payload({ id: 10, members: [{ task_id: targetId }] });
+      if (url.endsWith(`/personal-tasks/${targetId}`)) return payload({ error: { code: "temporary_error", message: "暂时不可用" } }, 503);
+      if (url.includes("/personal-tasks?")) return payload(list([current]));
+      throw new Error("未预期请求：" + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} focusNotificationId={10} />);
+    expect(await screen.findByText(/部分关联事务读取失败/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "清除定位" }));
+    expect(screen.queryByText(/部分关联事务读取失败/)).toBeNull();
+    expect(screen.queryByRole("region", { name: "摘要关联事务" })).toBeNull();
+  });
+
   it("冲突后先读取，再由用户确认替换草稿与版本", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
