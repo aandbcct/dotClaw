@@ -1,12 +1,14 @@
 """个人事务 HTTP 路由。"""
 
+from datetime import date
+
 from fastapi import APIRouter, Query, Request, Response, status
 
-from ...personal_tasks.models import PersonalTaskFilter
+from ...personal_tasks.models import PersonalTaskFilter, PersonalTaskQuery
 from ...personal_tasks.service import PersonalTaskService
 from .personal_task_schemas import (ChangePersonalTaskStatusRequest, CreatePersonalTaskRequest,
-    PersonalTaskListResponse, PersonalTaskResponse, UpdatePersonalTaskRequest, deadline_to_domain,
-    to_task_response)
+    PersonalTaskDetailResponse, PersonalTaskListItemResponse, PersonalTaskListResponse, PersonalTaskResponse,
+    ReminderSummaryResponse, UpdatePersonalTaskRequest, deadline_to_domain, to_reminder_response, to_task_response)
 
 router = APIRouter(prefix="/api/v1/personal-tasks", tags=["personal-tasks"])
 
@@ -16,10 +18,16 @@ def _service(request: Request) -> PersonalTaskService:
 
 
 @router.get("", response_model=PersonalTaskListResponse)
-async def list_personal_tasks(request: Request, filter: PersonalTaskFilter = PersonalTaskFilter.ACTIVE):
-    result = await _service(request).list(filter)
+async def list_personal_tasks(request: Request, filter: PersonalTaskFilter = PersonalTaskFilter.ACTIVE,
+    keyword: str = "", deadline_from: date | None = None, deadline_until: date | None = None,
+    overdue_only: bool = False, offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=100)):
+    result = await _service(request).query(PersonalTaskQuery(filter, keyword, deadline_from, deadline_until,
+        overdue_only, offset, limit))
     return PersonalTaskListResponse(
-        items=[to_task_response(item) for item in result.items], timezone=result.timezone, as_of=result.as_of,
+        items=[PersonalTaskListItemResponse(**to_task_response(item).model_dump(mode="json"), reminder_summary=ReminderSummaryResponse(
+            active_count=result.reminder_summaries[index].active_count, next_fire_at=result.reminder_summaries[index].next_fire_at))
+            for index, item in enumerate(result.items)], timezone=result.timezone, as_of=result.as_of,
+        total=result.total, offset=result.offset, limit=result.limit, has_more=result.offset + len(result.items) < result.total,
     )
 
 
@@ -30,9 +38,10 @@ async def create_personal_task(request: Request, body: CreatePersonalTaskRequest
         deadline=deadline_to_domain(body.deadline), reminders=reminders))
 
 
-@router.get("/{task_id}", response_model=PersonalTaskResponse)
+@router.get("/{task_id}", response_model=PersonalTaskDetailResponse)
 async def get_personal_task(request: Request, task_id: str):
-    return to_task_response(await _service(request).get(task_id))
+    view, reminders = await _service(request).get_detail(task_id)
+    return PersonalTaskDetailResponse(**to_task_response(view).model_dump(mode="json"), reminders=[to_reminder_response(item) for item in reminders])
 
 
 @router.put("/{task_id}", response_model=PersonalTaskResponse)

@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from dotclaw.personal_tasks.models import PersonalTask, PersonalTaskStatus, TaskDeadline
+from dotclaw.personal_tasks.models import PersonalTask, PersonalTaskFilter, PersonalTaskStatus, TaskDeadline
 from dotclaw.personal_tasks.repository import PersonalTaskNotFound, PersonalTaskVersionConflict
 from dotclaw.personal_tasks.service import InvalidPersonalTaskTransition, PersonalTaskService
 
@@ -28,6 +28,11 @@ class MemoryRepository:
     async def list(self, statuses):
         return tuple(task for task in self.items.values() if statuses is None or task.status in statuses)
 
+    async def query(self, query):
+        from dotclaw.personal_tasks.models import ReminderSummary
+
+        return tuple(self.items.values()), {task.id: ReminderSummary(0, None) for task in self.items.values()}
+
     async def replace(self, task, *, expected_version, now=None, timezone=None):
         current = self.items.get(task.id)
         if current is None:
@@ -36,6 +41,9 @@ class MemoryRepository:
             raise PersonalTaskVersionConflict(task.id)
         self.items[task.id] = task
         return task
+
+    async def replace_with_effects(self, task, *, expected_version, now=None, timezone=None):
+        return await self.replace(task, expected_version=expected_version, now=now, timezone=timezone), ()
 
     async def delete(self, task_id, *, expected_version):
         current = self.items.get(task_id)
@@ -104,3 +112,25 @@ async def test_create_initial_reminders_validates_all_before_persisting():
 
     created = await service.create(title="事务", reminders=({"kind": "at", "at": future},))
     assert len(repository.reminders[created.task.id]) == 1
+
+
+@pytest.mark.asyncio
+async def test_query_uses_literal_keyword_local_dates_and_stable_pagination():
+    from dotclaw.personal_tasks.models import PersonalTaskQuery
+
+    now = datetime(2026, 11, 20, 16, tzinfo=UTC)
+    service = PersonalTaskService(MemoryRepository(), timezone=ZoneInfo("Asia/Shanghai"), clock=lambda: now)
+    overdue = await service.create(title="100%_匹配", description="文字", deadline=TaskDeadline("date", date(2026, 11, 20)))
+    today = await service.create(title="literal %_", deadline=TaskDeadline("date", date(2026, 11, 21)))
+    await service.create(title="无截止事务")
+
+    result = await service.query(PersonalTaskQuery(keyword=" %_ ", deadline_from=date(2026, 11, 21),
+        deadline_until=date(2026, 11, 22), offset=0, limit=10))
+    assert [item.task.id for item in result.items] == [today.task.id]
+    overdue_only = await service.query(PersonalTaskQuery(keyword="%_", overdue_only=True))
+    assert [item.task.id for item in overdue_only.items] == [overdue.task.id]
+    page = await service.query(PersonalTaskQuery(filter=PersonalTaskFilter.ALL, offset=1, limit=1))
+    assert page.total == 3
+    assert len(page.items) == 1
+    assert page.offset == 1 and page.limit == 1
+    assert page.items[0].task.id == today.task.id

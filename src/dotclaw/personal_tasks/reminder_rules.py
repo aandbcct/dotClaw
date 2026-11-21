@@ -2,6 +2,7 @@
 
 import calendar
 from datetime import UTC, date, datetime, time, timedelta
+import re
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
@@ -43,26 +44,42 @@ def _local_candidates(rule: ReminderRule, zone: ZoneInfo, after: datetime) -> da
 
 
 def validate_rule(rule: ReminderRule, task: PersonalTask, zone: ZoneInfo) -> None:
+    fields = {"at": {"kind", "at"}, "before_deadline": {"kind", "offset_minutes"},
+              "before_date": {"kind", "days_before", "local_time"}, "daily": {"kind", "local_time"},
+              "weekly": {"kind", "weekdays", "local_time"}, "monthly": {"kind", "day", "local_time"},
+              "yearly": {"kind", "month", "day", "local_time"}}
+    if not isinstance(rule, dict) or not isinstance(rule.get("kind"), str) or rule["kind"] not in fields or set(rule) != fields[rule["kind"]]:
+        raise ValueError("提醒规则字段无效")
     kind = rule["kind"]
     if kind == "at":
+        if not isinstance(rule["at"], str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", rule["at"]) is None:
+            raise ValueError("at 必须是带时区的 RFC3339 字符串")
         value = datetime.fromisoformat(rule["at"].replace("Z", "+00:00"))
         if value.tzinfo is None:
             raise ValueError("at 必须包含时区偏移")
     elif kind == "before_deadline":
-        if task.deadline is None or task.deadline.kind != "datetime" or rule["offset_minutes"] < 0:
+        if type(rule["offset_minutes"]) is not int or task.deadline is None or task.deadline.kind != "datetime" or rule["offset_minutes"] < 0:
             raise ValueError("before_deadline 需要时刻截止和非负偏移")
     elif kind == "before_date":
-        if task.deadline is None or task.deadline.kind != "date" or rule["days_before"] < 0:
+        if type(rule["days_before"]) is not int or task.deadline is None or task.deadline.kind != "date" or rule["days_before"] < 0:
             raise ValueError("before_date 需要日期截止和非负天数")
-        time.fromisoformat(rule["local_time"])
+        _validate_local_time(rule["local_time"])
     else:
-        time.fromisoformat(rule["local_time"])
-        if kind == "weekly" and (not rule["weekdays"] or sorted(set(rule["weekdays"])) != rule["weekdays"] or any(day not in range(7) for day in rule["weekdays"])):
-            raise ValueError("weekly weekdays 必须是去重升序的 0..6")
-        if kind == "monthly" and rule["day"] not in range(1, 32):
+        _validate_local_time(rule["local_time"])
+        if kind == "weekly":
+            if not isinstance(rule["weekdays"], list) or any(type(day) is not int for day in rule["weekdays"]):
+                raise ValueError("weekly weekdays 类型无效")
+            if not rule["weekdays"] or sorted(set(rule["weekdays"])) != rule["weekdays"] or any(day not in range(7) for day in rule["weekdays"]):
+                raise ValueError("weekly weekdays 必须是去重升序的 0..6")
+        if kind == "monthly" and (type(rule["day"]) is not int or rule["day"] not in range(1, 32)):
             raise ValueError("monthly day 必须为 1..31")
-        if kind == "yearly" and (rule["month"] not in range(1, 13) or rule["day"] not in range(1, calendar.monthrange(2000, rule["month"])[1] + 1)):
+        if kind == "yearly" and (type(rule["month"]) is not int or type(rule["day"]) is not int or rule["month"] not in range(1, 13) or rule["day"] not in range(1, calendar.monthrange(2000, rule["month"])[1] + 1)):
             raise ValueError("yearly 月日无效")
+
+
+def _validate_local_time(value: object) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) is None:
+        raise ValueError("当地时刻必须为 HH:MM")
 
 
 def next_fire_at(rule: ReminderRule, task: PersonalTask, zone: ZoneInfo, after: datetime) -> datetime | None:

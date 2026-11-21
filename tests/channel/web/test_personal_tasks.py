@@ -67,8 +67,16 @@ async def test_real_task_http_lifecycle_and_persistence(tmp_path, deadline):
             assert listed.status_code == 200, listed.text
             assert listed.json()["items"][0]["id"] == task["id"]
             assert listed.json()["items"][0]["deadline"] == expected_deadline
+            assert listed.json()["items"][0]["reminder_summary"] == {"active_count": 0, "next_fire_at": None}
+            assert listed.json()["total"] == 1 and listed.json()["offset"] == 0 and listed.json()["limit"] == 50
+            assert listed.json()["has_more"] is False
+            invalid_range = await client.get("/api/v1/personal-tasks", params={"deadline_from": "2026-11-22", "deadline_until": "2026-11-22"})
+            assert invalid_range.status_code == 422
+            detail = await client.get(url)
+            assert detail.status_code == 200 and detail.json()["reminders"] == []
             edited = await client.put(url, json={"title": "已编辑", "description": "说明", "deadline": deadline, "expected_version": 1})
             assert edited.status_code == 200, edited.text
+            assert edited.json()["reminder_changes"] == []
             conflict = await client.put(url, json={"title": "旧版本", "description": "", "deadline": None, "expected_version": 1})
             assert conflict.status_code == 409
             # 重建仓储和服务，检查不依赖进程内缓存的数据可读性。
@@ -80,6 +88,7 @@ async def test_real_task_http_lifecycle_and_persistence(tmp_path, deadline):
             for state in ("in_progress", "completed", "pending", "cancelled"):
                 changed = await client.post(url + "/status", json={"status": state, "expected_version": version})
                 assert changed.status_code == 200, changed.text
+                assert changed.json()["reminder_changes"] == []
                 version += 1
                 assert changed.json()["version"] == version
                 assert (changed.json()["completed_at"] is not None) == (state == "completed")
@@ -121,6 +130,36 @@ async def test_create_task_with_initial_reminder_is_atomic_and_keeps_task_respon
             })
             assert created.status_code == 201, created.text
             assert "reminders" not in created.json()
+            detail = await client.get(f"/api/v1/personal-tasks/{created.json()['id']}")
+            assert detail.status_code == 200 and len(detail.json()["reminders"]) == 1
             reminders = await client.get(f"/api/v1/personal-tasks/{created.json()['id']}/reminders")
             assert reminders.status_code == 200
             assert len(reminders.json()["items"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_status_response_contains_committed_reminder_effects(tmp_path):
+    now = datetime(2030, 1, 1, 12, tzinfo=UTC)
+    repository = SqlitePersonalTaskRepository(tmp_path / "task-effects.sqlite3")
+    await repository.initialize()
+    zone = ZoneInfo("UTC")
+    host = SimpleNamespace(personal_task_service=PersonalTaskService(repository, timezone=zone, clock=lambda: now),
+        reminder_service=ReminderService(repository, timezone=zone, clock=lambda: now), scheduler_enabled=True,
+        _config=SimpleNamespace(personal_tasks=SimpleNamespace(timezone="UTC")), project_root=None, shutdown=AsyncMock())
+
+    async def host_factory():
+        return host
+
+    app = create_app(host_factory=host_factory)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            created = await client.post("/api/v1/personal-tasks", json={"title": "事务", "reminders": [
+                {"kind": "daily", "local_time": "09:00"}]})
+            assert created.status_code == 201, created.text
+            reminder_list = await client.get(f"/api/v1/personal-tasks/{created.json()['id']}/reminders")
+            reminder_id = reminder_list.json()["items"][0]["id"]
+            changed = await client.post(f"/api/v1/personal-tasks/{created.json()['id']}/status",
+                json={"status": "completed", "expected_version": 1})
+            assert changed.status_code == 200, changed.text
+            assert changed.json()["reminder_changes"] == [{"reminder_id": reminder_id, "action": "cancelled",
+                "reason": "task_ended", "next_fire_at": None, "version": 2}]

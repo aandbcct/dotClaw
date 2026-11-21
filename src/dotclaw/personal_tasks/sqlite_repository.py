@@ -10,7 +10,7 @@ import re
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from .models import PersonalTask, PersonalTaskStatus, TaskDeadline
+from .models import PersonalTask, PersonalTaskQuery, PersonalTaskStatus, ReminderChange, ReminderSummary, TaskDeadline
 from .repository import PersonalTaskNotFound, PersonalTaskStorageError, PersonalTaskVersionConflict
 from .reminder_models import Reminder, ReminderRule, ReminderStatus
 from .notification_models import Notification, NotificationMember, NotificationDelivery, NotificationPage, NotificationChanges
@@ -219,6 +219,27 @@ class SqlitePersonalTaskRepository:
         finally:
             connection.close()
 
+    async def get_detail(self, task_id: str) -> tuple[PersonalTask | None, tuple[Reminder, ...]]:
+        return await asyncio.to_thread(self._get_detail_sync, task_id)
+
+    def _get_detail_sync(self, task_id: str) -> tuple[PersonalTask | None, tuple[Reminder, ...]]:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                connection.execute("COMMIT")
+                return None, ()
+            reminders = tuple(self._row_to_reminder(item) for item in connection.execute(
+                "SELECT * FROM task_reminders WHERE task_id=? ORDER BY created_at,id", (task_id,)).fetchall())
+            connection.execute("COMMIT")
+            return self._row_to_task(row), reminders
+        except (sqlite3.Error, ValueError, TypeError) as error:
+            connection.rollback()
+            raise PersonalTaskStorageError("读取事务详情失败") from error
+        finally:
+            connection.close()
+
     async def list(self, statuses: tuple[PersonalTaskStatus, ...] | None) -> tuple[PersonalTask, ...]:
         return await asyncio.to_thread(self._list_sync, statuses)
 
@@ -236,11 +257,36 @@ class SqlitePersonalTaskRepository:
         finally:
             connection.close()
 
+    async def query(self, query: PersonalTaskQuery) -> tuple[tuple[PersonalTask, ...], dict[str, ReminderSummary]]:
+        return await asyncio.to_thread(self._query_sync, query)
+
+    def _query_sync(self, query: PersonalTaskQuery) -> tuple[tuple[PersonalTask, ...], dict[str, ReminderSummary]]:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            tasks = tuple(self._row_to_task(row) for row in connection.execute("SELECT * FROM personal_tasks").fetchall())
+            rows = connection.execute("SELECT task_id,count(*) AS active_count,min(next_fire_at) AS next_fire_at FROM task_reminders WHERE status='active' GROUP BY task_id").fetchall()
+            summaries = {row["task_id"]: ReminderSummary(row["active_count"], self._date(row["next_fire_at"])) for row in rows}
+            for task in tasks:
+                summaries.setdefault(task.id, ReminderSummary(0, None))
+            connection.execute("COMMIT")
+            return tasks, summaries
+        except (sqlite3.Error, ValueError, TypeError) as error:
+            connection.rollback()
+            raise PersonalTaskStorageError("查询事务失败") from error
+        finally:
+            connection.close()
+
     async def replace(self, task: PersonalTask, *, expected_version: int, now: datetime | None = None, timezone: ZoneInfo | None = None) -> PersonalTask:
+        saved, _ = await self.replace_with_effects(task, expected_version=expected_version, now=now, timezone=timezone)
+        return saved
+
+    async def replace_with_effects(self, task: PersonalTask, *, expected_version: int, now: datetime | None = None, timezone: ZoneInfo | None = None) -> tuple[PersonalTask, tuple[ReminderChange, ...]]:
         return await asyncio.to_thread(self._replace_sync, task, expected_version, now or task.updated_at, timezone)
 
-    def _replace_sync(self, task: PersonalTask, expected_version: int, now: datetime, timezone: ZoneInfo | None) -> PersonalTask:
+    def _replace_sync(self, task: PersonalTask, expected_version: int, now: datetime, timezone: ZoneInfo | None) -> tuple[PersonalTask, tuple[ReminderChange, ...]]:
         connection = self._connect()
+        changes: list[ReminderChange] = []
         try:
             connection.execute("BEGIN IMMEDIATE")
             old_row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (task.id,)).fetchone()
@@ -252,7 +298,9 @@ class SqlitePersonalTaskRepository:
                 exists = connection.execute("SELECT 1 FROM personal_tasks WHERE id=?", (task.id,)).fetchone()
                 raise PersonalTaskVersionConflict(task.id) if exists else PersonalTaskNotFound(task.id)
             if task.status not in (PersonalTaskStatus.PENDING, PersonalTaskStatus.IN_PROGRESS):
+                rows = connection.execute("SELECT id,reason,next_fire_at,version FROM task_reminders WHERE task_id=? AND status IN ('active','paused')", (task.id,)).fetchall()
                 connection.execute("UPDATE task_reminders SET status='cancelled',reason='task_ended',next_fire_at=NULL,version=version+1,updated_at=? WHERE task_id=? AND status IN ('active','paused')", (self._stamp(now), task.id))
+                changes.extend(ReminderChange(row["id"], "cancelled", "task_ended", None, row["version"] + 1) for row in rows)
             elif old_task and old_task.deadline != task.deadline:
                 reminders = connection.execute("SELECT * FROM task_reminders WHERE task_id=? AND status IN ('active','paused')", (task.id,)).fetchall()
                 for row in reminders:
@@ -261,11 +309,14 @@ class SqlitePersonalTaskRepository:
                         continue
                     if task.deadline is None or task.deadline.kind != ("datetime" if reminder.rule["kind"] == "before_deadline" else "date"):
                         connection.execute("UPDATE task_reminders SET status='cancelled',reason='deadline_removed_or_changed_kind',next_fire_at=NULL,version=version+1,updated_at=? WHERE id=?", (self._stamp(now), reminder.id))
+                        changes.append(ReminderChange(reminder.id, "cancelled", "deadline_removed_or_changed_kind", None, reminder.version + 1))
                     elif reminder.status == ReminderStatus.ACTIVE:
                         adjusted = reschedule_relative(reminder, task, now)
                         connection.execute("UPDATE task_reminders SET status=?,reason=?,next_fire_at=?,version=?,updated_at=? WHERE id=?", (adjusted.status.value, adjusted.reason, self._stamp(adjusted.next_fire_at), adjusted.version, self._stamp(now), reminder.id))
+                        action = "paused" if adjusted.status == ReminderStatus.PAUSED else "rescheduled"
+                        changes.append(ReminderChange(reminder.id, action, adjusted.reason, adjusted.next_fire_at, adjusted.version))
             connection.execute("COMMIT")
-            return task
+            return task, tuple(changes)
         except (PersonalTaskNotFound, PersonalTaskVersionConflict):
             connection.rollback()
             raise

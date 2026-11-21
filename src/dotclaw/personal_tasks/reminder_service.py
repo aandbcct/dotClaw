@@ -23,6 +23,8 @@ class ReminderService:
         return await self._repository.list_reminders(task_id)
 
     async def create(self, task_id: str, *, rule: ReminderRule, expected_task_version: int) -> Reminder:
+        if type(expected_task_version) is not int or expected_task_version < 1:
+            raise InvalidReminderInput("expected_task_version 必须为正整数")
         task = await self._repository.get(task_id)
         if task is None:
             raise PersonalTaskNotFound(task_id)
@@ -46,6 +48,8 @@ class ReminderService:
         return await self._repository.create_reminder(reminder, expected_task_version=expected_task_version)
 
     async def update(self, task_id: str, reminder_id: str, *, rule: ReminderRule, expected_version: int, expected_task_version: int) -> Reminder:
+        if any(type(value) is not int or value < 1 for value in (expected_version, expected_task_version)):
+            raise InvalidReminderInput("expected_version 和 expected_task_version 必须为正整数")
         task = await self._repository.get(task_id)
         if task is None:
             raise PersonalTaskNotFound(task_id)
@@ -73,6 +77,10 @@ class ReminderService:
         return await self._repository.replace_reminder(updated, expected_version=expected_version, expected_task_version=expected_task_version)
 
     async def change_status(self, task_id: str, reminder_id: str, *, action: Literal["pause", "resume", "cancel"], expected_version: int, expected_task_version: int) -> Reminder:
+        if action not in ("pause", "resume", "cancel"):
+            raise InvalidReminderTransition("不支持的提醒操作")
+        if any(type(value) is not int or value < 1 for value in (expected_version, expected_task_version)):
+            raise InvalidReminderInput("expected_version 和 expected_task_version 必须为正整数")
         task = await self._repository.get(task_id)
         if task is None:
             raise PersonalTaskNotFound(task_id)
