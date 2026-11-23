@@ -30,9 +30,10 @@ class ContextSlotManager:
         loaded_slots: list[tuple[ContextSlotBinding, ContextSlot]] = []
         binding: ContextSlotBinding
         for binding in plan.bindings:
-            self._signal_bus.subscribe(binding.descriptor.slot_id, binding.descriptor.owner, binding.owner_key)
+            if binding.descriptor.cache_scope is not ContextCacheScope.NONE:
+                self._signal_bus.subscribe(binding.descriptor.slot_id, binding.descriptor.owner, binding.owner_key)
+                self._bindings[_binding_key(binding)] = binding
             slot: ContextSlot = self._slot(binding)
-            self._bindings[_binding_key(binding)] = binding
             loaded_slots.append((binding, slot))
         await self.drain_signals()
         results: list[ContextContribution] = []

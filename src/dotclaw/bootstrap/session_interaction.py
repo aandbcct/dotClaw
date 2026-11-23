@@ -26,6 +26,7 @@ from ..runtime.application.run_watch_service import RunWatchService, RunWatchCur
 from ..runtime.domain.context import ContextOwner
 from ..runtime.domain.facts import AgentRun, RunErrorCode
 from ..session.session import Session, SessionManager
+from ..assistant.service import ASSISTANT_AGENT_ID, ASSISTANT_SESSION_ID
 
 
 class UnknownIdentityError(ValueError):
@@ -34,6 +35,10 @@ class UnknownIdentityError(ValueError):
 
 class SessionDeletionRejected(RuntimeError):
     """存在非终态 Run 时拒绝删除 Session（开发计划阶段 5）。"""
+
+
+class ReservedAssistantSessionError(RuntimeError):
+    """固定助理会话或身份只能由助理入口管理。"""
 
 
 class SessionInteractionService:
@@ -83,7 +88,7 @@ class SessionInteractionService:
             return self._default_agent_id
         if self._agent_registry.get("default"):
             return "default"
-        identities = self._agent_registry.list_all()
+        identities = [item for item in self._agent_registry.list_all() if item.agent_id != ASSISTANT_AGENT_ID]
         if len(identities) == 1:
             return identities[0].agent_id
         raise UnknownIdentityError("无法确定默认 Identity，请显式指定 agent_id")
@@ -96,6 +101,8 @@ class SessionInteractionService:
     ) -> Session:
         """创建绑定显式 Identity 的 Session；未指定时使用默认 Identity 并落盘。"""
         resolved: str = agent_id or self._resolve_default_agent_id()
+        if resolved == ASSISTANT_AGENT_ID:
+            raise ReservedAssistantSessionError("固定助理会话只能通过助理入口创建")
         if self._agent_registry.get(resolved) is None:
             raise UnknownIdentityError(f"未知 Identity: {resolved}")
         selected_model: str = model or self._preferred_model
@@ -109,12 +116,30 @@ class SessionInteractionService:
             model=selected_model,
         )
 
+    async def ensure_assistant_session(self) -> Session:
+        """由固定入口创建助理会话；调用方负责串行与既有记录核验。"""
+        if self._agent_registry.get(ASSISTANT_AGENT_ID) is None:
+            raise UnknownIdentityError(f"固定助理 Identity 未注册: {ASSISTANT_AGENT_ID}")
+        selected_model = self._preferred_model
+        if not selected_model:
+            raise ValueError("创建助理 Session 前必须配置 chat 用途的首选模型")
+        if selected_model not in self._chat_models:
+            raise ValueError(f"助理会话模型不存在或未启用: {selected_model}")
+        return await self._session_manager.create(
+            agent_id=ASSISTANT_AGENT_ID,
+            title="个人助理",
+            model=selected_model,
+            session_id=ASSISTANT_SESSION_ID,
+        )
+
     # ── 路由 ──
 
     async def update_session(
         self, session_id: str, *, title: str | None = None, archived: bool | None = None,
     ) -> Session:
         """更新标题或归档标记，租约内重读避免覆盖最新对话投影。"""
+        if session_id == ASSISTANT_SESSION_ID:
+            raise ReservedAssistantSessionError("固定助理会话不能重命名或归档")
         if title is not None and not title.strip():
             raise ValueError("标题不能为空")
         async with self._coordinator.edit_session(session_id):
@@ -264,6 +289,8 @@ class SessionInteractionService:
 
     async def delete_session(self, session_id: str) -> None:
         """与提交共用租约，租约内确认活动状态后完成清理。"""
+        if session_id == ASSISTANT_SESSION_ID:
+            raise ReservedAssistantSessionError("固定助理会话不能删除")
         async with self._coordinator.edit_session(session_id):
             await self._delete_session_locked(session_id)
 

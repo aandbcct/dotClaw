@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 from hashlib import sha256
 
 from dotclaw.runtime.application.dto import ContextBundle, ContextMetadata, RunRequest, ToolDefinition
@@ -22,7 +23,8 @@ from dotclaw.runtime.domain.facts import JSONMap, JSONValue, MessageRole, RunMes
 from dotclaw.runtime.domain.events import RunEvent, RunEventType
 from dotclaw.runtime.domain.control import AgentAction
 
-from .contracts import ContextContribution, ContextOwnerSnapshot, ContextSlotBinding
+from ..assistant.models import AssistantInputRef
+from .contracts import ContextContribution, ContextOwnerSnapshot, ContextPlan, ContextSlotBinding
 from .plan_resolver import ContextPlanResolver
 from .ports import ContextDependencies, MemorySearchRecord
 from .signals import ContextRefreshSignal
@@ -43,6 +45,47 @@ class ContextProvider:
             return _bundle_from_active_version(execution)
         owner_data: dict[ContextOwner, ContextOwnerSnapshot] = await self._owner_data(request, execution)
         plan = self._resolver.resolve(owner_data)
+        is_assistant = request.agent_id == "personal-assistant"
+        assistant_slot_ids = {
+            "identity",
+            "tools",
+            "conversation",
+            "history_compressions",
+            "run_messages",
+            "assistant_context",
+        }
+        plan = ContextPlan(tuple(
+            binding
+            for binding in plan.bindings
+            if (
+                binding.descriptor.slot_id in assistant_slot_ids
+                if is_assistant
+                else binding.descriptor.slot_id != "assistant_context"
+            )
+        ))
+        if is_assistant and any(binding.descriptor.slot_id == "assistant_context" for binding in plan.bindings):
+            reader = self._dependencies.assistant_context_reader
+            if reader is None:
+                raise RuntimeError("personal-assistant 已启用 assistant_context，但读取器未装配")
+            created_at = datetime.fromisoformat(request.user_message.created_at.replace("Z", "+00:00"))
+            if created_at.tzinfo is None or created_at.utcoffset() is None:
+                raise ValueError("助理上下文输入时间必须包含时区")
+            input_ref = AssistantInputRef(
+                run_id=execution.run_id,
+                message_id=request.user_message.message_id,
+                created_at=created_at,
+            )
+            run_snapshot = owner_data[ContextOwner.RUN]
+            run_data = dict(run_snapshot.data)
+            run_data["assistant_context_text"] = await reader.read(request.session_id, input_ref)
+            run_snapshot = ContextOwnerSnapshot(run_snapshot.owner_key, run_data)
+            owner_data[ContextOwner.RUN] = run_snapshot
+            plan = ContextPlan(tuple(
+                ContextSlotBinding(binding.descriptor, binding.owner_key, run_snapshot)
+                if binding.descriptor.owner is ContextOwner.RUN
+                else binding
+                for binding in plan.bindings
+            ))
         contributions: tuple[ContextContribution, ...] = await self._manager.load_plan(plan)
         snapshots: tuple[ContextSlotSnapshot, ...] = _snapshots(plan.bindings, contributions)
         context_run_messages = _filter_legacy_approval_results(execution.run_messages, execution.run_events)
@@ -72,13 +115,14 @@ class ContextProvider:
 
     async def _owner_data(self, request: RunRequest, execution: RunExecutionView) -> dict[ContextOwner, ContextOwnerSnapshot]:
         """在 Provider 边界读取 Owner 数据；Manager 永不读取外部领域数据。"""
+        is_assistant = request.agent_id == "personal-assistant"
         policy_tools: JSONValue | None = execution.policy.policy_data.get("tools")
         history_text: str = request.conversation.compressed_history.content if request.conversation.compressed_history is not None else ""
         return {
-            ContextOwner.AGENT: ContextOwnerSnapshot(request.agent_id, {"system_prompt": _string_value(execution.policy.policy_data, "system_prompt"), "skills_text": _skills_text(self._dependencies), "tools": policy_tools if isinstance(policy_tools, list) else []}),
+            ContextOwner.AGENT: ContextOwnerSnapshot(request.agent_id, {"system_prompt": _string_value(execution.policy.policy_data, "system_prompt"), "skills_text": "" if is_assistant else _skills_text(self._dependencies), "tools": policy_tools if isinstance(policy_tools, list) else []}),
             ContextOwner.SESSION: ContextOwnerSnapshot(request.session_id, {"history_compression": history_text, "user_info_text": _user_info_text(self._dependencies)}),
-            ContextOwner.RUN: ContextOwnerSnapshot(execution.run_id, {"conversation_messages": [message.to_dict() for message in request.conversation.messages], "message_ids": [message.message_id for message in execution.run_messages], "memory_text": await _memory_text(self._dependencies, request.user_message.content), "knowledge_text": await _knowledge_text(self._dependencies, request.user_message.content)}),
-            ContextOwner.GLOBAL: ContextOwnerSnapshot("global", {"available_agents_text": _available_agents_text(self._dependencies)}),
+            ContextOwner.RUN: ContextOwnerSnapshot(execution.run_id, {"conversation_messages": [message.to_dict() for message in request.conversation.messages], "message_ids": [message.message_id for message in execution.run_messages], "memory_text": "" if is_assistant else await _memory_text(self._dependencies, request.user_message.content), "knowledge_text": "" if is_assistant else await _knowledge_text(self._dependencies, request.user_message.content)}),
+            ContextOwner.GLOBAL: ContextOwnerSnapshot("global", {"available_agents_text": "" if is_assistant else _available_agents_text(self._dependencies)}),
         }
 
 

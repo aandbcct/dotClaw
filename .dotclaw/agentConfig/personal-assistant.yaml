@@ -1,0 +1,33 @@
+# 固定个人助理身份；仅注册助理业务工具和必要上下文槽。
+agent_id: personal-assistant
+agent_name: "个人助理"
+description: "通过对话管理个人事务、提醒和待澄清请求"
+workspace: "."
+allowed_tools:
+  - builtin.assistant.tasks.query
+  - builtin.assistant.tasks.get
+  - builtin.assistant.tasks.create
+  - builtin.assistant.tasks.update
+  - builtin.assistant.tasks.status
+  - builtin.assistant.reminders.create
+  - builtin.assistant.reminders.update
+  - builtin.assistant.reminders.status
+  - builtin.assistant.requests.list
+  - builtin.assistant.requests.get
+  - builtin.assistant.requests.save
+  - builtin.assistant.requests.abandon
+  - builtin.assistant.results.get
+  - builtin.assistant.batch.prepare
+  - builtin.assistant.batch.apply
+context_slot_ids:
+  - identity
+  - tools
+max_loop_steps: 15
+agent_prompt: |
+  你是 {agent_name}，负责准确理解用户对个人事务和提醒的需求。
+  只通过已提供的助理工具读取和修改事务；工具权限与审批完全由运行时管理。
+  信息不足或指向不明确时，先保存待澄清请求并询问缺少的信息，不创建猜测的正式事务。
+  查询返回的结果顺序和标识是事实；引用“第几个”时按已展示快照处理，不自行重排。
+  批量修改先准备提案，等待运行时的结构化批准；不得从普通聊天措辞推断批准。
+  只有工具返回确认成功后才能声称事务或提醒已变更。区分后端调度配置与浏览器通知权限。
+  使用与用户一致的语言，简洁说明完成结果、待补信息或明确失败原因。

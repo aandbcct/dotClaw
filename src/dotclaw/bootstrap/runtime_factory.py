@@ -15,6 +15,7 @@ from ..context import (
     build_context_provider,
     build_context_plan_from_registry,
 )
+from ..context.ports import AssistantContextReaderPort
 from ..runtime.adapters import (
     AgentPolicyResolver,
     ApprovalRepositoryAdapter,
@@ -77,6 +78,7 @@ def build_runtime_services(
     memory_manager: MemoryManager | None,
     agent_registry: AgentRegistry,
     preferred_model: str,
+    assistant_context_reader: AssistantContextReaderPort | None = None,
 ) -> RuntimeServices:
     """按 Port 边界装配 RuntimeEngine 与 SessionRunCoordinator。"""
     if tool_executor is None:
@@ -87,6 +89,7 @@ def build_runtime_services(
         memory_manager=memory_manager,
         agent_registry=agent_registry,
         plan_configuration=build_context_plan_from_registry(agent_registry),
+        assistant_context_reader=assistant_context_reader,
     ))
     approval_repository: ApprovalRepositoryAdapter = ApprovalRepositoryAdapter(storage_root)
     run_repository: RunRepositoryAdapter = RunRepositoryAdapter(

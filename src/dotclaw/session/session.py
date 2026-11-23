@@ -231,6 +231,7 @@ class SessionManager:
         self._data_dir: Path = (project_root / data_dir).resolve()
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._deletion_handler: Callable[[str], Awaitable[None]] | None = None
+        self._create_lock = asyncio.Lock()
 
     def set_deletion_handler(self, handler: Callable[[str], Awaitable[None]]) -> None:
         """设置 Session 删除完成后调用的资源释放处理器。"""
@@ -252,32 +253,43 @@ class SessionManager:
         safe_session_id: str = validate_path_segment(session_id, "session_id")
         return self._data_dir / safe_session_id
 
-    async def create(self, agent_id: str, title: str = "新对话",
-                     model: str = "") -> Session:
+    async def create(
+        self,
+        agent_id: str,
+        title: str = "新对话",
+        model: str = "",
+        *,
+        session_id: str | None = None,
+    ) -> Session:
         """创建新 Session 并持久化。
 
         Args:
             agent_id: 绑定的 Identity 标识，必填且非空（阶段 1：Session 持久化绑定 Identity）。
             title: 会话标题。
             model: 创建时使用的模型名。
+            session_id: 可选固定标识；若对应 Session 已存在则拒绝覆盖。
 
         Raises:
             ValueError: agent_id 为空或仅空白。
+            FileExistsError: 显式 Session ID 已存在。
         """
         if not agent_id or not agent_id.strip():
             raise ValueError("创建 Session 必须指定非空 agent_id")
-        import uuid
-        now: str = datetime.now().isoformat()
-        session: Session = Session(
-            id=str(uuid.uuid4())[:8],
-            title=title,
-            agent_id=agent_id,
-            model=model,
-            created_at=now,
-            updated_at=now,
-        )
-        await self.save(session)
-        return session
+        async with self._create_lock:
+            selected_id = str(uuid.uuid4())[:8] if session_id is None else session_id
+            if self._session_path(selected_id).exists():
+                raise FileExistsError(f"Session 已存在，拒绝覆盖: {selected_id}")
+            now: str = datetime.now().isoformat()
+            session: Session = Session(
+                id=selected_id,
+                title=title,
+                agent_id=agent_id,
+                model=model,
+                created_at=now,
+                updated_at=now,
+            )
+            await self.save(session)
+            return session
 
     async def load(self, session_id: str) -> Session | None:
         """加载 Session。返回 None 如果不存在。"""
