@@ -234,10 +234,12 @@ class AssistantChange(StrictModel):
 
 class AssistantProposalValues(StrictModel):
     title: str | None = None
+    description: str | None = None
     status: Literal["pending", "in_progress", "completed", "cancelled", "active", "paused", "fired", "missed"] | None = None
     version: int | None = Field(default=None, ge=1)
     deadline: str | None = None
     reminder_summary: str | None = None
+    reminder_rule: ReminderRule | None = None
 
 
 class AssistantProposalItem(StrictModel):
@@ -318,8 +320,13 @@ class RequestDetailData(StrictModel):
     request: "AssistantRequest"
 
 
+class ResultSetData(StrictModel):
+    kind: Literal["result_set"]
+    result_set: "AssistantResultSet"
+
+
 AssistantOperationData = Annotated[
-    TaskPageData | TaskDetailData | RequestPageData | RequestDetailData,
+    TaskPageData | TaskDetailData | RequestPageData | RequestDetailData | ResultSetData,
     Field(discriminator="kind"),
 ]
 
@@ -386,5 +393,22 @@ class AssistantResultSet(StrictModel):
     created_at: datetime
 
 
+class AssistantRunResults(StrictModel):
+    schema_version: Literal[1] = 1
+    run_id: str
+    result_sets: list[AssistantResultSet]
+    operations: list[AssistantOperation]
+
+
+class AssistantProposalPreview(StrictModel):
+    request_id: str
+    version: int = Field(ge=1)
+    hash: str
+    items: list[AssistantProposalItem] = Field(min_length=2, max_length=20)
+
+
 RequestPageData.model_rebuild()
 RequestDetailData.model_rebuild()
+ResultSetData.model_rebuild()
+AssistantOperationResult.model_rebuild()
+AssistantOperation.model_rebuild()
