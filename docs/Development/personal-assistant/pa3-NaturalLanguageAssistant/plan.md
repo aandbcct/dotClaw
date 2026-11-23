@@ -2,7 +2,9 @@
 
 **一个 PR，7 个有依赖的实施阶段，每阶段一个主 commit。**本文件按“总体设计 → 分阶段实施”组织；接口、状态、持久化和异常契约由 [spec.md](spec.md) 唯一定义，实现者按契约落实，不再自行选择产品语义。
 
-设计基线：2026-11-23，当前 `feat/assistant` 分支 HEAD `87902de`，#64 及本次已确认讨论。当前仅交付文档，尚未编写或运行实现。本计划覆盖 #64；#65 不合并，#56 的长期方向不作为本期验收要求。
+设计基线：2026-11-23，初始 `feat/assistant` HEAD `87902de`，#64 及本次已确认讨论。本计划覆盖 #64；#65 不合并，#56 的长期方向不作为本期验收要求。
+
+**实施状态（2026-11-23）：**T1—T6已分阶段验收并提交，当前代码基线为 `9c328f9`。T7仅完成部署身份打包、示例配置和文档/静态证据收口。用户明确禁止动态测试、应用/项目代码运行、Docker运行、build及浏览器验证；纯源码AST静态检查和TypeScript `tsc --noEmit` 属允许检查，T1—T5阶段记录有项目解释器AST证据，T6记录有tsc证据。本次没有新增一次性测试，也没有将未运行项记为通过。A1—A9状态以 `verification.md` 的实现静态证据和未验证项为准。
 
 # 第一部分：总体设计
 
@@ -136,7 +138,7 @@ prepare保存完整命令和前后差异；apply仅接收请求ID/版本/hash，
 **依赖：** T1；spec §3—§5。
 
 1. 新增 `assistant/service.py` 的 `AssistantService（助理应用服务）`。公开方法对应spec工具表：query_tasks/get_task/create_task/update_task/change_task_status/create_reminder/update_reminder/change_reminder_status/list_requests/get_request/save_request/abandon_request/prepare_batch/apply_batch/get_result_set/get_run_results/reconcile_controls。
-2. 构造注入数据库路径、时区、普通业务服务、助理仓储；运行仓储通过明确的bind_run_repository装配一次，绑定前禁止reconcile；不允许从模型参数获取依赖。
+2. `AssistantService(db_path, *, timezone, repository, clock=None)` 接收数据库路径、时区、助理仓储和可选时钟；运行仓储通过明确的 `bind_run_repository` 装配一次，绑定前禁止reconcile，不允许从模型参数获取依赖。每次业务操作在助理SQLite事务内，用同一借用连接构造普通事务/提醒仓储与服务，不把普通业务服务作为AssistantService构造依赖。
 3. 单项写路径使用 `_execute_once(operation_key,tool_name,arguments,context,action)`：先查回执→hash→SAVEPOINT→借用连接服务执行→保存回执/展示引用/可选请求resolved→提交。action只在这个文件内由固定命令分发，不暴露通用脚本能力。
 4. patch仅变更给定字段；request关联必须同时提供expected_request_version。请求来源通过run_repository.load_messages核验用户角色、会话归属和时间。缺少可选截止不强迫澄清。
 5. batch prepare保存前后展示快照及不可变命令；apply使用子key及最终汇总key，逐项提交。领域失败保存失败结果后继续；数据库错误停止；取消等待事务收尾。
@@ -151,7 +153,7 @@ prepare保存完整命令和前后差异；apply仅接收请求ID/版本/hash，
 
 1. 新增 `tools/assistant_tools.py`：`AssistantToolHandler（助理工具适配器）` 实现现有ToolHandler接口，构造service、name、args_model及固定调用函数；definition/execute/args_model按现有约定，不复制ToolExecutor。register_assistant_tools(registry,service)注册spec全部工具，包括results.get。
 2. tools/decorator.py增加两种ToolPolicy（权限档案）；capability.py增加业务ResourceKind（资源类型）、resource_id/operation_hash及Broker分支；policy.py默认规则增加两项ALLOW。业务字段形成资源摘要，绝不转成文件路径。
-3. tools/base.py的ToolExecutionContext（工具上下文）增加approved/input_message_id/input_created_at默认字段；runtime/application/execution.py的RunExecutionView（运行视图）从request投影来源；runtime/adapters/tool_executor_adapter.py和tools/executor.py透传，模型不能覆写。
+3. tools/base.py的ToolExecutionContext（工具上下文）增加approved/input_message_id/input_created_at默认字段；runtime/application/execution.py的RunExecutionView（运行视图）从request投影来源；runtime/adapters/tool_executor_adapter.py和tools/executor.py透传，模型不能覆写。历史来源时间严格读取已验证 `USER_INPUT` RunMessage `metadata['created_at']`；缺失、格式错误或无时区明确报来源错误，不回退到run启动时间。两个USER_INPUT持久化点写入用户消息时间。
 4. executor._approval_operation_keys支持业务操作hash；_is_unattended_allow不豁免助理显式批准；describe_recovery把服务端数据库路径/session加入助理执行作用域。注册期注入路径元数据，scope改变不能跨库重放。
 5. batch.apply needs_approval=True，handler再次检查可信approved；普通写默认无需批准，用户全局ASK/DENY仍有效。每工具恢复声明及错误证据按spec；非助理身份/会话调用明确拒绝。
 6. tools executor已有执行链顺序保持；不改Runtime状态枚举、transition或通用工具重试策略。
@@ -168,6 +170,7 @@ prepare保存完整命令和前后差异；apply仅接收请求ID/版本/hash，
 3. 新增身份YAML及AssistantContextSlot（上下文槽）；修改context/{ports,defaults,slots,provider}.py，仅在启用slot时读取。Runtime factory注入读取依赖，active context重放优先级不变。
 4. 修改bootstrap/application_host.py/_host_components.py/runtime_factory.py：数据库初始化提前→工具注册→原Runtime装配→bind_run_repository→原恢复与请求同步→交互入口→调度最后启动。明确初始化失败传播，不把业务工具缺失作为可忽略降级。
 5. 不建立常驻助理worker或新队列；ensure发现固定文件丢失但数据库有记录时报错；首建多标签只一个会话。状态同步不触发后台业务执行。
+6. 助理工具全局注册后，普通身份的 `allowed_tools` 为空时仍排除 `builtin.assistant.*`；personal-assistant显式白名单照常使用，普通身份即使显式写入该工具仍由handler身份校验拒绝。RUN/NONE上下文槽按请求读取，不缓存实例或保留binding/signal订阅；冻结active context replay优先规则不变。
 
 **测试与门槛：**新增 `tests/assistant/test_entry.py,test_context.py`；扩展runtime_v2/test_context_plan_bootstrap、test_phase2_application_host、test_session_deletion。验证固定ID并发/恢复/损坏、普通身份隔离、上下文上限与可继续查询、历史压缩后请求保持、冻结快照重放、不因切页终止运行。
 
@@ -176,7 +179,7 @@ prepare保存完整命令和前后差异；apply仅接收请求ID/版本/hash，
 **Commit：** `feat(web): add assistant entry and authoritative result views`
 **依赖：** T4；spec §8。
 
-1. 新增channel/web/assistant_schemas.py、assistant_routes.py，实现三个端点及类型化响应；create_app挂载，复用错误信封和host。
+1. 新增 `channel/web/assistant_routes.py` 实现三个端点并由create_app挂载；直接复用 `SessionDetailResponse` 及 `assistant.models` 中的严格结果/提案响应模型，不新增仅作转导出的 `assistant_schemas.py`，沿用现有错误信封和host。
 2. app.py普通sessions列表/search/options过滤固定助理；直接detail/messages/activity仍可使用。消息提交前仅针对固定会话调用before_submit；原approval/abandon端点返回后调用reconcile_controls，不改变控制动作本身。
 3. 结果API从SQLite回执读实际提交数据，按run归属验证；proposal端点比对version/hash后返回保存的before/after，不从当前值重建已批准内容。
 4. 保留普通事务/提醒HTTP接口；不增加聊天文本直接授权端点，不把审批交给LLM。错误映射严格使用spec。
@@ -199,25 +202,23 @@ prepare保存完整命令和前后差异；apply仅接收请求ID/版本/hash，
 
 ## T7 / P0：端到端验收、部署与文档收口
 
-**Commit：** `test(assistant): verify conversation workflows and document delivery`
+**Commit：** `docs(assistant): document delivery and package the assistant identity`
 **依赖：** T1—T6；spec §10全部门槛。
 
-1. 新增 `tests/assistant/test_runtime_integration.py`，通过真实工具/SQLite和现有协调器验证审批、取消、重启、提交后丢失回执；脚本模型只验证协议与状态，不替代真实语言验收。
-2. 新增 `docs/Development/personal-assistant/pa3-NaturalLanguageAssistant/verification.md`：记录代码head、环境、模型配置、每组A1—A9结果、日志/回执证据、未执行项及已知限制。真实模型至少覆盖上文6条核心故事与跨午夜/多请求/批量拒绝用例；发现误解要修复并重跑对应场景。
-3. Docker实际验收：服务启动、固定入口、多轮澄清、真实页面一致、提醒进入现有通知链路、重启恢复、完成后停止后续提醒。只清理带唯一标记的验收事务；不删除数据卷。
+1. 不新增一次性集成测试文件：用户禁止本次执行动态测试，T7不通过新增未运行的测试文件形成虚假的验收信号。
+2. 新增 `docs/Development/personal-assistant/pa3-NaturalLanguageAssistant/verification.md`：记录已提交代码基线、T1—T6提交、A1—A9逐项实现静态依据、静态命令结果、全部运行未验证项及限制。不得声称真实模型、SQLite、审批、取消、迁移、重启、通知或浏览器流程通过。
+3. 只静态核对Docker身份白名单、COPY和Compose已有挂载；不启动容器、不操作数据库、不进行对话。记录镜像文件可读与旧挂载补齐说明。
 4. 修改.dockerignore精确放行新身份YAML、Dockerfile只COPY该文件，核对compose.yml/compose.dev.yml持久配置挂载；README和docs/docker.md增量说明本期能力、请求板边界、v3迁移、固定会话限制及通知条件；更新config.example.yaml/docker/config.example.yaml的两项助理策略示例，不改用户配置。
 5. 检查权限没有扩大到任意文件/进程，旧入口仍有效，spec与实现一致；差异必须修订文档并明确理由，禁止仅在PR描述补一条未落档的新规则。
 
-**执行命令与完成门槛：**
-- Windows先执行 `.venv\\Scripts\\python.exe -c "import sys; print(sys.executable)"`；再用同一解释器运行受影响测试。
-- 后端门槛：tests/assistant、tests/personal_tasks、tests/tools及本计划修改到的tests/runtime_v2、tests/channel/web；依据收集配置核对新增目录已纳入。
-- 前端：frontend目录 `npm test`、`npm run build`；随后Docker人工流程和真实模型用例，结果分别记录。
-- 文档/差异：git diff --check；搜索固定助理身份、工具前缀及连接scope调用，确保所有新增入口有对应测试；不以编译或脚本测试代替浏览器和真实模型验收。
-- 完成标准：A1—A9有证据，必要回归通过，数据迁移与恢复无半结果，README无超范围承诺。未执行或失败不能标通过。
+**本次执行约束与完成门槛：**
+- 用户禁止动态测试、应用或项目代码运行、项目脚本、npm测试/build、Docker/Compose、真实模型和浏览器；不得为一次性验证新增测试文件。纯源码AST静态检查可使用 `.venv\Scripts\python.exe`，TypeScript可使用 `tsc --noEmit`。
+- T1—T5的项目解释器AST检查及T6的TypeScript静态检查按阶段记录如实引用；T7仅执行文档/白名单/Compose挂载文本核对、`git diff --check` 和必要静态扫描。`verification.md` 对A1—A9逐项列实现位置，运行验证统一标为“未执行”。
+- 交付门槛是文档与精确身份配置打包完成、示例策略形状与真实 `tools.policy.rules` 配置一致、规格差异已同步、静态命令结果可复查；这不代表A1—A9运行验收通过。
 
 ## 6. 最终交付与风险控制
 
-交付：一个PR、七个按依赖commit、实现代码与测试、两份设计文档和实际verification记录。无需新建GitHub Tickets；T1—T7是本PR内部可验收工作单元。
+交付：一个PR、T1—T6实现提交、T7文档/身份配置提交，两份设计文档和如实标记未验证的verification记录。无需新建GitHub Tickets；T1—T7是本PR内部可验收工作单元。
 
 主要风险及控制：
 - **共享提交改造影响旧调用**：仅改指定仓储方法，旧服务调用回归与故障注入先通过。

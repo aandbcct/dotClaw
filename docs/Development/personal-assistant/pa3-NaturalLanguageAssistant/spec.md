@@ -1,6 +1,6 @@
 # PA-03 技术规格：自然语言事务管理与个人助理入口
 
-状态：2026-11-23 设计基线，尚未实现。配套 [plan.md](plan.md)；冲突时先修订设计，不允许实现者自行选择替代语义。范围为 #64，一个 PR。以下类名均为现有类型或本次指定的拟新增类型。
+设计基线：2026-11-23。T1—T6已实现并分阶段提交，T7交付与本次验证边界见 [plan.md](plan.md) 和 [verification.md](verification.md)。本次用户明确禁止动态测试、Docker运行、build、真实模型和浏览器流程；静态证据不能替代第10节A1—A9的运行验证。契约冲突时先修订设计，不允许实现者自行选择替代语义。范围为 #64，一个 PR。以下类名均为现有类型或本次指定的拟新增类型。
 
 ## 1. 架构与不可变规则
 
@@ -51,7 +51,7 @@ flowchart TB
 - 模型未配置、模型不可用、身份缺失分别显示现有配置错误，不自动换身份/模型。当前 Host 已在无 chat 模型时拒绝启动，前端按既有服务不可用行为展示，不为此重写启动机制。
 - 同会话忙碌继续使用协调器现有拒绝/控制结果；不排队，不因换页停止运行。
 
-新增身份 YAML，显式列出本期助理工具；不开放 exec、任意文件、委派、MCP 或记忆写入工具。上下文仅启用身份、工具、当前对话、历史摘要、运行消息及本次助理上下文。助理专用快照不加载无关全局 Agent 目录、知识库和记忆；正常身份行为不变。
+新增身份 YAML `.dotclaw/agentConfig/personal-assistant.yaml`，显式列出本期15个助理工具；不开放 exec、任意文件、委派、MCP 或记忆写入工具。Docker上下文仅放行此文件及所需父目录，Dockerfile只复制该身份文件；Compose既有只读目录挂载会遮住镜像内置文件，旧挂载源需单独补该文件且不覆盖其他身份。上下文仅启用身份、工具、当前对话、历史摘要、运行消息及本次助理上下文。助理专用快照不加载无关全局 Agent 目录、知识库和记忆；普通身份空白工具白名单不暴露 `builtin.assistant.*`，personal-assistant显式白名单保留，handler仍校验身份；正常身份的其他行为不变。
 
 ## 3. 数据模型与数据库 v3
 
@@ -203,6 +203,8 @@ sequenceDiagram
 
 默认两档案ALLOW，仅对显式助理工具生效。现有policy merge仍允许用户改为ASK/DENY，Agent只能收窄。handler验证agent_id与固定session_id，不因其他身份allowed_tools为空就允许访问助理服务；直接无context调用拒绝。不扩大文件写、进程或网络权限。
 
+普通身份的 `allowed_tools` 为空代表其他已注册工具可用，但助理工具全局注册后必须从该默认集合中排除 `builtin.assistant.*`；personal-assistant显式白名单正常保留。普通身份即使显式列出助理工具，handler仍按身份和固定会话校验并拒绝调用。
+
 batch.apply的needs_approval=True。在 `ToolExecutor._is_unattended_allow` 中两个assistant档案始终不跳过声明式审批；即使配置unattended_allow_profiles也不能取消批量确认。全局DENY仍先拒绝。普通单项WRITE默认不额外确认。
 
 `ToolExecutionContext（工具执行上下文）` 新增 approved:bool=False。适配器 `ToolExecutorAdapter._context` 只从invocation.approved赋值；执行器 `_build_context` 保留。batch handler以此拒绝无批准执行，不能接受模型传入approved。
@@ -223,7 +225,9 @@ batch.apply的needs_approval=True。在 `ToolExecutor._is_unattended_allow` 中�
 
 新增 `AssistantContextSlot（助理上下文槽）`，RUN owner、cache_scope=NONE，注册在defaults。普通重建每次读取最新请求；审批/恢复沿用现有冻结active context，再通过工具取最新数据，不破坏上下文重放。ContextDependencies新增assistant_context_reader可选依赖；只在身份启用该slot时调用，不给所有身份增加读库开销。
 
-时间解析：模型根据输入来源时间解释相对日期，保存原文和基准；服务校验类型、未来提醒和来源归属，不伪称确定性校验能证明任意自然语言解释正确。跨午夜及“下午/上午”属于模型验收用例。
+`ContextSlotManager` 对cache_scope=NONE按请求创建实例，不缓存实例、binding或signal订阅；不改变其他缓存范围的生命周期或active context重放优先级。
+
+时间解析：模型根据输入来源时间解释相对日期，保存原文和基准；服务校验类型、未来提醒和来源归属，不伪称确定性校验能证明任意自然语言解释正确。来源必须是当前助理会话中已验证的 `USER_INPUT` RunMessage；输入时间使用消息 `metadata['created_at']`。当前输入使用冻结请求时间，历史输入严格读取其持久化metadata；缺失、格式错误或缺少时区均明确报来源错误，绝不退回Run启动时间。Engine在两个用户输入持久化点将来源时间写入metadata。跨午夜及“下午/上午”属于模型验收用例。
 
 结果顺序：tasks.query的快照由服务按查询输出生成；前端直接渲染该有序卡片列表，模型提示不得重新编号重排。后续“第二个”按用户指向快照读取，不以新查询顺序代替；多页/多组不明确则澄清。snapshot ID采用服务端run_id/call_id确定性生成；绑定运行工具结果，不依赖最终回答成功投影到会话。
 
@@ -231,7 +235,7 @@ batch.apply的needs_approval=True。在 `ToolExecutor._is_unattended_allow` 中�
 
 ## 8. Web、前端与错误契约
 
-新增 `channel/web/assistant_schemas.py / assistant_routes.py`，复用现有错误信封：
+新增 `channel/web/assistant_routes.py`，复用现有错误信封和严格响应模型，不新增仅转导出的 `assistant_schemas.py`：
 - POST /api/v1/assistant/session → 200 SessionDetailResponse（会话详情响应）；确保入口并同步审批终态。
 - GET /api/v1/assistant/results?run_id=... → {schema_version:1,run_id,result_sets:[],operations:[]}。校验run存在且属于固定会话；返回全部已提交工具回执，可在流中查询；不存在404，跨会话404。
 - GET /api/v1/assistant/requests/{id}/proposal?version=...&hash=... → {request_id,version,hash,items:[{target,before,after}]}；只读匹配快照，版本变化409。

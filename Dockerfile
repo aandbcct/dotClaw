@@ -20,6 +20,7 @@ RUN /opt/venv/bin/python -m pip install --no-cache-dir -e '.[gui]'
 COPY docker/ /opt/dotclaw/docker/
 RUN mkdir -p /app/data /app/skills /app/.dotclaw/agentConfig /workspace \
     && chown -R dotclaw:dotclaw /app /workspace
+COPY --chown=dotclaw:dotclaw .dotclaw/agentConfig/personal-assistant.yaml /app/.dotclaw/agentConfig/personal-assistant.yaml
 USER dotclaw
 EXPOSE 8765
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \

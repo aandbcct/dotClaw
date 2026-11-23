@@ -10,6 +10,11 @@
 !docker/
 !docker/*.py
 !docker/*.example.yaml
+!.dotclaw/
+.dotclaw/**
+!.dotclaw/agentConfig/
+.dotclaw/agentConfig/**
+!.dotclaw/agentConfig/personal-assistant.yaml
 **/__pycache__/
 **/*.pyc
 **/node_modules/
