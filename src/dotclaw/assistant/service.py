@@ -140,6 +140,10 @@ class AssistantRequestSourceError(RuntimeError):
     """草案引用的运行输入不存在或不属于当前助理会话。"""
 
 
+class AssistantRequestNotFound(RuntimeError):
+    """助理只读接口请求的草案不存在。"""
+
+
 class AssistantApprovalRequiredError(RuntimeError):
     """批量命令没有来自运行时的可信批准。"""
 
@@ -1496,7 +1500,9 @@ class AssistantService:
         if session_id != ASSISTANT_SESSION_ID:
             raise AssistantRequestSourceError("批量提案只允许从固定助理会话读取")
         request = await self._repository.get_request(session_id, request_id)
-        if request is None or request.version != version or request.proposal_hash != proposal_hash or request.proposal is None or request.proposal_run_id is None:
+        if request is None:
+            raise AssistantRequestNotFound(request_id)
+        if request.version != version or request.proposal_hash != proposal_hash or request.proposal is None or request.proposal_run_id is None:
             raise AssistantRequestConflict(request_id)
         run = await self._run_repo().load_run_snapshot(session_id, request.proposal_run_id)
         if run is None or run.session_id != session_id or run.agent_id != ASSISTANT_AGENT_ID:

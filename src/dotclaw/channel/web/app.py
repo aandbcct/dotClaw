@@ -17,7 +17,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ...bootstrap.application_host import ApplicationHost
-from ...bootstrap.session_interaction import SessionDeletionRejected, UnknownIdentityError
+from ...bootstrap.session_interaction import (
+    ReservedAssistantSessionError,
+    SessionDeletionRejected,
+    UnknownIdentityError,
+)
+from ...assistant.entry_service import AssistantSessionInvalidError, AssistantSessionMissingError
+from ...assistant.service import ASSISTANT_AGENT_ID, ASSISTANT_SESSION_ID
 from ...common.logging_setup import exception_diagnostic
 from ...runtime.application.session_run_coordinator import RunNotRecoverableError, SessionBusyError
 from ...runtime.application.dto import RunResult
@@ -66,6 +72,7 @@ from .sse import SSEOutputAdapter, encode_sse_event
 from .personal_task_routes import router as personal_task_router
 from .reminder_routes import router as reminder_router
 from .notification_routes import router as notification_router
+from .assistant_routes import router as assistant_router
 
 logger = logging.getLogger("dotclaw.channel.web")
 
@@ -100,6 +107,7 @@ def create_app(
                 await asyncio.wait(tuple(tasks), timeout=1.0)
 
     app = FastAPI(title="dotClaw GUI", version="0.1.0", lifespan=lifespan)
+    app.include_router(assistant_router)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
@@ -174,6 +182,7 @@ def create_app(
     async def list_sessions(request: Request) -> list[SessionSummaryResponse]:
         """按更新时间倒序返回会话摘要。"""
         sessions = await _host(request).session_manager.list_all()
+        sessions = [item for item in sessions if item.id != ASSISTANT_SESSION_ID and item.agent_id != ASSISTANT_AGENT_ID]
         sessions.sort(key=lambda item: item.updated_at, reverse=True)
         return [_session_summary(item) for item in sessions]
 
@@ -189,6 +198,7 @@ def create_app(
         if not query:
             return _error_response(422, WebErrorCode.INVALID_REQUEST, "搜索词不能为空")
         sessions = await _host(request).session_manager.list_all()
+        sessions = [item for item in sessions if item.id != ASSISTANT_SESSION_ID and item.agent_id != ASSISTANT_AGENT_ID]
         sessions.sort(key=lambda item: item.updated_at, reverse=True)
         hits: list[SearchHitResponse] = []
         for session in sessions:
@@ -234,6 +244,8 @@ def create_app(
     @app.delete("/api/v1/sessions/{session_id}", status_code=204, response_model=None)
     async def delete_session(session_id: str, request: Request) -> Response:
         """删除完整会话，幂等且保留应用层清理与运行保护。"""
+        if session_id == ASSISTANT_SESSION_ID:
+            return _error_response(409, WebErrorCode.RESERVED_ASSISTANT_SESSION, "助理固定会话不能删除")
         try:
             await _host(request).session_interaction.delete_session(session_id)
         except (SessionBusyError, SessionDeletionRejected):
@@ -253,6 +265,7 @@ def create_app(
                     description=item.description,
                 )
                 for item in identities
+                if item.agent_id != ASSISTANT_AGENT_ID
             ],
             models=list(host.chat_models),
             default_agent_id=host.session_interaction.default_agent_id,
@@ -303,6 +316,8 @@ def create_app(
         session_id: str, payload: UpdateSessionRequest, request: Request,
     ) -> SessionSummaryResponse | JSONResponse:
         """通过会话交互入口持久化重命名或归档，不改变历史内容。"""
+        if session_id == ASSISTANT_SESSION_ID:
+            return _error_response(409, WebErrorCode.RESERVED_ASSISTANT_SESSION, "助理固定会话不能修改")
         try:
             session = await _host(request).session_interaction.update_session(
                 session_id, title=payload.title, archived=payload.archived,
@@ -337,6 +352,12 @@ def create_app(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 WebErrorCode.UNKNOWN_IDENTITY,
                 str(error),
+            )
+        except ReservedAssistantSessionError:
+            return _error_response(
+                status.HTTP_409_CONFLICT,
+                WebErrorCode.RESERVED_ASSISTANT_SESSION,
+                "助理固定会话只能通过助理入口管理",
             )
         except ValueError:
             return _error_response(
@@ -374,6 +395,12 @@ def create_app(
         logger.info("web.message.received content_length=%d", len(payload.content), extra={"session_id": session_id})
         if not host.session_manager.exists(session_id):
             return _session_not_found()
+        if session_id == ASSISTANT_SESSION_ID:
+            try:
+                await host.assistant_entry_service.before_submit()
+            except (PersonalTaskStorageError, AssistantSessionInvalidError, AssistantSessionMissingError, OSError, ValueError) as error:
+                logger.error("助理提交前状态同步失败: %s", error)
+                return _error_response(500, WebErrorCode.INTERNAL_ERROR, "助理会话暂时无法提交")
 
         return _run_stream(
             request,
@@ -457,6 +484,12 @@ def create_app(
             return _error_response(status.HTTP_409_CONFLICT, WebErrorCode.RUN_NOT_RECOVERABLE, "只能放弃当前可恢复运行")
         if result.state.outcome() is not RunOutcome.ABANDONED:
             return _error_response(status.HTTP_409_CONFLICT, WebErrorCode.RUN_NOT_RECOVERABLE, "运行未被放弃，请查询状态")
+        if session_id == ASSISTANT_SESSION_ID:
+            try:
+                await host.assistant_service.reconcile_controls(session_id)
+            except (PersonalTaskStorageError, OSError, ValueError) as error:
+                logger.error("放弃运行后助理状态同步失败: %s", error)
+                return _error_response(500, WebErrorCode.INTERNAL_ERROR, "助理请求状态暂时无法同步")
         run = await host.session_interaction.get_run(session_id, run_id)
         if run is None:
             return _error_response(status.HTTP_404_NOT_FOUND, WebErrorCode.RUN_NOT_FOUND, "运行记录不存在")
@@ -470,12 +503,19 @@ def create_app(
     ) -> StreamingResponse:
         """提交网页审批决定，并继续以 SSE 返回恢复后的运行。"""
         host = _host(request)
+
+        async def resolve_and_reconcile(adapter: SSEOutputAdapter) -> RunResult:
+            result = await host.session_interaction.resolve_approval(approval_id, payload.approved, adapter)
+            if result.run_id:
+                run = await host.session_interaction.get_run_by_id(result.run_id)
+                if run is not None and run.session_id == ASSISTANT_SESSION_ID:
+                    await host.assistant_service.reconcile_controls(ASSISTANT_SESSION_ID)
+            return result
+
         return _run_stream(
             request,
             "",
-            lambda adapter: host.session_interaction.resolve_approval(
-                approval_id, payload.approved, adapter,
-            ),
+            resolve_and_reconcile,
         )
 
     @app.post("/api/v1/delegations/{child_run_id}/resume", response_model=None)
