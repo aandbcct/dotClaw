@@ -51,6 +51,8 @@ a { color:var(--accent); text-underline-offset:3px; }
 .sidebar-collapsed .nav-action { justify-content:center; padding:8px; }
 .sidebar-collapsed .settings-entry { margin-top:auto; }
 .workspace { position:relative; display:grid; min-width:0; min-height:0; grid-template-rows:56px minmax(0,1fr) auto; }
+.workspace-panel { display:contents; }
+.workspace-panel[hidden] { display:none !important; }
 .workspace-header { display:flex; align-items:center; gap:12px; min-width:0; padding:0 24px; }
 .model-context { min-width:0; }
 .model-selector { display:flex; gap:8px; align-items:center; max-width:260px; min-height:44px; padding:8px; font-size:16px; font-weight:600; overflow-wrap:anywhere; }

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DisplayMessage, RunActivity, ToolExecution } from "./types";
 import { CopyButton } from "./MessageContent";
 import { ToolApprovalSummary, ToolResultView } from "./ToolPresentation";
+import { AssistantBatchPreview } from "./AssistantBatchPreview";
+import type { AssistantPreviewState } from "./useAssistantResults";
 
 interface RunActivityPanelProps {
   message: DisplayMessage; activities: RunActivity[]; canControl: boolean;
@@ -9,6 +11,8 @@ interface RunActivityPanelProps {
   onRestoreInput: () => void; onApprove: (runId: string, approved: boolean) => void;
   onResumeDelegation: (runId: string) => void; onResumeRun: (runId: string) => void;
   onAbandon: (runId: string) => void; abandoningRunId: string | null;
+  assistantPreviewFor?: (runId: string, callId: string) => AssistantPreviewState | null;
+  onRetryAssistantPreview?: (runId: string) => void;
   children?: ReactNode;
 }
 const LABELS: Record<string, string> = {
@@ -19,7 +23,7 @@ const LABELS: Record<string, string> = {
 const activeStages = new Set(["sending", "processing", "thinking", "responding", "tool_running", "stopping", "waiting_approval", "waiting_delegation", "recoverable", "unknown"]);
 
 /** 思考与步骤分别展示真实来源；正文和操作仍属于同一条助手消息。 */
-export function RunActivityPanel({ message, activities, canControl, onLoadRun, onCheckStatus, onRestoreInput, onApprove, onResumeDelegation, onResumeRun, onAbandon, abandoningRunId, children }: RunActivityPanelProps) {
+export function RunActivityPanel({ message, activities, canControl, onLoadRun, onCheckStatus, onRestoreInput, onApprove, onResumeDelegation, onResumeRun, onAbandon, abandoningRunId, assistantPreviewFor, onRetryAssistantPreview, children }: RunActivityPanelProps) {
   const execution = message.execution;
   const active = Boolean(execution && activeStages.has(execution.stage));
   const [expanded, setExpanded] = useState(active);
@@ -54,6 +58,16 @@ export function RunActivityPanel({ message, activities, canControl, onLoadRun, o
         const activity = activities.find((item) => item.run_id === runId);
         const controllable = canControl && !abandoningRunId && runId === message.run_ids?.[0] && activity && !activity.committing && (!activity.cancellation || activity.cancellation.phase === "settled") && ["waiting_approval", "waiting_delegation", "recoverable"].includes(activity.status);
         const approvalTool = activity?.approval_call_id ? activity.tools.find((tool) => tool.call_id === activity.approval_call_id) : undefined;
+        const batchApply = approvalTool?.name === "builtin.assistant.batch.apply";
+        const previewArgumentsValid = typeof approvalTool?.arguments?.request_id === "string"
+          && Number.isInteger(approvalTool.arguments.expected_version)
+          && typeof approvalTool.arguments.proposal_hash === "string";
+        const assistantPreview = batchApply
+          ? previewArgumentsValid
+            ? assistantPreviewFor?.(runId, approvalTool.call_id) || null
+            : { status: "error" as const, preview: null, error: "批准参数不完整，无法核对保存的提案。" }
+          : null;
+        const previewReady = !batchApply || assistantPreview?.status === "loaded";
         return <section className="run-activity" aria-label={`运行过程 ${runId}`} key={runId}>
           {!activity ? <p className="muted">执行记录尚未读取。<button type="button" onClick={() => onLoadRun(runId)}>读取执行记录</button></p> : <>
             {activity.committing && !activity.cancellation && <p role="status">正在保存结果，请稍候。</p>}
@@ -64,7 +78,7 @@ export function RunActivityPanel({ message, activities, canControl, onLoadRun, o
                 {step.kind === "model" ? <><div className="tool-step-heading"><strong>模型调用</strong><span>{LABELS[step.status]}</span></div><StepTime start={step.started_at} end={step.completed_at} /></> : <ToolStep tool={activity.tools.find((tool) => tool.call_id === step.call_id)} status={step.status} />}
               </li>) : activity.tools.map((tool) => <li className={`execution-step execution-step--${tool.status}`} key={tool.call_id}><ToolStep tool={tool} /></li>)}
             </ol>
-            {activity.status === "waiting_approval" && <div className="approval-card" role="group" aria-label="工具审批"><div><strong>需要你的批准</strong><ToolApprovalSummary tool={approvalTool} /></div><button type="button" disabled={!controllable} onClick={() => onApprove(runId, false)}>拒绝</button><button type="button" disabled={!controllable || !approvalTool} onClick={() => onApprove(runId, true)}>批准并继续</button>{!approvalTool && <button type="button" onClick={() => onCheckStatus(runId)}>重新查询审批</button>}</div>}
+            {activity.status === "waiting_approval" && <div className="approval-card" role="group" aria-label="工具审批"><div><strong>需要你的批准</strong>{batchApply ? <AssistantBatchPreview state={assistantPreview} onRetry={() => previewArgumentsValid ? onRetryAssistantPreview?.(runId) : onCheckStatus(runId)} /> : <ToolApprovalSummary tool={approvalTool} />}</div><button type="button" disabled={!controllable} onClick={() => onApprove(runId, false)}>拒绝</button><button type="button" disabled={!controllable || !approvalTool || !previewReady} onClick={() => onApprove(runId, true)}>批准并继续</button>{!approvalTool && <button type="button" onClick={() => onCheckStatus(runId)}>重新查询审批</button>}</div>}
             {activity.status === "waiting_delegation" && <div className="approval-card"><span>父任务正在等待子任务</span><button type="button" disabled={!controllable} onClick={() => onResumeDelegation(runId)}>继续父任务</button></div>}
             {activity.status === "recoverable" && <div className="approval-card"><span>可从已保存的检查点恢复；不会重放已丢失的逐字增量。</span><button type="button" disabled={!controllable || confirmingRunId === runId} onClick={() => onResumeRun(runId)}>恢复运行</button>
               {confirmingRunId === runId ? <div className="abandon-confirm" role="group" aria-label="确认放弃运行"><p>放弃后不能恢复；已执行的操作不会撤销。</p><button type="button" onClick={() => setConfirmingRunId(null)}>取消放弃</button><button type="button" disabled={!controllable} onClick={() => { setConfirmingRunId(null); onAbandon(runId); }}>确认放弃</button></div> : <button type="button" disabled={!controllable} onClick={() => setConfirmingRunId(runId)}>{abandoningRunId === runId ? "放弃中…" : "放弃本次运行"}</button>}

@@ -12,6 +12,10 @@ export interface ConversationView {
   activitiesByRunId: Record<string, RunActivity>;
   abandoningRunId: string | null;
 }
+export interface SessionWorkspaceOptions {
+  preferenceKey?: string;
+  autoLoad?: boolean;
+}
 const emptyView = (): ConversationView => ({ messages: [], phase: "idle", activity: null, runId: null, error: "", loading: false, detached: false, errorCode: "", retryable: false, lastSubmittedText: "", statusError: "", submissionStage: "idle", activeMessageId: null, activitiesByRunId: {}, abandoningRunId: null });
 const newExecution = (submittedText = ""): MessageExecution => ({ stage: "processing", error: null, statusError: "", submittedText });
 const finalStages = new Set(["completed", "failed", "cancelled", "abandoned"]);
@@ -54,7 +58,9 @@ function isRunAcceptedData(data: Record<string, unknown>): data is Record<string
 }
 
 /** 以会话为唯一键隔离消息和控制状态，流回调不读取当前选中项。 */
-export function useSessionWorkspace() {
+export function useSessionWorkspace(options: SessionWorkspaceOptions = {}) {
+  const preferenceKey = options.preferenceKey || "dotclaw.last-session.v1";
+  const autoLoad = options.autoLoad ?? true;
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [views, setViews] = useState<Record<string, ConversationView>>({});
@@ -235,7 +241,7 @@ export function useSessionWorkspace() {
     for (const id of observers.current.keys()) if (id !== session.id) stopObservation(id);
     selectedRef.current = session.id;
     setSelectedId(session.id);
-    writePreference("dotclaw.last-session.v1", session.id);
+    writePreference(preferenceKey, session.id);
     if (viewsRef.current[session.id]) { await readActivity(session.id); return; }
     patch(session.id, { loading: true });
     try {
@@ -247,14 +253,22 @@ export function useSessionWorkspace() {
   }
   useEffect(() => {
     alive.current = true;
-    void listSessions().then(async (items) => {
-      if (!alive.current) return;
-      setSessions(items);
-      const last = readPreference<string | null>("dotclaw.last-session.v1", null);
-      const selected = items.find((item) => item.id === last) || items.find((item) => !item.archived);
-      if (selected) await open(selected);
-    }).catch((error: unknown) => { if (alive.current) setLoadError(errorText(error)); })
-      .finally(() => { if (alive.current) setLoading(false); });
+    void (async () => {
+      try {
+        if (autoLoad) {
+          const items = await listSessions();
+          if (!alive.current) return;
+          setSessions(items);
+          const last = readPreference<string | null>(preferenceKey, null);
+          const selected = items.find((item) => item.id === last) || items.find((item) => !item.archived);
+          if (selected) await open(selected);
+        }
+      } catch (error) {
+        if (alive.current) setLoadError(errorText(error));
+      } finally {
+        if (alive.current) setLoading(false);
+      }
+    })();
     return () => {
       alive.current = false;
       for (const id of observers.current.keys()) stopObservation(id);
@@ -267,7 +281,7 @@ export function useSessionWorkspace() {
     for (const id of observers.current.keys()) stopObservation(id);
     selectedRef.current = null;
     setSelectedId(null);
-    writePreference("dotclaw.last-session.v1", null);
+    writePreference(preferenceKey, null);
   }
   function receive(id: string, messageId: string, event: StreamEvent): void {
     const current = viewsRef.current[id] || emptyView();

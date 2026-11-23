@@ -57,6 +57,96 @@ export interface SessionDetail extends SessionSummary {
   messages: SessionMessage[];
 }
 
+export interface AssistantTaskRef {
+  id: string;
+  title: string;
+  status: PersonalTaskStatus;
+  version: number;
+}
+export interface AssistantReminderRef {
+  id: string;
+  task_id: string;
+  status: "active" | "paused" | "cancelled" | "fired" | "missed";
+  version: number;
+  next_fire_at: string | null;
+}
+export interface AssistantResultItem extends AssistantTaskRef {
+  deadline?: string | null;
+  reminder_summary?: string | null;
+}
+export interface AssistantResultSet {
+  id: string;
+  session_id: string;
+  run_id: string;
+  call_id: string;
+  items: AssistantResultItem[];
+  created_at: string;
+}
+export interface AssistantOperationError { code: string; message: string; }
+export interface AssistantBatchItemResult {
+  index: number;
+  outcome: "succeeded" | "failed";
+  task_refs: AssistantTaskRef[];
+  reminder_refs: AssistantReminderRef[];
+  error: AssistantOperationError | null;
+}
+export type AssistantOperationName =
+  | "tasks.query" | "tasks.get" | "tasks.create" | "tasks.update" | "tasks.status"
+  | "reminders.create" | "reminders.update" | "reminders.status" | "requests.list"
+  | "requests.get" | "requests.save" | "requests.abandon" | "results.get"
+  | "batch.prepare" | "batch.apply";
+export interface AssistantOperationResult {
+  schema_version: 1;
+  operation: AssistantOperationName;
+  outcome: "succeeded" | "failed" | "partial";
+  data: unknown;
+  task_refs: AssistantTaskRef[];
+  reminder_refs: AssistantReminderRef[];
+  changes: Array<{ id: string; action: "cancelled" | "rescheduled" | "paused"; reason: string | null; next_fire_at: string | null; version: number }>;
+  error: AssistantOperationError | null;
+  result_set_id: string | null;
+  request_id: string | null;
+  items: AssistantBatchItemResult[];
+}
+export interface AssistantOperation {
+  operation_key: string;
+  session_id: string;
+  run_id: string;
+  call_id: string;
+  tool_name: string;
+  arguments_hash: string;
+  request_id: string | null;
+  result: AssistantOperationResult;
+  created_at: string;
+}
+export interface AssistantRunResults {
+  schema_version: 1;
+  run_id: string;
+  result_sets: AssistantResultSet[];
+  operations: AssistantOperation[];
+}
+export interface AssistantProposalValues {
+  title?: string | null;
+  description?: string | null;
+  status?: PersonalTaskStatus | AssistantReminderRef["status"] | null;
+  version?: number | null;
+  deadline?: string | null;
+  reminder_summary?: string | null;
+  reminder_rule?: ReminderRule | null;
+}
+export interface AssistantProposalItem {
+  target: AssistantTaskRef | AssistantReminderRef;
+  before: AssistantProposalValues;
+  after: AssistantProposalValues;
+  command: Record<string, unknown>;
+}
+export interface AssistantProposalPreview {
+  request_id: string;
+  version: number;
+  hash: string;
+  items: AssistantProposalItem[];
+}
+
 export interface DisplayMessage extends SessionMessage {
   reasoning?: string;
   pending?: boolean;

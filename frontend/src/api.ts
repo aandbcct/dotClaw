@@ -10,6 +10,7 @@ import type {
   CancelReceipt,
   PersonalTask, PersonalTaskDetail, PersonalTaskInput, PersonalTaskList, PersonalTaskQuery, PersonalTaskStatus,
   Reminder, ReminderRule, ReminderList, NotificationItem, NotificationList, NotificationChanges, NotificationDelivery,
+  AssistantRunResults, AssistantProposalPreview,
 } from "./types";
 
 const API_ROOT = "/api/v1";
@@ -80,6 +81,19 @@ export function listSessions(): Promise<SessionSummary[]> {
 
 export function getSession(sessionId: string): Promise<SessionDetail> {
   return requestJson<SessionDetail>(`${API_ROOT}/sessions/${sessionId}`);
+}
+
+export function ensureAssistantSession(): Promise<SessionDetail> {
+  return requestJson<SessionDetail>(`${API_ROOT}/assistant/session`, { method: "POST" });
+}
+
+export function getAssistantResults(runId: string): Promise<AssistantRunResults> {
+  return requestJson<AssistantRunResults>(`${API_ROOT}/assistant/results?${new URLSearchParams({ run_id: runId })}`);
+}
+
+export function getAssistantProposal(requestId: string, version: number, hash: string): Promise<AssistantProposalPreview> {
+  const query = new URLSearchParams({ version: String(version), hash });
+  return requestJson<AssistantProposalPreview>(`${API_ROOT}/assistant/requests/${encodeURIComponent(requestId)}/proposal?${query}`);
 }
 
 export function switchSessionModel(sessionId: string, model: string): Promise<SessionSummary> {

@@ -1,0 +1,30 @@
+/* 助理沿用聊天网格，只补充结果和批准差异的专属呈现。 */
+.assistant-entry-status { width:min(760px,calc(100% - 48px)); margin:12px auto 0; padding:10px 12px; border-radius:8px; background:var(--surface); color:var(--muted); font-size:13px; }
+.assistant-entry-status button,.assistant-result-error button,.assistant-batch-preview button { margin-left:8px; padding:6px 10px; color:var(--accent); }
+.assistant-results { display:grid; gap:10px; margin:28px 0; }
+.assistant-results > header,.assistant-result-card > header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.assistant-results > header h2 { margin:0; font-size:17px; }
+.assistant-result-card { min-width:0; padding:14px 16px; border:1px solid var(--line); border-radius:10px; background:var(--raised); }
+.assistant-result-card > header small,.assistant-result-card li > span,.assistant-result-card li > small { color:var(--muted); font-size:12px; }
+.assistant-result-card ol,.assistant-result-card ul { display:grid; gap:6px; margin:10px 0 0; padding-left:22px; }
+.assistant-result-card li { display:flex; align-items:center; gap:8px 14px; flex-wrap:wrap; }
+.assistant-result-card li button { padding:4px 0; color:var(--accent); text-align:left; text-decoration:underline; text-underline-offset:3px; }
+.assistant-result-card li > small { flex-basis:100%; }
+.assistant-operation-error { margin:6px 0; color:var(--danger); overflow-wrap:anywhere; }
+.assistant-batch-result-items > li { display:block; }
+.assistant-batch-result-items > li > ul { margin-top:6px; }
+.assistant-result-error { padding:10px 12px; border-radius:8px; background:var(--danger-surface); color:var(--danger); }
+.assistant-batch-preview { max-width:min(620px,70vw); margin-top:8px; font-size:13px; }
+.assistant-batch-preview > p { margin:6px 0; }
+.assistant-batch-preview ol { display:grid; gap:10px; margin:8px 0; padding-left:24px; }
+.assistant-batch-preview li > strong { display:block; margin-bottom:6px; }
+.assistant-batch-preview dl { display:grid; gap:5px; margin:0; }
+.assistant-batch-preview dl > div { display:grid; grid-template-columns:minmax(80px,auto) minmax(0,1fr); gap:8px; }
+.assistant-batch-preview dt { color:var(--muted); }
+.assistant-batch-preview dd { min-width:0; margin:0; overflow-wrap:anywhere; }
+.assistant-batch-preview del { color:var(--muted); }
+.assistant-batch-preview ins { color:var(--accent); text-decoration:none; }
+@media (max-width:640px) {
+  .assistant-batch-preview { max-width:calc(100vw - 48px); }
+  .assistant-batch-preview dl > div { grid-template-columns:1fr; gap:2px; }
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./reminder-workspace.css";
 import { ApiError, getNotification, getPersonalTask } from "./api";
 import { Dialog } from "./Dialog";
@@ -15,8 +15,9 @@ function reminderEffectText(changes: ReminderChange[]): string {
   return ([counts.rescheduled ? `改期 ${counts.rescheduled} 条` : "", counts.paused ? `暂停 ${counts.paused} 条` : "", counts.cancelled ? `取消 ${counts.cancelled} 条` : ""]
     .filter(Boolean).join("、"));
 }
-export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotificationId, onFocusHandled }: { onOpenNavigation: () => void; focusTaskId?: string | null; focusNotificationId?: number | null; onFocusHandled?: () => void }) {
+export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotificationId, refreshRevision = 0, onFocusHandled }: { onOpenNavigation: () => void; focusTaskId?: string | null; focusNotificationId?: number | null; refreshRevision?: number; onFocusHandled?: () => void }) {
   const tasks = usePersonalTasks(); const [editing, setEditing] = useState<PersonalTask | null | undefined>(undefined); const [deleting, setDeleting] = useState<PersonalTask | null>(null); const [actionError, setActionError] = useState(""); const [reminding, setReminding] = useState<PersonalTask | null>(null);
+  const priorRefreshRevision = useRef(refreshRevision);
   const [focusResult, setFocusResult] = useState<{ kind: "task" | "summary"; items: PersonalTask[]; missingIds: string[] } | null>(null);
   const [focusError, setFocusError] = useState("");
   const [focusLoading, setFocusLoading] = useState(false);
@@ -26,6 +27,11 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
   const [taskSuccess, setTaskSuccess] = useState("");
   const visibleTasks = tasks.items;
   useEffect(() => { setKeywordDraft(tasks.keyword); }, [tasks.keyword]);
+  useEffect(() => {
+    if (priorRefreshRevision.current === refreshRevision) return;
+    priorRefreshRevision.current = refreshRevision;
+    void tasks.reload(true);
+  }, [refreshRevision, tasks.reload]);
   useEffect(() => { if (focusTaskId || focusNotificationId) setFocusTarget({ taskId: focusTaskId || undefined, notificationId: focusNotificationId || undefined }); }, [focusTaskId, focusNotificationId]);
   useEffect(() => {
     if (!focusTarget) return;
