@@ -82,6 +82,9 @@ class ToolExecutorAdapter(ToolPort):
             agentrun_id=invocation.run_id, session_id=execution.session_id,
             agent_id=execution.policy.agent_id, tool_call_id=invocation.call.call_id,
             attempt=invocation.attempt, idempotency_key=invocation.idempotency_key,
+            approved=invocation.approved,
+            input_message_id=execution.input_message_id,
+            input_created_at=execution.input_created_at,
         )
 
     async def describe_recovery(self, call: ToolCall, execution: RunExecutionView) -> ToolRecoveryContract:
@@ -89,6 +92,8 @@ class ToolExecutorAdapter(ToolPort):
         return self._executor.describe_recovery(call.name, ToolExecutionContext(
             agentrun_id=execution.run_id, session_id=execution.session_id,
             agent_id=execution.policy.agent_id,
+            input_message_id=execution.input_message_id,
+            input_created_at=execution.input_created_at,
         ))
 
 

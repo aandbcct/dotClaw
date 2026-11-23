@@ -221,7 +221,8 @@ class RuntimeEngine:
                     root_run_id=request.root_run_id or request.parent_run_id, delegation_task_id=request.delegation_task_id,
                     latest_checkpoint_id=f"checkpoint-{run_id}")
                 message = RunMessage(request.user_message.message_id, 1, RunMessageKind.USER_INPUT,
-                    MessageRole.USER, request.user_message.content)
+                    MessageRole.USER, request.user_message.content,
+                    metadata={"created_at": request.user_message.created_at})
                 await self._run_repository.save_messages(run.session_id, run_id, (message,))
                 await self._run_repository.create_run(run)
                 await self._checkpoint_repository.save(RunCheckpoint(f"checkpoint-{run_id}", run_id,
@@ -1298,7 +1299,14 @@ class RuntimeEngine:
             # Created（例如 resume 入口以 Created 构造 execution）；正常 execute 路径已在
             # 持久化前经 transition() 完成 RunStarted 迁移，此处跳过以避免重复迁移失败。
             sequence += 1
-            messages.append(RunMessage(execution.request.user_message.message_id, sequence, RunMessageKind.USER_INPUT, MessageRole.USER, execution.request.user_message.content))
+            messages.append(RunMessage(
+                execution.request.user_message.message_id,
+                sequence,
+                RunMessageKind.USER_INPUT,
+                MessageRole.USER,
+                execution.request.user_message.content,
+                metadata={"created_at": execution.request.user_message.created_at},
+            ))
             await self._save_messages(run, execution, messages)
         if isinstance(execution.state.mode, Created):
             start_transition = await self._apply_transition(execution, run, RunStarted(run.input_message_id), event_number)
