@@ -25,7 +25,7 @@ export function AssistantResults({
     .filter((operation) => ["tasks.create", "tasks.update", "tasks.status", "reminders.create", "reminders.update", "reminders.status", "batch.apply", "plans.apply"].includes(operation.result.operation))
     .map((operation) => ({ runId: result.run_id, operation })));
   return <section className="assistant-results" aria-label="助理执行结果">
-    <header><h2>事务结果</h2>{loading && <span role="status">正在同步…</span>}</header>
+    {loading && <p role="status">正在同步…</p>}
     {errors.map((error) => <p className="assistant-result-error" role="alert" key={error.runId}>
       {error.message}<button type="button" onClick={() => onRetry(error.runId)}>重试读取结果</button>
     </p>)}

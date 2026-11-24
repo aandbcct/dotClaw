@@ -211,6 +211,7 @@ it("批量审批预览匹配后仍提交服务端原 approval_id", async () => {
   const user = userEvent.setup(); render(<App />);
   await user.click(screen.getByRole("button", { name: "个人助理" }));
   await screen.findByText(/已核对提案 v\s*2/);
+  expect(screen.queryByRole("complementary", { name: "事务结果" })).toBeNull();
   await user.click(screen.getByRole("button", { name: "批准并继续" }));
   await waitFor(() => expect(mock.mock.calls.some(([url, init]) => String(url).endsWith("/approvals/approval-original") && init?.method === "POST")).toBe(true));
 });

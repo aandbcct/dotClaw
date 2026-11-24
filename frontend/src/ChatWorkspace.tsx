@@ -65,10 +65,20 @@ export function ChatWorkspace({
   const submitting = useRef(new Set<string>());
   const composing = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const detailsButtonRef = useRef<HTMLButtonElement>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const { conversationRef, onScroll, scrollToBottom, awayFromBottom, hasNewContent } = useConversationScroll(selectedId || undefined, view.messages);
   const busy = Boolean(view.abandoningRunId) || workspace.isStreaming(selectedId) || ["running", "stopping", "suspended", "recoverable"].includes(view.phase);
   useEffect(() => { setNewError(""); setModelError(""); }, [selectedId, resetErrorKey]);
   useEffect(() => { if (active && !selectedId) inputRef.current?.focus(); }, [active, selectedId]);
+  useEffect(() => {
+    if (!assistantMode || !active || !detailsOpen || modelOpen) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") { setDetailsOpen(false); detailsButtonRef.current?.focus(); }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [assistantMode, active, detailsOpen, modelOpen]);
   useEffect(() => {
     if (!targetMessage || view.loading) return;
     const element = document.getElementById(`message-${targetMessage}`);
@@ -164,6 +174,7 @@ export function ChatWorkspace({
         {modelError && !modelOpen && <span className="inline-error" role="alert">{modelError}</span>}
       </div>
       <span className="header-title" title={selected?.title}>{selected?.title || (assistantMode ? "个人助理" : "新对话")}</span>
+      {assistantMode && <button ref={detailsButtonRef} className="assistant-details-toggle" type="button" aria-expanded={detailsOpen} aria-controls="assistant-details" onClick={() => setDetailsOpen((open) => !open)}>事务结果</button>}
       <button className="icon-button theme-button" type="button" aria-label={theme === "light" ? "切换深色外观" : "切换浅色外观"} onClick={onToggleTheme}>{theme === "light" ? "☾" : "☀"}</button>
       {!assistantMode && selected && onOpenSessionMenu && <button className="icon-button" type="button" aria-label="当前会话更多操作" onClick={() => onOpenSessionMenu(selected)}>⋯</button>}
     </header>
@@ -199,9 +210,9 @@ export function ChatWorkspace({
           {message.role === "assistant" && !message.pending && Boolean(message.run_ids?.length) && selectedId && <SearchSources sessionId={selectedId} runIds={message.run_ids!} />}
         </article>)}
         {creating && !selectedId && <article className="message message--assistant"><div className="execution-status" role="status"><span className="execution-spinner" aria-hidden="true" />正在发送</div></article>}
-        {assistantMode && <AssistantResults results={results} errors={resultErrors} loading={resultsLoading} onRetry={onRetryResults || (() => undefined)} onOpenTask={onFocusTask || (() => undefined)} />}
       </div>}
     </section>
+    {assistantMode && active && detailsOpen && <aside id="assistant-details" className="assistant-details" aria-label="事务结果"><header><h2>事务结果</h2><button type="button" onClick={() => { setDetailsOpen(false); detailsButtonRef.current?.focus(); }}>关闭</button></header><div className="assistant-details-content"><AssistantResults results={results} errors={resultErrors} loading={resultsLoading} onRetry={onRetryResults || (() => undefined)} onOpenTask={onFocusTask || (() => undefined)} /></div></aside>}
     <div className="composer-region">
       {(externalError || newError || workspace.loadError || (!view.activeMessageId && view.error)) && <div className="error-strip" role="alert"><p>{externalError || newError || workspace.loadError || view.error}</p></div>}
       <form className="composer" onSubmit={(event) => void submit(event)}>
