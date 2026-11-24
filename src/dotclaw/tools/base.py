@@ -202,6 +202,15 @@ class ToolExecutionContext:
     idempotency_key: str | None = None
     """由 Runtime 冻结并传给受支持提供方的稳定幂等键。"""
 
+    approved: bool = False
+    """Runtime 已持久化确认的调用批准状态，不能由工具参数覆盖。"""
+
+    input_message_id: str = ""
+    """本次 Run 对应的服务端用户输入消息标识。"""
+
+    input_created_at: str = ""
+    """本次 Run 对应的服务端用户输入消息时间。"""
+
 
 # ToolContext 在模块末尾绑定为 ToolExecutionContext 的别名，供函数签名使用。
 ToolContext = ToolExecutionContext  # type: ignore[assignment]

@@ -5,10 +5,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from dotclaw.personal_tasks.models import PersonalTask, PersonalTaskStatus
+from dotclaw.personal_tasks.models import PersonalTask, PersonalTaskStatus, TaskPlanning, TaskDeadline, PersonalTaskKind
 from dotclaw.personal_tasks.repository import PersonalTaskStorageError, PersonalTaskVersionConflict
 from dotclaw.personal_tasks.sqlite_repository import SqlitePersonalTaskRepository
 from dotclaw.personal_tasks.reminder_models import Reminder, ReminderStatus
+from dotclaw.personal_tasks.service import PersonalTaskService
+from dotclaw.personal_tasks.reminder_service import ReminderService
 
 
 def task(version=1):
@@ -33,6 +35,57 @@ async def test_reopen_persists_and_compare_and_swap_allows_one_writer(tmp_path):
     assert sum(not isinstance(result, Exception) for result in outcomes) == 1
     assert sum(isinstance(result, PersonalTaskVersionConflict) for result in outcomes) == 1
     assert (await reopened.get("t1")).version == 2
+
+
+@pytest.mark.asyncio
+async def test_planning_json_survives_reopen_and_old_style_update(tmp_path):
+    path = tmp_path / "planning.sqlite3"
+    repository = SqlitePersonalTaskRepository(path)
+    await repository.initialize()
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    event = PersonalTask("event", "事件", "", PersonalTaskStatus.PENDING, None, now, now, None, 1,
+        TaskPlanning(PersonalTaskKind.EVENT, event_time=TaskDeadline("datetime", now.replace(hour=14)), time_text="下午两点"))
+    await repository.create(event)
+    prep = PersonalTask("prep", "准备", "", PersonalTaskStatus.PENDING, None, now, now, None, 1,
+        TaskPlanning(scheduled_time=TaskDeadline("date", date(2030, 1, 2)), related_task_id="event"))
+    await repository.create(prep)
+    changed = PersonalTask("prep", "准备材料", "", prep.status, None, now, now, None, 2, prep.planning)
+    await repository.replace(changed, expected_version=1)
+    reopened = SqlitePersonalTaskRepository(path)
+    await reopened.initialize()
+    assert (await reopened.get("event")).planning == event.planning
+    assert (await reopened.get("prep")).planning == prep.planning
+
+
+@pytest.mark.asyncio
+async def test_before_event_reminder_reschedules_pauses_and_cancels(tmp_path):
+    path = tmp_path / "event-reminder.sqlite3"
+    repository = SqlitePersonalTaskRepository(path)
+    await repository.initialize()
+    zone = ZoneInfo("UTC")
+    now = datetime(2030, 1, 1, 12, tzinfo=UTC)
+    tasks = PersonalTaskService(repository, timezone=zone, clock=lambda: now)
+    reminders = ReminderService(repository, timezone=zone, clock=lambda: now)
+    created = await tasks.create(title="面试", planning=TaskPlanning(PersonalTaskKind.EVENT,
+        event_time=TaskDeadline("datetime", now.replace(hour=14))))
+    reminder = await reminders.create(created.task.id, rule={"kind": "before_event", "offset_minutes": 30},
+        expected_task_version=created.task.version)
+    assert reminder.next_fire_at == now.replace(hour=13, minute=30)
+    moved = await tasks.update(created.task.id, title="面试", description="", deadline=None,
+        expected_version=created.task.version, planning=TaskPlanning(PersonalTaskKind.EVENT,
+            event_time=TaskDeadline("datetime", now.replace(hour=16))))
+    reminder = (await reminders.list(created.task.id))[0]
+    assert moved.reminder_changes[0].action == "rescheduled"
+    assert reminder.next_fire_at == now.replace(hour=15, minute=30)
+    past = await tasks.update(created.task.id, title="面试", description="", deadline=None,
+        expected_version=moved.task.version, planning=TaskPlanning(PersonalTaskKind.EVENT,
+            event_time=TaskDeadline("datetime", now.replace(hour=12, minute=15))))
+    assert past.reminder_changes[0].action == "paused"
+    assert (await reminders.list(created.task.id))[0].status == ReminderStatus.PAUSED
+    removed = await tasks.update(created.task.id, title="面试", description="", deadline=None,
+        expected_version=past.task.version, planning=TaskPlanning(PersonalTaskKind.EVENT))
+    assert removed.reminder_changes[0].action == "cancelled"
+    assert (await reminders.list(created.task.id))[0].status == ReminderStatus.CANCELLED
 
 
 def test_connect_maps_pragma_failure_and_closes_connection(tmp_path, monkeypatch):

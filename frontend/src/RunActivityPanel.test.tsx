@@ -42,7 +42,7 @@ it("恢复阻断展示结果待确认并提示核对，不提供恢复按钮", (
   expect(screen.queryByRole("button", { name: "恢复运行" })).toBeNull();
 });
 
-it("无正文立即显示真实处理反馈，思考首次展开后尊重手动折叠，完成折叠不反复关闭", async () => {
+it("无正文立即显示真实处理反馈，思考默认折叠且完成折叠不反复关闭", async () => {
   const user = userEvent.setup(), callbacks = actions();
   const { rerender } = render(<RunActivityPanel {...callbacks} message={message} activities={[activity]} canControl={false} />);
   expect(screen.getByText("处理中").closest("[role=status]")).toBeTruthy();
@@ -52,10 +52,11 @@ it("无正文立即显示真实处理反馈，思考首次展开后尊重手动�
   const thinking = { ...message, reasoning: "真实返回内容", execution: { ...message.execution!, stage: "thinking" as const } };
   rerender(<RunActivityPanel {...callbacks} message={thinking} activities={[activity]} canControl={false} />);
   const details = screen.getByText("思考过程").closest("details")!;
-  expect(details.open).toBe(true);
-  await user.click(screen.getByText("思考过程"));
-  rerender(<RunActivityPanel {...callbacks} message={{ ...thinking, reasoning: "真实返回内容继续" }} activities={[activity]} canControl={false} />);
   expect(details.open).toBe(false);
+  await user.click(screen.getByText("思考过程"));
+  expect(screen.getByText("真实返回内容")).toBeTruthy();
+  rerender(<RunActivityPanel {...callbacks} message={{ ...thinking, reasoning: "真实返回内容继续" }} activities={[activity]} canControl={false} />);
+  expect(screen.getByText("思考过程").closest("details")?.open).toBe(true);
   const completed = { ...thinking, execution: { ...thinking.execution, stage: "completed" as const } };
   rerender(<RunActivityPanel {...callbacks} message={completed} activities={[activity]} canControl={false} />);
   expect(screen.queryByRole("list")).toBeNull();
@@ -64,6 +65,21 @@ it("无正文立即显示真实处理反馈，思考首次展开后尊重手动�
   rerender(<RunActivityPanel {...callbacks} message={completed} activities={[{ ...activity }]} canControl={false} />);
   expect(screen.getAllByRole("listitem")).toHaveLength(2);
   expect(callbacks.onLoadRun).toHaveBeenCalledWith("r");
+});
+
+it("工具事件紧凑显示，参数和结果默认折叠，更新结果不自动展开", async () => {
+  const user = userEvent.setup();
+  const first = { ...activity, tools: [{ ...activity.tools[0], status: "completed", result: "原始结果", error: "" }] };
+  const { rerender } = render(<RunActivityPanel {...actions()} message={message} activities={[first]} canControl={false} />);
+  expect(screen.getByText("读取文件").closest(".execution-event")).toBeTruthy();
+  expect(screen.getByText("参数").closest("details")?.open).toBe(false);
+  expect(screen.getByText("结果").closest("details")?.open).toBe(false);
+  rerender(<RunActivityPanel {...actions()} message={message} activities={[{ ...first, tools: [{ ...first.tools[0], result: "新结果" }] }]} canControl={false} />);
+  expect(screen.getByText("结果").closest("details")?.open).toBe(false);
+  await user.click(screen.getByText("参数"));
+  expect(screen.getByText(/"path": "demo"/)).toBeTruthy();
+  await user.click(screen.getByText("结果"));
+  expect(screen.getByText("新结果")).toBeTruthy();
 });
 
 it("多个运行独立分组，旧 tools 可降级；历史审批禁用，当前审批携带原运行 ID", async () => {
@@ -115,4 +131,19 @@ it("审批仅匹配指定调用，未知关联禁用批准但保留拒绝和查�
   expect(callbacks.onApprove).toHaveBeenCalledWith("r", false);
   await user.click(screen.getByRole("button", { name: "重新查询审批" }));
   expect(callbacks.onCheckStatus).toHaveBeenCalledWith("r");
+});
+
+it("批量预览不可核对时禁用批准，匹配预览后才允许继续", async () => {
+  const user = userEvent.setup(), callbacks = actions();
+  const batch = { ...activity, status: "waiting_approval", approval_id: "approval-original", approval_call_id: "batch-call",
+    tools: [{ ...activity.tools[0], call_id: "batch-call", name: "builtin.assistant.batch.apply", arguments: { request_id: "request-1", expected_version: 2, proposal_hash: "hash-1" } }], steps: [] };
+  const preview = { request_id: "request-1", version: 2, hash: "hash-1", items: [] };
+  const { rerender } = render(<RunActivityPanel {...callbacks} message={message} activities={[batch]} canControl
+    assistantPreviewFor={() => ({ status: "error", preview: null, error: "预览不可用" })} />);
+  expect((screen.getByRole("button", { name: "批准并继续" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole("alert").textContent).toContain("预览不可用");
+  rerender(<RunActivityPanel {...callbacks} message={message} activities={[batch]} canControl
+    assistantPreviewFor={() => ({ status: "loaded", preview, error: "" })} />);
+  await user.click(screen.getByRole("button", { name: "批准并继续" }));
+  expect(callbacks.onApprove).toHaveBeenCalledExactlyOnceWith("r", true);
 });

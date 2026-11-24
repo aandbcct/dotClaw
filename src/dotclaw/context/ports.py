@@ -8,12 +8,14 @@ from typing import Protocol, Sequence
 from ..runtime.application.ports import ContextPort
 from ..runtime.application.dto import ContextMetadata
 from ..runtime.domain.context import ContextOwner
+from ..assistant.models import AssistantInputRef
 
 __all__ = [
     "AgentDescriptor",
     "AgentDirectoryPort",
     "ContextDependencies",
     "ContextPlanConfigurationPort",
+    "AssistantContextReaderPort",
     "ContextMetadata",
     "ContextPort",
     "KnowledgeSearchPort",
@@ -77,6 +79,13 @@ class ContextPlanConfigurationPort(Protocol):
         """返回本次 Owner 在有效 Context Plan 中启用的 Slot 标识。"""
 
 
+class AssistantContextReaderPort(Protocol):
+    """为固定助理会话提供有界业务摘要。"""
+
+    async def read(self, session_id: str, input_ref: AssistantInputRef) -> str:
+        """返回版本化摘要 JSON。"""
+
+
 @dataclass(frozen=True)
 class UserProfile:
     """可选用户资料的最小展示字段。"""
@@ -95,3 +104,4 @@ class ContextDependencies:
     user_profile: UserProfile | None = None
     agent_registry: AgentDirectoryPort | None = None
     plan_configuration: ContextPlanConfigurationPort | None = None
+    assistant_context_reader: AssistantContextReaderPort | None = None

@@ -5,12 +5,62 @@ import { PersonalTasks } from "./PersonalTasks";
 import { addDaysToDateInput, dateTimeInputValue, dateTimeToRfc3339 } from "./reminderTime";
 
 afterEach(() => { vi.unstubAllGlobals(); });
-const current = { id: "t1", title: "原题", description: "", status: "pending", deadline: null, created_at: "2026-11-18T00:00:00Z", updated_at: "2026-11-18T00:00:00Z", completed_at: null, version: 1, is_overdue: false };
+const current = { id: "t1", title: "原题", description: "", status: "pending", deadline: null, planning: { kind: "task", event_time: null, scheduled_time: null, time_text: "", related_task_id: null }, created_at: "2026-11-18T00:00:00Z", updated_at: "2026-11-18T00:00:00Z", completed_at: null, version: 1, is_overdue: false };
 const payload = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const list = (items: unknown[], extra: Record<string, unknown> = {}) => ({ items: items.map((item) => ({ ...(item as Record<string, unknown>), reminder_summary: (item as { reminder_summary?: unknown }).reminder_summary || { active_count: 0, next_fire_at: null } })), timezone: "Asia/Shanghai", as_of: "2026-11-18T00:00:00Z", total: items.length, offset: 0, limit: 50, has_more: false, ...extra });
 const reminderPage = (items: unknown[]) => ({ items, timezone: "Asia/Shanghai", scheduler_enabled: true, last_scan_at: null, scan_lag_seconds: 0 });
 
 describe("个人事务视图", () => {
+  it("计划筛选由服务器处理，已结束查询同时指定全部事务状态", async () => {
+    const queries: URL[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/v1/personal-tasks") { queries.push(url); return payload(list([])); }
+      throw new Error("未预期请求：" + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
+    await user.click(await screen.findByRole("button", { name: "已结束" }));
+    await waitFor(() => expect(queries.at(-1)?.searchParams.get("plan_filter")).toBe("ended"));
+    expect(queries.at(-1)?.searchParams.get("filter")).toBe("all");
+    await user.click(screen.getByRole("button", { name: "已安排" }));
+    await waitFor(() => expect(queries.at(-1)?.searchParams.get("plan_filter")).toBe("scheduled"));
+    expect(queries.at(-1)?.searchParams.get("filter")).toBe("all");
+  });
+
+  it("编辑事件时完整保留安排原文与关联ID，并不把发生时间写入截止", async () => {
+    const event = { ...current, planning: { kind: "event", event_time: { kind: "date", value: "2026-12-03" }, scheduled_time: null, time_text: "周四下午", related_task_id: "related-event" } };
+    let updateBody = "";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/t1") && init?.method === "PUT") { updateBody = String(init.body); return payload(event); }
+      if (url.includes("/personal-tasks?")) return payload(list([event]));
+      throw new Error("未预期请求：" + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
+    await user.click(await screen.findByText("更多"));
+    await user.click(screen.getByRole("button", { name: "编辑事务" }));
+    await user.clear(screen.getByLabelText("说明")); await user.type(screen.getByLabelText("说明"), "已核对");
+    await user.click(screen.getByRole("button", { name: "保存事务" }));
+    await waitFor(() => expect(updateBody).not.toBe("") );
+    expect(JSON.parse(updateBody)).toMatchObject({ deadline: null, planning: event.planning, description: "已核对" });
+  });
+  it("仅按已有关联事件ID读取标题并提供定位，不在界面显示原始ID", async () => {
+    const event = { ...current, planning: { kind: "event", event_time: null, scheduled_time: null, time_text: "", related_task_id: "event-2" } };
+    const related = { ...current, id: "event-2", title: "真实关联事件" };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/event-2")) return payload(related);
+      if (url.includes("/personal-tasks?")) return payload(list([event]));
+      throw new Error("未预期请求：" + url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup(); render(<PersonalTasks onOpenNavigation={() => undefined} />);
+    expect(screen.queryByText("event-2")).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "查看关联事件" }));
+    expect(await screen.findByText("真实关联事件")).toBeTruthy();
+  });
   it("新建时将事务和初始提醒放进同一个创建请求", async () => {
     const created = { ...current, id: "new-task", title: "含提醒事务" };
     const today = dateTimeInputValue(new Date().toISOString(), "Asia/Shanghai").date;
@@ -176,7 +226,7 @@ describe("个人事务视图", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<PersonalTasks onOpenNavigation={() => undefined} focusNotificationId={7} />);
     expect(await screen.findByText("首屏外事务")).toBeTruthy();
-    expect(await screen.findByText("关联事务已删除（deleted-task）")).toBeTruthy();
+    expect(await screen.findByText("关联事务已删除")).toBeTruthy();
     expect(fetchMock.mock.calls.some(([url]) => new URL(String(url), "http://localhost").searchParams.get("offset") === "50")).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(`/personal-tasks/${target.id}`))).toBe(true);
   });
@@ -236,11 +286,17 @@ describe("个人事务视图", () => {
     expect(screen.queryByRole("region", { name: "摘要关联事务" })).toBeNull();
   });
 
-  it("冲突后先读取，再由用户确认替换草稿与版本", async () => {
+  it("冲突重载后使用服务端关联事件并保留到下一次保存", async () => {
+    const latest = { ...current, title: "服务器标题", version: 2, planning: { ...current.planning, related_task_id: "server-event" } };
+    const putBodies: string[] = [];
+    let updates = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (init?.method === "PUT") return payload({ error: { code: "personal_task_version_conflict", message: "事务已被修改" } }, 409);
-      if (url.endsWith("/t1")) return payload({ ...current, title: "服务器标题", version: 2 });
+      if (init?.method === "PUT") {
+        putBodies.push(String(init.body)); updates += 1;
+        return updates === 1 ? payload({ error: { code: "personal_task_version_conflict", message: "事务已被修改" } }, 409) : payload({ ...latest, version: 3 });
+      }
+      if (url.endsWith("/t1")) return payload(latest);
       return payload(list([current]));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -254,6 +310,10 @@ describe("个人事务视图", () => {
     expect((title as HTMLInputElement).value).toBe("我的草稿");
     await user.click(screen.getByRole("button", { name: "确认替换草稿" }));
     expect((title as HTMLInputElement).value).toBe("服务器标题");
+    expect(screen.getByText("已关联事件")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "保存事务" }));
+    await waitFor(() => expect(putBodies).toHaveLength(2));
+    expect(JSON.parse(putBodies[1]).planning.related_task_id).toBe("server-event");
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/t1"))).toBe(true);
   });
 

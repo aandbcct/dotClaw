@@ -14,6 +14,7 @@ from .signals import ContextSignalBus
 from .slot_manager import ContextSlotManager
 from .slots import (
     AvailableAgentsSlot,
+    AssistantContextSlot,
     ConversationSlot,
     HistoryCompressionsSlot,
     IdentitySlot,
@@ -46,7 +47,7 @@ def default_context_plan_configuration() -> InMemoryContextPlanConfiguration:
         ContextOwnerPlanConfiguration(ContextOwner.AGENT, ("identity", "tools", "skills")),
         ContextOwnerPlanConfiguration(ContextOwner.GLOBAL, ("available_agents",)),
         ContextOwnerPlanConfiguration(ContextOwner.SESSION, ("user_info", "history_compressions")),
-        ContextOwnerPlanConfiguration(ContextOwner.RUN, ("conversation", "memory", "knowledge", "run_messages")),
+        ContextOwnerPlanConfiguration(ContextOwner.RUN, ("conversation", "memory", "knowledge", "run_messages", "assistant_context")),
     ))
 
 
@@ -62,6 +63,7 @@ def _register_defaults(registry: ContextSlotRegistry) -> None:
     registry.register(_descriptor("memory", ContextOwner.RUN, ContextContributionKind.SYSTEM_CONTENT, ContextPersistenceMode.SNAPSHOT, ContextCacheScope.RUN, 80), MemorySlot)
     registry.register(_descriptor("knowledge", ContextOwner.RUN, ContextContributionKind.SYSTEM_CONTENT, ContextPersistenceMode.SNAPSHOT, ContextCacheScope.RUN, 90), KnowledgeSlot)
     registry.register(_descriptor("run_messages", ContextOwner.RUN, ContextContributionKind.RUN_MESSAGE_REFERENCES, ContextPersistenceMode.FACT_REFERENCE, ContextCacheScope.RUN, 100), RunMessagesSlot)
+    registry.register(_descriptor("assistant_context", ContextOwner.RUN, ContextContributionKind.SYSTEM_CONTENT, ContextPersistenceMode.SNAPSHOT, ContextCacheScope.NONE, 65), AssistantContextSlot)
 
 
 def _descriptor(

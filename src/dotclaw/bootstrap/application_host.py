@@ -42,6 +42,9 @@ from ..scheduler.reminder_scheduler import ReminderScheduler
 
 if TYPE_CHECKING:
     from dotclaw.channel.base import Channel
+    from dotclaw.assistant.entry_service import AssistantEntryService
+    from dotclaw.assistant.service import AssistantService
+    from dotclaw.assistant.sqlite_repository import SqliteAssistantRepository
     from dotclaw.config.settings import Config
     from dotclaw.context.ports import ContextPort
     from dotclaw.llm.proxy import LLMProxy
@@ -82,6 +85,9 @@ class ApplicationHost:
         self._notification_service: NotificationService | None = None
         self._reminder_scheduler: ReminderScheduler | None = None
         self._http_client: "HttpClient | None" = None
+        self._assistant_repository: SqliteAssistantRepository | None = None
+        self._assistant_service: AssistantService | None = None
+        self._assistant_entry_service: AssistantEntryService | None = None
 
     # ── 构建 ──
 
@@ -117,9 +123,53 @@ class ApplicationHost:
         if not chat_models:
             raise RuntimeError("chat 用途没有 active 模型")
         preferred_model = chat_models[0]
+
+        from ..assistant.context import AssistantContextReader
+        from ..assistant.entry_service import AssistantEntryService
+        from ..assistant.service import (
+            ASSISTANT_AGENT_ID,
+            ASSISTANT_SESSION_ID,
+            ASSISTANT_TOOL_OPERATIONS,
+            AssistantService,
+        )
+        from ..assistant.sqlite_repository import SqliteAssistantRepository
+
+        assistant_config_path = root / AGENT_CONFIG_DIRNAME / f"{ASSISTANT_AGENT_ID}.yaml"
+        if not assistant_config_path.is_file():
+            raise FileNotFoundError(f"固定助理 Identity 配置缺失: {assistant_config_path}")
+        self._agent_registry = AgentRegistry()
+        self._agent_registry.load_all(root / AGENT_CONFIG_DIRNAME)
+        assistant_identity = self._agent_registry.get(ASSISTANT_AGENT_ID)
+        if assistant_identity is None:
+            raise RuntimeError(f"固定助理 Identity 配置无效或身份标识不匹配: {assistant_config_path}")
+        default_identity = self._resolve_default_agent_id()
         migrated_sessions = await self._session_manager.bind_missing_models(preferred_model)
         if migrated_sessions:
             logger.info("已为 %d 个旧 Session 补齐模型绑定: %s", migrated_sessions, preferred_model)
+
+        task_path = Path(config.personal_tasks.database_path)
+        if not task_path.is_absolute():
+            task_path = root / task_path
+        task_timezone = ZoneInfo(config.personal_tasks.timezone)
+        task_repository = SqlitePersonalTaskRepository(task_path, task_timezone)
+        await task_repository.initialize()
+        self._personal_task_service = PersonalTaskService(task_repository, timezone=task_timezone)
+        self._reminder_service = ReminderService(task_repository, timezone=task_timezone)
+        self._notification_service = NotificationService(task_repository)
+        self._reminder_scheduler = ReminderScheduler(self._reminder_service)
+        assistant_repository = SqliteAssistantRepository(task_path)
+        self._assistant_repository = assistant_repository
+        assistant_service = AssistantService(
+            task_path,
+            timezone=task_timezone,
+            repository=assistant_repository,
+        )
+        self._assistant_service = assistant_service
+        assistant_context_reader = AssistantContextReader(
+            assistant_repository,
+            timezone=task_timezone,
+            scheduler_enabled=config.scheduler.enabled,
+        )
 
         # ── 可降级组件 ──
         self._skill_registry = _init_sync("技能", lambda: _build_skills(config, root))
@@ -128,9 +178,25 @@ class ApplicationHost:
         self._http_client = _build_http_client()
         self._tool_executor = _init_sync(
             "工具",
-            lambda: _build_tools(config, self._skill_registry, http_client=self._http_client),
+            lambda: _build_tools(
+                config,
+                self._skill_registry,
+                http_client=self._http_client,
+                assistant_service=assistant_service,
+            ),
             on_fail=CRITICAL,
         )
+        assistant_tool_names = {
+            name for name in self._tool_executor.registry.all_names()
+            if name.startswith("builtin.assistant.")
+        }
+        if (
+            assistant_tool_names != set(ASSISTANT_TOOL_OPERATIONS)
+            or set(assistant_identity.allowed_tools) != assistant_tool_names
+        ):
+            raise RuntimeError(
+                f"固定助理工具注册与白名单不匹配: {assistant_config_path}"
+            )
         memory_mgr, self._memory_dream = await _init_async(
             "记忆", _build_memory(config, self._llm_proxy, root)
         ) or (None, None)
@@ -142,15 +208,6 @@ class ApplicationHost:
         self._mcp_provider = await _init_async(
             "MCP", _build_mcp(config, self._tool_executor)
         ) or None
-
-        # ── 关键组件：加载全部 Identity ──
-        self._agent_registry = AgentRegistry()
-        self._agent_registry.load_all(root / AGENT_CONFIG_DIRNAME)
-        if not self._agent_registry.list_all():
-            raise RuntimeError("未加载任何 Identity，ApplicationHost 无法启动")
-
-        # ── 默认 Identity（context plan 与创建会话兜底共用）──
-        default_identity = self._resolve_default_agent_id()
 
         # ── 装配 Runtime（Host 私有组装函数）──
         # 文本流端口不再在构造期绑定到 LLMProxyAdapter；改为 CLI 每次消息构造
@@ -166,11 +223,14 @@ class ApplicationHost:
             memory_manager=memory_mgr,
             agent_registry=self._agent_registry,
             preferred_model=preferred_model,
+            assistant_context_reader=assistant_context_reader,
         )
+        assistant_service.bind_run_repository(self._runtime_services.run_repository)
         # Host 启动时补偿未决成功提交（总体设计 §5.3）。
         await self._runtime_services.run_repository.recover_pending_success_commits()
         await self._runtime_services.run_repository.recover_pending_cancellation_commits()
         await self._runtime_services.coordinator.recover_cancellations()
+        await assistant_service.reconcile_controls(ASSISTANT_SESSION_ID)
         self._context_port = self._runtime_services.context_port
 
         # ── 交互入口 ──
@@ -186,6 +246,12 @@ class ApplicationHost:
             chat_models=chat_models,
             run_watch_service=self._runtime_services.run_watch_service,
         )
+        self._assistant_entry_service = AssistantEntryService(
+            session_interaction=self._session_interaction,
+            session_manager=self._session_manager,
+            assistant_service=assistant_service,
+            assistant_repository=assistant_repository,
+        )
         # ── 评测 Draft 服务（PR5：TraceToEvalCaseDraft 与目录 Dataset）──
         # 兼容测试以 SimpleNamespace 注入配置的场景：缺省回退到默认 Dataset 目录。
         eval_cfg = getattr(config, "eval", None)
@@ -196,16 +262,6 @@ class ApplicationHost:
         self._eval_draft_service = EvalCaseDraftService(dataset_root)
         self._trace_service = TraceService(self._runtime_services.run_repository)
 
-        task_path = Path(config.personal_tasks.database_path)
-        if not task_path.is_absolute():
-            task_path = root / task_path
-        task_timezone = ZoneInfo(config.personal_tasks.timezone)
-        task_repository = SqlitePersonalTaskRepository(task_path, task_timezone)
-        await task_repository.initialize()
-        self._personal_task_service = PersonalTaskService(task_repository, timezone=task_timezone)
-        self._reminder_service = ReminderService(task_repository, timezone=task_timezone)
-        self._notification_service = NotificationService(task_repository)
-        self._reminder_scheduler = ReminderScheduler(self._reminder_service)
         if config.scheduler.enabled:
             await self._reminder_scheduler.start()
 
@@ -217,7 +273,7 @@ class ApplicationHost:
         assert registry is not None
         if registry.get("default") is not None:
             return registry.get("default")  # type: ignore[return-value]
-        identities = registry.list_all()
+        identities = [item for item in registry.list_all() if item.agent_id != "personal-assistant"]
         if len(identities) == 1:
             return identities[0]
         raise RuntimeError("无法确定默认 Identity，请确认已注册 default 或仅一个 Identity")
@@ -315,6 +371,18 @@ class ApplicationHost:
         if self._personal_task_service is None:
             raise RuntimeError("ApplicationHost 尚未初始化")
         return self._personal_task_service
+
+    @property
+    def assistant_service(self) -> AssistantService:
+        if self._assistant_service is None:
+            raise RuntimeError("ApplicationHost 尚未初始化")
+        return self._assistant_service
+
+    @property
+    def assistant_entry_service(self) -> AssistantEntryService:
+        if self._assistant_entry_service is None:
+            raise RuntimeError("ApplicationHost 尚未初始化")
+        return self._assistant_entry_service
 
     @property
     def reminder_service(self) -> ReminderService:

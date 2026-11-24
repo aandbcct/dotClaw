@@ -107,6 +107,13 @@ class AvailableAgentsSlot(_TextOwnerSlot):
         super().__init__("available_agents_text")
 
 
+class AssistantContextSlot(_TextOwnerSlot):
+    """读取固定助理身份的本轮有界业务摘要。"""
+
+    def __init__(self) -> None:
+        super().__init__("assistant_context_text")
+
+
 class HistoryCompressionsSlot:
     """保存当前唯一有效的历史摘要正文。"""
 

@@ -55,6 +55,8 @@ tools:
       process.exec: ask
       mcp.connect: ask
       mcp.call: ask
+      assistant.read: allow
+      assistant.write: allow
     denied_paths:
       - ".env"
       - ".git/**"

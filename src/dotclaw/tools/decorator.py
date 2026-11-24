@@ -28,6 +28,8 @@ class ToolPolicy(str, Enum):
     PROCESS = "process.exec"
     NETWORK = "network.http"
     MCP = "mcp.call"
+    ASSISTANT_READ = "assistant.read"
+    ASSISTANT_WRITE = "assistant.write"
 
 
 @dataclass(frozen=True)

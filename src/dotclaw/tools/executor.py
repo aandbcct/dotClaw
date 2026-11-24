@@ -149,6 +149,14 @@ class ToolExecutor:
                 "denied_paths": sorted(scope.denied_paths),
                 "allowed_mcp_servers": sorted(scope.allowed_mcp_servers),
                 "network_services": {key: sorted(value) for key, value in scope.network_services.items()},
+                **(
+                    {
+                        "assistant_database_path": definition.metadata["assistant_database_path"],
+                        "assistant_session_id": definition.metadata["assistant_session_id"],
+                    }
+                    if definition.name.startswith("builtin.assistant.")
+                    else {}
+                ),
             }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return ToolRecoveryContract(
             policy=definition.replay_policy,
@@ -252,7 +260,7 @@ class ToolExecutor:
         )
 
     def _approval_operation_keys(self, requests: list[CapabilityRequest]) -> tuple[str, ...]:
-        """从已解析的文件资源生成稳定审批键。"""
+        """从已解析的文件或助理业务资源生成稳定审批键。"""
         keys = {
             json.dumps(
                 [request.kind.value, os.path.normcase(request.absolute_path)],
@@ -262,6 +270,15 @@ class ToolExecutor:
             for request in requests
             if request.kind.value in {"file.read", "file.write"} and request.absolute_path is not None
         }
+        keys.update(
+            json.dumps(
+                [request.kind.value, request.resource_id, request.operation_hash],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            for request in requests
+            if request.kind in {ResourceKind.ASSISTANT_READ, ResourceKind.ASSISTANT_WRITE}
+        )
         return tuple(sorted(keys))
 
     def _check_skill(self, tool_name: str, args: dict, journal: Any, status: str) -> None:
@@ -385,8 +402,10 @@ class ToolExecutor:
         # needs_approval 用于没有资源档案、仍需显式审批的工具（如配置 approval_commands
         # 指定的工具）；无交互通道时一律拒绝（设计不变量 §10.1.3）。
         needs_explicit_approval = (
-            definition.needs_approval or definition.name in self._approval_commands
-        ) and not pre_approved
+            (definition.needs_approval or definition.name in self._approval_commands)
+            and not self._is_unattended_allow(definition.policy_profile, execution_context)
+            and not pre_approved
+        )
         if (outcome.decision is PolicyDecision.ASK or needs_explicit_approval) and not pre_approved:
             if runtime_approval:
                 return ToolResult(
@@ -521,6 +540,9 @@ class ToolExecutor:
                 tool_call_id=execution_context.tool_call_id,
                 attempt=execution_context.attempt,
                 idempotency_key=execution_context.idempotency_key,
+                approved=execution_context.approved,
+                input_message_id=execution_context.input_message_id,
+                input_created_at=execution_context.input_created_at,
                 http_client=http_client,
             )
         return ToolExecutionContext(timeout=timeout, http_client=http_client)
@@ -533,6 +555,38 @@ class ToolExecutor:
         handler: ToolHandler | None,
     ) -> ToolResult:
         """统一收尾：发射 tool_end 与 skill 命中事件。"""
+        if handler is not None and result.is_error:
+            definition = handler.definition()
+            operation = definition.metadata.get("assistant_operation")
+            if isinstance(operation, str):
+                try:
+                    output = json.loads(result.output)
+                except (TypeError, json.JSONDecodeError):
+                    output = None
+                if not isinstance(output, dict) or output.get("schema_version") != 1 or output.get("operation") != operation:
+                    code = {
+                        ToolErrorCode.INVALID_ARGUMENTS.value: "invalid_arguments",
+                        ToolErrorCode.POLICY_DENIED.value: "policy_denied",
+                        ToolErrorCode.APPROVAL_DENIED.value: "approval_denied",
+                        ToolErrorCode.TIMEOUT.value: "timeout",
+                        ToolErrorCode.CONFIGURATION_ERROR.value: "configuration_error",
+                    }.get(result.error_code or "", "execution_error")
+                    result = dataclasses.replace(
+                        result,
+                        output=json.dumps({
+                            "schema_version": 1,
+                            "operation": operation,
+                            "outcome": "failed",
+                            "data": None,
+                            "task_refs": [],
+                            "reminder_refs": [],
+                            "changes": [],
+                            "error": {"code": code, "message": result.output},
+                            "result_set_id": None,
+                            "request_id": None,
+                            "items": [],
+                        }, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+                    )
         if journal:
             status = "error" if result.is_error else "success"
             journal.tool_end(

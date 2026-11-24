@@ -44,7 +44,7 @@ def _local_candidates(rule: ReminderRule, zone: ZoneInfo, after: datetime) -> da
 
 
 def validate_rule(rule: ReminderRule, task: PersonalTask, zone: ZoneInfo) -> None:
-    fields = {"at": {"kind", "at"}, "before_deadline": {"kind", "offset_minutes"},
+    fields = {"at": {"kind", "at"}, "before_deadline": {"kind", "offset_minutes"}, "before_event": {"kind", "offset_minutes"},
               "before_date": {"kind", "days_before", "local_time"}, "daily": {"kind", "local_time"},
               "weekly": {"kind", "weekdays", "local_time"}, "monthly": {"kind", "day", "local_time"},
               "yearly": {"kind", "month", "day", "local_time"}}
@@ -60,6 +60,10 @@ def validate_rule(rule: ReminderRule, task: PersonalTask, zone: ZoneInfo) -> Non
     elif kind == "before_deadline":
         if type(rule["offset_minutes"]) is not int or task.deadline is None or task.deadline.kind != "datetime" or rule["offset_minutes"] < 0:
             raise ValueError("before_deadline 需要时刻截止和非负偏移")
+    elif kind == "before_event":
+        event_time = task.planning.event_time
+        if type(rule["offset_minutes"]) is not int or task.planning.kind.value != "event" or event_time is None or event_time.kind != "datetime" or rule["offset_minutes"] < 0:
+            raise ValueError("before_event 需要明确时刻的事件时间和非负偏移")
     elif kind == "before_date":
         if type(rule["days_before"]) is not int or task.deadline is None or task.deadline.kind != "date" or rule["days_before"] < 0:
             raise ValueError("before_date 需要日期截止和非负天数")
@@ -96,6 +100,8 @@ def next_fire_at(rule: ReminderRule, task: PersonalTask, zone: ZoneInfo, after: 
         candidate = DateTrigger(run_date=datetime.fromisoformat(rule["at"].replace("Z", "+00:00"))).run_date
     elif kind == "before_deadline":
         candidate = task.deadline.value - timedelta(minutes=rule["offset_minutes"])
+    elif kind == "before_event":
+        candidate = task.planning.event_time.value - timedelta(minutes=rule["offset_minutes"])
     elif kind == "before_date":
         local_day = task.deadline.value - timedelta(days=rule["days_before"])
         hour, minute = map(int, rule["local_time"].split(":"))
@@ -109,7 +115,7 @@ def next_fire_at(rule: ReminderRule, task: PersonalTask, zone: ZoneInfo, after: 
 
 
 def reschedule_relative(reminder: Reminder, task: PersonalTask, now: datetime) -> Reminder:
-    if reminder.rule["kind"] not in ("before_deadline", "before_date"):
+    if reminder.rule["kind"] not in ("before_deadline", "before_date", "before_event"):
         return reminder
     zone = ZoneInfo(reminder.timezone)
     try:
@@ -118,7 +124,7 @@ def reschedule_relative(reminder: Reminder, task: PersonalTask, now: datetime) -
         candidate = None
         reason = "invalid_local_time"
     else:
-        reason = "deadline_moved_past" if candidate is None else None
+        reason = ("event_moved_past" if reminder.rule["kind"] == "before_event" else "deadline_moved_past") if candidate is None else None
     return Reminder(reminder.id, reminder.task_id, reminder.rule, reminder.timezone,
                     ReminderStatus.ACTIVE if candidate else ReminderStatus.PAUSED, reason,
                     candidate, reminder.version + 1, reminder.created_at, now)

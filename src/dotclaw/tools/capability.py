@@ -16,12 +16,17 @@ ToolPolicy 档案翻译为结构化的 CapabilityRequest（资源请求）。它
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from enum import Enum
+from hashlib import sha256
 from typing import Any
 from urllib.parse import urlparse
+
+from pydantic import BaseModel
 
 from .base import ToolSource
 from .decorator import ToolPolicy
@@ -36,6 +41,8 @@ class ResourceKind(str, Enum):
     NETWORK_HTTP = "network.http"
     MCP_CONNECT = "mcp.connect"
     MCP_CALL = "mcp.call"
+    ASSISTANT_READ = "assistant.read"
+    ASSISTANT_WRITE = "assistant.write"
 
 
 @dataclass
@@ -63,6 +70,8 @@ class CapabilityRequest:
                                          # 可恢复诊断；不得据此自动修正或执行另一目标。
     param_field: str | None = None      # 文件类：路径参数名（path_param 或默认 "path"），
                                          # 供 Executor 定位需回填的参数。
+    resource_id: str | None = None      # 助理业务资源标识，不包含数据库路径。
+    operation_hash: str | None = None   # 助理工具名与完整规范参数的摘要。
 
     def describe(self) -> str:
         """返回脱敏后的资源摘要，供审计与审批提示使用。
@@ -79,6 +88,9 @@ class CapabilityRequest:
             return f"网络请求: {svc}{self.host or '(未知)'}"
         if self.kind in (ResourceKind.MCP_CONNECT, ResourceKind.MCP_CALL):
             return f"MCP 调用: {self.server or '(未知)'}"
+        if self.kind in (ResourceKind.ASSISTANT_READ, ResourceKind.ASSISTANT_WRITE):
+            verb = "读" if self.kind is ResourceKind.ASSISTANT_READ else "写"
+            return f"助理业务{verb}: {self.resource_id or 'collection'}"
         return f"资源({self.kind.value})"
 
 
@@ -128,6 +140,42 @@ class CapabilityBroker:
         except ValueError:
             # 未知档案不翻译，交回调用方按 passthrough 处理。
             return []
+
+        if policy in (ToolPolicy.ASSISTANT_READ, ToolPolicy.ASSISTANT_WRITE):
+            if isinstance(validated_args, BaseModel):
+                arguments = validated_args.model_dump(mode="python", exclude_unset=True)
+            elif isinstance(validated_args, dict):
+                arguments = validated_args
+            else:
+                raise TypeError("助理能力请求必须使用已验证参数对象")
+            encoded = json.dumps(
+                {"tool_name": definition.name, "arguments": arguments},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=_assistant_json_default,
+            )
+            task_id = _read_field(validated_args, "task_id")
+            request_id = _read_field(validated_args, "request_id") or _read_field(validated_args, "id")
+            result_set_id = _read_field(validated_args, "result_set_id")
+            if isinstance(task_id, str) and task_id:
+                resource_id = f"task:{task_id}"
+            elif isinstance(request_id, str) and request_id:
+                resource_id = f"request:{request_id}"
+            elif isinstance(result_set_id, str) and result_set_id:
+                resource_id = f"result_set:{result_set_id}"
+            else:
+                resource_id = "collection"
+            return [CapabilityRequest(
+                kind=(
+                    ResourceKind.ASSISTANT_READ
+                    if policy is ToolPolicy.ASSISTANT_READ
+                    else ResourceKind.ASSISTANT_WRITE
+                ),
+                profile=policy.value,
+                resource_id=resource_id,
+                operation_hash=sha256(encoded.encode("utf-8")).hexdigest(),
+            )]
 
         # 网络类：主机来自 ToolDefinition 的静态声明，绝不读取 Agent 参数（§2.2）。
         if policy is ToolPolicy.NETWORK:
@@ -222,6 +270,19 @@ class CapabilityBroker:
             profile=ToolPolicy.MCP.value,
             server=server,
         )
+
+
+def _assistant_json_default(value: object) -> str:
+    """按助理参数hash规则规范化日期、时间和枚举。"""
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise TypeError("助理时刻参数必须包含时区")
+        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Enum) and isinstance(value.value, str):
+        return value.value
+    raise TypeError(f"无法规范化助理参数：{type(value).__name__}")
 
 
 def _read_field(validated_args: Any, field: str) -> Any:

@@ -75,6 +75,8 @@ _DEFAULT_RULES: dict[str, PolicyDecision] = {
     "network.http": PolicyDecision.DENY,
     "mcp.connect": PolicyDecision.ASK,
     "mcp.call": PolicyDecision.ASK,
+    "assistant.read": PolicyDecision.ALLOW,
+    "assistant.write": PolicyDecision.ALLOW,
 }
 
 

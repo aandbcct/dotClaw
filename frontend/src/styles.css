@@ -51,6 +51,8 @@ a { color:var(--accent); text-underline-offset:3px; }
 .sidebar-collapsed .nav-action { justify-content:center; padding:8px; }
 .sidebar-collapsed .settings-entry { margin-top:auto; }
 .workspace { position:relative; display:grid; min-width:0; min-height:0; grid-template-rows:56px minmax(0,1fr) auto; }
+.workspace-panel { display:contents; }
+.workspace-panel[hidden] { display:none !important; }
 .workspace-header { display:flex; align-items:center; gap:12px; min-width:0; padding:0 24px; }
 .model-context { min-width:0; }
 .model-selector { display:flex; gap:8px; align-items:center; max-width:260px; min-height:44px; padding:8px; font-size:16px; font-weight:600; overflow-wrap:anywhere; }
@@ -258,22 +260,31 @@ a { color:var(--accent); text-underline-offset:3px; }
 
 /* 过程属于助手消息，辅助层级低于正文；异常和审批保持明显。 */
 .message-execution { width:100%; min-width:0; }
-.execution-status { display:flex; align-items:center; flex-wrap:wrap; gap:8px; color:var(--muted); font-size:13px; min-height:44px; }
-.execution-status > button { margin-left:auto; min-height:44px; padding:8px; color:var(--muted); font-size:12px; }
+.execution-status { display:flex; align-items:center; flex-wrap:wrap; gap:8px; color:var(--muted); font-size:13px; min-height:30px; }
+.execution-status > button { margin-left:auto; min-height:30px; padding:4px 8px; color:var(--muted); font-size:12px; }
 .execution-spinner { width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:execution-spin .9s linear infinite; flex-shrink:0; }
-.execution-process { border-left:1px solid var(--line); padding-left:18px; margin:0 0 20px 7px; color:var(--muted); font-size:13px; }
-.execution-process .reasoning { margin:0 0 12px; }
+.execution-process { padding-left:8px; margin:0 0 12px 7px; color:var(--muted); font-size:13px; }
+.execution-process .reasoning { margin:0; }
+.execution-process .reasoning summary { padding:4px 0; }
+.execution-process .reasoning p { margin:4px 0 8px; }
 .execution-steps { list-style:none; padding:0; margin:0; }
-.execution-step { position:relative; padding:12px 0; border-bottom:1px solid var(--line); }
-.execution-step::before { content:""; position:absolute; left:-23px; top:19px; width:7px; height:7px; border-radius:50%; background:var(--muted); border:2px solid var(--canvas); }
-.execution-step--running::before { background:var(--accent); }
-.execution-step--failed::before { background:var(--danger); }
+.execution-step { min-width:0; padding:2px 0; }
+.execution-event { display:flex; align-items:center; gap:8px; min-height:24px; min-width:0; flex-wrap:wrap; }
 .execution-step .tool-step-heading strong { font-weight:500; color:var(--text); }
 .execution-step .tool-step-heading > span { font-size:12px; }
+.execution-step .tool-step-heading { display:flex; align-items:center; gap:8px; min-width:0; max-width:min(100%, 560px); }
+.execution-step .tool-step-heading strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.execution-step .tool-time { margin:0; font-size:11px; white-space:nowrap; }
+.execution-event-data { display:flex; flex-wrap:wrap; gap:8px; margin-left:auto; }
+.execution-event-data details { min-width:0; }
+.execution-event-data summary { cursor:pointer; font-size:12px; }
+.execution-event-data details[open] { flex-basis:100%; }
+.execution-event-data details[open] > pre { margin:6px 0; }
+.execution-event:has(.execution-event-data details[open]) .execution-event-data { flex-basis:100%; width:100%; margin-left:0; }
 .execution-step pre { max-height:280px; overflow:auto; padding:12px; background:var(--surface); white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
-.execution-step summary { cursor:pointer; min-height:44px; display:flex; align-items:center; }
-.execution-process .run-id { margin:8px 0 16px; flex-direction:row; flex-wrap:wrap; align-items:center; gap:8px; overflow-wrap:anywhere; }
-.execution-process .run-id button { min-height:44px; padding:8px; }
+.execution-step summary { cursor:pointer; }
+.execution-process .run-id { margin:4px 0 8px; flex-direction:row; flex-wrap:wrap; align-items:center; gap:6px; overflow-wrap:anywhere; }
+.execution-process .run-id button { min-height:28px; padding:2px 6px; }
 .execution-feedback { padding:12px 16px; margin-top:16px; border-left:2px solid var(--danger); background:var(--danger-surface); font-size:13px; color:var(--danger); overflow-wrap:anywhere; }
 .execution-feedback--unknown { border-left-color:var(--line); background:var(--surface); color:var(--text); }
 .execution-feedback p { margin:0 0 8px; }
@@ -281,7 +292,7 @@ a { color:var(--accent); text-underline-offset:3px; }
 .execution-feedback button { min-height:44px; padding:8px; }
 @keyframes execution-spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .execution-spinner { animation:none; border-style:dotted; } }
-@media (max-width:767px) { .execution-process { padding-left:14px; } .execution-step::before { left:-19px; } .execution-feedback { padding:12px; } }
+@media (max-width:767px) { .execution-process { padding-left:6px; } .execution-event-data { margin-left:0; } .execution-feedback { padding:12px; } }
 
 /* 工具数据均为既有文本，长内容局部滚动，不挤出审批按钮。 */
 .tool-output,.approval-summary { min-width:0; width:100%; margin:12px 0; }

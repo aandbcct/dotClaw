@@ -66,6 +66,26 @@ docker compose -f compose.dev.yml up -d --force-recreate
 | `/app/data` | 开发版为本地 `./data`，部署版为命名卷；保存会话、运行事实、记忆、个人事务数据库和界面设置 |
 | `/workspace` | 开发版为本地 `./workspace`，部署版为命名卷；默认工具读写范围 |
 
+### 个人助理身份与 SQLite 升级
+
+镜像只打包仓库提供的 `.dotclaw/agentConfig/personal-assistant.yaml`，不复制其他身份或本机配置。两个 Compose 文件沿用只读挂载 `.dotclaw/agentConfig:/app/.dotclaw/agentConfig:ro`，该挂载会遮住镜像里的同一路径；当前仓库中的身份文件因此也必须存在于实际挂载源目录。更新后的仓库已包含这一个文件。若部署继续使用另一个旧身份目录作为挂载源，只补这一文件，不覆盖该目录中的其他身份：
+
+```powershell
+$identitySource = '.\.dotclaw\agentConfig\personal-assistant.yaml'
+$agentConfigDir = 'D:\your-existing-agentConfig' # 改为 compose 实际挂载的宿主目录
+$assistantIdentity = Join-Path $agentConfigDir 'personal-assistant.yaml'
+New-Item -ItemType Directory -Force $agentConfigDir | Out-Null
+if (-not (Test-Path -LiteralPath $assistantIdentity)) {
+  Copy-Item -LiteralPath $identitySource -Destination $assistantIdentity
+} else {
+  Write-Output 'personal-assistant.yaml 已存在；请先人工比较，不会覆盖。'
+}
+```
+
+固定助理身份只能访问明确列出的助理工具。固定助理会话不能重命名、归档或删除；模型切换、运行控制仍可用。`config.example.yaml` 和 `docker/config.example.yaml` 给出 `assistant.read`、`assistant.write` 策略示例，用户可在自己的配置中将其收紧为 `ask` 或 `deny`。
+
+SQLite 事务数据库支持从 v0、v1、v2、v3 连续迁移到 v4；v4 在原事务表增加事件与任务安排信息。首次用新版本启动前，停止所有访问同一数据目录的应用进程，并完整备份 `personal-assistant.sqlite3` 及存在的 `-wal`、`-shm` 文件。迁移失败应回滚本次数据库事务；迁移成功后旧版本不能直接写 v4。需要回退程序时，先停止服务，再恢复升级前的整套数据库备份；不要只恢复主 `.sqlite3` 文件或拼接 WAL。一个数据目录仍只允许一个应用进程管理。
+
 开发项目默认名为 `dotclaw-dev`，部署项目默认名为 `dotclaw`。部署版继续使用项目隔离的命名卷；开发版会直接读写原有宿主 `data`，避免同时运行另一个使用相同目录的本地后端。
 
 开发版多组隔离实验必须同时选择不同的数据和工作目录、项目名及端口；只改变 `-p` 不会隔离绑定目录。例如在独立 PowerShell 窗口执行：

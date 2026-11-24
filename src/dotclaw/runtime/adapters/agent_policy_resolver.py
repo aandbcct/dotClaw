@@ -90,7 +90,11 @@ class AgentPolicyResolver(RunPolicyPort):
         """
         definitions: list[LegacyToolDefinition] = self._executor.snapshot_definitions()
         if not identity.allowed_tools:
-            return definitions
+            return [
+                definition
+                for definition in definitions
+                if not definition.name.startswith("builtin.assistant.")
+            ]
         allowed: set[str] = set(identity.allowed_tools)
         return [
             definition

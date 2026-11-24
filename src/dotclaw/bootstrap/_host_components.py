@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from dotclaw.runtime.application.ports import ContextPort
     from dotclaw.skills.registry import SkillRegistry
     from dotclaw.tools.http_client import HttpClient
+    from dotclaw.assistant.service import AssistantService
 
 logger = logging.getLogger("dotclaw.bootstrap.components")
 
@@ -150,6 +151,7 @@ def _build_tools(
     config: Config,
     skill_registry: "SkillRegistryPort | None",
     http_client: "HttpClient | None" = None,
+    assistant_service: "AssistantService | None" = None,
 ):
     """构建 ToolExecutor + ToolRegistry + ApprovalManager。
 
@@ -178,6 +180,11 @@ def _build_tools(
     if config.tools.builtin_enabled:
         for handler in ToolDiscovery.discover_builtin():
             registry.register(handler)
+
+    if assistant_service is not None:
+        from dotclaw.tools.assistant_tools import register_assistant_tools
+
+        register_assistant_tools(registry, assistant_service)
 
     for tool_name in config.tools.disabled_tools:
         registry.unregister(tool_name)

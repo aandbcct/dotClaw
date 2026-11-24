@@ -17,7 +17,21 @@ from dotclaw.agent.identity import AgentIdentity
 from dotclaw.bootstrap import application_host as app_host_mod
 from dotclaw.bootstrap.application_host import ApplicationHost
 from dotclaw.bootstrap.runtime_factory import RuntimeServices
+from dotclaw.assistant.service import ASSISTANT_TOOL_OPERATIONS
 from dotclaw.session.session import SessionManager
+
+
+_ASSISTANT_TOOL_NAMES = list(ASSISTANT_TOOL_OPERATIONS)
+
+
+def _assistant_identity() -> AgentIdentity:
+    return AgentIdentity(agent_id="personal-assistant", allowed_tools=list(_ASSISTANT_TOOL_NAMES))
+
+
+def _write_assistant_identity_config(project_root: Path) -> None:
+    config = project_root / ".dotclaw" / "agentConfig" / "personal-assistant.yaml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("agent_id: personal-assistant\n", encoding="utf-8")
 
 
 # ============================================================================
@@ -71,9 +85,14 @@ class _FakeMCP:
 
 
 class _FakeTools:
-    registry = None
-    policy_engine = None
-    capability_broker = None
+    class _Registry:
+        def all_names(self) -> list[str]:
+            return list(_ASSISTANT_TOOL_NAMES)
+
+    def __init__(self) -> None:
+        self.registry = self._Registry()
+        self.policy_engine = None
+        self.capability_broker = None
 
 
 class _FakeApprovalRepository:
@@ -109,8 +128,10 @@ def _fake_config(session_dir: str) -> types.SimpleNamespace:
     llm = types.SimpleNamespace()
     debug = types.SimpleNamespace(level="INFO", log_file="logs/test.log")
     personal_tasks = types.SimpleNamespace(database_path="./data/personal-assistant.sqlite3", timezone="Asia/Shanghai")
+    scheduler = types.SimpleNamespace(enabled=False)
     return types.SimpleNamespace(session=session, skills=skills, tools=tools, memory=memory, llm=llm, debug=debug,
-                                 eval=types.SimpleNamespace(dataset_directory="./data/datasets"), personal_tasks=personal_tasks)
+                                 eval=types.SimpleNamespace(dataset_directory="./data/datasets"), personal_tasks=personal_tasks,
+                                 scheduler=scheduler)
 
 
 def _patch_registry(identities: list[AgentIdentity]):
@@ -189,14 +210,15 @@ async def test_application_host_shutdown_releases_context_and_closes_mcp(tmp_pat
 
 
 async def test_application_host_build_fails_without_identities(tmp_path: Path, monkeypatch) -> None:
-    """关键依赖（Identity 注册）缺失时，启动必须明确失败。"""
+    """固定助理身份存在但缺少普通默认身份时，启动必须明确失败。"""
     import dotclaw.config as config_mod
 
+    _write_assistant_identity_config(tmp_path)
     monkeypatch.setattr(config_mod, "get_config", lambda: _fake_config(str(tmp_path / "sessions")))
     monkeypatch.setattr(config_mod, "_find_project_root", lambda: tmp_path)
     monkeypatch.setattr(app_host_mod, "_build_llm", lambda config, root: _FakeLLM())
     monkeypatch.setattr(app_host_mod, "_build_skills", lambda config, root: None)
-    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry, http_client=None: _FakeTools())
+    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry, http_client=None, assistant_service=None: _FakeTools())
     monkeypatch.setattr(app_host_mod, "_build_memory", lambda config, llm_proxy, root: (None, None))
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
@@ -212,7 +234,7 @@ async def test_application_host_build_fails_without_identities(tmp_path: Path, m
         )
 
     monkeypatch.setattr(app_host_mod, "build_runtime_services", _fake_build_runtime_services)
-    monkeypatch.setattr(app_host_mod, "AgentRegistry", _patch_registry([]))
+    monkeypatch.setattr(app_host_mod, "AgentRegistry", _patch_registry([_assistant_identity()]))
 
     with pytest.raises(RuntimeError):
         await ApplicationHost.build()
@@ -222,16 +244,18 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
     """正常启动后暴露 SessionInteractionService 与 SessionManager（关键依赖齐备）。"""
     import dotclaw.config as config_mod
 
+    _write_assistant_identity_config(tmp_path)
     monkeypatch.setattr(config_mod, "get_config", lambda: _fake_config(str(tmp_path / "sessions")))
     monkeypatch.setattr(config_mod, "_find_project_root", lambda: tmp_path)
     monkeypatch.setattr(app_host_mod, "_build_llm", lambda config, root: _FakeLLM())
     monkeypatch.setattr(app_host_mod, "_build_skills", lambda config, root: None)
-    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry, http_client=None: _FakeTools())
+    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry, http_client=None, assistant_service=None: _FakeTools())
     monkeypatch.setattr(app_host_mod, "_build_memory", lambda config, llm_proxy, root: (None, None))
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _noop_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
-                                      session_manager, skill_registry, memory_manager, agent_registry, preferred_model):
+                                      session_manager, skill_registry, memory_manager, agent_registry, preferred_model,
+                                      assistant_context_reader):
         return RuntimeServices(
             engine=_FakeLLM(),
             context_port=_FakeContextPort(),
@@ -244,7 +268,7 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
     monkeypatch.setattr(app_host_mod, "build_runtime_services", _fake_build_runtime_services)
     monkeypatch.setattr(
         app_host_mod, "AgentRegistry",
-        _patch_registry([AgentIdentity(agent_id="default", agent_name="默认")]),
+        _patch_registry([_assistant_identity(), AgentIdentity(agent_id="default", agent_name="默认")]),
     )
 
     host = await ApplicationHost.build()
@@ -260,14 +284,15 @@ async def test_application_host_build_exposes_interaction_and_manager(tmp_path: 
 
 
 async def test_application_host_build_cleans_up_partial_resources_on_init_failure(tmp_path: Path, monkeypatch) -> None:
-    """initialize() 中途失败（空 Identity）时，build() 应先回收已建的 MCP Provider 再抛出。"""
+    """Runtime 装配故障发生在 MCP 已就绪后，build() 应先回收 Provider 再抛出。"""
     import dotclaw.config as config_mod
 
+    _write_assistant_identity_config(tmp_path)
     monkeypatch.setattr(config_mod, "get_config", lambda: _fake_config(str(tmp_path / "sessions")))
     monkeypatch.setattr(config_mod, "_find_project_root", lambda: tmp_path)
     monkeypatch.setattr(app_host_mod, "_build_llm", lambda config, root: _FakeLLM())
     monkeypatch.setattr(app_host_mod, "_build_skills", lambda config, root: None)
-    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry, http_client=None: _FakeTools())
+    monkeypatch.setattr(app_host_mod, "_build_tools", lambda config, skill_registry, http_client=None, assistant_service=None: _FakeTools())
     monkeypatch.setattr(app_host_mod, "_build_memory", lambda config, llm_proxy, root: (None, None))
 
     fake_mcp = _FakeMCP()
@@ -278,18 +303,14 @@ async def test_application_host_build_cleans_up_partial_resources_on_init_failur
     monkeypatch.setattr(app_host_mod, "_build_mcp", lambda config, tool_executor: _fake_mcp())
 
     def _fake_build_runtime_services(*, config, project_root, identity, llm_proxy, tool_executor,
-                                      session_manager, skill_registry, memory_manager, agent_registry, preferred_model):
-        return RuntimeServices(
-            engine=_FakeLLM(),
-            context_port=_FakeContextPort(),
-            coordinator=_FakeCoordinator(),
-            run_repository=_FakeRunRepository(),
-            agent_registry=agent_registry,
-            approval_repository=_FakeApprovalRepository(),
-        )
+                                      session_manager, skill_registry, memory_manager, agent_registry, preferred_model,
+                                      assistant_context_reader):
+        raise RuntimeError("注入 Runtime 装配故障")
 
     monkeypatch.setattr(app_host_mod, "build_runtime_services", _fake_build_runtime_services)
-    monkeypatch.setattr(app_host_mod, "AgentRegistry", _patch_registry([]))
+    monkeypatch.setattr(app_host_mod, "AgentRegistry", _patch_registry([
+        _assistant_identity(), AgentIdentity(agent_id="default", agent_name="默认"),
+    ]))
 
     with pytest.raises(RuntimeError):
         await ApplicationHost.build()

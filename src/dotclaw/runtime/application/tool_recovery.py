@@ -15,6 +15,7 @@ from ..domain.events import (
     DelegationCompleted,
     DelegationSubmitted,
     IterationLimitReached,
+    LLMCallFailed,
     RunEvent,
     RunEventType,
     ToolApprovalRequired,
@@ -1055,7 +1056,12 @@ class ToolRecoveryService:
         return await self._commit_result(run, replace(ledger, calls=calls), updated, source, checkpoint)
 
     def _failed_run_target(self, base_run: AgentRun, error: RunError) -> AgentRun:
-        return replace(base_run, state=transition(base_run.state, ToolBatchFailed(error)).state, ended_at=utc_now_iso(), error=error)
+        failure_event = (
+            LLMCallFailed(error)
+            if isinstance(base_run.state.mode, Running) and base_run.state.mode.stage is RunStage.CALLING_LLM
+            else ToolBatchFailed(error)
+        )
+        return replace(base_run, state=transition(base_run.state, failure_event).state, ended_at=utc_now_iso(), error=error)
 
     async def _commit_fact(
         self, ledger: ToolCallLedger, base_run: AgentRun, target_run: AgentRun,

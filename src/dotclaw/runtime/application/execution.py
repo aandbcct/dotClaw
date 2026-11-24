@@ -133,6 +133,8 @@ class RunExecution:
             staged_history_compressions=self.staged_history_compressions,
             replay_active_context=self.replay_active_context,
             session_id=self.request.session_id,
+            input_message_id=self.request.user_message.message_id,
+            input_created_at=self.request.user_message.created_at,
         )
 
     def update_state(self, state: AgentRunState, action: AgentAction) -> None:
@@ -205,3 +207,7 @@ class RunExecutionView:
     """是否要求 ContextPort 直接重放活动版本。"""
     session_id: str = ""
     """本次运行所属 Session 标识，供 LLMOutputEvent 填充（由 RunRequest.session_id 派生）。"""
+    input_message_id: str = ""
+    """本次 Run 的用户输入消息标识。"""
+    input_created_at: str = ""
+    """本次 Run 的用户输入消息时间。"""

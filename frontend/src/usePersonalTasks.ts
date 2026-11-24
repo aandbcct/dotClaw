@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, changePersonalTaskStatus, createPersonalTask, deletePersonalTask, listPersonalTasks, updatePersonalTask } from "./api";
-import type { PersonalTask, PersonalTaskFilter, PersonalTaskInput, PersonalTaskListItem, PersonalTaskQuery, PersonalTaskStatus, ReminderRule } from "./types";
+import type { PersonalTask, PersonalTaskFilter, PersonalTaskInput, PersonalTaskListItem, PersonalTaskQuery, PersonalTaskStatus, PlanFilter, ReminderRule } from "./types";
 
-type TaskFilters = Pick<PersonalTaskQuery, "filter" | "keyword" | "deadline_from" | "deadline_until" | "overdue_only">;
+type TaskFilters = Pick<PersonalTaskQuery, "filter" | "plan_filter" | "keyword" | "deadline_from" | "deadline_until" | "overdue_only">;
 const pageSize = 50;
 
 export function usePersonalTasks() {
   const [items, setItems] = useState<PersonalTaskListItem[]>([]);
   const [timezone, setTimezone] = useState("Asia/Shanghai");
-  const [filters, setFiltersState] = useState<TaskFilters>({ filter: "active", keyword: "", deadline_from: null, deadline_until: null, overdue_only: false });
+  const [filters, setFiltersState] = useState<TaskFilters>({ filter: "active", plan_filter: "all", keyword: "", deadline_from: null, deadline_until: null, overdue_only: false });
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -110,10 +110,11 @@ export function usePersonalTasks() {
     } finally { mutation.current = false; setPending(false); }
   }, [reload]);
 
-  return { items, timezone, filter: filters.filter, keyword: filters.keyword,
+  return { items, timezone, filter: filters.filter, planFilter: filters.plan_filter, keyword: filters.keyword,
     deadlineFrom: filters.deadline_from, deadlineUntil: filters.deadline_until, overdueOnly: filters.overdue_only,
     total, hasMore, loading, loadingMore, pending, error,
     setFilter: (filter: PersonalTaskFilter) => setFilters({ filter }),
+    setPlanFilter: (plan_filter: PlanFilter) => setFilters({ plan_filter, ...(plan_filter === "ended" ? { filter: "all" as const } : {}) }),
     setKeyword: (keyword: string) => setFilters({ keyword }),
     setDeadlineFrom: (deadline_from: string | null) => setFilters({ deadline_from }),
     setDeadlineUntil: (deadline_until: string | null) => setFilters({ deadline_until }),

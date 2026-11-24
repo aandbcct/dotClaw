@@ -3,7 +3,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from dotclaw.personal_tasks.models import PersonalTask, PersonalTaskFilter, PersonalTaskStatus, TaskDeadline
+from dotclaw.personal_tasks.models import (PersonalTask, PersonalTaskFilter, PersonalTaskStatus, TaskDeadline,
+    TaskPlanning, PersonalTaskKind, PlanFilter, PersonalTaskQuery)
 from dotclaw.personal_tasks.repository import PersonalTaskNotFound, PersonalTaskVersionConflict
 from dotclaw.personal_tasks.service import InvalidPersonalTaskTransition, PersonalTaskService
 from dotclaw.personal_tasks.reminder_rules import normalize_rule
@@ -155,3 +156,23 @@ async def test_legacy_list_keeps_all_items_without_query_limit():
     result = await service.list(PersonalTaskFilter.ALL)
     assert len(result.items) == 105
     assert result.total == 105
+
+
+@pytest.mark.asyncio
+async def test_planning_update_retention_relation_and_server_filtering():
+    now = datetime(2030, 1, 1, 12, tzinfo=UTC)
+    repository = MemoryRepository()
+    service = PersonalTaskService(repository, timezone=ZoneInfo("UTC"), clock=lambda: now)
+    event = await service.create(title="考试", planning=TaskPlanning(
+        PersonalTaskKind.EVENT, event_time=TaskDeadline("datetime", now.replace(hour=14))))
+    prep = await service.create(title="复习", planning=TaskPlanning(
+        scheduled_time=TaskDeadline("date", date(2030, 1, 2)), related_task_id=event.task.id))
+    updated = await service.update(prep.task.id, title="复习", description="已更新", deadline=None,
+        expected_version=prep.task.version)
+    assert updated.task.planning == prep.task.planning
+    assert len((await service.query(PersonalTaskQuery(filter=PersonalTaskFilter.ALL,
+        plan_filter=PlanFilter.SCHEDULED))).items) == 2
+    assert (await service.query(PersonalTaskQuery(filter=PersonalTaskFilter.ALL,
+        plan_filter=PlanFilter.UNSCHEDULED))).items == ()
+    with pytest.raises(ValueError):
+        await service.create(title="无效关联", planning=TaskPlanning(related_task_id="missing"))

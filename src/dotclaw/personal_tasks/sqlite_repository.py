@@ -3,6 +3,7 @@
 import asyncio
 import calendar
 import sqlite3
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 import json
@@ -10,7 +11,7 @@ import re
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from .models import PersonalTask, PersonalTaskStatus, ReminderChange, ReminderSummary, TaskDeadline
+from .models import PersonalTask, PersonalTaskStatus, ReminderChange, ReminderSummary, TaskDeadline, TaskPlanning, PersonalTaskKind
 from .repository import PersonalTaskNotFound, PersonalTaskStorageError, PersonalTaskVersionConflict
 from .reminder_models import Reminder, ReminderRule, ReminderStatus
 from .notification_models import Notification, NotificationMember, NotificationDelivery, NotificationPage, NotificationChanges
@@ -20,9 +21,34 @@ from .models import is_overdue, PersonalTaskStatus
 
 
 class SqlitePersonalTaskRepository:
-    def __init__(self, db_path: Path, timezone: ZoneInfo = ZoneInfo("UTC")):
+    def __init__(self, db_path: Path, timezone: ZoneInfo = ZoneInfo("UTC"), *, connection: sqlite3.Connection | None = None):
         self._db_path = db_path
         self._timezone = timezone
+        self._connection = connection
+
+    @contextmanager
+    def _connection_scope(self, *, write: bool = False, snapshot: bool = False):
+        if self._connection is None:
+            owned = True
+            connection = self._connect()
+        else:
+            owned = False
+            connection = self._connection
+        try:
+            if owned and write:
+                connection.execute("BEGIN IMMEDIATE")
+            elif owned and snapshot:
+                connection.execute("BEGIN")
+            yield connection
+            if owned and connection.in_transaction:
+                connection.execute("COMMIT")
+        except BaseException:
+            if owned and connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            if owned:
+                connection.close()
 
     def _connect(self) -> sqlite3.Connection:
         connection = None
@@ -48,14 +74,14 @@ class SqlitePersonalTaskRepository:
     @classmethod
     def _row_to_reminder(cls, row: sqlite3.Row) -> Reminder:
         rule = json.loads(row["rule_json"])
-        fields = {"at": {"kind", "at"}, "before_deadline": {"kind", "offset_minutes"}, "before_date": {"kind", "days_before", "local_time"}, "daily": {"kind", "local_time"}, "weekly": {"kind", "weekdays", "local_time"}, "monthly": {"kind", "day", "local_time"}, "yearly": {"kind", "month", "day", "local_time"}}
+        fields = {"at": {"kind", "at"}, "before_deadline": {"kind", "offset_minutes"}, "before_event": {"kind", "offset_minutes"}, "before_date": {"kind", "days_before", "local_time"}, "daily": {"kind", "local_time"}, "weekly": {"kind", "weekdays", "local_time"}, "monthly": {"kind", "day", "local_time"}, "yearly": {"kind", "month", "day", "local_time"}}
         if not isinstance(rule, dict) or rule.get("kind") not in fields or set(rule) != fields[rule["kind"]]:
             raise ValueError("数据库中的提醒规则结构无效")
         if "local_time" in rule and (not isinstance(rule["local_time"], str) or re.fullmatch(r"\d{2}:[0-5]\d", rule["local_time"]) is None or int(rule["local_time"][:2]) > 23):
             raise ValueError("数据库中的提醒当地时刻无效")
         if rule["kind"] == "at" and (not isinstance(rule["at"], str) or datetime.fromisoformat(rule["at"].replace("Z", "+00:00")).tzinfo is None):
             raise ValueError("数据库中的提醒时刻无效")
-        if rule["kind"] in ("before_deadline", "before_date") and (type(rule["offset_minutes"] if rule["kind"] == "before_deadline" else rule["days_before"]) is not int or (rule["offset_minutes"] if rule["kind"] == "before_deadline" else rule["days_before"]) < 0):
+        if rule["kind"] in ("before_deadline", "before_event", "before_date") and (type(rule["offset_minutes"] if rule["kind"] != "before_date" else rule["days_before"]) is not int or (rule["offset_minutes"] if rule["kind"] != "before_date" else rule["days_before"]) < 0):
             raise ValueError("数据库中的相对提醒偏移无效")
         if rule["kind"] in ("monthly", "yearly"):
             if type(rule["day"]) is not int or not 1 <= rule["day"] <= 31:
@@ -66,7 +92,7 @@ class SqlitePersonalTaskRepository:
             raise ValueError("数据库中的星期规则无效")
         status = ReminderStatus(row["status"])
         next_fire = cls._date(row["next_fire_at"])
-        if (status == ReminderStatus.ACTIVE) != (next_fire is not None) or row["version"] < 1 or (status in (ReminderStatus.FIRED, ReminderStatus.MISSED) and rule["kind"] not in ("at", "before_deadline", "before_date")):
+        if (status == ReminderStatus.ACTIVE) != (next_fire is not None) or row["version"] < 1 or (status in (ReminderStatus.FIRED, ReminderStatus.MISSED) and rule["kind"] not in ("at", "before_deadline", "before_event", "before_date")):
             raise ValueError("数据库中的提醒状态不一致")
         ZoneInfo(row["timezone"])
         return Reminder(row["id"], row["task_id"], rule, row["timezone"], status, row["reason"], next_fire, row["version"], cls._date(row["created_at"]), cls._date(row["updated_at"]))
@@ -96,7 +122,29 @@ class SqlitePersonalTaskRepository:
                 task.created_at.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                 task.updated_at.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                 task.completed_at.isoformat(timespec="microseconds").replace("+00:00", "Z") if task.completed_at else None,
-                task.version)
+                task.version, json.dumps({"kind": task.planning.kind.value,
+                    "event_time": SqlitePersonalTaskRepository._encode_deadline(task.planning.event_time),
+                    "scheduled_time": SqlitePersonalTaskRepository._encode_deadline(task.planning.scheduled_time),
+                    "time_text": task.planning.time_text, "related_task_id": task.planning.related_task_id}, ensure_ascii=False))
+
+    @staticmethod
+    def _encode_deadline(value: TaskDeadline | None) -> dict | None:
+        return None if value is None else {"kind": value.kind, "value": value.value.isoformat()}
+
+    @staticmethod
+    def _decode_planning(value: str) -> TaskPlanning:
+        data = json.loads(value)
+        if not isinstance(data, dict) or set(data) != {"kind", "event_time", "scheduled_time", "time_text", "related_task_id"}:
+            raise ValueError("数据库中的事务安排结构无效")
+        def decode_deadline(item):
+            if item is None:
+                return None
+            if not isinstance(item, dict) or set(item) != {"kind", "value"}:
+                raise ValueError("数据库中的安排时间结构无效")
+            return TaskDeadline(item["kind"], date.fromisoformat(item["value"]) if item["kind"] == "date" else datetime.fromisoformat(item["value"].replace("Z", "+00:00")))
+        if not isinstance(data["time_text"], str) or (data["related_task_id"] is not None and not isinstance(data["related_task_id"], str)):
+            raise ValueError("数据库中的事务安排字段无效")
+        return TaskPlanning(PersonalTaskKind(data["kind"]), decode_deadline(data["event_time"]), decode_deadline(data["scheduled_time"]), data["time_text"], data["related_task_id"])
 
     @staticmethod
     def _row_to_task(row: sqlite3.Row) -> PersonalTask:
@@ -106,7 +154,7 @@ class SqlitePersonalTaskRepository:
                             deadline, datetime.fromisoformat(row["created_at"].replace("Z", "+00:00")).astimezone(UTC),
                             datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00")).astimezone(UTC),
                             datetime.fromisoformat(row["completed_at"].replace("Z", "+00:00")).astimezone(UTC) if row["completed_at"] else None,
-                            row["version"])
+                            row["version"], SqlitePersonalTaskRepository._decode_planning(row["planning_json"]))
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize_sync)
@@ -147,7 +195,8 @@ class SqlitePersonalTaskRepository:
                     if statement.strip():
                         connection.execute(statement)
                 connection.execute("PRAGMA user_version=2")
-            elif version == 2:
+                version = 2
+            if version == 2:
                 for query in (
                     "SELECT id,task_id,rule_json,timezone,status,reason,next_fire_at,version,created_at,updated_at FROM task_reminders LIMIT 0",
                     "SELECT id,reminder_id,task_id,reminder_version,scheduled_at,processed_at,outcome,missed_until FROM reminder_occurrences LIMIT 0",
@@ -157,9 +206,36 @@ class SqlitePersonalTaskRepository:
                     "SELECT id,last_scan_at,timezone FROM reminder_scan_state LIMIT 0",
                 ):
                     connection.execute(query)
+                from ..assistant.sqlite_repository import migrate_assistant_schema
+                migrate_assistant_schema(connection)
+                connection.execute("PRAGMA user_version=3")
+                version = 3
+            if version == 3:
+                for query in (
+                    "SELECT id,title,description,status,deadline_kind,deadline_value,created_at,updated_at,completed_at,version FROM personal_tasks LIMIT 0",
+                    "SELECT id,task_id,rule_json,timezone,status,reason,next_fire_at,version,created_at,updated_at FROM task_reminders LIMIT 0",
+                    "SELECT id,reminder_id,task_id,reminder_version,scheduled_at,processed_at,outcome,missed_until FROM reminder_occurrences LIMIT 0",
+                    "SELECT id,kind,occurrence_id,created_at,read_at,title,body FROM notifications LIMIT 0",
+                    "SELECT notification_id,task_id,title_snapshot,missed,overdue FROM notification_members LIMIT 0",
+                    "SELECT notification_id,channel,claim_id,status,attempted_at,reported_at,error FROM notification_deliveries LIMIT 0",
+                    "SELECT id,last_scan_at,timezone FROM reminder_scan_state LIMIT 0",
+                ):
+                    connection.execute(query)
+                from ..assistant.sqlite_repository import validate_assistant_schema
+                validate_assistant_schema(connection)
+                connection.execute("ALTER TABLE personal_tasks ADD COLUMN planning_json TEXT NOT NULL DEFAULT '{\"kind\":\"task\",\"event_time\":null,\"scheduled_time\":null,\"time_text\":\"\",\"related_task_id\":null}'")
+                connection.execute("PRAGMA user_version=4")
+                version = 4
+            if version == 4:
+                connection.execute("SELECT id,title,description,status,deadline_kind,deadline_value,created_at,updated_at,completed_at,version,planning_json FROM personal_tasks LIMIT 0")
+                from ..assistant.sqlite_repository import validate_assistant_schema
+                validate_assistant_schema(connection)
             else:
                 raise PersonalTaskStorageError(f"不支持的数据库版本：{version}")
             connection.execute("COMMIT")
+        except PersonalTaskStorageError:
+            connection.rollback()
+            raise
         except sqlite3.Error as error:
             connection.rollback()
             raise PersonalTaskStorageError("初始化事务数据库失败") from error
@@ -171,74 +247,56 @@ class SqlitePersonalTaskRepository:
         return await asyncio.to_thread(self._create_sync, task)
 
     def _create_sync(self, task: PersonalTask) -> PersonalTask:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("INSERT INTO personal_tasks VALUES (?,?,?,?,?,?,?,?,?,?)", self._encode(task))
-            connection.execute("COMMIT")
-            return task
-        except sqlite3.Error as error:
-            connection.rollback()
-            raise PersonalTaskStorageError("创建事务失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope(write=True) as connection:
+            try:
+                connection.execute("INSERT INTO personal_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)", self._encode(task))
+                return task
+            except sqlite3.Error as error:
+                raise PersonalTaskStorageError("创建事务失败") from error
 
     async def create_with_reminders(self, task: PersonalTask, reminders: tuple[Reminder, ...]) -> PersonalTask:
         return await asyncio.to_thread(self._create_with_reminders_sync, task, reminders)
 
     def _create_with_reminders_sync(self, task: PersonalTask, reminders: tuple[Reminder, ...]) -> PersonalTask:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("INSERT INTO personal_tasks VALUES (?,?,?,?,?,?,?,?,?,?)", self._encode(task))
-            for reminder in reminders:
-                connection.execute(
-                    "INSERT INTO task_reminders VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (reminder.id, reminder.task_id, json.dumps(reminder.rule, ensure_ascii=False), reminder.timezone,
-                     reminder.status.value, reminder.reason, self._stamp(reminder.next_fire_at), reminder.version,
-                     self._stamp(reminder.created_at), self._stamp(reminder.updated_at)),
-                )
-            connection.execute("COMMIT")
-            return task
-        except sqlite3.Error as error:
-            connection.rollback()
-            raise PersonalTaskStorageError("创建事务及初始提醒失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope(write=True) as connection:
+            try:
+                connection.execute("INSERT INTO personal_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)", self._encode(task))
+                for reminder in reminders:
+                    connection.execute(
+                        "INSERT INTO task_reminders VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (reminder.id, reminder.task_id, json.dumps(reminder.rule, ensure_ascii=False), reminder.timezone,
+                         reminder.status.value, reminder.reason, self._stamp(reminder.next_fire_at), reminder.version,
+                         self._stamp(reminder.created_at), self._stamp(reminder.updated_at)),
+                    )
+                return task
+            except sqlite3.Error as error:
+                raise PersonalTaskStorageError("创建事务及初始提醒失败") from error
 
     async def get(self, task_id: str) -> PersonalTask | None:
         return await asyncio.to_thread(self._get_sync, task_id)
 
     def _get_sync(self, task_id: str) -> PersonalTask | None:
-        connection = self._connect()
-        try:
-            row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (task_id,)).fetchone()
-            return self._row_to_task(row) if row else None
-        except (sqlite3.Error, ValueError, TypeError) as error:
-            raise PersonalTaskStorageError("读取事务失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope() as connection:
+            try:
+                row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (task_id,)).fetchone()
+                return self._row_to_task(row) if row else None
+            except (sqlite3.Error, ValueError, TypeError) as error:
+                raise PersonalTaskStorageError("读取事务失败") from error
 
     async def get_detail(self, task_id: str) -> tuple[PersonalTask | None, tuple[Reminder, ...]]:
         return await asyncio.to_thread(self._get_detail_sync, task_id)
 
     def _get_detail_sync(self, task_id: str) -> tuple[PersonalTask | None, tuple[Reminder, ...]]:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN")
-            row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (task_id,)).fetchone()
-            if row is None:
-                connection.execute("COMMIT")
-                return None, ()
-            reminders = tuple(self._row_to_reminder(item) for item in connection.execute(
-                "SELECT * FROM task_reminders WHERE task_id=? ORDER BY created_at,id", (task_id,)).fetchall())
-            connection.execute("COMMIT")
-            return self._row_to_task(row), reminders
-        except (sqlite3.Error, ValueError, TypeError) as error:
-            connection.rollback()
-            raise PersonalTaskStorageError("读取事务详情失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope(snapshot=True) as connection:
+            try:
+                row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (task_id,)).fetchone()
+                if row is None:
+                    return None, ()
+                reminders = tuple(self._row_to_reminder(item) for item in connection.execute(
+                    "SELECT * FROM task_reminders WHERE task_id=? ORDER BY created_at,id", (task_id,)).fetchall())
+                return self._row_to_task(row), reminders
+            except (sqlite3.Error, ValueError, TypeError) as error:
+                raise PersonalTaskStorageError("读取事务详情失败") from error
 
     async def list(self, statuses: tuple[PersonalTaskStatus, ...] | None) -> tuple[PersonalTask, ...]:
         return await asyncio.to_thread(self._list_sync, statuses)
@@ -261,21 +319,16 @@ class SqlitePersonalTaskRepository:
         return await asyncio.to_thread(self._read_task_snapshot_sync)
 
     def _read_task_snapshot_sync(self) -> tuple[tuple[PersonalTask, ...], dict[str, ReminderSummary]]:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN")
-            tasks = tuple(self._row_to_task(row) for row in connection.execute("SELECT * FROM personal_tasks").fetchall())
-            rows = connection.execute("SELECT task_id,count(*) AS active_count,min(next_fire_at) AS next_fire_at FROM task_reminders WHERE status='active' GROUP BY task_id").fetchall()
-            summaries = {row["task_id"]: ReminderSummary(row["active_count"], self._date(row["next_fire_at"])) for row in rows}
-            for task in tasks:
-                summaries.setdefault(task.id, ReminderSummary(0, None))
-            connection.execute("COMMIT")
-            return tasks, summaries
-        except (sqlite3.Error, ValueError, TypeError) as error:
-            connection.rollback()
-            raise PersonalTaskStorageError("查询事务失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope(snapshot=True) as connection:
+            try:
+                tasks = tuple(self._row_to_task(row) for row in connection.execute("SELECT * FROM personal_tasks").fetchall())
+                rows = connection.execute("SELECT task_id,count(*) AS active_count,min(next_fire_at) AS next_fire_at FROM task_reminders WHERE status='active' GROUP BY task_id").fetchall()
+                summaries = {row["task_id"]: ReminderSummary(row["active_count"], self._date(row["next_fire_at"])) for row in rows}
+                for task in tasks:
+                    summaries.setdefault(task.id, ReminderSummary(0, None))
+                return tasks, summaries
+            except (sqlite3.Error, ValueError, TypeError) as error:
+                raise PersonalTaskStorageError("查询事务失败") from error
 
     async def replace(self, task: PersonalTask, *, expected_version: int, now: datetime | None = None, timezone: ZoneInfo | None = None) -> PersonalTask:
         saved, _ = await self.replace_with_effects(task, expected_version=expected_version, now=now, timezone=timezone)
@@ -285,46 +338,52 @@ class SqlitePersonalTaskRepository:
         return await asyncio.to_thread(self._replace_sync, task, expected_version, now or task.updated_at, timezone)
 
     def _replace_sync(self, task: PersonalTask, expected_version: int, now: datetime, timezone: ZoneInfo | None) -> tuple[PersonalTask, tuple[ReminderChange, ...]]:
-        connection = self._connect()
-        changes: list[ReminderChange] = []
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            old_row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (task.id,)).fetchone()
-            old_task = self._row_to_task(old_row) if old_row else None
-            values = self._encode(task)
-            cursor = connection.execute("UPDATE personal_tasks SET title=?,description=?,status=?,deadline_kind=?,deadline_value=?,updated_at=?,completed_at=?,version=? WHERE id=? AND version=?",
-                (values[1], values[2], values[3], values[4], values[5], values[7], values[8], values[9], task.id, expected_version))
-            if cursor.rowcount == 0:
-                exists = connection.execute("SELECT 1 FROM personal_tasks WHERE id=?", (task.id,)).fetchone()
-                raise PersonalTaskVersionConflict(task.id) if exists else PersonalTaskNotFound(task.id)
-            if task.status not in (PersonalTaskStatus.PENDING, PersonalTaskStatus.IN_PROGRESS):
-                rows = connection.execute("SELECT id,reason,next_fire_at,version FROM task_reminders WHERE task_id=? AND status IN ('active','paused')", (task.id,)).fetchall()
-                connection.execute("UPDATE task_reminders SET status='cancelled',reason='task_ended',next_fire_at=NULL,version=version+1,updated_at=? WHERE task_id=? AND status IN ('active','paused')", (self._stamp(now), task.id))
-                changes.extend(ReminderChange(row["id"], "cancelled", "task_ended", None, row["version"] + 1) for row in rows)
-            elif old_task and old_task.deadline != task.deadline:
-                reminders = connection.execute("SELECT * FROM task_reminders WHERE task_id=? AND status IN ('active','paused')", (task.id,)).fetchall()
-                for row in reminders:
-                    reminder = self._row_to_reminder(row)
-                    if reminder.rule["kind"] not in ("before_deadline", "before_date"):
-                        continue
-                    if task.deadline is None or task.deadline.kind != ("datetime" if reminder.rule["kind"] == "before_deadline" else "date"):
-                        connection.execute("UPDATE task_reminders SET status='cancelled',reason='deadline_removed_or_changed_kind',next_fire_at=NULL,version=version+1,updated_at=? WHERE id=?", (self._stamp(now), reminder.id))
-                        changes.append(ReminderChange(reminder.id, "cancelled", "deadline_removed_or_changed_kind", None, reminder.version + 1))
-                    elif reminder.status == ReminderStatus.ACTIVE:
-                        adjusted = reschedule_relative(reminder, task, now)
-                        connection.execute("UPDATE task_reminders SET status=?,reason=?,next_fire_at=?,version=?,updated_at=? WHERE id=?", (adjusted.status.value, adjusted.reason, self._stamp(adjusted.next_fire_at), adjusted.version, self._stamp(now), reminder.id))
-                        action = "paused" if adjusted.status == ReminderStatus.PAUSED else "rescheduled"
-                        changes.append(ReminderChange(reminder.id, action, adjusted.reason, adjusted.next_fire_at, adjusted.version))
-            connection.execute("COMMIT")
-            return task, tuple(changes)
-        except (PersonalTaskNotFound, PersonalTaskVersionConflict):
-            connection.rollback()
-            raise
-        except sqlite3.Error as error:
-            connection.rollback()
-            raise PersonalTaskStorageError("更新事务失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope(write=True) as connection:
+            changes: list[ReminderChange] = []
+            try:
+                old_row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (task.id,)).fetchone()
+                old_task = self._row_to_task(old_row) if old_row else None
+                values = self._encode(task)
+                cursor = connection.execute("UPDATE personal_tasks SET title=?,description=?,status=?,deadline_kind=?,deadline_value=?,updated_at=?,completed_at=?,version=?,planning_json=? WHERE id=? AND version=?",
+                (values[1], values[2], values[3], values[4], values[5], values[7], values[8], values[9], values[10], task.id, expected_version))
+                if cursor.rowcount == 0:
+                    exists = connection.execute("SELECT 1 FROM personal_tasks WHERE id=?", (task.id,)).fetchone()
+                    raise PersonalTaskVersionConflict(task.id) if exists else PersonalTaskNotFound(task.id)
+                if task.status not in (PersonalTaskStatus.PENDING, PersonalTaskStatus.IN_PROGRESS):
+                    rows = connection.execute("SELECT id,reason,next_fire_at,version FROM task_reminders WHERE task_id=? AND status IN ('active','paused')", (task.id,)).fetchall()
+                    connection.execute("UPDATE task_reminders SET status='cancelled',reason='task_ended',next_fire_at=NULL,version=version+1,updated_at=? WHERE task_id=? AND status IN ('active','paused')", (self._stamp(now), task.id))
+                    changes.extend(ReminderChange(row["id"], "cancelled", "task_ended", None, row["version"] + 1) for row in rows)
+                elif old_task and (old_task.deadline != task.deadline or old_task.planning.event_time != task.planning.event_time):
+                    reminders = connection.execute("SELECT * FROM task_reminders WHERE task_id=? AND status IN ('active','paused')", (task.id,)).fetchall()
+                    for row in reminders:
+                        reminder = self._row_to_reminder(row)
+                        if reminder.rule["kind"] not in ("before_deadline", "before_date", "before_event"):
+                            continue
+                        if reminder.rule["kind"] == "before_event" and old_task.planning.event_time == task.planning.event_time:
+                            continue
+                        if reminder.rule["kind"] != "before_event" and old_task.deadline == task.deadline:
+                            continue
+                        if reminder.rule["kind"] == "before_event":
+                            event_time = task.planning.event_time
+                            invalid_time = task.planning.kind != PersonalTaskKind.EVENT or event_time is None or event_time.kind != "datetime"
+                            cancel_reason = "event_time_removed_or_changed_kind"
+                        else:
+                            event_time = None
+                            invalid_time = task.deadline is None or task.deadline.kind != ("datetime" if reminder.rule["kind"] == "before_deadline" else "date")
+                            cancel_reason = "deadline_removed_or_changed_kind"
+                        if invalid_time:
+                            connection.execute("UPDATE task_reminders SET status='cancelled',reason=?,next_fire_at=NULL,version=version+1,updated_at=? WHERE id=?", (cancel_reason, self._stamp(now), reminder.id))
+                            changes.append(ReminderChange(reminder.id, "cancelled", cancel_reason, None, reminder.version + 1))
+                        elif reminder.status == ReminderStatus.ACTIVE or (reminder.rule["kind"] == "before_event" and reminder.status == ReminderStatus.PAUSED and reminder.reason == "event_moved_past"):
+                            adjusted = reschedule_relative(reminder, task, now)
+                            connection.execute("UPDATE task_reminders SET status=?,reason=?,next_fire_at=?,version=?,updated_at=? WHERE id=?", (adjusted.status.value, adjusted.reason, self._stamp(adjusted.next_fire_at), adjusted.version, self._stamp(now), reminder.id))
+                            action = "paused" if adjusted.status == ReminderStatus.PAUSED else "rescheduled"
+                            changes.append(ReminderChange(reminder.id, action, adjusted.reason, adjusted.next_fire_at, adjusted.version))
+                return task, tuple(changes)
+            except (PersonalTaskNotFound, PersonalTaskVersionConflict):
+                raise
+            except sqlite3.Error as error:
+                raise PersonalTaskStorageError("更新事务失败") from error
 
     async def delete(self, task_id: str, *, expected_version: int) -> None:
         await asyncio.to_thread(self._delete_sync, task_id, expected_version)
@@ -357,85 +416,69 @@ class SqlitePersonalTaskRepository:
         return await asyncio.to_thread(self._list_reminders_sync, task_id)
 
     def _list_reminders_sync(self, task_id: str) -> tuple[Reminder, ...]:
-        connection = self._connect()
-        try:
-            return tuple(self._row_to_reminder(row) for row in connection.execute("SELECT * FROM task_reminders WHERE task_id=? ORDER BY created_at,id", (task_id,)).fetchall())
-        except (sqlite3.Error, ValueError, TypeError, KeyError) as error:
-            raise PersonalTaskStorageError("读取提醒失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope() as connection:
+            try:
+                return tuple(self._row_to_reminder(row) for row in connection.execute("SELECT * FROM task_reminders WHERE task_id=? ORDER BY created_at,id", (task_id,)).fetchall())
+            except (sqlite3.Error, ValueError, TypeError, KeyError) as error:
+                raise PersonalTaskStorageError("读取提醒失败") from error
 
     async def get_reminder(self, task_id: str, reminder_id: str) -> Reminder:
         return await asyncio.to_thread(self._get_reminder_sync, task_id, reminder_id)
 
     def _get_reminder_sync(self, task_id: str, reminder_id: str) -> Reminder:
-        connection = self._connect()
-        try:
-            row = connection.execute("SELECT * FROM task_reminders WHERE task_id=? AND id=?", (task_id, reminder_id)).fetchone()
-            if row is None:
-                raise ReminderNotFound(reminder_id)
-            return self._row_to_reminder(row)
-        except ReminderNotFound:
-            raise
-        except (sqlite3.Error, ValueError, TypeError, KeyError) as error:
-            raise PersonalTaskStorageError("读取提醒失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope() as connection:
+            try:
+                row = connection.execute("SELECT * FROM task_reminders WHERE task_id=? AND id=?", (task_id, reminder_id)).fetchone()
+                if row is None:
+                    raise ReminderNotFound(reminder_id)
+                return self._row_to_reminder(row)
+            except ReminderNotFound:
+                raise
+            except (sqlite3.Error, ValueError, TypeError, KeyError) as error:
+                raise PersonalTaskStorageError("读取提醒失败") from error
 
     async def create_reminder(self, reminder: Reminder, *, expected_task_version: int) -> Reminder:
         return await asyncio.to_thread(self._create_reminder_sync, reminder, expected_task_version)
 
     def _create_reminder_sync(self, reminder: Reminder, expected_task_version: int) -> Reminder:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            task = connection.execute("SELECT status,version FROM personal_tasks WHERE id=?", (reminder.task_id,)).fetchone()
-            if task is None:
-                raise PersonalTaskNotFound(reminder.task_id)
-            if task["version"] != expected_task_version:
-                raise PersonalTaskVersionConflict(reminder.task_id)
-            if task["status"] not in ("pending", "in_progress"):
-                raise ValueError("已结束事务不能新增提醒")
-            connection.execute("INSERT INTO task_reminders VALUES(?,?,?,?,?,?,?,?,?,?)", (reminder.id, reminder.task_id, json.dumps(reminder.rule, ensure_ascii=False), reminder.timezone, reminder.status.value, reminder.reason, self._stamp(reminder.next_fire_at), reminder.version, self._stamp(reminder.created_at), self._stamp(reminder.updated_at)))
-            connection.execute("COMMIT")
-            return reminder
-        except (PersonalTaskNotFound, PersonalTaskVersionConflict):
-            connection.rollback()
-            raise
-        except (sqlite3.Error, ValueError) as error:
-            connection.rollback()
-            raise PersonalTaskStorageError("创建提醒失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope(write=True) as connection:
+            try:
+                task = connection.execute("SELECT status,version FROM personal_tasks WHERE id=?", (reminder.task_id,)).fetchone()
+                if task is None:
+                    raise PersonalTaskNotFound(reminder.task_id)
+                if task["version"] != expected_task_version:
+                    raise PersonalTaskVersionConflict(reminder.task_id)
+                if task["status"] not in ("pending", "in_progress"):
+                    raise ValueError("已结束事务不能新增提醒")
+                connection.execute("INSERT INTO task_reminders VALUES(?,?,?,?,?,?,?,?,?,?)", (reminder.id, reminder.task_id, json.dumps(reminder.rule, ensure_ascii=False), reminder.timezone, reminder.status.value, reminder.reason, self._stamp(reminder.next_fire_at), reminder.version, self._stamp(reminder.created_at), self._stamp(reminder.updated_at)))
+                return reminder
+            except (PersonalTaskNotFound, PersonalTaskVersionConflict):
+                raise
+            except (sqlite3.Error, ValueError) as error:
+                raise PersonalTaskStorageError("创建提醒失败") from error
 
     async def replace_reminder(self, reminder: Reminder, *, expected_version: int, expected_task_version: int) -> Reminder:
         return await asyncio.to_thread(self._replace_reminder_sync, reminder, expected_version, expected_task_version)
 
     def _replace_reminder_sync(self, reminder: Reminder, expected_version: int, expected_task_version: int) -> Reminder:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            task = connection.execute("SELECT status,version FROM personal_tasks WHERE id=?", (reminder.task_id,)).fetchone()
-            if task is None:
-                raise PersonalTaskNotFound(reminder.task_id)
-            if task["version"] != expected_task_version:
-                raise PersonalTaskVersionConflict(reminder.task_id)
-            if reminder.status == ReminderStatus.ACTIVE and task["status"] not in ("pending", "in_progress"):
-                raise ValueError("已结束事务不能启用提醒")
-            cursor = connection.execute("UPDATE task_reminders SET rule_json=?,timezone=?,status=?,reason=?,next_fire_at=?,version=?,updated_at=? WHERE task_id=? AND id=? AND version=?", (json.dumps(reminder.rule, ensure_ascii=False), reminder.timezone, reminder.status.value, reminder.reason, self._stamp(reminder.next_fire_at), reminder.version, self._stamp(reminder.updated_at), reminder.task_id, reminder.id, expected_version))
-            if cursor.rowcount == 0:
-                exists = connection.execute("SELECT 1 FROM task_reminders WHERE id=? AND task_id=?", (reminder.id, reminder.task_id)).fetchone()
-                raise ReminderVersionConflict(reminder.id) if exists else ReminderNotFound(reminder.id)
-            connection.execute("COMMIT")
-            return reminder
-        except (PersonalTaskNotFound, PersonalTaskVersionConflict, ReminderNotFound, ReminderVersionConflict):
-            connection.rollback()
-            raise
-        except (sqlite3.Error, ValueError) as error:
-            connection.rollback()
-            raise PersonalTaskStorageError("更新提醒失败") from error
-        finally:
-            connection.close()
+        with self._connection_scope(write=True) as connection:
+            try:
+                task = connection.execute("SELECT status,version FROM personal_tasks WHERE id=?", (reminder.task_id,)).fetchone()
+                if task is None:
+                    raise PersonalTaskNotFound(reminder.task_id)
+                if task["version"] != expected_task_version:
+                    raise PersonalTaskVersionConflict(reminder.task_id)
+                if reminder.status == ReminderStatus.ACTIVE and task["status"] not in ("pending", "in_progress"):
+                    raise ValueError("已结束事务不能启用提醒")
+                cursor = connection.execute("UPDATE task_reminders SET rule_json=?,timezone=?,status=?,reason=?,next_fire_at=?,version=?,updated_at=? WHERE task_id=? AND id=? AND version=?", (json.dumps(reminder.rule, ensure_ascii=False), reminder.timezone, reminder.status.value, reminder.reason, self._stamp(reminder.next_fire_at), reminder.version, self._stamp(reminder.updated_at), reminder.task_id, reminder.id, expected_version))
+                if cursor.rowcount == 0:
+                    exists = connection.execute("SELECT 1 FROM task_reminders WHERE id=? AND task_id=?", (reminder.id, reminder.task_id)).fetchone()
+                    raise ReminderVersionConflict(reminder.id) if exists else ReminderNotFound(reminder.id)
+                return reminder
+            except (PersonalTaskNotFound, PersonalTaskVersionConflict, ReminderNotFound, ReminderVersionConflict):
+                raise
+            except (sqlite3.Error, ValueError) as error:
+                raise PersonalTaskStorageError("更新提醒失败") from error
 
     async def process_due(self, *, now: datetime, timezone: ZoneInfo, startup: bool) -> None:
         await asyncio.to_thread(self._process_due_sync, now, timezone, startup)

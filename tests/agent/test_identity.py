@@ -2,7 +2,7 @@
 
 import pytest
 
-from dotclaw.agent.identity import AgentIdentity
+from dotclaw.agent.identity import AgentIdentity, load_agent_config
 
 
 class TestAgentIdentity:
@@ -42,6 +42,18 @@ class TestAgentIdentity:
         identity = AgentIdentity(agent_id="test")
         result = identity.resolve_system_prompt()
         assert result == ""
+
+    def test_personal_assistant_prompt_resolves_json_literals(self) -> None:
+        identity = load_agent_config("personal-assistant")
+
+        prompt = identity.resolve_system_prompt()
+
+        assert "你是 个人助理" in prompt
+        assert 'event_time={"kind":"date","value":"YYYY-MM-DD"}' in prompt
+        assert "assistant_context.time.date_weekday_reference" in prompt
+        assert "不得重叠" in prompt
+        assert "列出实际任务及其日期/时段" in prompt
+        assert "event_time={{" not in prompt
 
 class TestAgentIdentityCard:
     """对标 A2A AgentCard 的新字段：capabilities / input_modes / output_modes。"""

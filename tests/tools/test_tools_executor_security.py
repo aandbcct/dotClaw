@@ -21,10 +21,11 @@ import tempfile
 from pydantic import BaseModel
 
 from dotclaw.tools.capability import resolve_workspace_path
+from dotclaw.tools.base import ToolExecutionContext
 from dotclaw.tools.decorator import ToolPolicy, get_tool_meta, tool
 from dotclaw.tools.executor import ToolExecutor
 from dotclaw.tools.function_handler import FunctionToolHandler
-from dotclaw.tools.policy import PolicyEngine, PolicyScope, default_policy_scope
+from dotclaw.tools.policy import PolicyDecision, PolicyEngine, PolicyScope, default_policy_scope
 from dotclaw.tools.registry import ToolRegistry
 
 
@@ -50,6 +51,14 @@ async def e_write(args, context):
     return "WRITE:" + args.path
 
 
+_assistant_write_calls: list[str] = []
+
+
+@tool(name="e.assistant_write", description="写助理事务", policy=ToolPolicy.ASSISTANT_WRITE, needs_approval=True, args_model=PathArgs)
+async def e_assistant_write(args, context):
+    _assistant_write_calls.append(args.path)
+
+
 @tool(name="e.exec", description="执行命令", policy=ToolPolicy.PROCESS, needs_approval=True, args_model=CmdArgs)
 async def e_exec(args, context):
     return "EXEC:" + args.command
@@ -69,7 +78,7 @@ async def e_net(args, context):
 
 def _make_registry():
     reg = ToolRegistry()
-    for fn in (e_read, e_write, e_exec, e_net):
+    for fn in (e_read, e_write, e_assistant_write, e_exec, e_net):
         reg.register(FunctionToolHandler(fn, get_tool_meta(fn)))
     return reg
 
@@ -183,6 +192,71 @@ async def test_requires_approval_derivation():
     assert ex.requires_approval("e.read") is False      # 档案 ALLOW
     assert ex.requires_approval("e.net") is False       # 档案 DENY（被拒，不达审批）
     assert ex.requires_approval("not_a_tool") is False
+
+
+async def test_unattended_allow_skips_explicit_assistant_approval_only_when_both_rules_allow():
+    _assistant_write_calls.clear()
+    scope = default_policy_scope()
+    scope.global_rules[ToolPolicy.ASSISTANT_WRITE.value] = PolicyDecision.ALLOW
+    scope.agent_rules[ToolPolicy.ASSISTANT_WRITE.value] = PolicyDecision.ALLOW
+    executor = ToolExecutor(
+        _make_registry(),
+        policy_engine=PolicyEngine(scope),
+        unattended_allow_profiles={ToolPolicy.ASSISTANT_WRITE.value},
+    )
+    context = ToolExecutionContext(agent_id="personal-assistant")
+
+    assert executor.requires_approval("e.assistant_write", context) is False
+    preflight = await executor.preflight_for_runtime(
+        "e.assistant_write", {"path": "exam"}, context,
+    )
+    assert not preflight.approval_required
+    result = await executor.execute_for_runtime(
+        "e.assistant_write", {"path": "exam"}, context, approved=False,
+    )
+    assert not result.is_error
+    assert _assistant_write_calls == ["exam"]
+
+
+async def test_unattended_allow_does_not_bypass_assistant_ask_or_deny():
+    context = ToolExecutionContext(agent_id="personal-assistant")
+
+    ask_scope = default_policy_scope()
+    ask_scope.global_rules[ToolPolicy.ASSISTANT_WRITE.value] = PolicyDecision.ASK
+    ask_scope.agent_rules[ToolPolicy.ASSISTANT_WRITE.value] = PolicyDecision.ALLOW
+    ask_executor = ToolExecutor(
+        _make_registry(),
+        policy_engine=PolicyEngine(ask_scope),
+        unattended_allow_profiles={ToolPolicy.ASSISTANT_WRITE.value},
+    )
+    ask = await ask_executor.preflight_for_runtime(
+        "e.assistant_write", {"path": "exam"}, context,
+    )
+    assert ask.approval_required
+    ask_execution = await ask_executor.execute_for_runtime(
+        "e.assistant_write", {"path": "exam"}, context, approved=False,
+    )
+    assert ask_execution.approval_required
+
+    deny_scope = default_policy_scope()
+    deny_scope.global_rules[ToolPolicy.ASSISTANT_WRITE.value] = PolicyDecision.ALLOW
+    deny_scope.agent_rules[ToolPolicy.ASSISTANT_WRITE.value] = PolicyDecision.DENY
+    deny_executor = ToolExecutor(
+        _make_registry(),
+        policy_engine=PolicyEngine(deny_scope),
+        unattended_allow_profiles={ToolPolicy.ASSISTANT_WRITE.value},
+    )
+    denied = await deny_executor.preflight_for_runtime(
+        "e.assistant_write", {"path": "exam"}, context,
+    )
+    assert denied.is_error
+    assert denied.error_code == "POLICY_DENIED"
+    deny_execution = await deny_executor.execute_for_runtime(
+        "e.assistant_write", {"path": "exam"}, context, approved=False,
+    )
+    assert deny_execution.is_error
+    assert deny_execution.error_code == "POLICY_DENIED"
+    assert _assistant_write_calls == ["exam"]
 
 
 async def test_journal_records_desensitized_summary_only():

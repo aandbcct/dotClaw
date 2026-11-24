@@ -221,7 +221,8 @@ class RuntimeEngine:
                     root_run_id=request.root_run_id or request.parent_run_id, delegation_task_id=request.delegation_task_id,
                     latest_checkpoint_id=f"checkpoint-{run_id}")
                 message = RunMessage(request.user_message.message_id, 1, RunMessageKind.USER_INPUT,
-                    MessageRole.USER, request.user_message.content)
+                    MessageRole.USER, request.user_message.content,
+                    metadata={"created_at": request.user_message.created_at})
                 await self._run_repository.save_messages(run.session_id, run_id, (message,))
                 await self._run_repository.create_run(run)
                 await self._checkpoint_repository.save(RunCheckpoint(f"checkpoint-{run_id}", run_id,
@@ -587,7 +588,7 @@ class RuntimeEngine:
             session_id=session_id,
             lease_id="delegation-resume",
             agent_id=parent_run.agent_id,
-            user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
+            user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, _input_created_at(input_message)),
             conversation=_conversation_from_context_version(active_context_version),
             model_id=parent_run.policy.model_id,
             parent_run_id=parent_run.parent_run_id, root_run_id=parent_run.root_run_id, delegation_task_id=parent_run.delegation_task_id,
@@ -920,7 +921,7 @@ class RuntimeEngine:
             run.session_id,
             "resume-run",
             run.agent_id,
-            ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
+            ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, _input_created_at(input_message)),
             _conversation_from_context_version(version),
             run_id=run.run_id,
             model_id=run.policy.model_id,
@@ -1298,7 +1299,14 @@ class RuntimeEngine:
             # Created（例如 resume 入口以 Created 构造 execution）；正常 execute 路径已在
             # 持久化前经 transition() 完成 RunStarted 迁移，此处跳过以避免重复迁移失败。
             sequence += 1
-            messages.append(RunMessage(execution.request.user_message.message_id, sequence, RunMessageKind.USER_INPUT, MessageRole.USER, execution.request.user_message.content))
+            messages.append(RunMessage(
+                execution.request.user_message.message_id,
+                sequence,
+                RunMessageKind.USER_INPUT,
+                MessageRole.USER,
+                execution.request.user_message.content,
+                metadata={"created_at": execution.request.user_message.created_at},
+            ))
             await self._save_messages(run, execution, messages)
         if isinstance(execution.state.mode, Created):
             start_transition = await self._apply_transition(execution, run, RunStarted(run.input_message_id), event_number)
@@ -2888,3 +2896,9 @@ def _prepared_request_from_dict(data: JSONMap) -> RunRequest:
     return RunRequest(data["session_id"], data["lease_id"], data["agent_id"], message(data["user_message"]),
         ConversationSnapshot(conversation["session_id"], tuple(message(item) for item in conversation["messages"]), conversation["version"], compression),
         data.get("parent_run_id"), data.get("root_run_id"), data["run_id"], data.get("model_id", ""), data.get("delegation_task_id"))
+
+
+def _input_created_at(message: RunMessage) -> str:
+    """从已持久化的用户输入事实恢复原始时间；旧消息缺失时保持空值。"""
+    value = message.metadata.get("created_at")
+    return value if isinstance(value, str) else ""
