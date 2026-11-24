@@ -38,7 +38,7 @@ describe("对话工作区", () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText("有什么可以帮你？");
-    await user.type(screen.getByLabelText("输入消息"), "第一条消息");
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条消息");
     await user.click(screen.getByRole("button", { name: "发送消息" }));
     await waitFor(() => expect(calls).toEqual(["create", "send"]));
     expect(screen.getByText("第一条消息")).toBeTruthy();
@@ -47,10 +47,10 @@ describe("对话工作区", () => {
   it("创建失败保留输入和错误；无可用模型不给出虚假发送成功", async () => {
     setup((url) => url.endsWith("/options") ? json({ ...options, models: [] }) : undefined, []);
     const user = userEvent.setup(); render(<App />);
-    await user.type(screen.getByLabelText("输入消息"), "保留草稿");
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "保留草稿");
     await user.click(screen.getByRole("button", { name: "发送消息" }));
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("保留草稿");
+    expect((screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement).value).toBe("保留草稿");
   });
 
   it("高级选择保留智能体和模型，选择时不创建空会话", async () => {
@@ -65,7 +65,7 @@ describe("对话工作区", () => {
     await user.selectOptions(screen.getByLabelText("模型"), "fast-model");
     await user.click(screen.getByRole("button", { name: "使用此选择" }));
     expect(mock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
-    await user.type(screen.getByLabelText("输入消息"), "写作");
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "写作");
     await user.click(screen.getByRole("button", { name: "发送消息" }));
     await waitFor(() => expect(body).toEqual({ title: "新对话", agent_id: "writer", model: "fast-model" }));
   });
@@ -122,7 +122,7 @@ describe("对话工作区", () => {
   it("输入法选词回车不发送，普通回车发送", async () => {
     const mock = setup((url) => url.endsWith("/messages") ? stream([event("run.cancelled", {})]) : undefined);
     render(<App />); await screen.findByRole("button", { name: "当前会话更多操作" });
-    const input = screen.getByLabelText("输入消息");
+    const input = screen.getByRole("textbox", { name: "输入消息" });
     fireEvent.change(input, { target: { value: "中文输入" } });
     fireEvent.compositionStart(input); fireEvent.keyDown(input, { key: "Enter" }); fireEvent.compositionEnd(input);
     fireEvent.keyDown(input, { key: "Enter", isComposing: true }); fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
@@ -136,13 +136,13 @@ describe("对话工作区", () => {
     setup(undefined, [session, second]);
     const user = userEvent.setup(); const first = render(<App />);
     await screen.findByRole("button", { name: "当前会话更多操作" });
-    await user.type(screen.getByLabelText("输入消息"), "第一份草稿");
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一份草稿");
     await user.click(screen.getByRole("button", { name: "第二会话" }));
-    expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("");
-    await user.type(screen.getByLabelText("输入消息"), "第二份草稿");
+    expect((screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement).value).toBe("");
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第二份草稿");
     await user.click(screen.getByRole("button", { name: "切换深色外观" })); first.unmount();
     render(<App />); await screen.findByRole("button", { name: "当前会话更多操作" });
-    expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("第二份草稿");
+    expect((screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement).value).toBe("第二份草稿");
     expect(screen.getByRole("button", { name: "切换浅色外观" })).toBeTruthy();
   });
 
@@ -154,7 +154,7 @@ describe("对话工作区", () => {
     });
     const user = userEvent.setup(); render(<App />);
     await screen.findByRole("button", { name: "当前会话更多操作" });
-    await user.type(screen.getByLabelText("输入消息"), "请回答");
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "请回答");
     await user.click(screen.getByRole("button", { name: "发送消息" }));
     await waitFor(() => expect(screen.getAllByText("最终回答")).toHaveLength(1));
   });
@@ -165,11 +165,52 @@ it("首次创建尚未完成时消息区立即显示发送提示，创建失败�
   setup((url, init) => url.endsWith("/sessions") && init?.method === "POST" ? new Promise<Response>((_, reject) => { rejectCreation = reject; }) : undefined, []);
   const user = userEvent.setup(); render(<App />);
   await screen.findByText("有什么可以帮你？");
-  await user.type(screen.getByLabelText("输入消息"), "创建期间的原问题");
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "创建期间的原问题");
   await user.click(screen.getByRole("button", { name: "发送消息" }));
   expect((await screen.findByText("正在发送")).closest("article")).toBeTruthy();
   expect(document.querySelector(".workspace-header [role=status]")).toBeNull();
   rejectCreation(new Error("隔离创建失败"));
   await screen.findByText("隔离创建失败");
-  expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("创建期间的原问题");
+  expect((screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement).value).toBe("创建期间的原问题");
+});
+
+it("助理入口使用固定会话，返回普通聊天时保留原有消息", async () => {
+  const assistant = { ...session, id: "personal-assistant", title: "个人助理", messages: [] };
+  const mock = setup((url, init) => {
+    if (url.endsWith("/assistant/session") && init?.method === "POST") return json(assistant);
+    if (url.endsWith("/personal-assistant")) return json(assistant);
+    if (url.endsWith("/session-1")) return json({ ...session, messages: [{ id: "chat-history", role: "user", content: "普通聊天历史", created_at: session.updated_at }] });
+  });
+  const user = userEvent.setup(); render(<App />);
+  await screen.findByText("普通聊天历史");
+  await user.click(screen.getByRole("button", { name: "个人助理" }));
+  await user.type(await screen.findByRole("textbox", { name: "输入助理消息" }), "仅助理草稿");
+  await user.click(screen.getByRole("button", { name: "本地测试会话" }));
+  expect(await screen.findByText("普通聊天历史")).toBeTruthy();
+  expect((screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement).value).toBe("");
+  await user.click(screen.getByRole("button", { name: "个人助理" }));
+  expect((await screen.findByRole("textbox", { name: "输入助理消息" }) as HTMLTextAreaElement).value).toBe("仅助理草稿");
+  expect(mock.mock.calls.filter(([url, init]) => String(url).endsWith("/sessions") && init?.method === "POST")).toHaveLength(0);
+  expect(mock.mock.calls.some(([url, init]) => String(url).endsWith("/assistant/session") && init?.method === "POST")).toBe(true);
+});
+
+it("批量审批预览匹配后仍提交服务端原 approval_id", async () => {
+  const assistant = { ...session, id: "personal-assistant", title: "个人助理", messages: [{ id: "assistant-answer", role: "assistant", content: "", run_ids: ["run-batch"], created_at: session.updated_at }] };
+  const activity = { run_id: "run-batch", status: "waiting_approval", approval_id: "approval-original", approval_call_id: "batch-call", child_run_id: null,
+    tools: [{ call_id: "batch-call", name: "builtin.assistant.batch.apply", status: "waiting_approval", started_at: "", completed_at: "", arguments: { request_id: "request-1", expected_version: 2, proposal_hash: "hash-1" }, result: "", error: "" }], steps: [] };
+  const results = { schema_version: 1, run_id: "run-batch", result_sets: [], operations: [] };
+  const preview = { request_id: "request-1", version: 2, hash: "hash-1", items: [] };
+  const mock = setup((url, init) => {
+    if (url.endsWith("/assistant/session") && init?.method === "POST") return json(assistant);
+    if (url.endsWith("/personal-assistant")) return json(assistant);
+    if (url.includes("/personal-assistant/activity")) return json(activity);
+    if (url.includes("/assistant/results")) return json(results);
+    if (url.includes("/proposal?")) return json(preview);
+    if (url.endsWith("/approvals/approval-original") && init?.method === "POST") return stream([event("run.cancelled", { run_id: "run-batch" })]);
+  });
+  const user = userEvent.setup(); render(<App />);
+  await user.click(screen.getByRole("button", { name: "个人助理" }));
+  await screen.findByText(/已核对提案 v\s*2/);
+  await user.click(screen.getByRole("button", { name: "批准并继续" }));
+  await waitFor(() => expect(mock.mock.calls.some(([url, init]) => String(url).endsWith("/approvals/approval-original") && init?.method === "POST")).toBe(true));
 });

@@ -588,7 +588,7 @@ class RuntimeEngine:
             session_id=session_id,
             lease_id="delegation-resume",
             agent_id=parent_run.agent_id,
-            user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
+            user_message=ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, _input_created_at(input_message)),
             conversation=_conversation_from_context_version(active_context_version),
             model_id=parent_run.policy.model_id,
             parent_run_id=parent_run.parent_run_id, root_run_id=parent_run.root_run_id, delegation_task_id=parent_run.delegation_task_id,
@@ -921,7 +921,7 @@ class RuntimeEngine:
             run.session_id,
             "resume-run",
             run.agent_id,
-            ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, ""),
+            ConversationMessage(input_message.message_id, MessageRole.USER, input_message.content, _input_created_at(input_message)),
             _conversation_from_context_version(version),
             run_id=run.run_id,
             model_id=run.policy.model_id,
@@ -2896,3 +2896,9 @@ def _prepared_request_from_dict(data: JSONMap) -> RunRequest:
     return RunRequest(data["session_id"], data["lease_id"], data["agent_id"], message(data["user_message"]),
         ConversationSnapshot(conversation["session_id"], tuple(message(item) for item in conversation["messages"]), conversation["version"], compression),
         data.get("parent_run_id"), data.get("root_run_id"), data["run_id"], data.get("model_id", ""), data.get("delegation_task_id"))
+
+
+def _input_created_at(message: RunMessage) -> str:
+    """从已持久化的用户输入事实恢复原始时间；旧消息缺失时保持空值。"""
+    value = message.metadata.get("created_at")
+    return value if isinstance(value, str) else ""

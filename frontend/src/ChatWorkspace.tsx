@@ -205,7 +205,7 @@ export function ChatWorkspace({
     <div className="composer-region">
       {(externalError || newError || workspace.loadError || (!view.activeMessageId && view.error)) && <div className="error-strip" role="alert"><p>{externalError || newError || workspace.loadError || view.error}</p></div>}
       <form className="composer" onSubmit={(event) => void submit(event)}>
-        <label className="sr-only" htmlFor={assistantMode ? "assistant-message-input" : "message-input"}>输入消息</label>
+        <label className="sr-only" htmlFor={assistantMode ? "assistant-message-input" : "message-input"}>{assistantMode ? "输入助理消息" : "输入消息"}</label>
         <textarea ref={inputRef} id={assistantMode ? "assistant-message-input" : "message-input"} value={draft} placeholder={assistantMode ? "描述要处理的事务…" : "输入消息…"} rows={2} disabled={!ready} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} />
         {["running", "stopping"].includes(view.phase) && (!view.detached || view.activity?.status === "running") ? <button className="composer-action" type="button" aria-label="停止运行" disabled={view.phase === "stopping"} onClick={() => selectedId && void workspace.stop(selectedId)}>■</button> : <button className="composer-action" aria-label="发送消息" type="submit" disabled={!draft.trim() || busy || !ready || (creating && !selectedId)}>↑</button>}
       </form>

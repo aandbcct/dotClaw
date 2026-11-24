@@ -5,6 +5,7 @@ from datetime import date, datetime
 import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from .models import AssistantRequestPayload, ReminderRule
 
@@ -58,8 +59,8 @@ class TaskCreateInput(StrictInput):
     description: str = ""
     deadline: date | datetime | None = None
     reminders: list[ReminderRule] = Field(default_factory=list)
-    request_id: str | None = None
-    expected_request_version: int | None = Field(default=None, ge=1)
+    request_id: str | None = Field(default=None, description="关联已有请求时必须与 expected_request_version 同时提供。")
+    expected_request_version: int | None = Field(default=None, ge=1, description="关联已有请求时必须与 request_id 同时提供；取自 requests.get 返回的 data.request.version。")
 
     @field_validator("deadline", mode="before")
     @classmethod
@@ -69,7 +70,7 @@ class TaskCreateInput(StrictInput):
     @model_validator(mode="after")
     def request_reference_is_paired(self):
         if (self.request_id is None) != (self.expected_request_version is None):
-            raise ValueError("request_id 与 expected_request_version 必须同时提供")
+            raise PydanticCustomError("request_reference_pair", "request_id 与 expected_request_version 必须同时提供")
         return self
 
 
@@ -94,13 +95,13 @@ class TaskUpdateInput(StrictInput):
     task_id: str
     expected_version: int = Field(ge=1)
     patch: TaskPatch
-    request_id: str | None = None
-    expected_request_version: int | None = Field(default=None, ge=1)
+    request_id: str | None = Field(default=None, description="关联已有请求时必须与 expected_request_version 同时提供。")
+    expected_request_version: int | None = Field(default=None, ge=1, description="关联已有请求时必须与 request_id 同时提供；取自 requests.get 返回的 data.request.version。")
 
     @model_validator(mode="after")
     def request_reference_is_paired(self):
         if (self.request_id is None) != (self.expected_request_version is None):
-            raise ValueError("request_id 与 expected_request_version 必须同时提供")
+            raise PydanticCustomError("request_reference_pair", "request_id 与 expected_request_version 必须同时提供")
         return self
 
 
@@ -108,13 +109,13 @@ class TaskStatusInput(StrictInput):
     task_id: str
     expected_version: int = Field(ge=1)
     status: Literal["completed", "cancelled"]
-    request_id: str | None = None
-    expected_request_version: int | None = Field(default=None, ge=1)
+    request_id: str | None = Field(default=None, description="关联已有请求时必须与 expected_request_version 同时提供。")
+    expected_request_version: int | None = Field(default=None, ge=1, description="关联已有请求时必须与 request_id 同时提供；取自 requests.get 返回的 data.request.version。")
 
     @model_validator(mode="after")
     def request_reference_is_paired(self):
         if (self.request_id is None) != (self.expected_request_version is None):
-            raise ValueError("request_id 与 expected_request_version 必须同时提供")
+            raise PydanticCustomError("request_reference_pair", "request_id 与 expected_request_version 必须同时提供")
         return self
 
 
@@ -122,13 +123,13 @@ class ReminderCreateInput(StrictInput):
     task_id: str
     rule: ReminderRule
     expected_task_version: int = Field(ge=1)
-    request_id: str | None = None
-    expected_request_version: int | None = Field(default=None, ge=1)
+    request_id: str | None = Field(default=None, description="关联已有请求时必须与 expected_request_version 同时提供。")
+    expected_request_version: int | None = Field(default=None, ge=1, description="关联已有请求时必须与 request_id 同时提供；取自 requests.get 返回的 data.request.version。")
 
     @model_validator(mode="after")
     def request_reference_is_paired(self):
         if (self.request_id is None) != (self.expected_request_version is None):
-            raise ValueError("request_id 与 expected_request_version 必须同时提供")
+            raise PydanticCustomError("request_reference_pair", "request_id 与 expected_request_version 必须同时提供")
         return self
 
 
@@ -138,13 +139,13 @@ class ReminderUpdateInput(StrictInput):
     expected_task_version: int = Field(ge=1)
     expected_version: int = Field(ge=1)
     rule: ReminderRule
-    request_id: str | None = None
-    expected_request_version: int | None = Field(default=None, ge=1)
+    request_id: str | None = Field(default=None, description="关联已有请求时必须与 expected_request_version 同时提供。")
+    expected_request_version: int | None = Field(default=None, ge=1, description="关联已有请求时必须与 request_id 同时提供；取自 requests.get 返回的 data.request.version。")
 
     @model_validator(mode="after")
     def request_reference_is_paired(self):
         if (self.request_id is None) != (self.expected_request_version is None):
-            raise ValueError("request_id 与 expected_request_version 必须同时提供")
+            raise PydanticCustomError("request_reference_pair", "request_id 与 expected_request_version 必须同时提供")
         return self
 
 
@@ -154,13 +155,13 @@ class ReminderStatusInput(StrictInput):
     expected_task_version: int = Field(ge=1)
     expected_version: int = Field(ge=1)
     action: Literal["pause", "resume", "cancel"]
-    request_id: str | None = None
-    expected_request_version: int | None = Field(default=None, ge=1)
+    request_id: str | None = Field(default=None, description="关联已有请求时必须与 expected_request_version 同时提供。")
+    expected_request_version: int | None = Field(default=None, ge=1, description="关联已有请求时必须与 request_id 同时提供；取自 requests.get 返回的 data.request.version。")
 
     @model_validator(mode="after")
     def request_reference_is_paired(self):
         if (self.request_id is None) != (self.expected_request_version is None):
-            raise ValueError("request_id 与 expected_request_version 必须同时提供")
+            raise PydanticCustomError("request_reference_pair", "request_id 与 expected_request_version 必须同时提供")
         return self
 
 
@@ -184,8 +185,8 @@ class RequestSourceInput(StrictInput):
 
 
 class RequestSaveInput(StrictInput):
-    id: str | None = None
-    expected_version: int | None = Field(default=None, ge=1)
+    id: str | None = Field(default=None, description="更新已有请求时必须与 expected_version 同时提供。")
+    expected_version: int | None = Field(default=None, ge=1, description="更新已有请求时必须与 id 同时提供；取自 requests.get 返回的 data.request.version。")
     kind: Literal["create_task", "update_task", "change_status", "reminder", "batch"]
     summary: str = Field(max_length=200)
     payload: AssistantRequestPayload
@@ -194,7 +195,7 @@ class RequestSaveInput(StrictInput):
     @model_validator(mode="after")
     def request_version_is_paired(self):
         if (self.id is None) != (self.expected_version is None):
-            raise ValueError("id 与 expected_version 必须同时提供")
+            raise PydanticCustomError("request_version_pair", "id 与 expected_version 必须同时提供")
         return self
 
 
@@ -239,15 +240,15 @@ BatchItem = Annotated[BatchUpdateItem | BatchStatusItem | BatchReminderUpdateIte
 
 
 class BatchPrepareInput(StrictInput):
-    request_id: str | None = None
-    expected_request_version: int | None = Field(default=None, ge=1)
+    request_id: str | None = Field(default=None, description="关联已有请求时必须与 expected_request_version 同时提供。")
+    expected_request_version: int | None = Field(default=None, ge=1, description="关联已有请求时必须与 request_id 同时提供；取自 requests.get 返回的 data.request.version。")
     summary: str = Field(max_length=200)
     items: list[BatchItem] = Field(min_length=2, max_length=20)
 
     @model_validator(mode="after")
     def request_reference_is_paired(self):
         if (self.request_id is None) != (self.expected_request_version is None):
-            raise ValueError("request_id 与 expected_request_version 必须同时提供")
+            raise PydanticCustomError("request_reference_pair", "request_id 与 expected_request_version 必须同时提供")
         return self
 
 

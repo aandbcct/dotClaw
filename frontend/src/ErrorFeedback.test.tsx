@@ -28,7 +28,7 @@ it("空输出显示结构化错误、运行入口，恢复问题追加而不覆�
   const mock = setup((url) => url.endsWith("/messages") ? sse(event("run.accepted", { session_id: "a", run_id: "empty-run" }) + event("run.failed", { run_id: "empty-run", error: emptyError })) : undefined);
   const user = userEvent.setup(); render(<App />);
   await screen.findByRole("button", { name: "当前会话更多操作" });
-  await user.type(screen.getByLabelText("输入消息"), "原始问题");
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "原始问题");
   await user.click(screen.getByRole("button", { name: "发送消息" }));
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toContain(emptyError.message);
@@ -36,9 +36,9 @@ it("空输出显示结构化错误、运行入口，恢复问题追加而不覆�
   expect(screen.getByText("运行 ID：empty-run")).toBeTruthy();
   expect(screen.queryByRole("dialog", { name: "执行详情" })).toBeNull();
   expect(within(alert).getByRole("button", { name: "查看执行记录" })).toBeTruthy();
-  await user.type(screen.getByLabelText("输入消息"), "尚未发送的草稿");
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "尚未发送的草稿");
   await user.click(screen.getByRole("button", { name: "恢复原问题到输入框" }));
-  expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("尚未发送的草稿\n\n原始问题");
+  expect((screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement).value).toBe("尚未发送的草稿\n\n原始问题");
   expect(mock.mock.calls.filter(([url]) => String(url).endsWith("/messages"))).toHaveLength(1);
 });
 

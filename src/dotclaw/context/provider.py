@@ -81,7 +81,7 @@ class ContextProvider:
             run_snapshot = ContextOwnerSnapshot(run_snapshot.owner_key, run_data)
             owner_data[ContextOwner.RUN] = run_snapshot
             plan = ContextPlan(tuple(
-                ContextSlotBinding(binding.descriptor, binding.owner_key, run_snapshot)
+                ContextSlotBinding(binding.descriptor, binding.owner_key, run_snapshot.data)
                 if binding.descriptor.owner is ContextOwner.RUN
                 else binding
                 for binding in plan.bindings
@@ -90,6 +90,14 @@ class ContextProvider:
         snapshots: tuple[ContextSlotSnapshot, ...] = _snapshots(plan.bindings, contributions)
         context_run_messages = _filter_legacy_approval_results(execution.run_messages, execution.run_events)
         messages: tuple[RunMessage, ...] = _messages_from_contributions(execution.run_id, contributions, context_run_messages)
+        if is_assistant:
+            _validate_assistant_model_input(
+                tuple(binding.descriptor.slot_id for binding in plan.bindings),
+                contributions,
+                execution.input_message_id,
+                context_run_messages,
+                messages,
+            )
         if execution.action is AgentAction.INVOKE_LLM:
             _validate_tool_message_pairs(messages)
         tools: tuple[ToolDefinition, ...] = _tools_from_contributions(contributions)
@@ -182,9 +190,45 @@ def _bundle_from_active_version(execution: RunExecutionView) -> ContextBundle:
     contributions.append(ContextContribution(ContextContributionKind.RUN_MESSAGE_REFERENCES, ContextSlotStatus.INCLUDED if fact_content.message_ids else ContextSlotStatus.EMPTY, fact_content))
     frozen: tuple[ContextContribution, ...] = tuple(contributions)
     messages = _messages_from_contributions(execution.run_id, frozen, context_run_messages)
+    if execution.policy.agent_id == "personal-assistant":
+        _validate_assistant_model_input(
+            (*tuple(slot.slot_id for slot in active), "run_messages"),
+            frozen,
+            execution.input_message_id,
+            context_run_messages,
+            messages,
+        )
     if execution.action is AgentAction.INVOKE_LLM:
         _validate_tool_message_pairs(messages)
     return ContextBundle(messages, _tools_from_contributions(frozen), ContextMetadata(0, tuple(slot.slot_id for slot in active), slot_snapshots=active, fact_reference_message_ids=fact_content.message_ids))
+
+
+def _validate_assistant_model_input(
+    slot_ids: tuple[str, ...],
+    contributions: tuple[ContextContribution, ...],
+    input_message_id: str,
+    run_messages: tuple[RunMessage, ...],
+    messages: tuple[RunMessage, ...],
+) -> None:
+    """确保个人助理调用模型前具有摘要和当前用户输入事实。"""
+    by_slot = dict(zip(slot_ids, contributions, strict=True))
+    assistant_context = by_slot.get("assistant_context")
+    if assistant_context is None or assistant_context.status is not ContextSlotStatus.INCLUDED or not isinstance(assistant_context.content, TextSlotContent) or not assistant_context.content.text:
+        raise ValueError("personal-assistant 缺少有效 assistant_context Slot")
+    references = by_slot.get("run_messages")
+    source = next((message for message in run_messages if message.message_id == input_message_id), None)
+    if (
+        references is None
+        or references.status is not ContextSlotStatus.INCLUDED
+        or not isinstance(references.content, RunMessageReferencesSlotContent)
+        or input_message_id not in references.content.message_ids
+        or source is None
+        or source.kind is not RunMessageKind.USER_INPUT
+        or source.role is not MessageRole.USER
+    ):
+        raise ValueError("personal-assistant 缺少当前用户输入 RunMessage")
+    if not any(message.role is MessageRole.USER and message.content == source.content for message in messages):
+        raise ValueError("personal-assistant 模型输入未包含当前用户消息")
 
 
 def _filter_legacy_approval_results(messages: tuple[RunMessage, ...], events: tuple[RunEvent, ...]) -> tuple[RunMessage, ...]:

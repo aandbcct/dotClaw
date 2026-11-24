@@ -116,3 +116,18 @@ it("审批仅匹配指定调用，未知关联禁用批准但保留拒绝和查�
   await user.click(screen.getByRole("button", { name: "重新查询审批" }));
   expect(callbacks.onCheckStatus).toHaveBeenCalledWith("r");
 });
+
+it("批量预览不可核对时禁用批准，匹配预览后才允许继续", async () => {
+  const user = userEvent.setup(), callbacks = actions();
+  const batch = { ...activity, status: "waiting_approval", approval_id: "approval-original", approval_call_id: "batch-call",
+    tools: [{ ...activity.tools[0], call_id: "batch-call", name: "builtin.assistant.batch.apply", arguments: { request_id: "request-1", expected_version: 2, proposal_hash: "hash-1" } }], steps: [] };
+  const preview = { request_id: "request-1", version: 2, hash: "hash-1", items: [] };
+  const { rerender } = render(<RunActivityPanel {...callbacks} message={message} activities={[batch]} canControl
+    assistantPreviewFor={() => ({ status: "error", preview: null, error: "预览不可用" })} />);
+  expect((screen.getByRole("button", { name: "批准并继续" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole("alert").textContent).toContain("预览不可用");
+  rerender(<RunActivityPanel {...callbacks} message={message} activities={[batch]} canControl
+    assistantPreviewFor={() => ({ status: "loaded", preview, error: "" })} />);
+  await user.click(screen.getByRole("button", { name: "批准并继续" }));
+  expect(callbacks.onApprove).toHaveBeenCalledExactlyOnceWith("r", true);
+});

@@ -53,10 +53,11 @@ build-backend = "hatchling.build"
 packages = ["src/dotclaw"]
 
 [tool.pytest.ini_options]
-# 默认只收集当前架构和 Runtime v2 的测试。
+# 默认收集当前架构、Runtime v2 与个人助理业务测试。
 # 历史测试使用 legacy 标记隔离；执行迁移验证时可显式传入 -m legacy。
 testpaths = [
     "tests/agent",
+    "tests/assistant",
     "tests/benchmarks",
     "tests/channel",
     "tests/context",

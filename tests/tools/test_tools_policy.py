@@ -36,7 +36,7 @@ def _req(kind, profile, **kw):
     return CapabilityRequest(kind=kind, profile=profile, **kw)
 
 
-def test_default_rules_have_six_entries():
+def test_default_rules_have_eight_entries():
     rules = default_policy_scope().global_rules
     assert rules == {
         "workspace.read": PolicyDecision.ALLOW,
@@ -45,6 +45,8 @@ def test_default_rules_have_six_entries():
         "network.http": PolicyDecision.DENY,
         "mcp.connect": PolicyDecision.ASK,
         "mcp.call": PolicyDecision.ASK,
+        "assistant.read": PolicyDecision.ALLOW,
+        "assistant.write": PolicyDecision.ALLOW,
     }
 
 

@@ -37,12 +37,13 @@ async def test_version_one_database_migrates_without_losing_tasks(tmp_path):
     tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     connection.close()
 
-    assert version == 2
+    assert version == 3
     assert task is not None
     assert task.title == "迁移保留"
     assert task.version == 4
     assert task.deadline.value.isoformat() == "2030-01-02"
-    assert {"task_reminders", "reminder_occurrences", "notifications", "notification_members", "notification_deliveries", "reminder_scan_state"} <= tables
+    assert {"task_reminders", "reminder_occurrences", "notifications", "notification_members", "notification_deliveries", "reminder_scan_state",
+            "assistant_requests", "assistant_operations", "assistant_result_sets"} <= tables
 
 
 @pytest.mark.asyncio

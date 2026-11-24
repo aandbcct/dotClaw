@@ -74,18 +74,31 @@ def _resolve_refs(schema: Any, defs: dict, _seen: set[str] | None = None) -> Any
 
 
 def _strip_titles(schema: dict) -> dict:
-    """递归移除 JSON Schema 中的 title 字段，保留 description 等有用信息。"""
+    """只从 Schema 对象中移除 title 注释，不改写属性名或默认数据。"""
     if not isinstance(schema, dict):
         return schema
     result = {key: value for key, value in schema.items() if key != "title"}
     for key, value in result.items():
-        if isinstance(value, dict):
+        if key in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas") and isinstance(value, dict):
+            result[key] = {
+                name: _strip_titles(item) if isinstance(item, dict) else item
+                for name, item in value.items()
+            }
+        elif key in ("allOf", "anyOf", "oneOf", "prefixItems") and isinstance(value, list):
+            result[key] = [_strip_titles(item) if isinstance(item, dict) else item for item in value]
+        elif key in (
+            "items",
+            "additionalProperties",
+            "unevaluatedProperties",
+            "propertyNames",
+            "not",
+            "if",
+            "then",
+            "else",
+            "contains",
+            "contentSchema",
+        ) and isinstance(value, dict):
             result[key] = _strip_titles(value)
-        elif isinstance(value, list):
-            result[key] = [
-                _strip_titles(item) if isinstance(item, dict) else item
-                for item in value
-            ]
     return result
 
 
@@ -155,6 +168,8 @@ _SAFE_ERROR_MESSAGES: dict[str, str] = {
     "literal_error": "参数取值不在允许范围内",
     "type_error": "参数类型错误",
     "value_error": "参数取值不合法",
+    "request_reference_pair": "关联请求时 request_id 与 expected_request_version 必须同时提供；expected_request_version 取自 requests.get 返回的 data.request.version",
+    "request_version_pair": "更新请求时 id 与 expected_version 必须同时提供；expected_version 取自 requests.get 返回的 data.request.version",
 }
 
 

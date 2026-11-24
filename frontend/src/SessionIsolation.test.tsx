@@ -35,7 +35,7 @@ it("两会话流、错误、停止和完成回填相互隔离，不抢走当前�
   }));
   const user = userEvent.setup(); render(<App />);
   await screen.findByRole("button", { name: "当前会话更多操作" });
-  await user.type(screen.getByLabelText("输入消息"), "A 问题");
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "A 问题");
   await user.click(screen.getByRole("button", { name: "发送消息" }));
   expect(await screen.findByText("正在发送", { exact: true })).toBeTruthy();
   await act(async () => { controllers.get("a")!.enqueue(block("run.accepted", { session_id: "a", run_id: "ra" })); });
@@ -43,10 +43,10 @@ it("两会话流、错误、停止和完成回填相互隔离，不抢走当前�
   await act(async () => { controllers.get("a")!.enqueue(block("message.delta", { run_id: "ra", content: "A 部分", kind: "response_delta" })); });
   await screen.findByText("A 部分");
   await user.click(screen.getByRole("button", { name: "会话 B" }));
-  await user.type(screen.getByLabelText("输入消息"), "B 草稿");
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "B 草稿");
   await act(async () => { controllers.get("a")!.enqueue(block("message.delta", { run_id: "ra", content: "继续", kind: "response_delta" })); });
   expect(screen.queryByText("A 部分继续")).toBeNull();
-  expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("B 草稿");
+  expect((screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement).value).toBe("B 草稿");
   await user.click(screen.getByRole("button", { name: "发送消息" }));
   await act(async () => { controllers.get("b")!.enqueue(block("run.accepted", { session_id: "b", run_id: "rb" })); });
   expect(await screen.findByText("处理中", { exact: true })).toBeTruthy();
@@ -77,7 +77,7 @@ it("上翻阅读不跟随流更新，回到底部后继续跟随", async () => {
   }));
   const user = userEvent.setup(); render(<App />);
   await screen.findByRole("button", { name: "当前会话更多操作" });
-  await user.type(screen.getByLabelText("输入消息"), "长回答"); await user.click(screen.getByRole("button", { name: "发送消息" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "长回答"); await user.click(screen.getByRole("button", { name: "发送消息" }));
   const region = screen.getByRole("region", { name: "对话内容" });
   Object.defineProperties(region, { scrollHeight: { configurable: true, value: 1200 }, clientHeight: { configurable: true, value: 400 }, scrollTop: { configurable: true, writable: true, value: 100 } });
   fireEvent.scroll(region);
@@ -142,7 +142,7 @@ it("恢复检查点调用原运行接口，失败消息只显示在所属会话"
   await user.keyboard("{Escape}");
   await user.click(screen.getByRole("button", { name: "会话 B" }));
   expect(screen.queryByText("A 恢复失败")).toBeNull();
-  await user.type(screen.getByLabelText("输入消息"), "B 保留草稿");
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "B 保留草稿");
   await user.click(screen.getByRole("button", { name: "会话 A" }));
   expect(await screen.findByText("A 恢复失败")).toBeTruthy();
   expect(calls.some((url) => url.endsWith("/messages"))).toBe(false);
@@ -166,13 +166,13 @@ it("终态历史尚未回填时保留下一条草稿，不静默吞掉提交", a
   }));
   const user = userEvent.setup(); render(<App />);
   await screen.findByRole("button", { name: "当前会话更多操作" });
-  await user.type(screen.getByLabelText("输入消息"), "第一条");
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条");
   await user.click(screen.getByRole("button", { name: "发送消息" }));
   await screen.findByText("首轮完成");
-  await user.type(screen.getByLabelText("输入消息"), "第二条保留");
-  fireEvent.keyDown(screen.getByLabelText("输入消息"), { key: "Enter" });
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第二条保留");
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "输入消息" }), { key: "Enter" });
   expect(sends).toBe(1);
-  expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe("第二条保留");
+  expect((screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement).value).toBe("第二条保留");
   await act(async () => { finishHistory(json({ ...a, messages: [] })); });
   await user.click(await screen.findByRole("button", { name: "发送消息" }));
   await waitFor(() => expect(sends).toBe(2));

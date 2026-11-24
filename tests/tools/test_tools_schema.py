@@ -21,6 +21,16 @@ from dotclaw.tools.schema import (
     to_json_schema,
     validate_args,
 )
+from dotclaw.assistant.schemas import (
+    BatchPrepareInput,
+    ReminderCreateInput,
+    ReminderStatusInput,
+    ReminderUpdateInput,
+    RequestSaveInput,
+    TaskCreateInput,
+    TaskStatusInput,
+    TaskUpdateInput,
+)
 
 
 class Color(str, Enum):
@@ -41,6 +51,11 @@ class NestedArgs(BaseModel):
 
 class EnumArgs(BaseModel):
     color: Color
+
+
+class BusinessTitleArgs(BaseModel):
+    title: str = Field(description="业务标题")
+    metadata: dict[str, str] = Field(default={"title": "映射数据"})
 
 
 # 调用计数，用于验证校验失败时工具函数不会被执行。
@@ -83,6 +98,78 @@ def test_json_schema_strips_titles() -> None:
     assert "title" not in schema
     for prop in schema["properties"].values():
         assert "title" not in prop
+
+
+def test_json_schema_keeps_title_business_field_and_mapping_values() -> None:
+    """去除 Schema 注释时保留业务字段和任意数据映射中的 title。"""
+    schema = to_json_schema(BusinessTitleArgs)
+
+    assert "title" in schema["properties"]
+    assert schema["properties"]["title"]["type"] == "string"
+    assert "title" not in schema["properties"]["title"]
+    assert schema["properties"]["metadata"]["default"] == {"title": "映射数据"}
+
+
+def test_assistant_create_and_partial_rename_schemas_keep_title() -> None:
+    """助理任务创建和局部改名的业务字段 title 必须留在工具 Schema。"""
+    create_schema = to_json_schema(TaskCreateInput)
+    patch_schema = to_json_schema(TaskUpdateInput)
+
+    assert "title" in create_schema["required"]
+    assert create_schema["properties"]["title"]["type"] == "string"
+    patch_title = patch_schema["properties"]["patch"]["properties"]["title"]
+    assert patch_title["anyOf"][0]["type"] == "string"
+    assert "title" not in patch_title
+
+
+def test_request_reference_schema_documents_version_pair_for_all_seven_tools() -> None:
+    """七个关联请求工具都说明版本成对传递及其读取来源。"""
+    models = (
+        TaskCreateInput,
+        TaskUpdateInput,
+        TaskStatusInput,
+        ReminderCreateInput,
+        ReminderUpdateInput,
+        ReminderStatusInput,
+        BatchPrepareInput,
+    )
+    for model in models:
+        schema = to_json_schema(model)
+        assert "request_id" in schema["properties"]
+        assert "expected_request_version" in schema["properties"]
+        assert "expected_request_version" in schema["properties"]["request_id"]["description"]
+        assert "request_id" in schema["properties"]["expected_request_version"]["description"]
+        assert "requests.get" in schema["properties"]["expected_request_version"]["description"]
+        assert "data.request.version" in schema["properties"]["expected_request_version"]["description"]
+
+
+def test_request_pair_validation_uses_fixed_safe_errors() -> None:
+    """配对校验错误能指导补字段，且错误文本不泄露输入值。"""
+    with pytest.raises(ToolValidationError) as missing_reference_version:
+        validate_args(TaskCreateInput, {"title": "测试事务", "request_id": "private-request-id"})
+    assert "request_id" in str(missing_reference_version.value)
+    assert "expected_request_version" in str(missing_reference_version.value)
+    assert "data.request.version" in str(missing_reference_version.value)
+    assert "private-request-id" not in str(missing_reference_version.value)
+
+    with pytest.raises(ToolValidationError) as missing_save_version:
+        validate_args(RequestSaveInput, {
+            "id": "private-request-id",
+            "kind": "batch",
+            "summary": "请求更新",
+            "payload": {
+                "intent_args": {"action": "batch", "summary": None, "items": None},
+                "missing_fields": [],
+                "candidate_task_ids": [],
+                "selected_task_ids": [],
+                "temporal_values": [],
+                "last_error": None,
+            },
+            "source_refs": [],
+        })
+    assert "id" in str(missing_save_version.value)
+    assert "expected_version" in str(missing_save_version.value)
+    assert "private-request-id" not in str(missing_save_version.value)
 
 
 def test_validate_missing_required_raises_invalid_arguments() -> None:
