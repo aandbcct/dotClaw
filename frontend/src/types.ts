@@ -3,15 +3,18 @@ export type MessageRole = "user" | "assistant";
 export type PersonalTaskStatus = "pending" | "in_progress" | "completed" | "cancelled";
 export type PersonalTaskFilter = "active" | "all" | "completed" | "cancelled";
 export type TaskDeadline = { kind: "date"; value: string } | { kind: "datetime"; value: string };
+export type PersonalTaskKind = "task" | "event";
+export interface PersonalTaskPlanning { kind: PersonalTaskKind; event_time: TaskDeadline | null; scheduled_time: TaskDeadline | null; time_text: string; related_task_id: string | null; }
 export interface ReminderChange { reminder_id: string; action: "rescheduled" | "paused" | "cancelled"; reason: string | null; next_fire_at: string | null; version: number; }
 export interface ReminderSummary { active_count: number; next_fire_at: string | null; }
-export interface PersonalTask { id: string; title: string; description: string; status: PersonalTaskStatus; deadline: TaskDeadline | null; created_at: string; updated_at: string; completed_at: string | null; version: number; is_overdue: boolean; reminder_changes?: ReminderChange[]; }
+export interface PersonalTask { id: string; title: string; description: string; status: PersonalTaskStatus; deadline: TaskDeadline | null; planning: PersonalTaskPlanning; created_at: string; updated_at: string; completed_at: string | null; version: number; is_overdue: boolean; reminder_changes?: ReminderChange[]; }
 export interface PersonalTaskDetail extends PersonalTask { reminders: Reminder[]; }
 export interface PersonalTaskListItem extends PersonalTask { reminder_summary: ReminderSummary; }
 export interface PersonalTaskList { items: PersonalTaskListItem[]; timezone: string; as_of: string; total: number; offset: number; limit: number; has_more: boolean; }
-export interface PersonalTaskQuery { filter: PersonalTaskFilter; keyword: string; deadline_from: string | null; deadline_until: string | null; overdue_only: boolean; offset: number; limit: number; }
-export interface PersonalTaskInput { title: string; description: string; deadline: TaskDeadline | null; }
-export type ReminderRule = { kind: "at"; at: string } | { kind: "before_deadline"; offset_minutes: number } | { kind: "before_date"; days_before: number; local_time: string } | { kind: "daily"; local_time: string } | { kind: "weekly"; weekdays: number[]; local_time: string } | { kind: "monthly"; day: number; local_time: string } | { kind: "yearly"; month: number; day: number; local_time: string };
+export type PlanFilter = "all" | "unscheduled" | "scheduled" | "ended";
+export interface PersonalTaskQuery { filter: PersonalTaskFilter; plan_filter: PlanFilter; keyword: string; deadline_from: string | null; deadline_until: string | null; overdue_only: boolean; offset: number; limit: number; }
+export interface PersonalTaskInput { title: string; description: string; deadline: TaskDeadline | null; planning?: PersonalTaskPlanning; }
+export type ReminderRule = { kind: "at"; at: string } | { kind: "before_deadline"; offset_minutes: number } | { kind: "before_event"; offset_minutes: number } | { kind: "before_date"; days_before: number; local_time: string } | { kind: "daily"; local_time: string } | { kind: "weekly"; weekdays: number[]; local_time: string } | { kind: "monthly"; day: number; local_time: string } | { kind: "yearly"; month: number; day: number; local_time: string };
 export interface Reminder { id: string; task_id: string; rule: ReminderRule; timezone: string; status: string; reason: string | null; next_fire_at: string | null; version: number; created_at: string; updated_at: string; }
 export interface ReminderList { items: Reminder[]; timezone: string; scheduler_enabled: boolean; last_scan_at: string | null; scan_lag_seconds: number | null; }
 export interface NotificationMember { task_id: string; title_snapshot: string; missed: boolean; overdue: boolean; current_status: string | null; current_is_overdue: boolean | null; }
@@ -60,8 +63,11 @@ export interface SessionDetail extends SessionSummary {
 export interface AssistantTaskRef {
   id: string;
   title: string;
+  description: string;
   status: PersonalTaskStatus;
   version: number;
+  deadline: TaskDeadline | null;
+  planning: PersonalTaskPlanning;
 }
 export interface AssistantReminderRef {
   id: string;
@@ -70,7 +76,7 @@ export interface AssistantReminderRef {
   version: number;
   next_fire_at: string | null;
 }
-export interface AssistantResultItem extends AssistantTaskRef {
+export interface AssistantResultItem extends Omit<AssistantTaskRef, "deadline"> {
   deadline?: string | null;
   reminder_summary?: string | null;
 }
@@ -94,7 +100,7 @@ export type AssistantOperationName =
   | "tasks.query" | "tasks.get" | "tasks.create" | "tasks.update" | "tasks.status"
   | "reminders.create" | "reminders.update" | "reminders.status" | "requests.list"
   | "requests.get" | "requests.save" | "requests.abandon" | "results.get"
-  | "batch.prepare" | "batch.apply";
+  | "batch.prepare" | "batch.apply" | "plans.save" | "plans.apply";
 export interface AssistantOperationResult {
   schema_version: 1;
   operation: AssistantOperationName;
@@ -131,6 +137,7 @@ export interface AssistantProposalValues {
   status?: PersonalTaskStatus | AssistantReminderRef["status"] | null;
   version?: number | null;
   deadline?: string | null;
+  planning?: PersonalTaskPlanning | null;
   reminder_summary?: string | null;
   reminder_rule?: ReminderRule | null;
 }

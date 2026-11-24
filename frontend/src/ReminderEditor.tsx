@@ -16,12 +16,12 @@ function addCalendarDays(date: string, amount: number) {
 export function ReminderEditor({ task, reminder, timezone, pending, onSave, onReload, onClose }: { task: PersonalTask; reminder: Reminder | null; timezone: string; pending: boolean; onSave: (rule: ReminderRule, baseReminder?: Reminder) => Promise<void>; onReload?: () => Promise<Reminder | null>; onClose: () => void }) {
   const initial = reminder?.rule || { kind: "at", at: "" } as ReminderRule;
   const initialAt = initial.kind === "at" && initial.at ? dateTimeInputValue(initial.at, timezone) : { date: "", time: "09:00" };
-  const initialOffset = initial.kind === "before_deadline" ? initial.offset_minutes : 0;
+  const initialOffset = initial.kind === "before_deadline" || initial.kind === "before_event" ? initial.offset_minutes : 0;
   const [kind, setKind] = useState(initial.kind);
   const [atDate, setAtDate] = useState(initialAt.date);
   const [atTime, setAtTime] = useState(initialAt.time);
-  const [amount, setAmount] = useState(initial.kind === "before_deadline" ? initialOffset % 1440 === 0 ? initialOffset / 1440 : initialOffset % 60 === 0 ? initialOffset / 60 : initialOffset : initial.kind === "before_date" ? initial.days_before : 0);
-  const [unit, setUnit] = useState<OffsetUnit>(initial.kind === "before_deadline" ? initialOffset % 1440 === 0 ? "days" : initialOffset % 60 === 0 ? "hours" : "minutes" : "minutes");
+  const [amount, setAmount] = useState(initial.kind === "before_deadline" || initial.kind === "before_event" ? initialOffset % 1440 === 0 ? initialOffset / 1440 : initialOffset % 60 === 0 ? initialOffset / 60 : initialOffset : initial.kind === "before_date" ? initial.days_before : 0);
+  const [unit, setUnit] = useState<OffsetUnit>(initial.kind === "before_deadline" || initial.kind === "before_event" ? initialOffset % 1440 === 0 ? "days" : initialOffset % 60 === 0 ? "hours" : "minutes" : "minutes");
   const [localTime, setLocalTime] = useState("local_time" in initial ? initial.local_time : "09:00");
   const [weekdays, setWeekdays] = useState<number[]>(initial.kind === "weekly" ? initial.weekdays : [0]);
   const [day, setDay] = useState(initial.kind === "monthly" || initial.kind === "yearly" ? initial.day : 1);
@@ -51,7 +51,7 @@ export function ReminderEditor({ task, reminder, timezone, pending, onSave, onRe
     let rule: ReminderRule;
     try {
       if (kind === "at") rule = { kind, at: dateTimeToRfc3339(atDate, atTime, timezone) };
-      else if (kind === "before_deadline") {
+      else if (kind === "before_deadline" || kind === "before_event") {
         const offset = amount * unitMinutes[unit];
         if (!Number.isInteger(offset)) throw new Error("提前时长必须换算为整分钟");
         rule = { kind, offset_minutes: offset };
@@ -70,7 +70,7 @@ export function ReminderEditor({ task, reminder, timezone, pending, onSave, onRe
   }
 
   return <form onSubmit={(event) => void submit(event)} className="reminder-editor reminder-form">
-    <label>提醒规则<select disabled={pending} value={kind} onChange={(event) => { const nextKind = event.target.value as ReminderRule["kind"]; setKind(nextKind); if (nextKind === "at" && !atDate) { setAtDate(today.date); setAtTime("09:00"); } }}><option value="at">指定时刻</option><option value="before_deadline" disabled={task.deadline?.kind !== "datetime"}>截止前</option><option value="before_date" disabled={task.deadline?.kind !== "date"}>日期截止前</option><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="yearly">每年</option></select></label>
+    <label>提醒规则<select disabled={pending} value={kind} onChange={(event) => { const nextKind = event.target.value as ReminderRule["kind"]; setKind(nextKind); if (nextKind === "at" && !atDate) { setAtDate(today.date); setAtTime("09:00"); } }}><option value="at">指定时刻</option><option value="before_deadline" disabled={task.deadline?.kind !== "datetime"}>截止前</option><option value="before_event" disabled={task.planning?.kind !== "event" || task.planning.event_time?.kind !== "datetime"}>事件前</option><option value="before_date" disabled={task.deadline?.kind !== "date"}>日期截止前</option><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="yearly">每年</option></select></label>
     {kind === "at" && <>
       <div className="reminder-editor__shortcuts" aria-label="常用时间">
         <span>快捷时间 · {timezone}</span>
@@ -80,7 +80,7 @@ export function ReminderEditor({ task, reminder, timezone, pending, onSave, onRe
       </div>
       <label>触发日期和时刻 · {timezone}<span className="reminder-date-fields"><input aria-label="触发日期" disabled={pending} required type="date" value={atDate} onChange={(event) => setAtDate(event.target.value)} /><input aria-label="触发时刻" disabled={pending} required type="time" value={atTime} onChange={(event) => setAtTime(event.target.value)} /></span></label>
     </>}
-    {kind === "before_deadline" && <label>提前时长<span className="reminder-offset-fields"><input aria-label="提前数量" disabled={pending} required type="number" min="0" step="any" value={amount} onChange={(event) => setAmount(Number(event.target.value))} /><select aria-label="提前单位" disabled={pending} value={unit} onChange={(event) => setUnit(event.target.value as OffsetUnit)}><option value="minutes">分钟</option><option value="hours">小时</option><option value="days">天</option></select></span></label>}
+    {(kind === "before_deadline" || kind === "before_event") && <label>提前时长<span className="reminder-offset-fields"><input aria-label="提前数量" disabled={pending} required type="number" min="0" step="any" value={amount} onChange={(event) => setAmount(Number(event.target.value))} /><select aria-label="提前单位" disabled={pending} value={unit} onChange={(event) => setUnit(event.target.value as OffsetUnit)}><option value="minutes">分钟</option><option value="hours">小时</option><option value="days">天</option></select></span></label>}
     {kind === "before_date" && <label>提前天数<input disabled={pending} required type="number" min="0" step="1" value={amount} onChange={(event) => setAmount(Number(event.target.value))} /></label>}
     {kind === "weekly" && <fieldset disabled={pending}><legend>重复星期</legend>{[0, 1, 2, 3, 4, 5, 6].map((value) => <label key={value}><input type="checkbox" checked={weekdays.includes(value)} onChange={(event) => setWeekdays(event.target.checked ? [...weekdays, value] : weekdays.filter((item) => item !== value))} />{["一", "二", "三", "四", "五", "六", "日"][value]}</label>)}</fieldset>}
     {(kind === "monthly" || kind === "yearly") && <label>日期<input disabled={pending} required type="number" min="1" max="31" value={day} onChange={(event) => setDay(Number(event.target.value))} /></label>}

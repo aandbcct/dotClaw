@@ -30,6 +30,11 @@ class BeforeDeadlineRulePayload(_Rule):
     offset_minutes: Annotated[int, Field(ge=0)]
 
 
+class BeforeEventRulePayload(_Rule):
+    kind: Literal["before_event"]
+    offset_minutes: Annotated[int, Field(ge=0)]
+
+
 class BeforeDateRulePayload(_Rule):
     kind: Literal["before_date"]
     days_before: Annotated[int, Field(ge=0)]
@@ -110,7 +115,7 @@ class YearlyRulePayload(_Rule):
         return value
 
 
-ReminderRulePayload = Annotated[AtRulePayload | BeforeDeadlineRulePayload | BeforeDateRulePayload | DailyRulePayload | WeeklyRulePayload | MonthlyRulePayload | YearlyRulePayload, Field(discriminator="kind")]
+ReminderRulePayload = Annotated[AtRulePayload | BeforeDeadlineRulePayload | BeforeEventRulePayload | BeforeDateRulePayload | DailyRulePayload | WeeklyRulePayload | MonthlyRulePayload | YearlyRulePayload, Field(discriminator="kind")]
 
 
 class CreateReminderRequest(BaseModel):

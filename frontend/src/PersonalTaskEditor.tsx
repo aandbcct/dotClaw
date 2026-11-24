@@ -8,6 +8,13 @@ type InitialReminderKind = "none" | "at" | "before_deadline" | "before_date";
 export function PersonalTaskEditor({ task, timezone, pending, onSave, onReload, onClose }: { task: PersonalTask | null; timezone: string; pending: boolean; onSave: (input: PersonalTaskInput, version?: number, reminder?: ReminderRule) => Promise<void>; onReload: (id: string) => Promise<PersonalTask>; onClose: () => void }) {
   const [title, setTitle] = useState(task?.title || "");
   const [description, setDescription] = useState(task?.description || "");
+  const [planKind, setPlanKind] = useState(task?.planning?.kind || "task");
+  const initialPlanTime = task?.planning?.kind === "event" ? task.planning.event_time : task?.planning?.scheduled_time;
+  const [planTimeKind, setPlanTimeKind] = useState<"none" | "date" | "datetime">(initialPlanTime?.kind || "none");
+  const [planDate, setPlanDate] = useState(initialPlanTime?.kind === "date" ? initialPlanTime.value : initialPlanTime?.kind === "datetime" ? dateTimeInputValue(initialPlanTime.value, timezone).date : "");
+  const [planTime, setPlanTime] = useState(initialPlanTime?.kind === "datetime" ? dateTimeInputValue(initialPlanTime.value, timezone).time : "09:00");
+  const [timeText, setTimeText] = useState(task?.planning?.time_text || "");
+  const [relatedTaskId, setRelatedTaskId] = useState(task?.planning?.related_task_id || null);
   const [kind, setKind] = useState<"none" | "date" | "datetime">(task?.deadline?.kind || "none");
   const [date, setDate] = useState(task?.deadline?.kind === "date" ? task.deadline.value : task?.deadline?.kind === "datetime" ? dateTimeInputValue(task.deadline.value, timezone).date : "");
   const [time, setTime] = useState(task?.deadline?.kind === "datetime" ? dateTimeInputValue(task.deadline.value, timezone).time : "09:00");
@@ -41,11 +48,13 @@ export function PersonalTaskEditor({ task, timezone, pending, onSave, onReload, 
     setError("");
     try {
       const deadline: TaskDeadline | null = kind === "none" ? null : kind === "date" ? { kind, value: date } : { kind, value: dateTimeToRfc3339(date, time, timezone) };
+      const selectedTime: TaskDeadline | null = planTimeKind === "none" ? null : planTimeKind === "date" ? { kind: "date", value: planDate } : { kind: "datetime", value: dateTimeToRfc3339(planDate, planTime, timezone) };
+      const planning = { kind: planKind, event_time: planKind === "event" ? selectedTime : null, scheduled_time: planKind === "task" ? selectedTime : null, time_text: timeText, related_task_id: relatedTaskId } as const;
       let reminder: ReminderRule | undefined;
       if (initialReminderKind === "at") reminder = { kind: "at", at: dateTimeToRfc3339(reminderDate, reminderTime, timezone) };
       else if (initialReminderKind === "before_deadline") reminder = { kind: "before_deadline", offset_minutes: 1440 };
       else if (initialReminderKind === "before_date") reminder = { kind: "before_date", days_before: 1, local_time: localTime };
-      await onSave({ title: title.trim(), description, deadline }, version, reminder);
+      await onSave({ title: title.trim(), description, deadline, planning }, version, reminder);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "保存失败");
       setConflict(reason instanceof ApiError && reason.code === "personal_task_version_conflict");
@@ -62,6 +71,13 @@ export function PersonalTaskEditor({ task, timezone, pending, onSave, onReload, 
     if (!candidate) return;
     setTitle(candidate.title);
     setDescription(candidate.description);
+    setPlanKind(candidate.planning.kind);
+    const currentPlanTime = candidate.planning.kind === "event" ? candidate.planning.event_time : candidate.planning.scheduled_time;
+    setPlanTimeKind(currentPlanTime?.kind || "none");
+    if (currentPlanTime?.kind === "date") setPlanDate(currentPlanTime.value);
+    if (currentPlanTime?.kind === "datetime") { const value = dateTimeInputValue(currentPlanTime.value, timezone); setPlanDate(value.date); setPlanTime(value.time); }
+    setTimeText(candidate.planning.time_text);
+    setRelatedTaskId(candidate.planning.related_task_id);
     setKind(candidate.deadline?.kind || "none");
     if (candidate.deadline?.kind === "date") setDate(candidate.deadline.value);
     if (candidate.deadline?.kind === "datetime") {
@@ -79,6 +95,11 @@ export function PersonalTaskEditor({ task, timezone, pending, onSave, onReload, 
     <h2>{task ? "编辑事务" : "新建事务"}</h2>
     <label>标题<input required disabled={pending} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
     <label>说明<textarea disabled={pending} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+    <label>事务种类<select disabled={pending} value={planKind} onChange={(event) => setPlanKind(event.target.value as typeof planKind)}><option value="task">任务</option><option value="event">事件</option></select></label>
+    <label>安排类型<select disabled={pending} value={planTimeKind} onChange={(event) => setPlanTimeKind(event.target.value as typeof planTimeKind)}><option value="none">未安排</option><option value="date">日期</option><option value="datetime">具体时刻</option></select></label>
+    {planTimeKind !== "none" && <label>{planKind === "event" ? "事件发生时间" : "计划执行时间"}<span className="reminder-date-fields"><input aria-label={planKind === "event" ? "事件日期" : "计划日期"} disabled={pending} required type="date" value={planDate} onChange={(event) => setPlanDate(event.target.value)} />{planTimeKind === "datetime" && <input aria-label={planKind === "event" ? "事件时刻" : "计划时刻"} disabled={pending} required type="time" value={planTime} onChange={(event) => setPlanTime(event.target.value)} />}</span></label>}
+    <label>时间原文<input disabled={pending} value={timeText} onChange={(event) => setTimeText(event.target.value)} /></label>
+    {relatedTaskId && <p className="reminder-note">已关联事件</p>}
     <label>截止类型<select disabled={pending} value={kind} onChange={(event) => selectDeadlineKind(event.target.value as typeof kind)}><option value="none">无截止</option><option value="date">日期</option><option value="datetime">具体时刻</option></select></label>
     {kind !== "none" && <label>{kind === "date" ? "截止日期" : `截止日期和时刻 · ${timezone}`}<span className="reminder-date-fields"><input aria-label="截止日期" disabled={pending} required type="date" value={date} onChange={(event) => setDate(event.target.value)} />{kind === "datetime" && <input aria-label="截止时刻" disabled={pending} required type="time" value={time} onChange={(event) => setTime(event.target.value)} />}</span></label>}
     {task?.deadline && (kind === "none" || kind !== task.deadline.kind) && <p className="reminder-note">保存后，依赖原截止类型的活动提醒会取消。</p>}

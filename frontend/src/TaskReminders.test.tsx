@@ -6,7 +6,7 @@ import type { PersonalTask } from "./types";
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
-const task: PersonalTask = { id: "task-1", title: "准备评审", description: "", status: "pending", deadline: null, created_at: "2026-11-20T01:00:00Z", updated_at: "2026-11-20T01:00:00Z", completed_at: null, version: 1, is_overdue: false };
+const task: PersonalTask = { id: "task-1", title: "准备评审", description: "", status: "pending", deadline: null, planning: { kind: "task", event_time: null, scheduled_time: null, time_text: "", related_task_id: null }, created_at: "2026-11-20T01:00:00Z", updated_at: "2026-11-20T01:00:00Z", completed_at: null, version: 1, is_overdue: false };
 const reminder = { id: "reminder-1", task_id: "task-1", rule: { kind: "at", at: "2026-12-01T09:00:00Z" }, timezone: "Asia/Shanghai", status: "active", reason: null, next_fire_at: "2026-12-01T09:00:00Z", version: 1, created_at: "2026-11-20T01:00:00Z", updated_at: "2026-11-20T01:00:00Z" };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const reminderPage = (items: unknown[]) => ({ items, timezone: "Asia/Shanghai", scheduler_enabled: true, last_scan_at: "2026-11-20T01:00:00Z", scan_lag_seconds: 0.1 });

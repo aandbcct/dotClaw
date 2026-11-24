@@ -11,7 +11,7 @@ import re
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from .models import PersonalTask, PersonalTaskStatus, ReminderChange, ReminderSummary, TaskDeadline
+from .models import PersonalTask, PersonalTaskStatus, ReminderChange, ReminderSummary, TaskDeadline, TaskPlanning, PersonalTaskKind
 from .repository import PersonalTaskNotFound, PersonalTaskStorageError, PersonalTaskVersionConflict
 from .reminder_models import Reminder, ReminderRule, ReminderStatus
 from .notification_models import Notification, NotificationMember, NotificationDelivery, NotificationPage, NotificationChanges
@@ -74,14 +74,14 @@ class SqlitePersonalTaskRepository:
     @classmethod
     def _row_to_reminder(cls, row: sqlite3.Row) -> Reminder:
         rule = json.loads(row["rule_json"])
-        fields = {"at": {"kind", "at"}, "before_deadline": {"kind", "offset_minutes"}, "before_date": {"kind", "days_before", "local_time"}, "daily": {"kind", "local_time"}, "weekly": {"kind", "weekdays", "local_time"}, "monthly": {"kind", "day", "local_time"}, "yearly": {"kind", "month", "day", "local_time"}}
+        fields = {"at": {"kind", "at"}, "before_deadline": {"kind", "offset_minutes"}, "before_event": {"kind", "offset_minutes"}, "before_date": {"kind", "days_before", "local_time"}, "daily": {"kind", "local_time"}, "weekly": {"kind", "weekdays", "local_time"}, "monthly": {"kind", "day", "local_time"}, "yearly": {"kind", "month", "day", "local_time"}}
         if not isinstance(rule, dict) or rule.get("kind") not in fields or set(rule) != fields[rule["kind"]]:
             raise ValueError("数据库中的提醒规则结构无效")
         if "local_time" in rule and (not isinstance(rule["local_time"], str) or re.fullmatch(r"\d{2}:[0-5]\d", rule["local_time"]) is None or int(rule["local_time"][:2]) > 23):
             raise ValueError("数据库中的提醒当地时刻无效")
         if rule["kind"] == "at" and (not isinstance(rule["at"], str) or datetime.fromisoformat(rule["at"].replace("Z", "+00:00")).tzinfo is None):
             raise ValueError("数据库中的提醒时刻无效")
-        if rule["kind"] in ("before_deadline", "before_date") and (type(rule["offset_minutes"] if rule["kind"] == "before_deadline" else rule["days_before"]) is not int or (rule["offset_minutes"] if rule["kind"] == "before_deadline" else rule["days_before"]) < 0):
+        if rule["kind"] in ("before_deadline", "before_event", "before_date") and (type(rule["offset_minutes"] if rule["kind"] != "before_date" else rule["days_before"]) is not int or (rule["offset_minutes"] if rule["kind"] != "before_date" else rule["days_before"]) < 0):
             raise ValueError("数据库中的相对提醒偏移无效")
         if rule["kind"] in ("monthly", "yearly"):
             if type(rule["day"]) is not int or not 1 <= rule["day"] <= 31:
@@ -92,7 +92,7 @@ class SqlitePersonalTaskRepository:
             raise ValueError("数据库中的星期规则无效")
         status = ReminderStatus(row["status"])
         next_fire = cls._date(row["next_fire_at"])
-        if (status == ReminderStatus.ACTIVE) != (next_fire is not None) or row["version"] < 1 or (status in (ReminderStatus.FIRED, ReminderStatus.MISSED) and rule["kind"] not in ("at", "before_deadline", "before_date")):
+        if (status == ReminderStatus.ACTIVE) != (next_fire is not None) or row["version"] < 1 or (status in (ReminderStatus.FIRED, ReminderStatus.MISSED) and rule["kind"] not in ("at", "before_deadline", "before_event", "before_date")):
             raise ValueError("数据库中的提醒状态不一致")
         ZoneInfo(row["timezone"])
         return Reminder(row["id"], row["task_id"], rule, row["timezone"], status, row["reason"], next_fire, row["version"], cls._date(row["created_at"]), cls._date(row["updated_at"]))
@@ -122,7 +122,29 @@ class SqlitePersonalTaskRepository:
                 task.created_at.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                 task.updated_at.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                 task.completed_at.isoformat(timespec="microseconds").replace("+00:00", "Z") if task.completed_at else None,
-                task.version)
+                task.version, json.dumps({"kind": task.planning.kind.value,
+                    "event_time": SqlitePersonalTaskRepository._encode_deadline(task.planning.event_time),
+                    "scheduled_time": SqlitePersonalTaskRepository._encode_deadline(task.planning.scheduled_time),
+                    "time_text": task.planning.time_text, "related_task_id": task.planning.related_task_id}, ensure_ascii=False))
+
+    @staticmethod
+    def _encode_deadline(value: TaskDeadline | None) -> dict | None:
+        return None if value is None else {"kind": value.kind, "value": value.value.isoformat()}
+
+    @staticmethod
+    def _decode_planning(value: str) -> TaskPlanning:
+        data = json.loads(value)
+        if not isinstance(data, dict) or set(data) != {"kind", "event_time", "scheduled_time", "time_text", "related_task_id"}:
+            raise ValueError("数据库中的事务安排结构无效")
+        def decode_deadline(item):
+            if item is None:
+                return None
+            if not isinstance(item, dict) or set(item) != {"kind", "value"}:
+                raise ValueError("数据库中的安排时间结构无效")
+            return TaskDeadline(item["kind"], date.fromisoformat(item["value"]) if item["kind"] == "date" else datetime.fromisoformat(item["value"].replace("Z", "+00:00")))
+        if not isinstance(data["time_text"], str) or (data["related_task_id"] is not None and not isinstance(data["related_task_id"], str)):
+            raise ValueError("数据库中的事务安排字段无效")
+        return TaskPlanning(PersonalTaskKind(data["kind"]), decode_deadline(data["event_time"]), decode_deadline(data["scheduled_time"]), data["time_text"], data["related_task_id"])
 
     @staticmethod
     def _row_to_task(row: sqlite3.Row) -> PersonalTask:
@@ -132,7 +154,7 @@ class SqlitePersonalTaskRepository:
                             deadline, datetime.fromisoformat(row["created_at"].replace("Z", "+00:00")).astimezone(UTC),
                             datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00")).astimezone(UTC),
                             datetime.fromisoformat(row["completed_at"].replace("Z", "+00:00")).astimezone(UTC) if row["completed_at"] else None,
-                            row["version"])
+                            row["version"], SqlitePersonalTaskRepository._decode_planning(row["planning_json"]))
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize_sync)
@@ -187,7 +209,8 @@ class SqlitePersonalTaskRepository:
                 from ..assistant.sqlite_repository import migrate_assistant_schema
                 migrate_assistant_schema(connection)
                 connection.execute("PRAGMA user_version=3")
-            elif version == 3:
+                version = 3
+            if version == 3:
                 for query in (
                     "SELECT id,title,description,status,deadline_kind,deadline_value,created_at,updated_at,completed_at,version FROM personal_tasks LIMIT 0",
                     "SELECT id,task_id,rule_json,timezone,status,reason,next_fire_at,version,created_at,updated_at FROM task_reminders LIMIT 0",
@@ -198,6 +221,13 @@ class SqlitePersonalTaskRepository:
                     "SELECT id,last_scan_at,timezone FROM reminder_scan_state LIMIT 0",
                 ):
                     connection.execute(query)
+                from ..assistant.sqlite_repository import validate_assistant_schema
+                validate_assistant_schema(connection)
+                connection.execute("ALTER TABLE personal_tasks ADD COLUMN planning_json TEXT NOT NULL DEFAULT '{\"kind\":\"task\",\"event_time\":null,\"scheduled_time\":null,\"time_text\":\"\",\"related_task_id\":null}'")
+                connection.execute("PRAGMA user_version=4")
+                version = 4
+            if version == 4:
+                connection.execute("SELECT id,title,description,status,deadline_kind,deadline_value,created_at,updated_at,completed_at,version,planning_json FROM personal_tasks LIMIT 0")
                 from ..assistant.sqlite_repository import validate_assistant_schema
                 validate_assistant_schema(connection)
             else:
@@ -219,7 +249,7 @@ class SqlitePersonalTaskRepository:
     def _create_sync(self, task: PersonalTask) -> PersonalTask:
         with self._connection_scope(write=True) as connection:
             try:
-                connection.execute("INSERT INTO personal_tasks VALUES (?,?,?,?,?,?,?,?,?,?)", self._encode(task))
+                connection.execute("INSERT INTO personal_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)", self._encode(task))
                 return task
             except sqlite3.Error as error:
                 raise PersonalTaskStorageError("创建事务失败") from error
@@ -230,7 +260,7 @@ class SqlitePersonalTaskRepository:
     def _create_with_reminders_sync(self, task: PersonalTask, reminders: tuple[Reminder, ...]) -> PersonalTask:
         with self._connection_scope(write=True) as connection:
             try:
-                connection.execute("INSERT INTO personal_tasks VALUES (?,?,?,?,?,?,?,?,?,?)", self._encode(task))
+                connection.execute("INSERT INTO personal_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)", self._encode(task))
                 for reminder in reminders:
                     connection.execute(
                         "INSERT INTO task_reminders VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -314,8 +344,8 @@ class SqlitePersonalTaskRepository:
                 old_row = connection.execute("SELECT * FROM personal_tasks WHERE id=?", (task.id,)).fetchone()
                 old_task = self._row_to_task(old_row) if old_row else None
                 values = self._encode(task)
-                cursor = connection.execute("UPDATE personal_tasks SET title=?,description=?,status=?,deadline_kind=?,deadline_value=?,updated_at=?,completed_at=?,version=? WHERE id=? AND version=?",
-                (values[1], values[2], values[3], values[4], values[5], values[7], values[8], values[9], task.id, expected_version))
+                cursor = connection.execute("UPDATE personal_tasks SET title=?,description=?,status=?,deadline_kind=?,deadline_value=?,updated_at=?,completed_at=?,version=?,planning_json=? WHERE id=? AND version=?",
+                (values[1], values[2], values[3], values[4], values[5], values[7], values[8], values[9], values[10], task.id, expected_version))
                 if cursor.rowcount == 0:
                     exists = connection.execute("SELECT 1 FROM personal_tasks WHERE id=?", (task.id,)).fetchone()
                     raise PersonalTaskVersionConflict(task.id) if exists else PersonalTaskNotFound(task.id)
@@ -323,16 +353,28 @@ class SqlitePersonalTaskRepository:
                     rows = connection.execute("SELECT id,reason,next_fire_at,version FROM task_reminders WHERE task_id=? AND status IN ('active','paused')", (task.id,)).fetchall()
                     connection.execute("UPDATE task_reminders SET status='cancelled',reason='task_ended',next_fire_at=NULL,version=version+1,updated_at=? WHERE task_id=? AND status IN ('active','paused')", (self._stamp(now), task.id))
                     changes.extend(ReminderChange(row["id"], "cancelled", "task_ended", None, row["version"] + 1) for row in rows)
-                elif old_task and old_task.deadline != task.deadline:
+                elif old_task and (old_task.deadline != task.deadline or old_task.planning.event_time != task.planning.event_time):
                     reminders = connection.execute("SELECT * FROM task_reminders WHERE task_id=? AND status IN ('active','paused')", (task.id,)).fetchall()
                     for row in reminders:
                         reminder = self._row_to_reminder(row)
-                        if reminder.rule["kind"] not in ("before_deadline", "before_date"):
+                        if reminder.rule["kind"] not in ("before_deadline", "before_date", "before_event"):
                             continue
-                        if task.deadline is None or task.deadline.kind != ("datetime" if reminder.rule["kind"] == "before_deadline" else "date"):
-                            connection.execute("UPDATE task_reminders SET status='cancelled',reason='deadline_removed_or_changed_kind',next_fire_at=NULL,version=version+1,updated_at=? WHERE id=?", (self._stamp(now), reminder.id))
-                            changes.append(ReminderChange(reminder.id, "cancelled", "deadline_removed_or_changed_kind", None, reminder.version + 1))
-                        elif reminder.status == ReminderStatus.ACTIVE:
+                        if reminder.rule["kind"] == "before_event" and old_task.planning.event_time == task.planning.event_time:
+                            continue
+                        if reminder.rule["kind"] != "before_event" and old_task.deadline == task.deadline:
+                            continue
+                        if reminder.rule["kind"] == "before_event":
+                            event_time = task.planning.event_time
+                            invalid_time = task.planning.kind != PersonalTaskKind.EVENT or event_time is None or event_time.kind != "datetime"
+                            cancel_reason = "event_time_removed_or_changed_kind"
+                        else:
+                            event_time = None
+                            invalid_time = task.deadline is None or task.deadline.kind != ("datetime" if reminder.rule["kind"] == "before_deadline" else "date")
+                            cancel_reason = "deadline_removed_or_changed_kind"
+                        if invalid_time:
+                            connection.execute("UPDATE task_reminders SET status='cancelled',reason=?,next_fire_at=NULL,version=version+1,updated_at=? WHERE id=?", (cancel_reason, self._stamp(now), reminder.id))
+                            changes.append(ReminderChange(reminder.id, "cancelled", cancel_reason, None, reminder.version + 1))
+                        elif reminder.status == ReminderStatus.ACTIVE or (reminder.rule["kind"] == "before_event" and reminder.status == ReminderStatus.PAUSED and reminder.reason == "event_moved_past"):
                             adjusted = reschedule_relative(reminder, task, now)
                             connection.execute("UPDATE task_reminders SET status=?,reason=?,next_fire_at=?,version=?,updated_at=? WHERE id=?", (adjusted.status.value, adjusted.reason, self._stamp(adjusted.next_fire_at), adjusted.version, self._stamp(now), reminder.id))
                             action = "paused" if adjusted.status == ReminderStatus.PAUSED else "rescheduled"

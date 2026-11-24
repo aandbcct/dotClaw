@@ -1,5 +1,7 @@
 # PA-03 技术规格：自然语言事务管理与个人助理入口
 
+2026-11-24 计划增量的详细字段与交互见 [planning-extension.md](planning-extension.md)。本文已同步内部工具默认自动执行、数据库v4及规划工具边界；通用运行时审批不变。T1—T7首版实施历史保留在plan.md，前轮动态修复已提交 `2a1999f`。
+
 设计基线：2026-11-23。T1—T6已实现并分阶段提交，T7交付与本次验证边界见 [plan.md](plan.md) 和 [verification.md](verification.md)。首次实施仅做静态验证；用户随后授权动态修复并要求本轮不提交。最新动态结果及未覆盖边界见verification.md末节，不能把未执行的第10节项目记为通过。契约冲突时先修订设计，不允许实现者自行选择替代语义。范围为 #64，一个 PR。以下类名均为现有类型或本次指定的拟新增类型。
 
 ## 1. 架构与不可变规则
@@ -40,7 +42,6 @@ flowchart TB
 
 - `ensure_session() -> Session（会话）`：锁内读取固定 ID；存在则校验身份、未归档及模型；不存在则使用当前首选 chat 模型创建固定 ID 会话。文件保存成功后返回。不建 SQLite 绑定表：固定 ID 本身就是绑定，避免文件与数据库双写。
 - `before_submit() -> None`：同步本会话请求的审批终态投影，然后沿用原消息入口提交；不是新运行队列。
-- `is_assistant_session(session_id) -> bool`：按常量比较，供列表过滤和管理限制使用。
 
 修改 `SessionManager（会话管理器）.create(..., *, session_id: str | None = None)`：默认仍生成随机 ID；显式 ID 经过现有路径校验，已存在则报冲突，不覆盖文件。固定 ID 创建仅由入口服务调用。保留原原子保存方式。绑定文件损坏报存储错误，不自动重建；固定文件不存在但助理 SQLite 已有该会话数据时报 `assistant_session_missing`，避免默默丢失对话历史。
 
@@ -51,11 +52,11 @@ flowchart TB
 - 模型未配置、模型不可用、身份缺失分别显示现有配置错误，不自动换身份/模型。当前 Host 已在无 chat 模型时拒绝启动，前端按既有服务不可用行为展示，不为此重写启动机制。
 - 同会话忙碌继续使用协调器现有拒绝/控制结果；不排队，不因换页停止运行。
 
-新增身份 YAML `.dotclaw/agentConfig/personal-assistant.yaml`，显式列出本期15个助理工具；不开放 exec、任意文件、委派、MCP 或记忆写入工具。Docker上下文仅放行此文件及所需父目录，Dockerfile只复制该身份文件；Compose既有只读目录挂载会遮住镜像内置文件，旧挂载源需单独补该文件且不覆盖其他身份。上下文仅启用身份、工具、当前对话、历史摘要、运行消息及本次助理上下文。助理专用快照不加载无关全局 Agent 目录、知识库和记忆；普通身份空白工具白名单不暴露 `builtin.assistant.*`，personal-assistant显式白名单保留，handler仍校验身份；正常身份的其他行为不变。
+新增身份 YAML `.dotclaw/agentConfig/personal-assistant.yaml`，显式列出17个助理工具（含plans.save/apply）；不开放 exec、任意文件、委派、MCP 或记忆写入工具。Docker上下文仅放行此文件及所需父目录，Dockerfile只复制该身份文件；Compose既有只读目录挂载会遮住镜像内置文件，旧挂载源需单独补该文件且不覆盖其他身份。上下文仅启用身份、工具、当前对话、历史摘要、运行消息及本次助理上下文。助理专用快照不加载无关全局 Agent 目录、知识库和记忆；普通身份空白工具白名单不暴露 `builtin.assistant.*`，personal-assistant显式白名单保留，handler仍校验身份；正常身份的其他行为不变。
 
-## 3. 数据模型与数据库 v3
+## 3. 数据模型与数据库 v4
 
-现有 `user_version=2` 升为 3。唯一迁移入口仍为 `SqlitePersonalTaskRepository（事务 SQLite 仓储）._initialize_sync`，调用 `assistant/sqlite_repository.py:migrate_assistant_schema(connection)`，完成后在同一事务设置版本。0→1→2→3 连续执行，修正现有分支局部 version 更新；旧表不删除、不重建。拒绝 >3；迁移中断整体回滚；不支持用旧二进制写 v3，回退需要恢复升级前备份。
+唯一迁移入口仍为 `SqlitePersonalTaskRepository（事务 SQLite 仓储）._initialize_sync`。0→1→2→3→4 连续执行；v3通过 `assistant/sqlite_repository.py:migrate_assistant_schema(connection)` 创建助理表，v4在原事务表增加planning_json，默认普通任务和空安排。版本更新与迁移在同一事务，旧表和旧行保留；拒绝 >4，迁移中断整体回滚。旧二进制不能写v4，回退需要恢复升级前备份。planning结构见planning-extension.md。
 
 ### 3.1 类型与表
 
@@ -87,14 +88,14 @@ flowchart TB
 | awaiting_input | request.save 携带 expected_version 更新 | awaiting_input；版本+1，保留来源，替换本次草案 |
 | awaiting_input或不存在 | batch.prepare 保存完整且不可变 proposal | awaiting_confirmation；版本+1或新建；proposal_hash及来源 run 固定 |
 | awaiting_input | 关联单项操作成功，与业务提交同事务 | resolved；真实 result_refs，版本+1 |
-| awaiting_confirmation | 已批准批量全部单项成功 | resolved；最后一项提交时更新 |
-| awaiting_confirmation | 批量部分失败，或对应审批拒绝/运行放弃 | awaiting_input；保存失败及已成功引用，清除可执行 proposal；重新修改必须 prepare 并确认 |
+| awaiting_confirmation | 批量全部单项成功 | resolved；最后一项提交时更新 |
+| awaiting_confirmation | 批量部分失败，或对应显式ASK审批拒绝 | awaiting_input；保存失败及已成功引用，清除可执行 proposal；重新修改必须 prepare |
 | awaiting_input/awaiting_confirmation | request.abandon，当前没有活跃审批执行 | abandoned；不取消正式事务 |
 | resolved/abandoned | 再次修改/执行草案 | 拒绝；新意图创建新请求 |
 
 模型不能直接设置 resolved 或批准标志。运行暂时 recoverable 或仍等待审批时保持请求，不清除 proposal；用户通过现有控制面先恢复/拒绝/放弃运行。纯查询和直接完成的单项操作无需请求记录。
 
-新增 `AssistantService.reconcile_controls(session_id)`：仅枚举 awaiting_confirmation 请求，根据 proposal_run_id 读取 `RunRepositoryAdapter（运行仓储适配器）.load_tool_ledger/load_run`，精确匹配 batch.apply 的 request_id/version/hash。拒绝或终态未执行的提案 CAS 转 awaiting_input；recoverable、等待、正在执行不动。批量回执优先于旧投影，已成功项永不回退。入口首次打开、提交前、审批/放弃接口返回后调用；启动恢复阶段调用一次。重复调用幂等；CAS 冲突说明已有新状态，重读返回，不覆盖。
+`AssistantService.reconcile_controls(session_id)` 保留显式ASK策略及历史挂起批量的拒绝投影：枚举awaiting_confirmation请求，根据proposal_run_id读取原运行账本，匹配batch.apply的request_id/version/hash，只在已明确拒绝时CAS退回awaiting_input；默认自动执行的准备运行结束不撤销提案。批量回执优先，已成功项不回退。入口、启动及原控制面收尾继续调用；重复调用幂等，CAS冲突重读而不覆盖。
 
 ## 4. 接口：模型只表达业务参数
 
@@ -104,18 +105,20 @@ flowchart TB
 
 | 工具及输入模型 | 方法与输出 |
 | --- | --- |
-| tasks.query：`TaskQueryInput（查询入参）`，filter、keyword、deadline_from/until、overdue_only、offset=0、limit=20（1..50） | `AssistantService.query_tasks(input, context)` → 现有 query 的页结果＋持久 result_set_id；保留当时顺序 |
+| tasks.query：`TaskQueryInput（查询入参）`，filter、plan_filter、keyword、deadline_from/until、overdue_only、offset=0、limit=20（1..50） | `AssistantService.query_tasks(input, context)` → 现有 query 的页结果＋持久 result_set_id；保留当时顺序 |
 | tasks.get：`TaskGetInput（详情入参）`，task_id | `get_task` → 事务、版本、全部提醒、时间时区；保存可定位快照 |
-| tasks.create：`TaskCreateInput（创建入参）`，title、description=""、deadline可空、reminders=[]、request_id/expected_request_version可选成对 | `create_task` → 原子保存事务及初始提醒、回执、可选请求 resolved |
-| tasks.update：`TaskUpdateInput（局部修改入参）`，task_id、expected_version、patch、可选请求引用 | `update_task` → 仅允许 title/description/deadline；用 model_fields_set 区分未提供与清空；至少一项；合并当前值后调现有 update |
+| tasks.create：`TaskCreateInput（创建入参）`，title、description=""、deadline可空、planning可选、reminders=[]、普通请求引用可选成对 | `create_task` → 原子保存事务及初始提醒、回执、普通请求 resolved；不关联规划请求 |
+| tasks.update：`TaskUpdateInput（局部修改入参）`，task_id、expected_version、patch、普通请求引用可选 | `update_task` → 允许 title/description/deadline/planning；用 model_fields_set 区分未提供与清空；至少一项；合并当前值后调现有 update；不关闭规划请求 |
 | tasks.status：`TaskStatusInput（状态入参）`，task_id、expected_version、status=completed/cancelled、可选请求引用 | `change_task_status` → 现有 change_status；不新增 reopen/进度管理工具 |
 | reminders.create/update/status：`ReminderCreateInput / ReminderUpdateInput / ReminderStatusInput（提醒操作入参）` | 使用现有 service 同名方法；create含task_id/rule/expected_task_version，update再含reminder_id/expected_version，status以action=pause/resume/cancel替代rule；可选请求引用同上 |
 | requests.list/get：`RequestListInput / RequestGetInput（请求查询入参）` | list(keyword="",offset=0,limit=20) 返回当前会话未结页及total；get(id)返回完整草案和来源 |
 | results.get：`ResultSetGetInput（结果快照入参）`，result_set_id | `get_result_set`返回当前会话对应快照完整有序页，不重新查询排序 |
-| requests.save：`RequestSaveInput（草案入参）` | 新建 id为空；修改 id+expected_version；输入kind/summary/payload/source_refs；source_refs每项为run_id/message_id，时间由服务查得，当前输入自动加入；仅 awaiting_input，检查来源在当前会话 |
+| requests.save：`RequestSaveInput（草案入参）` | 新建 id为空；修改 id+expected_version；输入kind/summary/payload/source_refs；时间由服务查得，当前输入自动加入；仅 awaiting_input，检查来源在当前会话；不得创建或覆盖规划草案 |
 | requests.abandon：`RequestAbandonInput（放弃草案入参）`，id/expected_version | 仅放弃未结请求；有当前活跃审批时返回需先处理审批 |
 | batch.prepare：`BatchPrepareInput（批量提案入参）` | 可选请求引用、summary、items[2..20]；每项只允许update/status/reminder update或status，含读取版本；相同事务只允许一项，避免批内相互改变版本；查详情保存展示前后差异、完整命令和hash；不写业务 |
-| batch.apply：`BatchApplyInput（执行批量入参）` | request_id/expected_version/proposal_hash；必须经运行时批准；读取已保存命令，不接收新的items；逐项执行并返回全部结果 |
+| batch.apply：`BatchApplyInput（执行批量入参）` | request_id/expected_version/proposal_hash；默认自动执行；读取已保存命令，不接收新的items；逐项执行并返回全部结果 |
+| plans.save：`PlanSaveInput（计划草案入参）` | 保存阶段、缺失信息、关联事件和结构化任务安排，不写正式任务；更新使用request_id/expected_version；精确字段与约束见planning-extension.md |
+| plans.apply：`PlanApplyInput（接受计划入参）` | 对话明确接受后，以request_id/expected_version执行保存的proposed版本；同事务创建全部任务与提醒、写回执并关闭请求 |
 
 多个新建事项由模型逐项调用 create，不伪称原子批量。新建时不强制搜索所有现有事务；存在上下文引用或重复疑问时先查询。批量意图识别及调用正确工具属于模型验收项，不能声称程序能从任意语言证明模型没有拆成多个单项调用。
 
@@ -185,17 +188,17 @@ sequenceDiagram
 
 ### 5.3 批量与请求完成
 
-- prepare 成功的 proposal 不原地编辑；要改内容先退回awaiting_input，再prepare生成新version/hash并重新批准。
-- prepare及其首次apply必须在同一run中，apply校验context.agentrun_id等于proposal_run_id；该run结束却未提出apply时，reconcile退回awaiting_input，下轮重新prepare。这样控制投影能精确找到唯一所属运行，不能拿另一个run的批准套用。
+- prepare 成功的 proposal 不原地编辑；要改内容先退回awaiting_input，再prepare生成新version/hash。
+- prepare及apply可跨run，读取保存的session/request version/hash，不因准备运行结束而撤销提案。proposal_run_id保留来源追踪和历史显式审批投影用途，不作为默认apply的同run门槛。
 - 预览before/after只表示用户要求的直接字段变化；相对提醒联动以规则摘要说明，实际时间由提交时服务计算并返回，不把prepare时的预测当作最终事实。
-- apply 首先验证可信context.approved、session、request version/hash；逐项取命令。子操作键固定为 `batch:{request_id}:{proposal_hash}:{index}`，防同一提案被新tool call重复执行。
+- apply 首先验证session、request version/hash；逐项取命令。子操作键固定为 `batch:{request_id}:{proposal_hash}:{index}`，防同一提案被新tool call重复执行。
 - 每项是独立BEGIN IMMEDIATE，验证版本、调用同一业务服务、写子回执。领域失败记录后继续；存储错误立即终止剩余项并交Runtime恢复。
 - 最后一项同事务汇总子回执，全成功resolved；否则awaiting_input并清除proposal可执行状态，保留结果引用及失败内容。另保存以request_id/hash唯一的批量汇总回执，后续apply先查它，再检查已变化的请求状态。
-- 中途取消保留已提交项；运行恢复按子键跳过已提交项。运行放弃由reconcile_controls将剩余部分交回awaiting_input；不自动再执行、不撤销成功项。
+- 中途取消保留已提交项；运行恢复按子键跳过已提交项。运行放弃不撤销成功项，也不自动继续执行；未结提案由后续显式执行或放弃收尾。
 - apply完成后、Runtime记账前崩溃：批量汇总已持久化，恢复返回原汇总。聚合回执与最后一项提交必须同事务。
 - request.save/abandon本身也使用运行时key，CAS更新和回执同事务。
 
-## 6. 权限与确认：沿用同一控制面
+## 6. 工具权限：默认自动执行，复用通用控制面
 
 修改 `ToolPolicy（工具权限档案）` 新增 ASSISTANT_READ="assistant.read"、ASSISTANT_WRITE="assistant.write"；`ResourceKind（资源类型）` 同名新增；`CapabilityRequest（能力请求）` 新增 resource_id、operation_hash可选字段。
 
@@ -205,13 +208,13 @@ sequenceDiagram
 
 普通身份的 `allowed_tools` 为空代表其他已注册工具可用，但助理工具全局注册后必须从该默认集合中排除 `builtin.assistant.*`；personal-assistant显式白名单正常保留。普通身份即使显式列出助理工具，handler仍按身份和固定会话校验并拒绝调用。
 
-batch.apply的needs_approval=True。在 `ToolExecutor._is_unattended_allow` 中两个assistant档案始终不跳过声明式审批；即使配置unattended_allow_profiles也不能取消批量确认。全局DENY仍先拒绝。普通单项WRITE默认不额外确认。
+助理工具包括batch.apply默认不声明强制人工审批；两种assistant档案默认ALLOW。用户显式配置ASK/DENY时继续使用通用工具权限与运行时控制，不改造主干审批状态机。
 
-`ToolExecutionContext（工具执行上下文）` 新增 approved:bool=False。适配器 `ToolExecutorAdapter._context` 只从invocation.approved赋值；执行器 `_build_context` 保留。batch handler以此拒绝无批准执行，不能接受模型传入approved。
+`ToolExecutionContext（工具执行上下文）` 的approved仍由通用运行时审批传递，不由模型提供。内部助理batch handler不再把该值作为默认执行门槛；身份、会话、请求版本及proposal_hash仍在业务边界校验。
 
 `_approval_operation_keys` 为assistant资源追加规范化的资源+operation_hash键，保留原文件键规则。使用现有运行账本冻结call.arguments、审批ID和decision，不增加另一套approve端点。
 
-批量流程：prepare→模型调用apply→现有Runtime挂起审批→前端以call.arguments读取服务端proposal预览→用户批准/拒绝→现有 /api/v1/approvals/{id} 恢复→apply执行。预览未加载、hash不匹配或请求不存在时禁用批准按钮，显示原因。普通聊天“好”不提交批准；等待审批时原协调器仍阻止新消息。拒绝后回到可澄清状态，按§3.2同步，不自动换参数重新申请同一操作。
+默认批量流程为prepare→apply→真实结果回执，不要求用户点击批准。只有显式ASK策略或旧挂起运行仍走既有审批端点及提案预览；预览不匹配时不能批准。普通聊天不替代通用权限审批；用户通过对话接受规划则由plans.apply处理具体草案，二者语义独立。
 
 ## 7. 来源、上下文和结果引用
 

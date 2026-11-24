@@ -138,6 +138,40 @@ async def test_create_task_with_initial_reminder_is_atomic_and_keeps_task_respon
 
 
 @pytest.mark.asyncio
+async def test_event_planning_http_roundtrip_old_put_and_plan_filters(tmp_path):
+    now = datetime(2030, 1, 1, 12, tzinfo=UTC)
+    repository = SqlitePersonalTaskRepository(tmp_path / "planning-http.sqlite3")
+    await repository.initialize()
+    host = SimpleNamespace(personal_task_service=PersonalTaskService(repository, timezone=ZoneInfo("UTC"), clock=lambda: now),
+        project_root=None, shutdown=AsyncMock())
+
+    async def host_factory():
+        return host
+
+    app = create_app(host_factory=host_factory)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            planning = {"kind": "event", "event_time": {"kind": "datetime", "value": "2030-01-01T14:00:00Z"},
+                "scheduled_time": None, "time_text": "下午两点", "related_task_id": None}
+            created = await client.post("/api/v1/personal-tasks", json={"title": "考试", "planning": planning})
+            assert created.status_code == 201, created.text
+            assert created.json()["planning"] == planning
+            url = f"/api/v1/personal-tasks/{created.json()['id']}"
+            detail = await client.get(url)
+            assert detail.status_code == 200
+            assert detail.json()["planning"] == planning
+            edited = await client.put(url, json={"title": "考试已确认", "description": "", "deadline": None,
+                "expected_version": 1})
+            assert edited.status_code == 200, edited.text
+            assert edited.json()["planning"] == planning
+            scheduled = await client.get("/api/v1/personal-tasks", params={"plan_filter": "scheduled"})
+            unscheduled = await client.get("/api/v1/personal-tasks", params={"plan_filter": "unscheduled"})
+            assert scheduled.status_code == 200 and [item["id"] for item in scheduled.json()["items"]] == [created.json()["id"]]
+            assert unscheduled.status_code == 200 and unscheduled.json()["items"] == []
+            assert (await client.get("/api/v1/personal-tasks", params={"plan_filter": "unknown"})).status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_status_response_contains_committed_reminder_effects(tmp_path):
     now = datetime(2030, 1, 1, 12, tzinfo=UTC)
     repository = SqlitePersonalTaskRepository(tmp_path / "task-effects.sqlite3")

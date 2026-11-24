@@ -63,8 +63,3 @@ class AssistantEntryService:
     async def before_submit(self) -> None:
         """提交新消息前同步已终结的批量审批结果。"""
         await self._assistant_service.reconcile_controls(ASSISTANT_SESSION_ID)
-
-    @staticmethod
-    def is_assistant_session(session_id: str) -> bool:
-        """判断标识是否为固定助理会话。"""
-        return session_id == ASSISTANT_SESSION_ID

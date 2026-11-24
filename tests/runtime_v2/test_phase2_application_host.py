@@ -17,26 +17,11 @@ from dotclaw.agent.identity import AgentIdentity
 from dotclaw.bootstrap import application_host as app_host_mod
 from dotclaw.bootstrap.application_host import ApplicationHost
 from dotclaw.bootstrap.runtime_factory import RuntimeServices
+from dotclaw.assistant.service import ASSISTANT_TOOL_OPERATIONS
 from dotclaw.session.session import SessionManager
 
 
-_ASSISTANT_TOOL_NAMES = [
-    "builtin.assistant.tasks.query",
-    "builtin.assistant.tasks.get",
-    "builtin.assistant.tasks.create",
-    "builtin.assistant.tasks.update",
-    "builtin.assistant.tasks.status",
-    "builtin.assistant.reminders.create",
-    "builtin.assistant.reminders.update",
-    "builtin.assistant.reminders.status",
-    "builtin.assistant.requests.list",
-    "builtin.assistant.requests.get",
-    "builtin.assistant.requests.save",
-    "builtin.assistant.requests.abandon",
-    "builtin.assistant.results.get",
-    "builtin.assistant.batch.prepare",
-    "builtin.assistant.batch.apply",
-]
+_ASSISTANT_TOOL_NAMES = list(ASSISTANT_TOOL_OPERATIONS)
 
 
 def _assistant_identity() -> AgentIdentity:

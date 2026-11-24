@@ -2,12 +2,19 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getAssistantResults } from "./api";
 import { useAssistantResults } from "./useAssistantResults";
-import type { AssistantRunResults } from "./types";
+import type { AssistantOperationName, AssistantRunResults } from "./types";
 
 vi.mock("./api", () => ({ getAssistantResults: vi.fn(), getAssistantProposal: vi.fn() }));
 
 function result(id: string): AssistantRunResults {
   return { schema_version: 1, run_id: "run-1", result_sets: [{ id, session_id: "personal-assistant", run_id: "run-1", call_id: "call", items: [], created_at: "" }], operations: [] };
+}
+
+function completedPlanOperation(operation: Extract<AssistantOperationName, "plans.apply" | "plans.save">): AssistantRunResults {
+  return { schema_version: 1, run_id: "run-1", result_sets: [], operations: [{
+    operation_key: operation, session_id: "personal-assistant", run_id: "run-1", call_id: operation, tool_name: operation, arguments_hash: "", request_id: "request-1", created_at: "",
+    result: { schema_version: 1, operation, outcome: "succeeded", data: null, task_refs: [], reminder_refs: [], changes: [], error: null, result_set_id: null, request_id: "request-1", items: [] },
+  }] };
 }
 
 describe("useAssistantResults", () => {
@@ -33,5 +40,19 @@ describe("useAssistantResults", () => {
 
     act(() => window.dispatchEvent(new Event("focus")));
     await waitFor(() => expect(hook.current.results[0].result_sets[0].id).toBe("focus"));
+  });
+
+  it("plans.apply 刷新正式事务，plans.save 不刷新", async () => {
+    const onApplied = vi.fn();
+    vi.mocked(getAssistantResults).mockResolvedValue(completedPlanOperation("plans.apply"));
+    const applied = renderHook(() => useAssistantResults(["run-1"], {}, onApplied));
+    await waitFor(() => expect(onApplied).toHaveBeenCalledExactlyOnceWith());
+    applied.unmount();
+
+    const onSaved = vi.fn();
+    vi.mocked(getAssistantResults).mockResolvedValue(completedPlanOperation("plans.save"));
+    const saved = renderHook(() => useAssistantResults(["run-1"], {}, onSaved));
+    await waitFor(() => expect(saved.result.current.loading).toBe(false));
+    expect(onSaved).not.toHaveBeenCalled();
   });
 });

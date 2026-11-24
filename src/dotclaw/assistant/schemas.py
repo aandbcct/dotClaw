@@ -7,7 +7,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
-from .models import AssistantRequestPayload, ReminderRule
+from .models import AssistantRequestPayload, ReminderRule, TaskPlanningInput
 
 
 class StrictInput(BaseModel):
@@ -37,6 +37,7 @@ def _parse_query_date(value: date | str | None) -> date | None:
 
 class TaskQueryInput(StrictInput):
     filter: Literal["active", "all", "completed", "cancelled"] = "active"
+    plan_filter: Literal["all", "unscheduled", "scheduled", "ended"] = "all"
     keyword: str = ""
     deadline_from: date | None = None
     deadline_until: date | None = None
@@ -59,6 +60,7 @@ class TaskCreateInput(StrictInput):
     description: str = ""
     deadline: date | datetime | None = None
     reminders: list[ReminderRule] = Field(default_factory=list)
+    planning: TaskPlanningInput | None = None
     request_id: str | None = Field(default=None, description="关联已有请求时必须与 expected_request_version 同时提供。")
     expected_request_version: int | None = Field(default=None, ge=1, description="关联已有请求时必须与 request_id 同时提供；取自 requests.get 返回的 data.request.version。")
 
@@ -78,6 +80,7 @@ class TaskPatch(StrictInput):
     title: str | None = None
     description: str | None = None
     deadline: date | datetime | None = None
+    planning: TaskPlanningInput | None = None
 
     @field_validator("deadline", mode="before")
     @classmethod
@@ -197,6 +200,45 @@ class RequestSaveInput(StrictInput):
         if (self.id is None) != (self.expected_version is None):
             raise PydanticCustomError("request_version_pair", "id 与 expected_version 必须同时提供")
         return self
+
+
+class PlanSaveItem(StrictInput):
+    title: str
+    description: str = ""
+    deadline: str | None = None
+    planning: TaskPlanningInput = Field(description="必填结构化安排；已排期时写 scheduled_time，确未安排时显式设 scheduled_time=null。关联事件时写 related_task_id。")
+    reminders: list[ReminderRule] = Field(default_factory=list)
+
+
+class PlanSaveInput(StrictInput):
+    request_id: str | None = Field(default=None, description="更新计划草案时填写 data.request.id，并同时提供 expected_version；只能使用规划请求 ID，不能用事务 ID。")
+    expected_version: int | None = Field(default=None, ge=1, description="计划请求版本；更新前从 requests.get 的 data.request.version 读取最新值，不要用事务 version。")
+    summary: str = Field(max_length=200)
+    stage: Literal["needs_input", "drafting", "proposed"]
+    event_ids: list[str] = Field(default_factory=list, max_length=50)
+    missing_fields: list[str] = Field(default_factory=list, max_length=20)
+    items: list[PlanSaveItem] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def version_pair(self):
+        if (self.request_id is None) != (self.expected_version is None):
+            raise PydanticCustomError("plan_request_version_pair", "计划更新必须同时提供 data.request.id 与 data.request.version")
+        if self.stage == "proposed" and (not self.items or self.missing_fields):
+            raise ValueError("proposed 草案必须包含任务且没有缺失字段")
+        if self.stage == "proposed":
+            event_ids = set(self.event_ids)
+            for item in self.items:
+                related_id = item.planning.related_task_id
+                if event_ids and related_id not in event_ids:
+                    raise ValueError("proposed 计划的每个任务都必须关联一个 event_ids 中的事件")
+                if related_id is not None and related_id not in event_ids:
+                    raise ValueError("related_task_id 必须包含在 event_ids 中")
+        return self
+
+
+class PlanApplyInput(StrictInput):
+    request_id: str
+    expected_version: int = Field(ge=1)
 
 
 class RequestAbandonInput(StrictInput):

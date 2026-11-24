@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ...personal_tasks.models import PersonalTaskStatus, PersonalTaskView, TaskDeadline
+from ...personal_tasks.models import PersonalTaskStatus, PersonalTaskView, TaskDeadline, TaskPlanning, PersonalTaskKind
 from ...personal_tasks.reminder_models import Reminder
 from .reminder_schemas import ReminderResponse, ReminderRulePayload
 
@@ -40,12 +40,27 @@ class DateTimeDeadlinePayload(BaseModel):
 TaskDeadlinePayload = Annotated[DateDeadlinePayload | DateTimeDeadlinePayload, Field(discriminator="kind")]
 
 
+class TaskPlanningPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: PersonalTaskKind = PersonalTaskKind.TASK
+    event_time: TaskDeadlinePayload | None = None
+    scheduled_time: TaskDeadlinePayload | None = None
+    time_text: str = ""
+    related_task_id: str | None = None
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def parse_kind(cls, value):
+        return PersonalTaskKind(value) if isinstance(value, str) else value
+
+
 class CreatePersonalTaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     title: str
     description: str = ""
     deadline: TaskDeadlinePayload | None = None
     reminders: list[ReminderRulePayload] = Field(default_factory=list)
+    planning: TaskPlanningPayload = Field(default_factory=TaskPlanningPayload)
 
 
 class UpdatePersonalTaskRequest(BaseModel):
@@ -54,6 +69,7 @@ class UpdatePersonalTaskRequest(BaseModel):
     description: str
     deadline: TaskDeadlinePayload | None
     expected_version: Annotated[int, Field(ge=1, strict=True)]
+    planning: TaskPlanningPayload | None = None
 
 
 class ChangePersonalTaskStatusRequest(BaseModel):
@@ -68,6 +84,7 @@ class PersonalTaskResponse(BaseModel):
     description: str
     status: PersonalTaskStatus
     deadline: TaskDeadlinePayload | None
+    planning: TaskPlanningPayload
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None
@@ -113,6 +130,21 @@ def deadline_to_domain(value: TaskDeadlinePayload | None) -> TaskDeadline | None
     return TaskDeadline(value.kind, value.value)
 
 
+def planning_to_domain(value: TaskPlanningPayload) -> TaskPlanning:
+    return TaskPlanning(value.kind, deadline_to_domain(value.event_time), deadline_to_domain(value.scheduled_time),
+                        value.time_text, value.related_task_id)
+
+
+def planning_to_payload(value: TaskPlanning) -> TaskPlanningPayload:
+    def convert(item):
+        if item is None:
+            return None
+        cls = DateDeadlinePayload if item.kind == "date" else DateTimeDeadlinePayload
+        return cls.model_construct(kind=item.kind, value=item.value)
+    return TaskPlanningPayload.model_construct(kind=value.kind, event_time=convert(value.event_time),
+        scheduled_time=convert(value.scheduled_time), time_text=value.time_text, related_task_id=value.related_task_id)
+
+
 def to_task_response(view: PersonalTaskView) -> PersonalTaskResponse:
     task = view.task
     deadline = None
@@ -123,7 +155,7 @@ def to_task_response(view: PersonalTaskView) -> PersonalTaskResponse:
         else:
             deadline = DateTimeDeadlinePayload.model_construct(kind="datetime", value=task.deadline.value)
     return PersonalTaskResponse(id=task.id, title=task.title, description=task.description, status=task.status,
-        deadline=deadline, created_at=task.created_at, updated_at=task.updated_at,
+        deadline=deadline, planning=planning_to_payload(task.planning), created_at=task.created_at, updated_at=task.updated_at,
         completed_at=task.completed_at, version=task.version, is_overdue=view.is_overdue,
         reminder_changes=[ReminderChangeResponse(reminder_id=item.reminder_id, action=item.action, reason=item.reason,
             next_fire_at=item.next_fire_at, version=item.version) for item in view.reminder_changes])

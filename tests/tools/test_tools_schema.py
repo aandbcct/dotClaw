@@ -23,6 +23,7 @@ from dotclaw.tools.schema import (
 )
 from dotclaw.assistant.schemas import (
     BatchPrepareInput,
+    PlanSaveInput,
     ReminderCreateInput,
     ReminderStatusInput,
     ReminderUpdateInput,
@@ -170,6 +171,19 @@ def test_request_pair_validation_uses_fixed_safe_errors() -> None:
     assert "id" in str(missing_save_version.value)
     assert "expected_version" in str(missing_save_version.value)
     assert "private-request-id" not in str(missing_save_version.value)
+
+
+def test_plan_save_version_pair_error_explains_latest_planning_version() -> None:
+    with pytest.raises(ToolValidationError) as missing_plan_version:
+        validate_args(PlanSaveInput, {
+            "request_id": "private-plan-id", "summary": "更新计划", "stage": "drafting",
+        })
+    message = str(missing_plan_version.value)
+    assert "request_id" in message
+    assert "data.request.id" in message
+    assert "data.request.version" in message
+    assert "事务 ID" in message
+    assert "private-plan-id" not in message
 
 
 def test_validate_missing_required_raises_invalid_arguments() -> None:

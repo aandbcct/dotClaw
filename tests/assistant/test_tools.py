@@ -5,6 +5,7 @@ import pytest
 from dotclaw.tools.assistant_tools import register_assistant_tools
 from dotclaw.tools.registry import ToolRegistry
 from dotclaw.assistant.schemas import TaskCreateInput
+from dotclaw.assistant.service import ASSISTANT_TOOL_OPERATIONS
 
 from .test_service import add_user_run, make_context, make_service
 
@@ -14,7 +15,7 @@ async def test_registered_tool_executes_real_service_and_rejects_wrong_identity(
     service, task_repository, _ = await make_service(tmp_path / "assistant.sqlite3")
     registry = ToolRegistry()
     register_assistant_tools(registry, service)
-    assert len(registry.all_names()) == 15
+    assert set(registry.all_names()) == set(ASSISTANT_TOOL_OPERATIONS)
 
     handler = registry.get("builtin.assistant.tasks.create")
     result = await handler.execute({"title": "通过注册工具创建"}, make_context())
@@ -30,8 +31,8 @@ async def test_registered_tool_executes_real_service_and_rejects_wrong_identity(
 
 
 @pytest.mark.asyncio
-async def test_batch_tool_contract_requires_apply_to_start_runtime_approval(tmp_path):
-    """提案保存只返回审批引用，apply 工具声明才会让 Runtime 请求审批。"""
+async def test_batch_tool_contract_applies_without_runtime_approval(tmp_path):
+    """批量提案的版本校验不依赖运行时审批。"""
     service, task_repository, run_repository = await make_service(tmp_path / "assistant.sqlite3")
     first = await service.create_task(TaskCreateInput(title="待批一"), make_context(call_id="create-1", key="create-1"))
     second = await service.create_task(TaskCreateInput(title="待批二"), make_context(call_id="create-2", key="create-2"))
@@ -44,13 +45,19 @@ async def test_batch_tool_contract_requires_apply_to_start_runtime_approval(tmp_
     apply_handler = registry.get("builtin.assistant.batch.apply")
     prepare_definition = prepare_handler.definition()
     apply_definition = apply_handler.definition()
+    query_definition = registry.get("builtin.assistant.tasks.query").definition()
 
     assert not prepare_definition.needs_approval
-    assert apply_definition.needs_approval
+    assert not apply_definition.needs_approval
     assert "batch.apply" in prepare_definition.description
     assert "request_id 与 expected_request_version 必须同时提供" in prepare_definition.description
     assert "requests.get 返回的 data.request.version" in prepare_definition.description
-    assert "结构化批准" in apply_definition.description
+    assert "执行" in apply_definition.description
+    assert "filter=all" in query_definition.description
+    assert "由运行时暂停并请求结构化批准" not in prepare_definition.description
+    assert "data.request.id" in registry.get("builtin.assistant.plans.save").definition().description
+    assert "data.request.version" in registry.get("builtin.assistant.plans.apply").definition().description
+    assert "filter=all" in query_definition.description
 
     prepared = await prepare_handler.execute(
         {
@@ -77,10 +84,9 @@ async def test_batch_tool_contract_requires_apply_to_start_runtime_approval(tmp_
         make_context(run_id="batch-run", call_id="apply", key="apply", message_id="batch-message"),
     )
 
-    assert apply_result.is_error
-    assert json.loads(apply_result.output)["error"]["code"] == "approval_required"
-    assert (await task_repository.get_detail(first_task.id))[0].title == "待批一"
-    assert (await task_repository.get_detail(second_task.id))[0].title == "待批二"
+    assert not apply_result.is_error
+    assert (await task_repository.get_detail(first_task.id))[0].title == "已批一"
+    assert (await task_repository.get_detail(second_task.id))[0].title == "已批二"
 
 
 @pytest.mark.asyncio
@@ -157,9 +163,6 @@ async def test_task_create_request_reference_requires_version_before_side_effect
     save_handler = registry.get("builtin.assistant.requests.save")
     get_handler = registry.get("builtin.assistant.requests.get")
     create_handler = registry.get("builtin.assistant.tasks.create")
-    create_description = create_handler.definition().description
-    assert "request_id 与 expected_request_version 必须同时提供" in create_description
-    assert "requests.get 返回的 data.request.version" in create_description
 
     draft = await save_handler.execute(
         {

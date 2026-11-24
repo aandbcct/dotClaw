@@ -209,8 +209,6 @@ class ToolExecutor:
         self, profile: str | None, execution_context: ToolExecutionContext | None
     ) -> bool:
         """仅当全局与 Agent 最终策略均为 ALLOW 时跳过声明式人工审批。"""
-        if profile in {ToolPolicy.ASSISTANT_READ.value, ToolPolicy.ASSISTANT_WRITE.value}:
-            return False
         if profile is None or profile not in self._unattended_allow_profiles:
             return False
         scope = self._effective_scope(execution_context)
@@ -404,8 +402,10 @@ class ToolExecutor:
         # needs_approval 用于没有资源档案、仍需显式审批的工具（如配置 approval_commands
         # 指定的工具）；无交互通道时一律拒绝（设计不变量 §10.1.3）。
         needs_explicit_approval = (
-            definition.needs_approval or definition.name in self._approval_commands
-        ) and not pre_approved
+            (definition.needs_approval or definition.name in self._approval_commands)
+            and not self._is_unattended_allow(definition.policy_profile, execution_context)
+            and not pre_approved
+        )
         if (outcome.decision is PolicyDecision.ASK or needs_explicit_approval) and not pre_approved:
             if runtime_approval:
                 return ToolResult(

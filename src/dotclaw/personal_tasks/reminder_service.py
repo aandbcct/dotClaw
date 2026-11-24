@@ -39,11 +39,12 @@ class ReminderService:
             candidate = next_fire_at(rule, task, self._timezone, now)
         except (ValueError, KeyError, TypeError) as error:
             raise InvalidReminderInput(str(error)) from error
-        if candidate is None:
+        if candidate is None and rule["kind"] != "before_event":
             raise InvalidReminderInput("提醒时间必须晚于当前时间")
         rule = normalize_rule(rule)
-        reminder = Reminder(str(uuid4()), task_id, rule, str(self._timezone), ReminderStatus.ACTIVE, None,
-                            candidate, 1, now, now)
+        reminder = Reminder(str(uuid4()), task_id, rule, str(self._timezone),
+            ReminderStatus.ACTIVE if candidate else ReminderStatus.PAUSED,
+            "event_moved_past" if candidate is None else None, candidate, 1, now, now)
         return await self._repository.create_reminder(reminder, expected_task_version=expected_task_version)
 
     async def update(self, task_id: str, reminder_id: str, *, rule: ReminderRule, expected_version: int, expected_task_version: int) -> Reminder:
@@ -67,11 +68,12 @@ class ReminderService:
             candidate = next_fire_at(rule, task, self._timezone, now)
         except (ValueError, KeyError, TypeError) as error:
             raise InvalidReminderInput(str(error)) from error
-        if candidate is None:
+        if candidate is None and rule["kind"] != "before_event":
             raise InvalidReminderInput("提醒时间必须晚于当前时间")
         rule = normalize_rule(rule)
-        updated = Reminder(current.id, task_id, rule, str(self._timezone), ReminderStatus.ACTIVE, None,
-                           candidate, current.version + 1, current.created_at, now)
+        updated = Reminder(current.id, task_id, rule, str(self._timezone),
+            ReminderStatus.ACTIVE if candidate else ReminderStatus.PAUSED,
+            "event_moved_past" if candidate is None else None, candidate, current.version + 1, current.created_at, now)
         return await self._repository.replace_reminder(updated, expected_version=expected_version, expected_task_version=expected_task_version)
 
     async def change_status(self, task_id: str, reminder_id: str, *, action: Literal["pause", "resume", "cancel"], expected_version: int, expected_task_version: int) -> Reminder:

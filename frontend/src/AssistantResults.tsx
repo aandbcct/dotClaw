@@ -22,7 +22,7 @@ export function AssistantResults({
   onRetry: (runId: string) => void;
 }) {
   const writes = results.flatMap((result) => result.operations
-    .filter((operation) => ["tasks.create", "tasks.update", "tasks.status", "reminders.create", "reminders.update", "reminders.status", "batch.apply"].includes(operation.result.operation))
+    .filter((operation) => ["tasks.create", "tasks.update", "tasks.status", "reminders.create", "reminders.update", "reminders.status", "batch.apply", "plans.apply"].includes(operation.result.operation))
     .map((operation) => ({ runId: result.run_id, operation })));
   return <section className="assistant-results" aria-label="助理执行结果">
     <header><h2>事务结果</h2>{loading && <span role="status">正在同步…</span>}</header>
@@ -35,7 +35,11 @@ export function AssistantResults({
         {set.items.map((item) => <li key={item.id}>
           <button type="button" onClick={() => onOpenTask(item.id)}>{item.title}</button>
           <span>{taskStatus[item.status]} · v{item.version}</span>
+          <small>{item.description}</small>
           {item.deadline && <small>截止：{item.deadline}</small>}
+          {item.planning.kind === "event" && item.planning.event_time && <small>发生：{item.planning.event_time.value}</small>}
+          {item.planning.kind === "task" && item.planning.scheduled_time && <small>计划：{item.planning.scheduled_time.value}</small>}
+          {item.planning.time_text && <small>时间原文：{item.planning.time_text}</small>}
           {item.reminder_summary && <small>{item.reminder_summary}</small>}
         </li>)}
       </ol>}

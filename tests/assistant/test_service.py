@@ -104,6 +104,10 @@ async def test_real_sqlite_create_patch_clear_and_query_snapshot(tmp_path):
     assert created.outcome == "succeeded"
     task_ref = created.task_refs[0]
     assert task_ref.title == "核对合同"
+    assert task_ref.description == "初稿"
+    assert task_ref.deadline.kind == "date"
+    assert task_ref.deadline.value == date(2032, 4, 10)
+    assert task_ref.planning.kind == "task"
 
     updated = await service.update_task(
         TaskUpdateInput(
@@ -133,11 +137,89 @@ async def test_real_sqlite_create_patch_clear_and_query_snapshot(tmp_path):
     page = await service.query_tasks(TaskQueryInput(keyword="合同"), make_context(call_id="call-4", key="key-4"))
     assert page.data.total == 1
     assert page.data.items[0].id == task_ref.id
+    assert page.data.items[0].description == ""
+    assert page.data.items[0].deadline is None
+    assert page.data.items[0].planning.kind == "task"
     snapshot = await service.get_result_set(
         ResultSetGetInput(result_set_id=page.result_set_id),
         make_context(call_id="call-5", key="key-5"),
     )
     assert snapshot.data.result_set.items[0].id == task_ref.id
+    assert snapshot.data.result_set.items[0].description == ""
+    assert snapshot.data.result_set.items[0].planning.kind == "task"
+
+
+@pytest.mark.asyncio
+async def test_task_query_passes_plan_filter_and_ended_uses_all_status_filter(tmp_path):
+    service, _, _ = await make_service(tmp_path / "assistant.sqlite3")
+    created = await service.create_task(TaskCreateInput(title="已结束事务"), make_context())
+    await service.change_task_status(
+        TaskStatusInput(task_id=created.task_refs[0].id, expected_version=1, status="completed"),
+        make_context(call_id="complete", key="complete"),
+    )
+    ended_active = await service.query_tasks(TaskQueryInput(plan_filter="ended"), make_context(call_id="active-ended", key="active-ended"))
+    ended_all = await service.query_tasks(TaskQueryInput(filter="all", plan_filter="ended"), make_context(call_id="all-ended", key="all-ended"))
+    assert ended_active.data.total == 0
+    assert ended_all.data.total == 1
+    assert ended_all.data.items[0].id == created.task_refs[0].id
+
+
+@pytest.mark.asyncio
+async def test_planning_receipts_render_local_offset_without_turning_date_into_midnight(tmp_path):
+    path = tmp_path / "assistant.sqlite3"
+    timezone = ZoneInfo("Asia/Shanghai")
+    task_repository = SqlitePersonalTaskRepository(path, timezone)
+    await task_repository.initialize()
+    service = AssistantService(
+        path, timezone=timezone, repository=SqliteAssistantRepository(path), clock=lambda: NOW,
+    )
+    date_event = await service.create_task(
+        TaskCreateInput(title="日期事件", planning={
+            "kind": "event", "event_time": {"kind": "date", "value": "2032-04-10"},
+        }),
+        make_context(call_id="date-event", key="date-event"),
+    )
+    timed_event = await service.create_task(
+        TaskCreateInput(title="精确事件", planning={
+            "kind": "event", "event_time": {"kind": "datetime", "value": "2032-04-11T20:00:00+08:00"},
+        }),
+        make_context(call_id="timed-event", key="timed-event"),
+    )
+
+    assert date_event.task_refs[0].planning.event_time.value == date(2032, 4, 10)
+    local_time = timed_event.task_refs[0].planning.event_time.value
+    assert isinstance(local_time, datetime)
+    assert local_time.isoformat() == "2032-04-11T20:00:00+08:00"
+    stored, _ = await task_repository.get_detail(timed_event.task_refs[0].id)
+    assert stored.planning.event_time.value.astimezone(UTC).isoformat() == "2032-04-11T12:00:00+00:00"
+
+    page = await service.query_tasks(TaskQueryInput(filter="all"), make_context(call_id="events-page", key="events-page"))
+    snapshot = await service.get_result_set(
+        ResultSetGetInput(result_set_id=page.result_set_id),
+        make_context(call_id="events-snapshot", key="events-snapshot"),
+    )
+    page_event = next(item for item in page.data.items if item.id == timed_event.task_refs[0].id)
+    result_event = next(item for item in snapshot.data.result_set.items if item.id == timed_event.task_refs[0].id)
+    assert page_event.planning.event_time.value.isoformat() == "2032-04-11T20:00:00+08:00"
+    assert result_event.planning.event_time.value.isoformat() == "2032-04-11T20:00:00+08:00"
+
+    cleared = await service.update_task(
+        TaskUpdateInput(
+            task_id=timed_event.task_refs[0].id, expected_version=timed_event.task_refs[0].version,
+            patch={"planning": {"kind": "event", "event_time": None, "time_text": "晚上"}},
+        ),
+        make_context(call_id="clear-event-time", key="clear-event-time"),
+    )
+    assert cleared.task_refs[0].planning.event_time is None
+    assert cleared.task_refs[0].planning.time_text == "晚上"
+    cancelled = await service.change_task_status(
+        TaskStatusInput(task_id=timed_event.task_refs[0].id, expected_version=cleared.task_refs[0].version, status="cancelled"),
+        make_context(call_id="cancel-event", key="cancel-event"),
+    )
+    persisted, _ = await task_repository.get_detail(timed_event.task_refs[0].id)
+    assert cancelled.task_refs[0].status == "cancelled"
+    assert persisted.planning.event_time is None
+    assert persisted.planning.time_text == "晚上"
 
 
 @pytest.mark.asyncio

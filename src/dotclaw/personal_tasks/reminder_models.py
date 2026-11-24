@@ -16,6 +16,11 @@ class BeforeDeadlineRule(TypedDict):
     offset_minutes: int
 
 
+class BeforeEventRule(TypedDict):
+    kind: Literal["before_event"]
+    offset_minutes: int
+
+
 class BeforeDateRule(TypedDict):
     kind: Literal["before_date"]
     days_before: int
@@ -46,7 +51,7 @@ class YearlyRule(TypedDict):
     local_time: str
 
 
-ReminderRule = AtRule | BeforeDeadlineRule | BeforeDateRule | DailyRule | WeeklyRule | MonthlyRule | YearlyRule
+ReminderRule = AtRule | BeforeDeadlineRule | BeforeEventRule | BeforeDateRule | DailyRule | WeeklyRule | MonthlyRule | YearlyRule
 
 
 class ReminderStatus(StrEnum):

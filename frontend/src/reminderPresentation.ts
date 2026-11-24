@@ -9,6 +9,11 @@ export function reminderRuleSummary(rule: ReminderRule, timezone: string): strin
     const value = unit === "天" ? rule.offset_minutes / 1440 : unit === "小时" ? rule.offset_minutes / 60 : rule.offset_minutes;
     return `截止前${value}${unit}`;
   }
+  if (rule.kind === "before_event") {
+    const unit = rule.offset_minutes % 1440 === 0 ? "天" : rule.offset_minutes % 60 === 0 ? "小时" : "分钟";
+    const value = unit === "天" ? rule.offset_minutes / 1440 : unit === "小时" ? rule.offset_minutes / 60 : rule.offset_minutes;
+    return `事件前${value}${unit}`;
+  }
   if (rule.kind === "before_date") return rule.days_before === 0 ? `截止当天 ${rule.local_time}` : `截止日期前${rule.days_before}天 ${rule.local_time}`;
   if (rule.kind === "daily") return `每天 ${rule.local_time}`;
   if (rule.kind === "weekly") return `每${rule.weekdays.map((day) => weekdays[day]).join("、")} ${rule.local_time}`;

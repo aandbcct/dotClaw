@@ -85,6 +85,7 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
   }
   return <section className="personal-tasks"><header><button className="menu-button" onClick={onOpenNavigation}>☰</button><h1>事务</h1><span>应用时区：{tasks.timezone}</span><button onClick={() => void tasks.reload(true)}>刷新</button><button onClick={() => setEditing(null)}>新建</button></header>
     <nav aria-label="事务筛选">{(["active", "all", "completed", "cancelled"] as PersonalTaskFilter[]).map((value) => <button key={value} aria-pressed={tasks.filter === value} onClick={() => tasks.setFilter(value)}>{({ active: "未完成", all: "全部", completed: "已完成", cancelled: "已取消" })[value]}</button>)}</nav>
+    <nav aria-label="计划筛选">{(["all", "unscheduled", "scheduled", "ended"] as const).map((value) => <button key={value} aria-pressed={tasks.planFilter === value} onClick={() => tasks.setPlanFilter(value)}>{({ all: "全部计划", unscheduled: "待安排", scheduled: "已安排", ended: "已结束" })[value]}</button>)}</nav>
     <form className="task-query-filters" onSubmit={(event) => { event.preventDefault(); tasks.setKeyword(keywordDraft); }}>
       <label>关键词<input aria-label="事务关键词" value={keywordDraft} onChange={(event) => setKeywordDraft(event.target.value)} /></label>
       <button type="submit">搜索</button>
@@ -100,14 +101,18 @@ export function PersonalTasks({ onOpenNavigation, focusTaskId, focusNotification
       {focusLoading && <p>正在读取关联事务…</p>}
       {focusError && <p role="alert">{focusError} <button onClick={() => setFocusRetry((value) => value + 1)}>重试</button></p>}
       {focusResult?.items.map((task) => <p key={task.id}><strong>{task.title}</strong> · {labels[task.status]}{task.is_overdue ? " · 逾期" : ""}</p>)}
-      {focusResult?.missingIds.map((id) => <p key={id} role="status">关联事务已删除（{id}）</p>)}
+      {focusResult?.missingIds.map((id) => <p key={id} role="status">关联事务已删除</p>)}
       {!focusLoading && !focusError && focusResult && !focusResult.items.length && !focusResult.missingIds.length && <p>没有可显示的关联事务</p>}
     </section>}
     {tasks.loading ? <p>正在读取事务…</p> : !visibleTasks.length ? <p>暂无事务</p> : <ul className="task-list">{visibleTasks.map((task) => {
       const summary = task.reminder_summary;
       const primaryStatus = task.status === "pending" || task.status === "in_progress" ? "completed" : "pending";
+      const planningTime = task.planning?.kind === "event" ? task.planning.event_time : task.planning?.scheduled_time;
+      const planState = task.status === "completed" || task.status === "cancelled" ? "已结束" : !planningTime ? "待安排" : task.planning?.kind === "event" && planningTime.kind === "date" ? "待补具体时刻" : "已安排";
       return <li className="task-row" tabIndex={-1} id={`task-${task.id}`} key={task.id}>
-        <div className="task-row-heading"><strong>{task.title}</strong><span className={`task-status task-status--${task.status}`}>{labels[task.status]}</span>{task.deadline && <span>{task.deadline.kind === "date" ? task.deadline.value : new Date(task.deadline.value).toLocaleString("zh-CN", { timeZone: tasks.timezone })}</span>}{task.is_overdue && <b>逾期</b>}</div>
+        <div className="task-row-heading"><strong>{task.title}</strong><span>{task.planning?.kind === "event" ? "事件" : "任务"}</span><span className={`task-status task-status--${task.status}`}>{labels[task.status]}</span><span>{planState}</span>{planningTime && <span>{task.planning?.kind === "event" ? "发生：" : "计划："}{planningTime.kind === "date" ? planningTime.value : new Date(planningTime.value).toLocaleString("zh-CN", { timeZone: tasks.timezone })}</span>}{task.deadline && <span>截止：{task.deadline.kind === "date" ? task.deadline.value : new Date(task.deadline.value).toLocaleString("zh-CN", { timeZone: tasks.timezone })}</span>}{task.is_overdue && <b>逾期</b>}</div>
+        {task.planning?.time_text && <p>时间原文：{task.planning.time_text}</p>}
+        {task.planning?.kind === "event" && task.planning.related_task_id && <p><button type="button" onClick={() => setFocusTarget({ taskId: task.planning!.related_task_id! })}>查看关联事件</button></p>}
         {task.description && <p>{task.description}</p>}
         <div className="task-reminder-summary" aria-live="polite">
           {summary.active_count > 0 && summary.next_fire_at ? <span>下次提醒：{new Date(summary.next_fire_at).toLocaleString("zh-CN", { timeZone: tasks.timezone })} · {tasks.timezone}{summary.active_count > 1 ? `（另有 ${summary.active_count - 1} 条）` : ""}</span> : <span>无待触发提醒</span>}

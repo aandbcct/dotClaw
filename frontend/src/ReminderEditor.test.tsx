@@ -6,7 +6,7 @@ import type { PersonalTask } from "./types";
 
 afterEach(() => vi.useRealTimers());
 
-const makeTask = (deadline: PersonalTask["deadline"]): PersonalTask => ({ id: "task-1", title: "准备评审", description: "", status: "pending", deadline, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", completed_at: null, version: 1, is_overdue: false });
+const makeTask = (deadline: PersonalTask["deadline"]): PersonalTask => ({ id: "task-1", title: "准备评审", description: "", status: "pending", deadline, planning: { kind: "task", event_time: null, scheduled_time: null, time_text: "", related_task_id: null }, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", completed_at: null, version: 1, is_overdue: false });
 const common = { reminder: null, timezone: "Asia/Shanghai", pending: false, onReload: undefined, onClose: () => undefined };
 
 describe("提醒时间快捷项", () => {
@@ -53,5 +53,16 @@ describe("提醒时间快捷项", () => {
     expect((screen.getByLabelText("提前单位") as HTMLSelectElement).value).toBe("days");
     await user.click(screen.getByRole("button", { name: "保存提醒" }));
     expect(onSave).toHaveBeenCalledWith({ kind: "before_deadline", offset_minutes: 1440 }, undefined);
+  });
+
+  it("只允许事件具体时刻选择事件前提醒并保存相对分钟数", async () => {
+    const onSave = vi.fn(async () => undefined);
+    const task = { ...makeTask(null), planning: { kind: "event" as const, event_time: { kind: "datetime" as const, value: "2026-04-01T00:30:00Z" }, scheduled_time: null, time_text: "早上", related_task_id: null } };
+    render(<ReminderEditor {...common} task={task} onSave={onSave} />);
+    await userEvent.setup().selectOptions(screen.getByLabelText("提醒规则"), "before_event");
+    fireEvent.change(screen.getByLabelText("提前数量"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("提前单位"), { target: { value: "hours" } });
+    await userEvent.setup().click(screen.getByRole("button", { name: "保存提醒" }));
+    expect(onSave).toHaveBeenCalledWith({ kind: "before_event", offset_minutes: 120 }, undefined);
   });
 });

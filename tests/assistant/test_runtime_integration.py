@@ -197,11 +197,8 @@ def _runtime_engine(root: Path, registry: ToolRegistry, model: BatchApprovalMode
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approved, fail_context", [(True, False), (False, False), (True, True)])
-async def test_batch_approval_resume_restores_persisted_user_input(
-    tmp_path: Path, approved: bool, fail_context: bool
-) -> None:
-    """审批恢复保留初始 USER_INPUT；LLM 上下文失败时返回 FAILED。"""
+async def test_batch_runs_without_runtime_approval_and_keeps_user_input(tmp_path: Path) -> None:
+    """批量 apply 不触发审批并保留初始 USER_INPUT。"""
     database = tmp_path / "personal-assistant.sqlite3"
     timezone = ZoneInfo("UTC")
     task_repository = SqlitePersonalTaskRepository(database, timezone)
@@ -231,29 +228,15 @@ async def test_batch_approval_resume_restores_persisted_user_input(
         ConversationSnapshot("personal-assistant", (), 0),
     )
 
-    waiting = await engine.execute(request)
-    assert waiting.approval_id == "approval-batch"
-    assert waiting.state.mode.reason.value == "approval"
-    if fail_context:
-        reader.fail = True
-
-    result: RunResult = await engine.resolve_approval(waiting.approval_id, approved)
-
-    if fail_context:
-        assert result.state.outcome() is RunOutcome.FAILED
-        assert result.error is not None
-        assert model.call_inputs == [(message.message_id, _INPUT_CREATED_AT)] * 2
-    else:
-        assert result.state.outcome() is RunOutcome.COMPLETED
-        assert model.call_inputs == [(message.message_id, _INPUT_CREATED_AT)] * 3
+    result: RunResult = await engine.execute(request)
+    assert result.approval_id is None
+    assert result.state.outcome() is RunOutcome.COMPLETED
+    assert model.call_inputs == [(message.message_id, _INPUT_CREATED_AT)] * 3
     assert [(run_id, message_id, created_at.isoformat()) for run_id, message_id, created_at in reader.references] == [
-        (waiting.run_id, message.message_id, _INPUT_CREATED_AT),
+        (result.run_id, message.message_id, _INPUT_CREATED_AT),
     ] * 3
-    stored_input = await engine._run_repository.load_messages("personal-assistant", waiting.run_id)
+    stored_input = await engine._run_repository.load_messages("personal-assistant", result.run_id)
     assert stored_input[0].metadata["created_at"] == _INPUT_CREATED_AT
     saved_first, _ = await task_repository.get_detail(first.task.id)
     saved_second, _ = await task_repository.get_detail(second.task.id)
-    if approved:
-        assert (saved_first.title, saved_second.title) == ("新标题1", "新标题2")
-    else:
-        assert (saved_first.title, saved_second.title) == ("事务一", "事务二")
+    assert (saved_first.title, saved_second.title) == ("新标题1", "新标题2")

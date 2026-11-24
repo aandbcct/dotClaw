@@ -84,7 +84,7 @@ if (-not (Test-Path -LiteralPath $assistantIdentity)) {
 
 固定助理身份只能访问明确列出的助理工具。固定助理会话不能重命名、归档或删除；模型切换、运行控制仍可用。`config.example.yaml` 和 `docker/config.example.yaml` 给出 `assistant.read`、`assistant.write` 策略示例，用户可在自己的配置中将其收紧为 `ask` 或 `deny`。
 
-SQLite 事务数据库支持从 v0、v1、v2 连续迁移到 v3。首次用新版本启动前，停止所有访问同一数据目录的应用进程，并完整备份 `personal-assistant.sqlite3` 及存在的 `-wal`、`-shm` 文件。迁移失败应回滚本次数据库事务；迁移成功后旧版本不能直接写 v3。需要回退程序时，先停止服务，再恢复升级前的整套数据库备份；不要只恢复主 `.sqlite3` 文件或拼接 WAL。一个数据目录仍只允许一个应用进程管理。
+SQLite 事务数据库支持从 v0、v1、v2、v3 连续迁移到 v4；v4 在原事务表增加事件与任务安排信息。首次用新版本启动前，停止所有访问同一数据目录的应用进程，并完整备份 `personal-assistant.sqlite3` 及存在的 `-wal`、`-shm` 文件。迁移失败应回滚本次数据库事务；迁移成功后旧版本不能直接写 v4。需要回退程序时，先停止服务，再恢复升级前的整套数据库备份；不要只恢复主 `.sqlite3` 文件或拼接 WAL。一个数据目录仍只允许一个应用进程管理。
 
 开发项目默认名为 `dotclaw-dev`，部署项目默认名为 `dotclaw`。部署版继续使用项目隔离的命名卷；开发版会直接读写原有宿主 `data`，避免同时运行另一个使用相同目录的本地后端。
 

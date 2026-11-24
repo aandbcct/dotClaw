@@ -16,7 +16,7 @@ interface PreviewRequest {
 }
 interface RunResultState { result: AssistantRunResults | null; error: string; loading: boolean; }
 const WRITING_OPERATIONS = new Set([
-  "tasks.create", "tasks.update", "tasks.status", "reminders.create", "reminders.update", "reminders.status", "batch.apply",
+  "tasks.create", "tasks.update", "tasks.status", "reminders.create", "reminders.update", "reminders.status", "batch.apply", "plans.apply",
 ]);
 
 function proposalRequest(runId: string, tool: ToolExecution | undefined): PreviewRequest | null {

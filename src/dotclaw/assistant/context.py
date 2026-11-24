@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .models import AssistantInputRef
@@ -36,12 +36,24 @@ class AssistantContextReader:
             statuses=("awaiting_input", "awaiting_confirmation"),
         )
         result_sets = await self._repository.list_recent_result_sets(session_id, limit=3)
+        input_local = input_ref.created_at.astimezone(self._timezone)
+        input_date = input_local.date()
+        weekdays = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
         payload = {
             "schema_version": 1,
             "time": {
                 "now_utc": _timestamp(datetime.now(UTC)),
                 "business_timezone": self._timezone.key,
                 "input_created_at": _timestamp(input_ref.created_at),
+                "input_local": input_local.isoformat(timespec="seconds"),
+                "date_weekday_reference": [
+                    {
+                        "date": (input_date + timedelta(days=offset)).isoformat(),
+                        "weekday": weekdays[(input_date + timedelta(days=offset)).weekday()],
+                        "days_from_input": offset,
+                    }
+                    for offset in range(14)
+                ],
             },
             "requests": {
                 "items": [
@@ -52,6 +64,9 @@ class AssistantContextReader:
                         "status": request.status,
                         "version": request.version,
                         "updated_at": _timestamp(request.updated_at),
+                        "planning_stage": request.payload.planning_stage,
+                        "missing_fields": request.payload.missing_fields,
+                        "event_ids": request.payload.selected_task_ids,
                     }
                     for request in requests
                 ],

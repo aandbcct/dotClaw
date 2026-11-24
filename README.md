@@ -541,6 +541,8 @@ npm run dev
 
 Web 工作区提供固定的“个人助理”入口，用于通过对话查询和管理个人事务、提醒。待澄清请求保存在助理请求记录中，不等于正式事务；请求记录没有独立管理页面或业务写入 REST API，通过助理对话继续补充或放弃。查询与操作结果读取服务端保存的事务快照和回执。助理会话不能重命名、归档或删除，但可以切换模型、停止和恢复运行。
 
+助理会记录明确属于用户的事件，分别保存事件发生时间、任务安排时间和截止时间；时间不完整时保留原文并追问，不默认创建提醒。备考等规划先保存为草案，通过对话接受后再生成关联任务，无需确认按钮。现有事务列表支持待安排、已安排及已结束筛选。内部助理工具默认自动执行，用户显式配置的 `ask`、`deny` 策略仍生效；事件和计划的具体契约见 [计划增量规格](docs/Development/personal-assistant/pa3-NaturalLanguageAssistant/planning-extension.md)。
+
 本期不包含 #65 的主动跟进、自动提醒建议或快捷录入；自然语言解释仍需用户核对关键对象和时间。提醒通知继续受现有调度和浏览器条件限制：`scheduler.enabled` 控制后端扫描；站内通知可在网页关闭时保存，浏览器系统通知要求页面打开且已授予权限。SQLite 升级及 Docker 身份配置步骤见 [Docker 开发与部署](docs/docker.md)；设计及本次验证边界见 [PA-03 计划](docs/Development/personal-assistant/pa3-NaturalLanguageAssistant/plan.md)、[规格](docs/Development/personal-assistant/pa3-NaturalLanguageAssistant/spec.md) 与 [验证记录](docs/Development/personal-assistant/pa3-NaturalLanguageAssistant/verification.md)。
 
 实施范围、测试、前后截图及限制见[前端补齐与视觉改造开发说明](docs/Development/gui/前端与ChatGPT差距及补齐建议.md#9-实施结果与验收记录2026-10-23)。当前入口面向本地使用。

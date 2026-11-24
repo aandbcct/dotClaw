@@ -18,7 +18,10 @@ from ..personal_tasks.models import (
     PersonalTaskQuery,
     PersonalTaskStatus,
     PersonalTask,
+    PlanFilter,
     TaskDeadline,
+    TaskPlanning,
+    PersonalTaskKind,
     PersonalTaskView,
 )
 from ..personal_tasks.reminder_models import Reminder, ReminderRule, ReminderStatus
@@ -58,6 +61,7 @@ from .models import (
     AssistantRequest,
     AssistantRequestIntent,
     AssistantRequestPayload,
+    RequestCreateIntent,
     AssistantResultItem,
     AssistantResultSet,
     AssistantRunResults,
@@ -97,6 +101,9 @@ from .schemas import (
     TaskQueryInput,
     TaskStatusInput,
     TaskUpdateInput,
+    TaskPlanningInput,
+    PlanSaveInput,
+    PlanApplyInput,
 )
 from .sqlite_repository import (
     AssistantRequestConflict,
@@ -109,7 +116,7 @@ from ..personal_tasks.sqlite_repository import SqlitePersonalTaskRepository
 
 ASSISTANT_AGENT_ID = "personal-assistant"
 ASSISTANT_SESSION_ID = "personal-assistant"
-_RESULT_OPERATION_NAMES = {
+ASSISTANT_TOOL_OPERATIONS: dict[str, str] = {
     "builtin.assistant.tasks.query": "tasks.query",
     "builtin.assistant.tasks.get": "tasks.get",
     "builtin.assistant.tasks.create": "tasks.create",
@@ -125,6 +132,8 @@ _RESULT_OPERATION_NAMES = {
     "builtin.assistant.results.get": "results.get",
     "builtin.assistant.batch.prepare": "batch.prepare",
     "builtin.assistant.batch.apply": "batch.apply",
+    "builtin.assistant.plans.save": "plans.save",
+    "builtin.assistant.plans.apply": "plans.apply",
 }
 _T = TypeVar("_T")
 _TransactionAction = Callable[
@@ -142,10 +151,6 @@ class AssistantRequestSourceError(RuntimeError):
 
 class AssistantRequestNotFound(RuntimeError):
     """助理只读接口请求的草案不存在。"""
-
-
-class AssistantApprovalRequiredError(RuntimeError):
-    """批量命令没有来自运行时的可信批准。"""
 
 
 _DOMAIN_ERRORS = (
@@ -186,10 +191,6 @@ class AssistantService:
         if self._run_repository is None:
             raise AssistantConfigurationError("助理运行仓储尚未绑定")
         return self._run_repository
-
-    @staticmethod
-    def _operation_name(tool_name: str) -> str:
-        return _RESULT_OPERATION_NAMES[tool_name]
 
     @staticmethod
     def _utc(value: datetime) -> datetime:
@@ -251,7 +252,7 @@ class AssistantService:
     @classmethod
     def _error_result(cls, tool_name: str, code: str, message: str) -> AssistantOperationResult:
         return cls._result(
-            cls._operation_name(tool_name),
+            ASSISTANT_TOOL_OPERATIONS[tool_name],
             outcome="failed",
             error=AssistantError(code=code, message=message),
         )
@@ -356,10 +357,45 @@ class AssistantService:
     def _rule_dict(rule: ReminderRule) -> dict[str, object]:
         return rule.model_dump(mode="python", exclude_unset=True)
 
-    @staticmethod
-    def _task_ref(task_view: PersonalTaskView) -> AssistantTaskRef:
+    def _task_ref(self, task_view: PersonalTaskView) -> AssistantTaskRef:
         task = task_view.task
-        return AssistantTaskRef(id=task.id, title=task.title, status=task.status.value, version=task.version)
+        return AssistantTaskRef(
+            id=task.id, title=task.title, status=task.status.value, version=task.version,
+            description=task.description, deadline=AssistantService._deadline_json(task.deadline),
+            planning=self._planning_json(task.planning),
+        )
+
+    @staticmethod
+    def _deadline_json(value: TaskDeadline | None) -> dict[str, object] | None:
+        if value is None:
+            return None
+        return {"kind": value.kind, "value": value.value.isoformat()}
+
+    def _planning_json(self, value: TaskPlanning) -> dict[str, object]:
+        def deadline(item: TaskDeadline | None):
+            if item is None:
+                return None
+            local_value = item.value.astimezone(self._timezone) if item.kind == "datetime" else item.value
+            return {"kind": item.kind, "value": local_value.isoformat()}
+        return {
+            "kind": value.kind.value,
+            "event_time": deadline(value.event_time),
+            "scheduled_time": deadline(value.scheduled_time),
+            "time_text": value.time_text,
+            "related_task_id": value.related_task_id,
+        }
+
+    @staticmethod
+    def _planning_value(value: TaskPlanningInput | None) -> TaskPlanning | None:
+        if value is None:
+            return None
+        def deadline(item):
+            return TaskDeadline(item.kind, item.value) if item is not None else None
+        return TaskPlanning(
+            kind=PersonalTaskKind(value.kind), event_time=deadline(value.event_time),
+            scheduled_time=deadline(value.scheduled_time), time_text=value.time_text,
+            related_task_id=value.related_task_id,
+        )
 
     @staticmethod
     def _reminder_ref(reminder: Reminder) -> AssistantReminderRef:
@@ -401,15 +437,16 @@ class AssistantService:
         next_text = AssistantService._timestamp(next_fire) if next_fire else ""
         return f"{len(active)} 个启用提醒" + (f"；下一次 {next_text}" if next_text else "")
 
-    @classmethod
-    def _result_item(cls, task_view: PersonalTaskView, reminder_summary: str) -> AssistantResultItem:
+    def _result_item(self, task_view: PersonalTaskView, reminder_summary: str) -> AssistantResultItem:
         task = task_view.task
         return AssistantResultItem(
             id=task.id,
             title=task.title,
             status=task.status.value,
             version=task.version,
-            deadline=cls._deadline_text(task),
+            deadline=self._deadline_text(task),
+            description=task.description,
+            planning=self._planning_json(task.planning),
             reminder_summary=reminder_summary,
         )
 
@@ -448,7 +485,14 @@ class AssistantService:
         if expected_version is None:
             raise AssistantRequestConflict(request_id)
         request = await self._repository.get_request(session_id, request_id, connection=connection)
-        if request is None or request.version != expected_version or request.status != "awaiting_input":
+        if request is None:
+            raise AssistantRequestConflict(request_id)
+        if request.payload.planning_stage is not None:
+            raise InvalidPersonalTaskInput(
+                "这是计划草案请求，不能关联单项事务操作；请单独更新事件，不要传规划 request_id，"
+                "计划变更请使用 plans.save，并从 requests.get 的 data.request.version 读取最新 expected_version。"
+            )
+        if request.version != expected_version or request.status != "awaiting_input":
             raise AssistantRequestConflict(request_id)
         return request
 
@@ -476,6 +520,7 @@ class AssistantService:
         async def action(connection, task_service, reminder_service, now):
             result = await task_service.query(PersonalTaskQuery(
                 filter=PersonalTaskFilter(input.filter),
+                plan_filter=PlanFilter(input.plan_filter),
                 keyword=input.keyword,
                 deadline_from=input.deadline_from,
                 deadline_until=input.deadline_until,
@@ -542,6 +587,7 @@ class AssistantService:
                 description=input.description,
                 deadline=self._deadline(input.deadline),
                 reminders=tuple(self._rule_dict(rule) for rule in input.reminders),
+                planning=self._planning_value(input.planning),
             )
             saved_view, reminders = await task_service.get_detail(view.task.id)
             request_id = await self._resolve_request(connection, request, (view.task.id,), now)
@@ -567,12 +613,14 @@ class AssistantService:
             if title is None or description is None:
                 raise InvalidPersonalTaskInput("事务标题和描述不能设为 null")
             deadline = current.task.deadline if "deadline" not in patch_fields else self._deadline(input.patch.deadline)
+            planning = current.task.planning if "planning" not in patch_fields else self._planning_value(input.patch.planning)
             view = await task_service.update(
                 input.task_id,
                 title=title,
                 description=description,
                 deadline=deadline,
                 expected_version=input.expected_version,
+                planning=planning,
             )
             _, reminders = await task_service.get_detail(input.task_id)
             request_id = await self._resolve_request(connection, request, (input.task_id,), now)
@@ -781,11 +829,23 @@ class AssistantService:
         tool_name = "builtin.assistant.requests.save"
 
         async def action(connection, task_service, reminder_service, now):
+            if input.payload.planning_stage is not None:
+                raise InvalidPersonalTaskInput(
+                    "规划草案不能通过 requests.save 创建或更新；请使用 plans.save，"
+                    "并从 data.request.id 与 data.request.version 获取更新参数。"
+                )
             self._assert_context(context)
             existing = None
             if input.id is not None:
                 existing = await self._repository.get_request(context.session_id, input.id, connection=connection)
-                if existing is None or existing.version != input.expected_version or existing.status != "awaiting_input":
+                if existing is None:
+                    raise AssistantRequestConflict(input.id)
+                if existing.payload.planning_stage is not None:
+                    raise InvalidPersonalTaskInput(
+                        "不能通过 requests.save 覆盖计划草案；请使用 plans.save，"
+                        "并从 requests.get 的 data.request.id 与 data.request.version 获取更新参数。"
+                    )
+                if existing.version != input.expected_version or existing.status != "awaiting_input":
                     raise AssistantRequestConflict(input.id)
             source_inputs = tuple(input.source_refs)
             if existing is not None:
@@ -829,6 +889,109 @@ class AssistantService:
                 )
                 await self._repository.save_request(request, expected_version=existing.version, connection=connection)
             return self._result("requests.save", data=RequestDetailData(kind="request_detail", request=request), request_id=request.id)
+
+        return await self._execute_once(self._operation_key(context), tool_name, input, context, action)
+
+    async def save_plan(self, input: PlanSaveInput, context: ToolExecutionContext) -> AssistantOperationResult:
+        tool_name = "builtin.assistant.plans.save"
+
+        async def action(connection, task_service, reminder_service, now):
+            existing = None
+            if input.request_id is not None:
+                existing = await self._repository.get_request(context.session_id, input.request_id, connection=connection)
+                if existing is None:
+                    raise AssistantRequestConflict(input.request_id)
+                if existing.payload.planning_stage is None:
+                    raise InvalidPersonalTaskInput(
+                        "该请求不是计划草案，不能由 plans.save 更新；请使用 requests.save。"
+                    )
+                if existing.status != "awaiting_input":
+                    raise InvalidPersonalTaskInput(
+                        "计划请求已不处于等待输入状态；请先 requests.get 检查最新状态，不要继续使用旧版本。"
+                    )
+                if existing.version != input.expected_version:
+                    raise InvalidPersonalTaskInput(
+                        "计划版本已变化；请先 requests.get 读取最新 data.request.id 与 data.request.version，"
+                        "再分别填入 request_id 与 expected_version。"
+                    )
+            sources = tuple(existing.source_refs) if existing is not None else ()
+            refs = await self._resolve_source_refs(context.session_id, context, sources)
+            for event_id in input.event_ids:
+                event = await task_service.get(event_id)
+                if event.task.planning.kind is not PersonalTaskKind.EVENT:
+                    raise InvalidPersonalTaskInput(f"关联事务不是事件：{event_id}")
+            intent = RequestCreateIntent(
+                action="create_task",
+                plan_items=[item.model_dump(mode="json", exclude_unset=True) for item in input.items],
+            )
+            payload = AssistantRequestPayload(
+                intent_args=intent,
+                planning_stage=input.stage,
+                missing_fields=input.missing_fields,
+                candidate_task_ids=input.event_ids,
+                selected_task_ids=input.event_ids,
+                temporal_values=[],
+                last_error=None,
+            )
+            request = AssistantRequest(
+                id=existing.id if existing else str(uuid4()), session_id=context.session_id,
+                kind="create_task", summary=input.summary, status="awaiting_input", payload=payload,
+                source_refs=refs, proposal=None, proposal_hash=None, proposal_run_id=None,
+                result_refs=existing.result_refs if existing else [],
+                version=existing.version + 1 if existing else 1,
+                created_at=existing.created_at if existing else now, updated_at=now,
+            )
+            await self._repository.save_request(request, expected_version=existing.version if existing else None, connection=connection)
+            return self._result("plans.save", data=RequestDetailData(kind="request_detail", request=request), request_id=request.id)
+
+        return await self._execute_once(self._operation_key(context), tool_name, input, context, action)
+
+    async def apply_plan(self, input: PlanApplyInput, context: ToolExecutionContext) -> AssistantOperationResult:
+        tool_name = "builtin.assistant.plans.apply"
+
+        async def action(connection, task_service, reminder_service, now):
+            request = await self._repository.get_request(context.session_id, input.request_id, connection=connection)
+            if request is None or request.status != "awaiting_input" or request.version != input.expected_version or request.kind != "create_task":
+                raise AssistantRequestConflict(input.request_id)
+            if request.payload.planning_stage != "proposed" or request.payload.missing_fields:
+                raise AssistantRequestConflict("计划尚未形成可执行版本")
+            refs = await self._resolve_source_refs(context.session_id, context, tuple(request.source_refs))
+            for event_id in request.payload.selected_task_ids:
+                event = await task_service.get(event_id)
+                if event.task.planning.kind is not PersonalTaskKind.EVENT:
+                    raise InvalidPersonalTaskInput(f"关联事务不是事件：{event_id}")
+            intent = request.payload.intent_args
+            if not isinstance(intent, RequestCreateIntent) or not intent.plan_items:
+                raise AssistantRequestConflict("保存的计划没有任务")
+            event_ids = set(request.payload.selected_task_ids)
+            for item in intent.plan_items:
+                related_id = item.planning.related_task_id if item.planning is not None else None
+                if event_ids and related_id not in event_ids:
+                    raise AssistantRequestConflict("计划任务没有关联已保存的事件")
+                if related_id is not None and related_id not in event_ids:
+                    raise AssistantRequestConflict("计划任务关联不属于已保存事件")
+            task_refs: list[AssistantTaskRef] = []
+            reminder_refs: list[AssistantReminderRef] = []
+            for item in intent.plan_items:
+                create = TaskCreateInput(
+                    title=item.title, description=item.description, deadline=item.deadline,
+                    reminders=item.reminders,
+                    planning=TaskPlanningInput.model_validate(item.planning) if item.planning else None,
+                )
+                view = await task_service.create(
+                    title=create.title, description=create.description, deadline=self._deadline(create.deadline),
+                    reminders=tuple(self._rule_dict(rule) for rule in create.reminders),
+                    planning=self._planning_value(create.planning),
+                )
+                saved, reminders = await task_service.get_detail(view.task.id)
+                task_refs.append(self._task_ref(saved))
+                reminder_refs.extend(self._reminder_ref(reminder) for reminder in reminders)
+            resolved = request.model_copy(update={
+                "status": "resolved", "result_refs": list(dict.fromkeys((*request.result_refs, *(ref.id for ref in task_refs)))),
+                "version": request.version + 1, "updated_at": now, "source_refs": refs,
+            })
+            await self._repository.save_request(resolved, expected_version=request.version, connection=connection)
+            return self._result("plans.apply", task_refs=task_refs, reminder_refs=reminder_refs, request_id=request.id)
 
         return await self._execute_once(self._operation_key(context), tool_name, input, context, action)
 
@@ -948,6 +1111,7 @@ class AssistantService:
                     title=task.title,
                     description=task.description,
                     deadline=self._deadline_text(task),
+                    planning=self._planning_json(task.planning),
                     status=task.status.value,
                     version=task.version,
                 )
@@ -1072,7 +1236,10 @@ class AssistantService:
                     deadline = self._deadline(date.fromisoformat(command.patch.deadline))
                 except ValueError as error:
                     raise InvalidPersonalTaskInput("批量提案中的截止日期格式无效") from error
-            view = await task_service.update(command.task_id, title=title, description=description, deadline=deadline, expected_version=command.expected_version)
+            planning = current.task.planning
+            if "planning" in fields:
+                planning = self._planning_value(TaskPlanningInput.model_validate(command.patch.planning))
+            view = await task_service.update(command.task_id, title=title, description=description, deadline=deadline, expected_version=command.expected_version, planning=planning)
             _, reminders = await task_service.get_detail(command.task_id)
             return self._result("tasks.update", task_refs=[self._task_ref(view)], reminder_refs=[self._reminder_ref(item) for item in reminders], changes=self._changes(view))
         if isinstance(command, TaskStatusAction):
@@ -1111,8 +1278,6 @@ class AssistantService:
         tool_name = "builtin.assistant.batch.apply"
         operation_key = self._operation_key(context)
         arguments_hash = self._arguments_hash(tool_name, context.session_id, input)
-        if not context.approved:
-            raise AssistantApprovalRequiredError("批量执行必须经过运行时批准")
 
         async def check_replay(connection, task_service, reminder_service, now):
             existing = await self._repository.get_operation(operation_key, connection=connection)
@@ -1132,7 +1297,7 @@ class AssistantService:
             if summary is not None:
                 if summary.arguments_hash != arguments_hash:
                     return self._error_result(tool_name, "key_conflict", "同一批量提案的汇总参数不匹配")
-                if summary.run_id != context.agentrun_id or summary.request_id != input.request_id or summary.tool_name != tool_name:
+                if summary.request_id != input.request_id or summary.tool_name != tool_name:
                     return self._error_result(tool_name, "request_conflict", "批量汇总回执不属于当前运行提案")
                 await self._repository.insert_operation(
                     AssistantOperation(
@@ -1212,24 +1377,6 @@ class AssistantService:
                     connection=connection,
                 )
                 return failure
-            if request.proposal_run_id != context.agentrun_id:
-                conflict = AssistantRequestConflict("批量提案与批准运行不匹配")
-                failure = self._domain_error_result(tool_name, conflict)
-                await self._repository.insert_operation(
-                    AssistantOperation(
-                        operation_key=operation_key,
-                        session_id=context.session_id,
-                        run_id=context.agentrun_id,
-                        call_id=context.tool_call_id,
-                        tool_name=tool_name,
-                        arguments_hash=arguments_hash,
-                        request_id=input.request_id,
-                        result=failure,
-                        created_at=now,
-                    ),
-                    connection=connection,
-                )
-                return failure
             return request
 
         request_or_failure = await self._in_transaction(read_proposal)
@@ -1261,7 +1408,7 @@ class AssistantService:
                     item_result = previous.result
                 else:
                     current_request = await self._repository.get_request(context.session_id, request.id, connection=connection)
-                    if current_request is None or current_request.status != "awaiting_confirmation" or current_request.version != input.expected_version or current_request.proposal_hash != input.proposal_hash or current_request.proposal_run_id != context.agentrun_id:
+                    if current_request is None or current_request.status != "awaiting_confirmation" or current_request.version != input.expected_version or current_request.proposal_hash != input.proposal_hash:
                         raise AssistantRequestConflict(request.id)
                     await asyncio.to_thread(connection.execute, "SAVEPOINT effect")
                     try:
@@ -1401,8 +1548,6 @@ class AssistantService:
             summary = await self._repository.get_operation(summary_key, connection=connection)
             if summary is not None:
                 target_status = "resolved" if summary.result.outcome == "succeeded" else "awaiting_input"
-                if request.status == target_status:
-                    return
                 await self._save_reconciled_request(connection, request, target_status, summary.result, now)
                 return
 
@@ -1418,13 +1563,8 @@ class AssistantService:
                     and record.call.arguments.get("expected_version") == request.version
                     and record.call.arguments.get("proposal_hash") == request.proposal_hash
                 ), None)
-            if apply_record is not None:
-                if (
-                    apply_record.state is not ToolCallState.PENDING
-                    and apply_record.approval_decision is not False
-                    and not apply_record.is_settled
-                ):
-                    return
+            if apply_record is None or apply_record.approval_decision is not False:
+                return
 
             results: list[AssistantOperationResult] = []
             if request.proposal is not None:
@@ -1437,7 +1577,7 @@ class AssistantService:
                 for result in results
                 for ref in (*result.task_refs, *result.reminder_refs)
             ]
-            reason = "批量审批被拒绝" if apply_record is not None and apply_record.approval_decision is False else "批量运行已结束，未完成的项目可重新准备提案"
+            reason = "批量审批被拒绝"
             projection = self._result("batch.apply", outcome="partial", request_id=request.id, items=[self._batch_item_result(i, result) for i, result in enumerate(results)])
             await self._save_reconciled_request(connection, request, "awaiting_input", projection, now, partial_refs, reason)
 

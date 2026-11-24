@@ -1,6 +1,6 @@
 """助理请求、回执和展示快照的严格数据模型。"""
 
-from datetime import datetime
+from datetime import date, datetime
 import calendar
 import json
 import re
@@ -29,6 +29,52 @@ class AtReminderRule(StrictModel):
 class BeforeDeadlineReminderRule(StrictModel):
     kind: Literal["before_deadline"]
     offset_minutes: int = Field(ge=0)
+
+
+class BeforeEventReminderRule(StrictModel):
+    kind: Literal["before_event"]
+    offset_minutes: int = Field(ge=0)
+
+
+class PlanningDeadline(StrictModel):
+    kind: Literal["date", "datetime"]
+    value: date | datetime = Field(description="日期用 YYYY-MM-DD；时刻用带业务时区显式偏移的 RFC3339，例如 2026-11-26T20:00:00+08:00。")
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def parse_value(cls, value):
+        if value is None or type(value) in (date, datetime):
+            return value
+        if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return date.fromisoformat(value)
+        pattern = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
+        if isinstance(value, str) and re.fullmatch(pattern, value):
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                return parsed
+        raise ValueError("planning 时间必须是日期或带时区的 RFC3339 时刻")
+
+    @model_validator(mode="after")
+    def kind_matches_value(self):
+        if (self.kind == "date") != (type(self.value) is date):
+            raise ValueError("planning 时间 kind 与 value 类型不匹配")
+        return self
+
+
+class TaskPlanningInput(StrictModel):
+    kind: Literal["task", "event"] = "task"
+    event_time: PlanningDeadline | None = Field(default=None, description="事件发生时间；精确时刻使用业务本地 RFC3339 偏移，不转换为 Z；只有日期则传 kind=date。")
+    scheduled_time: PlanningDeadline | None = Field(default=None, description="任务安排时间；精确时刻使用业务本地 RFC3339 偏移，不转换为 Z。")
+    time_text: str = ""
+    related_task_id: str | None = None
+
+    @model_validator(mode="after")
+    def kind_specific_time(self):
+        if self.kind == "task" and self.event_time is not None:
+            raise ValueError("任务不能设置 event_time")
+        if self.kind == "event" and self.scheduled_time is not None:
+            raise ValueError("事件不能设置 scheduled_time")
+        return self
 
 
 class LocalTimeReminderRule(StrictModel):
@@ -81,7 +127,7 @@ class YearlyReminderRule(LocalTimeReminderRule):
 
 
 ReminderRule = Annotated[
-    AtReminderRule | BeforeDeadlineReminderRule | BeforeDateReminderRule | DailyReminderRule |
+    AtReminderRule | BeforeDeadlineReminderRule | BeforeEventReminderRule | BeforeDateReminderRule | DailyReminderRule |
     WeeklyReminderRule | MonthlyReminderRule | YearlyReminderRule,
     Field(discriminator="kind"),
 ]
@@ -91,6 +137,7 @@ class TaskPatch(StrictModel):
     title: str | None = None
     description: str | None = None
     deadline: str | None = None
+    planning: TaskPlanningInput | None = None
 
 
 class TaskUpdateAction(StrictModel):
@@ -131,12 +178,22 @@ AssistantBatchCommand = Annotated[
 ]
 
 
+class PlanItem(StrictModel):
+    title: str
+    description: str = ""
+    deadline: str | None = None
+    planning: TaskPlanningInput | None = None
+    reminders: list[ReminderRule] = Field(default_factory=list)
+
+
 class RequestCreateIntent(StrictModel):
     action: Literal["create_task"]
     title: str | None = None
     description: str | None = None
     deadline: str | None = None
     reminders: list[ReminderRule] = Field(default_factory=list)
+    planning: TaskPlanningInput | None = None
+    plan_items: list[PlanItem] | None = Field(default=None, max_length=20)
 
 
 class RequestUpdateIntent(StrictModel):
@@ -194,6 +251,7 @@ class AssistantRequestPayload(StrictModel):
     selected_task_ids: list[str] = Field(max_length=50)
     temporal_values: list[TemporalValue]
     last_error: str | None = None
+    planning_stage: Literal["needs_input", "drafting", "proposed"] | None = None
 
     @field_validator("candidate_task_ids")
     @classmethod
@@ -201,6 +259,20 @@ class AssistantRequestPayload(StrictModel):
         if len(value) != len(set(value)):
             raise ValueError("candidate_task_ids 必须按顺序去重")
         return value
+
+    @model_validator(mode="after")
+    def valid_planning_stage(self):
+        if self.planning_stage == "proposed":
+            if not isinstance(self.intent_args, RequestCreateIntent) or not self.intent_args.plan_items or self.missing_fields:
+                raise ValueError("proposed 计划必须包含任务且没有缺失字段")
+            event_ids = set(self.selected_task_ids)
+            for item in self.intent_args.plan_items:
+                related_id = item.planning.related_task_id if item.planning is not None else None
+                if event_ids and related_id not in event_ids:
+                    raise ValueError("proposed 计划任务必须关联已选择事件")
+                if related_id is not None and related_id not in event_ids:
+                    raise ValueError("计划任务关联必须来自已选择事件")
+        return self
 
 
 class AssistantInputRef(StrictModel):
@@ -214,6 +286,9 @@ class AssistantTaskRef(StrictModel):
     title: str
     status: Literal["pending", "in_progress", "completed", "cancelled"]
     version: int = Field(ge=1)
+    description: str = ""
+    deadline: PlanningDeadline | None = None
+    planning: TaskPlanningInput = Field(default_factory=TaskPlanningInput)
 
 
 class AssistantReminderRef(StrictModel):
@@ -238,6 +313,7 @@ class AssistantProposalValues(StrictModel):
     status: Literal["pending", "in_progress", "completed", "cancelled", "active", "paused", "fired", "missed"] | None = None
     version: int | None = Field(default=None, ge=1)
     deadline: str | None = None
+    planning: TaskPlanningInput | None = None
     reminder_summary: str | None = None
     reminder_rule: ReminderRule | None = None
 
@@ -350,7 +426,7 @@ class AssistantOperationResult(StrictModel):
         "tasks.query", "tasks.get", "tasks.create", "tasks.update", "tasks.status",
         "reminders.create", "reminders.update", "reminders.status", "requests.list",
         "requests.get", "requests.save", "requests.abandon", "results.get",
-        "batch.prepare", "batch.apply",
+        "batch.prepare", "batch.apply", "plans.save", "plans.apply",
     ]
     outcome: Literal["succeeded", "failed", "partial"]
     data: AssistantOperationData | None = None
@@ -381,6 +457,8 @@ class AssistantResultItem(StrictModel):
     status: Literal["pending", "in_progress", "completed", "cancelled"]
     version: int = Field(ge=1)
     deadline: str | None = None
+    description: str = ""
+    planning: TaskPlanningInput = Field(default_factory=TaskPlanningInput)
     reminder_summary: str | None = None
 
 

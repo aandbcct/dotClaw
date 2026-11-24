@@ -126,7 +126,12 @@ class ApplicationHost:
 
         from ..assistant.context import AssistantContextReader
         from ..assistant.entry_service import AssistantEntryService
-        from ..assistant.service import ASSISTANT_AGENT_ID, ASSISTANT_SESSION_ID, AssistantService
+        from ..assistant.service import (
+            ASSISTANT_AGENT_ID,
+            ASSISTANT_SESSION_ID,
+            ASSISTANT_TOOL_OPERATIONS,
+            AssistantService,
+        )
         from ..assistant.sqlite_repository import SqliteAssistantRepository
 
         assistant_config_path = root / AGENT_CONFIG_DIRNAME / f"{ASSISTANT_AGENT_ID}.yaml"
@@ -185,7 +190,10 @@ class ApplicationHost:
             name for name in self._tool_executor.registry.all_names()
             if name.startswith("builtin.assistant.")
         }
-        if len(assistant_tool_names) != 15 or set(assistant_identity.allowed_tools) != assistant_tool_names:
+        if (
+            assistant_tool_names != set(ASSISTANT_TOOL_OPERATIONS)
+            or set(assistant_identity.allowed_tools) != assistant_tool_names
+        ):
             raise RuntimeError(
                 f"固定助理工具注册与白名单不匹配: {assistant_config_path}"
             )

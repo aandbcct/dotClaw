@@ -170,6 +170,7 @@ _SAFE_ERROR_MESSAGES: dict[str, str] = {
     "value_error": "参数取值不合法",
     "request_reference_pair": "关联请求时 request_id 与 expected_request_version 必须同时提供；expected_request_version 取自 requests.get 返回的 data.request.version",
     "request_version_pair": "更新请求时 id 与 expected_version 必须同时提供；expected_version 取自 requests.get 返回的 data.request.version",
+    "plan_request_version_pair": "更新计划草案时必须同时提供 request_id 与 expected_version；request_id 取 data.request.id，expected_version 取 requests.get 返回的 data.request.version，不能使用事务 ID 或事务 version",
 }
 
 
