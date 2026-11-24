@@ -27,16 +27,11 @@ export function RunActivityPanel({ message, activities, canControl, onLoadRun, o
   const execution = message.execution;
   const active = Boolean(execution && activeStages.has(execution.stage));
   const [expanded, setExpanded] = useState(active);
-  const [reasoningOpen, setReasoningOpen] = useState(false);
   const [confirmingRunId, setConfirmingRunId] = useState<string | null>(null);
-  const reasoningSeen = useRef(false);
   const wasActive = useRef(active);
   useEffect(() => {
     if (active !== wasActive.current) { setExpanded(active); wasActive.current = active; }
   }, [active]);
-  useEffect(() => {
-    if (message.reasoning && !reasoningSeen.current) { setReasoningOpen(true); reasoningSeen.current = true; }
-  }, [message.reasoning]);
   useEffect(() => {
     if (confirmingRunId && (!canControl || activities.find((activity) => activity.run_id === confirmingRunId)?.status !== "recoverable")) setConfirmingRunId(null);
   }, [activities, canControl, confirmingRunId]);
@@ -53,7 +48,7 @@ export function RunActivityPanel({ message, activities, canControl, onLoadRun, o
       <button type="button" aria-expanded={expanded} onClick={toggle}>{expanded ? "收起过程" : "执行记录"}</button>
     </div>
     {expanded && <div className="execution-process">
-      {message.reasoning && <details className="reasoning" open={reasoningOpen} onToggle={(event) => setReasoningOpen(event.currentTarget.open)}><summary>思考过程</summary><p>{message.reasoning}</p></details>}
+      {message.reasoning && <details className="reasoning"><summary>思考过程</summary><p>{message.reasoning}</p></details>}
       {(message.run_ids || []).map((runId) => {
         const activity = activities.find((item) => item.run_id === runId);
         const controllable = canControl && !abandoningRunId && runId === message.run_ids?.[0] && activity && !activity.committing && (!activity.cancellation || activity.cancellation.phase === "settled") && ["waiting_approval", "waiting_delegation", "recoverable"].includes(activity.status);
@@ -75,7 +70,7 @@ export function RunActivityPanel({ message, activities, canControl, onLoadRun, o
             {activity.cancellation?.effect === "remote_unknown" && activity.cancellation.phase === "settled" && ["cancelled", "abandoned"].includes(activity.status) && <p className="muted">本地已停止，远端执行结果未确认。</p>}
             <ol className="execution-steps">
               {activity.steps ? activity.steps.map((step) => <li key={step.id} className={`execution-step execution-step--${step.status}`}>
-                {step.kind === "model" ? <><div className="tool-step-heading"><strong>模型调用</strong><span>{LABELS[step.status]}</span></div><StepTime start={step.started_at} end={step.completed_at} /></> : <ToolStep tool={activity.tools.find((tool) => tool.call_id === step.call_id)} status={step.status} />}
+                {step.kind === "model" ? <div className="execution-event"><div className="tool-step-heading"><strong>模型调用</strong><span>{LABELS[step.status]}</span></div><StepTime start={step.started_at} end={step.completed_at} /></div> : <ToolStep tool={activity.tools.find((tool) => tool.call_id === step.call_id)} status={step.status} />}
               </li>) : activity.tools.map((tool) => <li className={`execution-step execution-step--${tool.status}`} key={tool.call_id}><ToolStep tool={tool} /></li>)}
             </ol>
             {activity.status === "waiting_approval" && <div className="approval-card" role="group" aria-label="工具审批"><div><strong>需要你的批准</strong>{batchApply ? <AssistantBatchPreview state={assistantPreview} onRetry={() => previewArgumentsValid ? onRetryAssistantPreview?.(runId) : onCheckStatus(runId)} /> : <ToolApprovalSummary tool={approvalTool} />}</div><button type="button" disabled={!controllable} onClick={() => onApprove(runId, false)}>拒绝</button><button type="button" disabled={!controllable || !approvalTool || !previewReady} onClick={() => onApprove(runId, true)}>批准并继续</button>{!approvalTool && <button type="button" onClick={() => onCheckStatus(runId)}>重新查询审批</button>}</div>}
@@ -99,7 +94,7 @@ export function RunActivityPanel({ message, activities, canControl, onLoadRun, o
   </div>;
 }
 function StepTime({ start, end }: { start: string; end: string }) {
-  return start || end ? <p className="tool-time" title={[start, end].filter(Boolean).join(" → ")}>{start ? formatTime(start) : "未记录开始时间"}{end ? ` → ${formatTime(end)}` : ""}</p> : null;
+  return start || end ? <span className="tool-time" title={[start, end].filter(Boolean).join(" → ")}>{start ? formatTime(start) : "未记录开始时间"}{end ? ` → ${formatTime(end)}` : ""}</span> : null;
 }
 function formatTime(value: string): string {
   const date = new Date(value);
@@ -107,5 +102,5 @@ function formatTime(value: string): string {
 }
 function ToolStep({ tool, status }: { tool?: ToolExecution; status?: string }) {
   const value = status || tool?.status || "";
-  return <><div className="tool-step-heading"><strong>{tool?.name || "工具调用"}</strong><span>{value === "completed" ? "调用结束" : LABELS[value] || value}</span></div>{tool && <><StepTime start={tool.started_at} end={tool.completed_at} />{tool.error && <p className="inline-error">{tool.error}</p>}<details><summary>参数</summary><pre>{JSON.stringify(tool.arguments, null, 2)}</pre></details><ToolResultView tool={tool} /></>}</>;
+  return <><div className="execution-event"><div className="tool-step-heading" title={tool?.name}><strong>{tool?.name || "工具调用"}</strong><span>{value === "completed" ? "调用结束" : LABELS[value] || value}</span></div>{tool && <StepTime start={tool.started_at} end={tool.completed_at} />}{tool && <div className="execution-event-data"><details><summary>参数</summary><pre>{JSON.stringify(tool.arguments, null, 2)}</pre></details>{tool?.result && <details><summary>{tool.status === "completed" ? "结果" : tool.status === "uncertain" ? "结果待确认" : "工具错误"}</summary><ToolResultView tool={tool} /></details>}</div>}</div>{tool?.error && <p className="inline-error">{tool.error}</p>}</>;
 }
